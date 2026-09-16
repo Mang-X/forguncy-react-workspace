@@ -1,0 +1,19 @@
+{
+  "private": true,
+  "type": "module",
+  "name": "forguncy-frontend-library-__LIBRARY_ID__",
+  "packageManager": "pnpm@11.1.2",
+  "scripts": {
+    "build": "node build.mjs",
+    "validate": "node validate.mjs",
+    "smoke": "node smoke.mjs",
+    "pack": "node pack.mjs"
+  },
+  "dependencies": {
+    "__LIBRARY_ID__": "__VERSION__"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12"
+  }
+}
+

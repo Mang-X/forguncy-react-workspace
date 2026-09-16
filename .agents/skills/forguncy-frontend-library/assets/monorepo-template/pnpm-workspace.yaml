@@ -1,0 +1,27 @@
+# pnpm workspace + 项目设置
+# pnpm 12 起，除鉴权/registry 之外的一切设置都在 pnpm-workspace.yaml 里（不在 package.json / .npmrc）
+# 参考：https://pnpm.io/settings
+
+# ---------------------------------------------------------------- 工作区成员
+packages:
+  # 每个活字格前端扩展包：目录名即 Forguncy 包 id
+  - packages/*
+  # 仓库内部工具，不产出扩展包
+  - tooling/*
+
+# ---------------------------------------------------------------- 版本策略
+# 活字格要求：版本固定，禁止 latest / *，内容变更必须提升 version
+saveExact: true
+resolutionMode: highest
+
+# ---------------------------------------------------------------- 依赖解析
+# React 类库复用宿主 React，peer 版本冲突不应阻断安装
+strictPeerDependencies: false
+autoInstallPeers: true
+
+# ---------------------------------------------------------------- 依赖构建脚本
+# pnpm 默认禁止未 review 的依赖安装脚本（strictDepBuilds 默认 true）。
+# esbuild 需要 postinstall 校验平台二进制；除此之外不再放行任何构建脚本。
+# 新增带 install 脚本的依赖（原生模块、字体包等）都要在这里显式写 true 或 false。
+allowBuilds:
+  esbuild: true

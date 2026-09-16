@@ -21,13 +21,6 @@ Every non-workspace dependency used by generated cell code must resolve to one o
 
 Do not introduce application routers, a second application-wide state system, authentication frameworks, or a second business-data source of truth inside React cells.
 
-## Existing related projects
-
-- https://github.com/MangMax/forguncy-react-library — verified reusable Forguncy frontend extensions.
-- https://github.com/MangMax/forguncy-frontend-library — Skill and tooling for researching, building, validating, packaging, uploading, and verifying frontend extensions.
-
-Do not duplicate those responsibilities here.
-
 ## Workflow
 
 1. Every design/specification is a GitHub Issue.

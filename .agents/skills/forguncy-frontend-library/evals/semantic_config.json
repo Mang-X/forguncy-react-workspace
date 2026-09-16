@@ -1,0 +1,146 @@
+{
+  "version": "1.0.0",
+  "capability": "把浏览器端 JavaScript 类库打包成活字格 ReactCellType 前端扩展包（manifest.json + bundle.js + types.d.ts）并完成校验、打包、上传与运行时验证",
+  "positive_concepts": {
+    "frontend_package_build": {
+      "weight": 1.2,
+      "phrases": [
+        "前端扩展包",
+        "扩展包",
+        "frontend library package",
+        "extension package"
+      ]
+    },
+    "forguncy_platform": {
+      "weight": 0.8,
+      "phrases": [
+        "活字格",
+        "forguncy",
+        "reactcelltype",
+        "活字格前端"
+      ]
+    },
+    "triad_or_global": {
+      "weight": 0.9,
+      "phrases": [
+        "manifest.json",
+        "bundle.js",
+        "types.d.ts",
+        "types",
+        "globalname",
+        "frontendlibraries"
+      ]
+    },
+    "diagnose_or_upload": {
+      "weight": 1,
+      "phrases": [
+        "codeeditor",
+        "补全",
+        "提示不到",
+        "全局变量不存在",
+        "invalid hook call",
+        "预览报",
+        "超过 8 mib",
+        "包超限",
+        "上传",
+        "缺少标准文件",
+        "覆盖上传"
+      ]
+    },
+    "library_source": {
+      "weight": 0.7,
+      "phrases": [
+        "类库",
+        "js library",
+        "javascript library",
+        "umd",
+        "iife",
+        "esm"
+      ]
+    },
+    "artifact_size_limit": {
+      "weight": 0.6,
+      "phrases": [
+        "8 mib",
+        "16 mib",
+        "超限",
+        "裁剪",
+        "体积"
+      ]
+    }
+  },
+  "negative_concepts": {
+    "dotnet_plugin": {
+      "weight": 0.5,
+      "exclusive": false,
+      "phrases": [
+        "serverscommand",
+        "服务端命令",
+        "celltype",
+        "clientcommand",
+        "serverapi",
+        "middleware",
+        "插件开发",
+        "单元格类型"
+      ]
+    },
+    "summary_only": {
+      "weight": 0.5,
+      "exclusive": true,
+      "phrases": [
+        "总结",
+        "要点",
+        "summarize"
+      ]
+    },
+    "translation_only": {
+      "weight": 0.5,
+      "exclusive": true,
+      "phrases": [
+        "翻译",
+        "translate"
+      ]
+    },
+    "brainstorm_only": {
+      "weight": 0.5,
+      "exclusive": true,
+      "phrases": [
+        "头脑风暴",
+        "brainstorm",
+        "点子"
+      ]
+    },
+    "meta_skill_authoring": {
+      "weight": 0.5,
+      "exclusive": true,
+      "phrases": [
+        "可复用的 skill",
+        "做成一个 skill",
+        "做一个 skill"
+      ]
+    },
+    "unrelated_frontend": {
+      "weight": 0.4,
+      "exclusive": false,
+      "phrases": [
+        "vue 组件库",
+        "ci 配置",
+        "页面性能",
+        "写一个 vue"
+      ]
+    },
+    "forguncy_other_config": {
+      "weight": 0.4,
+      "exclusive": false,
+      "phrases": [
+        "数据库连接字符串",
+        "配置数据库",
+        "连接字符串"
+      ]
+    }
+  },
+  "fallback_positive_concepts": [
+    "frontend_package_build",
+    "forguncy_platform"
+  ]
+}
