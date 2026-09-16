@@ -30,14 +30,16 @@ jobs:
                   blob = json.load(r)
               pieces.append(base64.b64decode(blob['content']).decode('ascii'))
           packed = base64.b64decode(''.join(pieces), validate=True)
-          assert hashlib.sha256(packed).hexdigest() == '4b84e29e7e28802b23170ce56888b5b46dfa1cdcb49a9f7cd482721c05cabac9', 'Archive checksum mismatch'
+          assert hashlib.sha256(packed).hexdigest() == '4b84e29e7e28802b23170ce56888b5b46dfa1cdcb49a9f7cd482721c05cabac9'
           with tarfile.open(fileobj=io.BytesIO(lzma.decompress(packed))) as archive:
               for member in archive.getmembers():
                   p = pathlib.Path(member.name)
-                  assert not p.is_absolute() and '..' not in p.parts
-                  assert member.isfile(), 'Only source files are allowed'
-                  assert str(p).startswith('tools/issue-board/') or str(p) == '.github/workflows/issue-board.yml', str(p)
-                  assert not p.exists(), 'Refuse to overwrite existing source: ' + str(p)
+                  assert not p.is_absolute() and '..' not in p.parts and member.isfile()
+                  if str(p) == '.github/workflows/issue-board.yml':
+                      assert p.read_bytes() == archive.extractfile(member).read(), 'Workflow was prepared separately'
+                      continue
+                  assert str(p).startswith('tools/issue-board/')
+                  assert not p.exists(), 'Refuse to overwrite source: ' + str(p)
                   p.parent.mkdir(parents=True, exist_ok=True)
                   p.write_bytes(archive.extractfile(member).read())
           pkg = pathlib.Path('package.json')
@@ -53,12 +55,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
       - run: node tools/issue-board/build.mjs
-      - name: Commit source without bootstrap machinery
+      - name: Commit ordinary source files
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git rm .github/workflows/bootstrap-issue-board.yml
-          git add tools/issue-board .github/workflows/issue-board.yml package.json README.md
+          git add tools/issue-board package.json README.md
           git commit -m 'feat: add Issue dependency dashboard (refs #36)'
           git push origin HEAD:feat/36-issue-dependency-board
       - uses: actions/upload-artifact@v4
