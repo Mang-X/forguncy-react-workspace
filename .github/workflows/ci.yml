@@ -18,4 +18,5 @@ jobs:
           node-version: "24"
           cache: true
           run-install: true
+      - run: vp toolchain
       - run: vp check
