@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light"><meta name="referrer" content="no-referrer">
+<title>Issue 依赖看板 · Forguncy React Workspace</title>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <a class="brand" href="https://github.com/Mang-X/forguncy-react-workspace" target="_blank" rel="noopener noreferrer"><span class="brand-icon">f<span>↗</span></span><span>Forguncy<span class="brand-sub">开发协作台</span></span></a>
+    <div class="space-label">WORKSPACE <span>01</span></div>
+    <div class="repo-card"><span class="repo-mark">M</span><div><strong>Mang-X</strong><small>forguncy-react-workspace</small></div></div>
+    <div class="space-label section-label">工作视图</div>
+    <nav aria-label="工作视图" id="views"><button class="nav-item active" data-view="graph"><span>◇</span>依赖图谱 <kbd>G</kbd></button><button class="nav-item" data-view="queue"><span>☷</span>任务列表 <kbd>L</kbd></button><button class="nav-item" data-view="warnings"><span>△</span>依赖核对 <b id="warning-count">0</b></button></nav>
+    <div class="space-label section-label">任务状态 <button class="clear-small" id="clear-filters">重置</button></div>
+    <nav id="statuses" aria-label="状态筛选"></nav>
+    <div class="sidebar-bottom"><span class="source-dot"></span><strong>GitHub 是唯一事实来源</strong><p>Spec 在 Issue，实现在 PR。<br>本机分配备忘不修改 GitHub。</p><a href="https://github.com/Mang-X/forguncy-react-workspace/issues/3" target="_blank" rel="noopener noreferrer">查看项目总计划 ↗</a></div>
+  </aside>
+  <div class="workspace">
+    <header class="topbar"><div class="breadcrumbs"><span>Mang-X</span><span class="slash">/</span><strong>forguncy-react-workspace</strong><span class="badge neutral">公开仓库</span></div><div class="top-actions"><span id="sync-status" role="status" aria-live="polite">尚未同步</span><button id="refresh" class="button small"><span id="refresh-icon">↻</span> 同步 GitHub</button></div></header>
+    <main>
+      <div class="page-heading"><div><div class="eyebrow">PROJECT DELIVERY / ISSUE → PR</div><h1>让任务依赖一目了然<span class="heading-dot">.</span></h1><p>看清前置关系，找到下一步，再把任务交给合适的代理。</p></div><div class="heading-actions"><button class="button" id="export-assignments">导出分配</button><button class="button primary" id="copy-ready">复制待分配任务 <span>↗</span></button></div></div>
+      <div id="stats" class="stats" aria-label="全仓库状态统计"></div>
+      <div id="notice" class="notice" role="status" hidden></div>
+      <div class="board-shell">
+        <div class="board-main">
+          <div class="toolbar"><div class="segmented"><button data-view="graph" class="active">依赖图</button><button data-view="queue">任务列表</button></div><label class="search"><span>⌕</span><input id="search" type="search" placeholder="搜索标题、#编号、负责人" aria-label="搜索任务"><kbd>/</kbd></label><select id="type-filter" aria-label="任务类型"><option value="">全部类型</option></select><select id="area-filter" aria-label="任务领域"><option value="">全部领域</option></select><button class="button small" id="toggle-completed" aria-pressed="false">隐藏已关闭</button></div>
+          <div class="canvas-top"><span id="view-description">箭头由前置任务指向下游任务</span><span id="visible-count"></span></div>
+          <section id="graph-panel" aria-label="Issue 依赖图"><svg id="graph" role="group" aria-label="可平移缩放的依赖图" tabindex="0"><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="context-stroke" stroke-width="1.5"/></marker></defs><g id="world"></g></svg><div id="empty-graph" class="empty-state" hidden><span>◇</span><strong>没有匹配的任务</strong><p>调整筛选，或点击「重置」查看全部。</p></div><div class="graph-caption"><span class="line-demo"></span>前置依赖 <span class="line-demo dashed"></span>条件 / 验收依赖</div><div class="canvas-bottom"><div class="mini-wrap"><svg id="minimap" aria-label="依赖图导航缩略图" role="img"></svg></div><div class="zoom-controls"><button id="zoom-out" aria-label="缩小">−</button><span id="zoom-value">85%</span><button id="zoom-in" aria-label="放大">+</button><i></i><button id="fit" aria-label="显示全图" title="显示全图">⊞</button><button id="reset-zoom" title="恢复可读比例" aria-label="恢复可读比例">1:1</button></div></div></section>
+          <section id="queue-panel" hidden><div class="list-heading"><strong id="list-title">所有任务</strong><span>可开始不代表可无冲突并行，请确认工作范围与文件归属。</span></div><div id="task-list"></div></section>
+          <section id="warnings-panel" hidden><div class="list-heading"><strong>依赖核对</strong><span>忠实显示原始声明，不替你删边、修图或关闭 Issue。</span></div><div id="warnings-list"></div></section>
+          <footer class="board-footer"><span><span class="source-dot"></span> <span id="data-origin">GitHub 实时数据</span></span><span id="poll-label">每 3 分钟同步 · 后台暂停</span></footer>
+        </div>
+        <aside class="inspector" id="inspector" aria-label="任务详情"></aside>
+      </div>
+      <div class="page-footer"><span>FORGUNCY REACT WORKSPACE</span><span>滚轮平移 · Ctrl / ⌘ + 滚轮缩放 · 点击节点查看依赖证据</span></div>
+    </main>
+  </div>
+</div>
+<div id="toast" role="status" aria-live="polite" hidden></div>
+<dialog id="copy-dialog"><div class="dialog-header"><strong>复制代理任务说明</strong><button id="close-dialog" class="button small">关闭</button></div><p>浏览器未允许剪贴板访问。已选中下方内容，可直接复制。</p><textarea id="copy-text" aria-label="代理任务说明" readonly></textarea></dialog>
+<script id="snapshot" type="application/json">null</script>
+<script type="module" src="./app.mjs"></script>
+</body></html>

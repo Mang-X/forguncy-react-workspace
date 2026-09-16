@@ -10,7 +10,10 @@
   "scripts": {
     "check": "vp check",
     "test": "vp test",
-    "build": "vp run -r build"
+    "build": "vp run -r build",
+    "board:test": "node --test tools/issue-board/model.test.mjs",
+    "board:snapshot": "node tools/issue-board/snapshot.mjs",
+    "board:build": "node tools/issue-board/build.mjs"
   },
   "devDependencies": {
     "vite-plus": "0.3.2"

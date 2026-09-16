@@ -89,3 +89,17 @@ React 单元格更适合承载：
 - 未经过真实活字格运行验证的能力，不宣称为已兼容。
 
 如果你想了解当前最优先的工作，可以从 [Issue #3](https://github.com/Mang-X/forguncy-react-workspace/issues/3) 开始。
+
+## Issue 依赖看板
+
+仓库内提供中文依赖图与代理任务分配辅助页面，代码位于 `tools/issue-board/`。
+
+```sh
+vp run board:test
+vp run board:snapshot
+vp run board:build
+```
+
+用浏览器打开 `dist/issue-board/index.html`；也可从 GitHub Actions 的 **Issue dependency board** 工作流下载同名构建产物。页面包含生成时的真实 Issue 快照，打开后会读取 GitHub 最新状态，并在页面可见时每 3 分钟刷新。
+
+支持依赖来源查看、就绪任务筛选、循环与缺失引用提示，以及复制代理任务说明。本机代理分配备注仅保存在当前浏览器，不会写回 GitHub 或实际启动代理；多人协作仍以 GitHub Issues 与 PR 为准。
