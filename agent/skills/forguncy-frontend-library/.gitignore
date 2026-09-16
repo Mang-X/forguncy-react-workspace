@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+**/.DS_Store
+
+# 生成物（保留在本地，不入库）
+reports/
+dist/
+
+# 依赖与临时文件
+node_modules/
+*.log
+_tmp_*
+
+# 本地工具数据（保留在本地，不入库；不要删除）
+.workbuddy-ai/

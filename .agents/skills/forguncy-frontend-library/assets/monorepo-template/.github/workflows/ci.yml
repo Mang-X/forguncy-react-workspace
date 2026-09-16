@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CI: true
+
+jobs:
+  verify:
+    name: 构建 + 包内断言
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 安装 Vite+（同时解析 pnpm 与 Node）
+        run: |
+          curl -fsSL https://vite.plus | bash
+          # 安装器把 bin 放在 ~/.vite-plus/bin（macOS）或 ~/.local/share/vite-plus/bin（Linux），
+          # 两个都加进 PATH，免得换个 runner 镜像就 command not found。
+          for dir in "$HOME/.vite-plus/bin" "$HOME/.local/share/vite-plus/bin"; do
+            if [ -d "$dir" ]; then echo "$dir" >> "$GITHUB_PATH"; fi
+          done
+
+      - name: 确认工具链就位
+        run: |
+          export PATH="$HOME/.vite-plus/bin:$HOME/.local/share/vite-plus/bin:$PATH"
+          vp --version
+          vp env doctor || true
+
+      - name: 安装依赖
+        run: vp install --frozen-lockfile
+
+      - name: 构建三件套
+        run: vp run -r build
+
+      - name: 全门禁（静态校验 / 烟雾闸门 / 类库断言）
+        run: vp run -r gates
+
+      - name: 打 ZIP（确认 packaging 环节不回归）
+        run: vp run -r pack
+
+      - name: 确认构建产物没有入库
+        run: |
+          tracked=$(git ls-files | grep -E '(^|/)(dist|artifacts)/' || true)
+          if [ -n "$tracked" ]; then
+            echo "这些构建产物不该入库："
+            echo "$tracked"
+            exit 1
+          fi
+
+# 说明：gates 里的 validate / smoke / pack 依赖 forguncy-frontend-library 技能脚本。
+# 该技能随仓库分发在 .agents/skills/forguncy-frontend-library（skills-lock.json 记录来源与哈希），
+# 所以 CI 不需要任何外部配置或密钥。

@@ -1,0 +1,57 @@
+{
+  "schema_version": "1.0",
+  "reviewed_at": "2026-09-11",
+  "capabilities": {
+    "file_write": {
+      "decision": "approved",
+      "reviewer": "Yao Team",
+      "scope": "只写入用户指定的扩展包工作目录（dist/、包目录与 ZIP 产物）及技能自身的 reports/ 报告；不修改活字格仓库、宿主程序目录或系统路径。",
+      "reason": "scaffold_package.mjs、build.mjs、pack_package.mjs 必须生成包工作目录、三件套与 ZIP 产物，才能交付可上传的扩展包；写入范围限定在用户给定的包目录内并保留绝对路径证据。",
+      "expires_at": "2027-03-11",
+      "evidence": [
+        "reports/security_trust_report.md",
+        "references/verify-locally.md"
+      ],
+      "target_enforcement": {
+        "openai": "metadata-only permission_contract in adapter.json plus operator note",
+        "claude": "adapter.json target_permission_contract and README note",
+        "generic": "adapter.json target_permission_contract",
+        "vscode": "adapter.json target_permission_contract plus workspace-trust note"
+      }
+    },
+    "subprocess": {
+      "decision": "approved",
+      "reviewer": "Yao Team",
+      "scope": "仅在包工作目录内执行 node build/validate/smoke/pack 与 pnpm install，参数为固定脚本名与用户指定目录；不执行远程脚本或管道输入。",
+      "reason": "构建、静态校验、烟雾测试与打包都需要在用户机器上调用 node 与 pnpm；命令集合固定且参数受脚手架约束，因此限定为本地确定性调用。",
+      "expires_at": "2027-03-11",
+      "evidence": [
+        "reports/security_trust_report.md",
+        "references/build-strategies.md"
+      ],
+      "target_enforcement": {
+        "openai": "metadata-only permission_contract in adapter.json plus operator note",
+        "claude": "adapter.json target_permission_contract and README note",
+        "generic": "adapter.json target_permission_contract",
+        "vscode": "adapter.json target_permission_contract plus workspace-trust note"
+      }
+    },
+    "network": {
+      "decision": "approved",
+      "reviewer": "Yao Team",
+      "scope": "仅通过 pnpm 从官方或用户指定 registry 拉取被固定版本的类库与 esbuild，以及用户明确授权时的活字格 MCP 上传；不得访问其他主机。",
+      "reason": "要把类库打成扩展包必须先按固定版本获取该库与 esbuild；版本必须锁定并提交 pnpm-lock.yaml，来源限于官方或用户指定来源，超出范围需用户确认。",
+      "expires_at": "2027-03-11",
+      "evidence": [
+        "reports/security_trust_report.md",
+        "references/upload-and-integrate.md"
+      ],
+      "target_enforcement": {
+        "openai": "metadata-only permission_contract in adapter.json plus operator note",
+        "claude": "adapter.json target_permission_contract and README note",
+        "generic": "adapter.json target_permission_contract",
+        "vscode": "adapter.json target_permission_contract plus workspace-trust note"
+      }
+    }
+  }
+}
