@@ -13,6 +13,6 @@
     "build": "vp run -r build"
   },
   "devDependencies": {
-    "vite-plus": "0.2.7"
+    "vite-plus": "0.3.2"
   }
 }
