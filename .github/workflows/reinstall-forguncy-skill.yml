@@ -1,0 +1,30 @@
+name: Normalize Forguncy frontend-library Skill install
+
+on:
+  push:
+    branches:
+      - chore/install-forguncy-frontend-skill
+
+permissions:
+  contents: write
+
+jobs:
+  install:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: chore/install-forguncy-frontend-skill
+      - name: Reinstall skill for repository agents
+        run: |
+          rm -rf .agents .claude agent skills-lock.json
+          npx skills@latest add MangMax/forguncy-frontend-library -s forguncy-frontend-library -a codex -a claude-code -y
+      - name: Commit normalized installation
+        run: |
+          rm .github/workflows/reinstall-forguncy-skill.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "chore: normalize installed skill targets"
+          git push origin HEAD:chore/install-forguncy-frontend-skill
