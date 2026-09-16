@@ -3,13 +3,16 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@12.0.0",
+  "packageManager": "pnpm@11.18.0",
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "scripts": {
     "check": "vp check",
     "test": "vp test",
     "build": "vp run -r build"
+  },
+  "devDependencies": {
+    "vite-plus": "0.2.7"
   }
 }
