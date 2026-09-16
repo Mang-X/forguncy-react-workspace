@@ -1,0 +1,55 @@
+name: Specification
+description: Capture a technical or product design decision before implementation.
+title: "Spec: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Specs live in Issues. Do not mirror this content into a `specs/` repository directory.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What concrete problem or uncertainty does this spec resolve?
+    validations:
+      required: true
+  - type: textarea
+    id: decision
+    attributes:
+      label: Proposed contract / decision
+      description: Define observable behavior, interfaces, invariants, and boundaries.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence and constraints
+      description: Runtime observations, Forguncy constraints, related repositories, benchmarks, or upstream docs.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Use a checklist with testable outcomes.
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: List `Depends on #...` and `Blocks #...` relationships.
+    validations:
+      required: false
+  - type: textarea
+    id: non-goals
+    attributes:
+      label: Non-goals
+    validations:
+      required: true
