@@ -1,0 +1,45 @@
+name: Implementation
+description: Plan an implementation unit that will be delivered by one or more Pull Requests.
+title: "Implement: "
+body:
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: What user/developer-visible capability will exist when this issue is complete?
+    validations:
+      required: true
+  - type: textarea
+    id: spec
+    attributes:
+      label: Governing spec / decision
+      description: Link the Spec Issue(s) that define the contract.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Implementation plan
+      description: Ordered, PR-sized steps. Keep the plan in this Issue rather than a repository plan document.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: List `Depends on #...` and `Blocks #...` relationships.
+    validations:
+      required: false
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation plan
+      description: State which checks are local, simulated, MCP-backed, or require a real Forguncy runtime.
+    validations:
+      required: true

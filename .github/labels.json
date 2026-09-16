@@ -1,0 +1,30 @@
+[
+  {"name":"type:epic","color":"5319E7","description":"Multi-issue outcome or phase umbrella"},
+  {"name":"type:spec","color":"1D76DB","description":"Design/specification decision captured in an Issue"},
+  {"name":"type:feature","color":"0E8A16","description":"Implementation work that delivers product capability"},
+  {"name":"type:research","color":"FBCA04","description":"Runtime probe, benchmark, or feasibility research"},
+  {"name":"type:infra","color":"C5DEF5","description":"Repository, CI, toolchain, or automation infrastructure"},
+  {"name":"type:docs","color":"0075CA","description":"Contributor or user-facing documentation"},
+
+  {"name":"area:compiler","color":"BFDADC","description":"ReactCellType cell compiler and generated artifacts"},
+  {"name":"area:runtime","color":"BFD4F2","description":"Forguncy host runtime bridge and local runtime"},
+  {"name":"area:dependency","color":"D4C5F9","description":"Dependency decisions, probing, and compatibility"},
+  {"name":"area:mcp","color":"C2E0C6","description":"Forguncy MCP synchronization and project integration"},
+  {"name":"area:skill","color":"F9D0C4","description":"Agent Skill and agent-facing workflow"},
+  {"name":"area:dev","color":"FEF2C0","description":"Local development and developer experience"},
+  {"name":"area:ci","color":"D93F0B","description":"Continuous integration and repository automation"},
+
+  {"name":"strategy:host","color":"0052CC","description":"Dependency is supplied by the Forguncy/ReactCellType host"},
+  {"name":"strategy:inline","color":"0E8A16","description":"Dependency is bundled into generated cell code"},
+  {"name":"strategy:extension","color":"8250DF","description":"Dependency is supplied by a Forguncy frontend extension"},
+  {"name":"strategy:replace","color":"D876E3","description":"Prefer a more compatible modern alternative library"},
+
+  {"name":"priority:p0","color":"B60205","description":"Blocks the MVP or architecture validation"},
+  {"name":"priority:p1","color":"D93F0B","description":"Required for the first usable release"},
+  {"name":"priority:p2","color":"FBCA04","description":"Important follow-up after the first usable release"},
+
+  {"name":"status:ready","color":"0E8A16","description":"Ready to implement; dependencies are satisfied"},
+  {"name":"status:blocked","color":"B60205","description":"Blocked by another Issue or external dependency"},
+  {"name":"status:needs-validation","color":"FBCA04","description":"Must be verified against a real Forguncy project/runtime"},
+  {"name":"status:needs-decision","color":"C5DEF5","description":"Requires an explicit design/product decision"}
+]
