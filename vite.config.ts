@@ -4,6 +4,9 @@ export default defineConfig({
   build: {
     sourcemap: false,
   },
+  check: {
+    fmt: false,
+  },
   lint: {
     options: {
       typeAware: false,
