@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -37,10 +37,20 @@ describe("decision provenance", () => {
     expect(DECISION_CITATION_TOKENS).toContain("#4");
   });
 
-  it("keeps the repository agent rules citing the decision", () => {
+  it("keeps the durable boundary rules in the repository agent rules", () => {
     const agents = readRepositoryFile("AGENTS.md");
-    expect(citesDecision(agents)).toBe(true);
+    expect(agents).toMatch(/Forguncy owns the application\. React owns the island\./);
+    expect(agents).toMatch(/architectural rejection/i);
+    expect(agents).toMatch(/technical bundling failure/i);
     expect(agents).toMatch(/platform conflict/i);
+  });
+
+  it("keeps the repository agent rules free of decision links and transient state", () => {
+    const agents = readRepositoryFile("AGENTS.md");
+    expect(agents).not.toMatch(/https?:\/\//);
+    expect(agents).not.toMatch(/github\.com/);
+    expect(agents).not.toMatch(/\/issues\//);
+    expect(agents).not.toMatch(/#\d+/);
   });
 
   it("keeps the Spec template carrying a governing-Spec field", () => {
@@ -49,8 +59,14 @@ describe("decision provenance", () => {
     expect(citesDecision(specTemplate)).toBe(true);
   });
 
-  it("does not introduce a duplicated specs/ or plans/ document tree", () => {
+  it("keeps the PR template asking for the governing Spec Issue", () => {
     const prTemplate = readRepositoryFile(join(".github", "pull_request_template.md"));
     expect(prTemplate).toMatch(/Governing Spec Issue\(s\)/);
+  });
+
+  it("does not introduce a duplicated specs/ or plans/ document tree", () => {
+    for (const directory of ["specs", "plans"]) {
+      expect(existsSync(join(repositoryRoot, directory)), directory).toBe(false);
+    }
   });
 });
