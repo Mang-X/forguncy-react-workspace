@@ -1,0 +1,902 @@
+/**
+ * The verified ReactCellType target/runtime contract.
+ *
+ * Decision source: GitHub Issue #5 — "Research: establish the ReactCellType
+ * target/runtime contract on Forguncy 12.0.100"
+ * (https://github.com/Mang-X/forguncy-react-workspace/issues/5).
+ *
+ * Repository rules put Specs in Issues and forbid a duplicated `specs/` tree, so
+ * the evidence lives in that Issue. This module exists because a prose comment is
+ * not reproducible project state: the artifact Spec (#6), the compiler (#7) and
+ * the Agent dependency-selection flow (#18) need to *assert* these facts rather
+ * than remember them.
+ *
+ * Every fact names the channel it was observed through. `RuntimeEvidenceChannel`
+ * deliberately has no "assumption" / "expected" / "likely" member, so a claim that
+ * was never observed cannot be recorded here without inventing an evidence
+ * channel. Questions that are genuinely still open live in
+ * `RUNTIME_CONTRACT_UNKNOWNS` instead of being guessed into the contract.
+ *
+ * Read the evidence channels as follows:
+ *
+ * - `product-runtime-source` — read from the shipped runtime script of the
+ *   product, not from a summary of it.
+ * - `product-documentation` — read from the API documentation the product itself
+ *   serves to its AI surface.
+ * - `designer-api` — produced by executing a designer operation against a real
+ *   project.
+ * - `generated-runtime-browser` — observed in a real browser against the
+ *   generated dev site.
+ *
+ * Scope note: this module states the *target's* behaviour. It deliberately does
+ * not decide the generated artifact's shape (#6), measure the code budget (#21),
+ * or describe local development (#22).
+ */
+
+import type { ArchitectureDecisionSource } from "./governance";
+import { RUNTIME_CONTRACT_DECISION } from "./governance";
+
+export type RuntimeEvidenceChannel =
+  | "product-runtime-source"
+  | "product-documentation"
+  | "designer-api"
+  | "generated-runtime-browser";
+
+// ---------------------------------------------------------------------------
+// Pinned target
+// ---------------------------------------------------------------------------
+
+/**
+ * The exact target the contract was established against.
+ *
+ * Pinned rather than described, because a contract without a version is a
+ * claim about "Forguncy" in the abstract, and Forguncy ships its own React and
+ * transpiler per version.
+ */
+export interface RuntimeContractTarget {
+  readonly product: string;
+  readonly productVersion: string;
+  readonly productBuild: string;
+  readonly hostReactVersion: string;
+  readonly hostReactDomVersion: string;
+  readonly browserTranspiler: string;
+  readonly browserTranspilerVersion: string;
+  readonly reactCellTypePluginGuid: string;
+  readonly decision: ArchitectureDecisionSource;
+  readonly evidence: readonly RuntimeEvidenceChannel[];
+}
+
+export const RUNTIME_CONTRACT_TARGET: RuntimeContractTarget = {
+  product: "Forguncy",
+  productVersion: "12.0.100.0",
+  productBuild: "12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623",
+  hostReactVersion: "19.2.7",
+  hostReactDomVersion: "19.2.7",
+  browserTranspiler: "Babel standalone",
+  browserTranspilerVersion: "7.29.4",
+  reactCellTypePluginGuid: "96205a31-0c2e-4b98-9ce5-6555088e6cbd",
+  decision: RUNTIME_CONTRACT_DECISION,
+  evidence: ["product-runtime-source", "generated-runtime-browser"],
+};
+
+/** Short header for reports, PR bodies and diagnostics. */
+export function describeRuntimeContractTarget(target: RuntimeContractTarget = RUNTIME_CONTRACT_TARGET): string {
+  return `${target.product} ${target.productVersion} (${target.productBuild}) — host React ${target.hostReactVersion}, browser ${target.browserTranspiler} ${target.browserTranspilerVersion}`;
+}
+
+// ---------------------------------------------------------------------------
+// Execution model
+// ---------------------------------------------------------------------------
+
+export interface CellSourceExecutionModel {
+  /** How the cell source is transformed before it runs. */
+  readonly transformCall: string;
+  readonly transformPresets: readonly string[];
+  /**
+   * Transforms that are *not* applied. Their absence is the reason TypeScript
+   * annotations, module syntax and un-transpiled language features cannot rely
+   * on the platform to be lowered.
+   */
+  readonly missingTransforms: readonly string[];
+  /** How the transformed source is bound to the host. */
+  readonly hostBindingCall: string;
+  /** The `new Function` parameters, in the order the runtime passes them. */
+  readonly injectedParameters: readonly string[];
+  /** How user source is additionally nested inside the function body. */
+  readonly userCodeNesting: string;
+  /** `new Function` gives each cell its own function scope. */
+  readonly perCellCompilationScope: boolean;
+  /** Declarations at the top level of a cell do not become page globals. */
+  readonly topLevelDeclarationsReachGlobalThis: boolean;
+  readonly evidence: readonly RuntimeEvidenceChannel[];
+}
+
+export const CELL_SOURCE_EXECUTION_MODEL: CellSourceExecutionModel = {
+  transformCall: 'Babel.transform(source, { presets: ["react"] })',
+  transformPresets: ["react"],
+  missingTransforms: ["typescript", "preset-env", "module (import/export lowering)"],
+  hostBindingCall:
+    'new Function("React", "antd", "echarts", "dayjs", "ForguncyReactHelper", "__useDataSource", "__props", compiled + returnExpression)',
+  injectedParameters: ["React", "antd", "echarts", "dayjs", "ForguncyReactHelper", "__useDataSource", "__props"],
+  userCodeNesting:
+    "an arrow IIFE inside the function body, which also declares props, useState, useEffect, useMemo, useRef, useCallback, useDataSource, DataSourceCompareType, DataSourceRelationType, __renderResult and render",
+  perCellCompilationScope: true,
+  topLevelDeclarationsReachGlobalThis: false,
+  evidence: ["product-runtime-source", "designer-api", "generated-runtime-browser"],
+};
+
+// ---------------------------------------------------------------------------
+// Entry shapes
+// ---------------------------------------------------------------------------
+
+export type CellEntryKind =
+  | "app-function-declaration"
+  | "app-async-function-declaration"
+  | "app-variable-assignment"
+  | "app-arrow-assignment"
+  | "app-class-component"
+  | "render-call"
+  | "top-level-element-variable"
+  | "whole-source-expression"
+  | "no-entry";
+
+export interface CellEntryShape {
+  readonly id: CellEntryKind;
+  /** The source shape, described the way a generator would emit it. */
+  readonly shape: string;
+  /** Accepted by `api.page.setCells` against a real project. */
+  readonly acceptedAtWriteTime: boolean;
+  /** An element actually mounted in the generated runtime page. */
+  readonly renderedAtRuntime: boolean;
+  /** Set when the shape is accepted but does not work, or works but is not an entry. */
+  readonly note?: string;
+  readonly evidence: readonly RuntimeEvidenceChannel[];
+}
+
+/**
+ * The entry shapes a generator may emit, and the two it may not.
+ *
+ * `app-async-function-declaration` is the trap: the platform's write-time
+ * validator accepts it, and React 19 then refuses it at runtime. A generator
+ * that only validates against the designer API will ship a blank cell.
+ */
+export const CELL_ENTRY_SHAPES: readonly CellEntryShape[] = [
+  {
+    id: "app-function-declaration",
+    shape: "function App(props) { ... }",
+    acceptedAtWriteTime: true,
+    renderedAtRuntime: true,
+    evidence: ["designer-api", "generated-runtime-browser"],
+  },
+  {
+    id: "app-variable-assignment",
+    shape: "var App = function (props) { ... };",
+    acceptedAtWriteTime: true,
+    renderedAtRuntime: true,
+    evidence: ["designer-api", "generated-runtime-browser"],
+  },
+  {
+    id: "app-arrow-assignment",
+    shape: "const App = (props) => <div />;",
+    acceptedAtWriteTime: true,
+    renderedAtRuntime: true,
+    evidence: ["designer-api", "generated-runtime-browser"],
+  },
+  {
+    id: "app-class-component",
+    shape: "class App extends React.Component { render() { ... } }",
+    acceptedAtWriteTime: true,
+    renderedAtRuntime: true,
+    evidence: ["designer-api", "generated-runtime-browser"],
+  },
+  {
+    id: "app-async-function-declaration",
+    shape: "async function App(props) { ... }",
+    acceptedAtWriteTime: true,
+    renderedAtRuntime: false,
+    note: "Accepted by the write-time validator, then rejected by React 19 at runtime with minified error #482 (\"an async Client Component\"). Do not emit.",
+    evidence: ["designer-api", "generated-runtime-browser"],
+  },
+  {
+    id: "render-call",
+    shape: "render(<div />);",
+    acceptedAtWriteTime: true,
+    renderedAtRuntime: true,
+    note: "Requires no App binding at all; this is the documented alternative entry.",
+    evidence: ["product-runtime-source", "designer-api", "generated-runtime-browser"],
+  },
+  {
+    id: "top-level-element-variable",
+    shape: "const element = <div />;",
+    acceptedAtWriteTime: true,
+    renderedAtRuntime: true,
+    evidence: ["product-runtime-source", "designer-api", "generated-runtime-browser"],
+  },
+  {
+    id: "whole-source-expression",
+    shape: "<div />",
+    acceptedAtWriteTime: true,
+    renderedAtRuntime: true,
+    note: "Only when the trimmed source starts with `<` or `(`; the platform re-compiles the whole source as one expression.",
+    evidence: ["product-runtime-source", "designer-api", "generated-runtime-browser"],
+  },
+  {
+    id: "no-entry",
+    shape: "const x = 1;",
+    acceptedAtWriteTime: true,
+    renderedAtRuntime: false,
+    note: "Accepted and silently renders nothing, with no console error. A generator bug that drops the entry therefore fails silently in production.",
+    evidence: ["designer-api", "generated-runtime-browser"],
+  },
+];
+
+export interface CellEntryResolutionStep {
+  readonly order: number;
+  readonly mechanism: string;
+  /** The ordering itself is read from the runtime source; each mechanism was executed separately. */
+  readonly orderingEvidence: RuntimeEvidenceChannel;
+  readonly evidence: readonly RuntimeEvidenceChannel[];
+}
+
+/**
+ * Which mechanism wins when a source satisfies more than one of them.
+ *
+ * Ordering is a property of the runtime implementation, so it is recorded from
+ * the source rather than inferred from which shapes happened to render.
+ */
+export const CELL_ENTRY_RESOLUTION_ORDER: readonly CellEntryResolutionStep[] = [
+  {
+    order: 1,
+    mechanism: "A render(value) call wins: the recorded render result is returned as the element.",
+    orderingEvidence: "product-runtime-source",
+    evidence: ["product-runtime-source", "designer-api", "generated-runtime-browser"],
+  },
+  {
+    order: 2,
+    mechanism: "Otherwise an App binding is wrapped as React.createElement(App, props).",
+    orderingEvidence: "product-runtime-source",
+    evidence: ["product-runtime-source", "designer-api", "generated-runtime-browser"],
+  },
+  {
+    order: 3,
+    mechanism: "Otherwise a top-level element binding is used as the element.",
+    orderingEvidence: "product-runtime-source",
+    evidence: ["product-runtime-source", "designer-api", "generated-runtime-browser"],
+  },
+  {
+    order: 4,
+    mechanism:
+      "Otherwise, when the trimmed source starts with `<` or `(`, the whole source is compiled again as a single expression.",
+    orderingEvidence: "product-runtime-source",
+    evidence: ["product-runtime-source", "designer-api", "generated-runtime-browser"],
+  },
+  {
+    order: 5,
+    mechanism: "Otherwise the cell stays empty and no error is logged.",
+    orderingEvidence: "product-runtime-source",
+    evidence: ["product-runtime-source", "designer-api", "generated-runtime-browser"],
+  },
+];
+
+export function findCellEntryShape(id: CellEntryKind): CellEntryShape {
+  const shape = CELL_ENTRY_SHAPES.find(candidate => candidate.id === id);
+  if (!shape) {
+    throw new Error(`Unknown ReactCellType entry shape "${id}".`);
+  }
+  return shape;
+}
+
+/** Entry shapes that validate but do not work. A generator must never emit these. */
+export function nonWorkingCellEntryShapes(): readonly CellEntryShape[] {
+  return CELL_ENTRY_SHAPES.filter(shape => !shape.renderedAtRuntime);
+}
+
+/**
+ * The entry shapes a generator may emit: they satisfy the platform's write-time
+ * validator *and* actually mount. `no-entry` is excluded even though it is
+ * accepted, because it describes the absence of a shape rather than one.
+ */
+export function emitCellEntryShapes(): readonly CellEntryShape[] {
+  return CELL_ENTRY_SHAPES.filter(shape => shape.acceptedAtWriteTime && shape.renderedAtRuntime);
+}
+
+// ---------------------------------------------------------------------------
+// Rejected source
+// ---------------------------------------------------------------------------
+
+export type CellSourceRejectionId =
+  | "import-declaration"
+  | "export-declaration"
+  | "react-use"
+  | "use-action-state"
+  | "use-optimistic"
+  | "use-form-status"
+  | "typescript-annotation"
+  | "top-level-await"
+  | "top-level-return"
+  | "duplicate-top-level-declaration"
+  | "runtime-import-call-not-rejected";
+
+export interface CellSourceRejection {
+  readonly id: CellSourceRejectionId;
+  /**
+   * Which validation pass rejects it. `preview` compiles the wrapped source;
+   * `babel` parses the raw source. Both surface through the same designer error.
+   */
+  readonly stage: "preview" | "babel" | "none";
+  /** The platform's own wording, verbatim where it is a fixed message. */
+  readonly message: string;
+  /**
+   * True when the platform caps or repeats the message, so the recorded string is
+   * one observed sample rather than a constant.
+   */
+  readonly messageVaries: boolean;
+  /** Whether this construct is refused, rather than merely unstyled. */
+  readonly rejected: boolean;
+  readonly note: string;
+  readonly evidence: readonly RuntimeEvidenceChannel[];
+}
+
+/**
+ * The source restrictions the target enforces itself, with its own wording.
+ *
+ * A compiler should reproduce these messages rather than invent its own, because
+ * the same code is rejected again when it reaches the platform.
+ *
+ * `runtime-import-call-not-rejected` is recorded as a *rejection record* because
+ * it belongs in the same decision table, but its `rejected` flag is false: the
+ * platform validator does not reject `import()`. The "no runtime chunk loading"
+ * rule is a bundler/artifact requirement (#6, #7), not a platform prohibition,
+ * and conflating the two would make a later reader believe the platform will
+ * catch it.
+ */
+export const CELL_SOURCE_REJECTIONS: readonly CellSourceRejection[] = [
+  {
+    id: "import-declaration",
+    stage: "preview",
+    message: "ReactCellType does not support import statements. Use the provided global variables instead.",
+    messageVaries: false,
+    rejected: true,
+    note: "Fixed message constant in the runtime. Design-time rejection; the cell is never written.",
+    evidence: ["product-runtime-source", "designer-api"],
+  },
+  {
+    id: "export-declaration",
+    stage: "preview",
+    message:
+      "ReactCellType does not support export statements. Define App, element, or call render(value) instead.",
+    messageVaries: false,
+    rejected: true,
+    note: "Fixed message constant; also the shortest statement of the accepted entry shapes.",
+    evidence: ["product-runtime-source", "designer-api"],
+  },
+  {
+    id: "react-use",
+    stage: "preview",
+    message:
+      "React.use is not supported in ReactCellType user code. Use stable client-side hooks such as React.useState and React.useEffect.",
+    messageVaries: false,
+    rejected: true,
+    note: "Fixed message constant. Rejected by name, so it cannot be worked around with an alias.",
+    evidence: ["product-runtime-source", "designer-api"],
+  },
+  {
+    id: "use-action-state",
+    stage: "preview",
+    message: "useActionState is not supported in ReactCellType user code.",
+    messageVaries: false,
+    rejected: true,
+    note: "Recorded from the runtime's message table; not separately executed.",
+    evidence: ["product-runtime-source"],
+  },
+  {
+    id: "use-optimistic",
+    stage: "preview",
+    message: "useOptimistic is not supported in ReactCellType user code.",
+    messageVaries: false,
+    rejected: true,
+    note: "Recorded from the runtime's message table; not separately executed.",
+    evidence: ["product-runtime-source"],
+  },
+  {
+    id: "use-form-status",
+    stage: "preview",
+    message: "useFormStatus is not supported in ReactCellType user code.",
+    messageVaries: false,
+    rejected: true,
+    note: "Recorded from the runtime's message table; not separately executed.",
+    evidence: ["product-runtime-source"],
+  },
+  {
+    id: "typescript-annotation",
+    stage: "babel",
+    message: 'unknown: Unexpected token, expected "," (1:18)',
+    messageVaries: true,
+    rejected: true,
+    note: "Babel parse error with the offending position and a code frame; the position varies with the source.",
+    evidence: ["product-runtime-source", "designer-api"],
+  },
+  {
+    id: "top-level-await",
+    stage: "preview",
+    message: "unknown: Unexpected reserved word 'await'. (2:10)",
+    messageVaries: true,
+    rejected: true,
+    note: "Reported against the wrapped source, so the frame exposes the IIFE nesting.",
+    evidence: ["product-runtime-source", "designer-api"],
+  },
+  {
+    id: "top-level-return",
+    stage: "babel",
+    message: "unknown: 'return' outside of function. (1:0)",
+    messageVaries: true,
+    rejected: true,
+    note: "The raw source is parsed as a program, so a top-level return is not a legal way to return an element.",
+    evidence: ["product-runtime-source", "designer-api"],
+  },
+  {
+    id: "duplicate-top-level-declaration",
+    stage: "babel",
+    message: "unknown: Identifier 'App' has already been declared. (2:9)",
+    messageVaries: true,
+    rejected: true,
+    note: "Any duplicate top-level declaration is refused, not only App.",
+    evidence: ["product-runtime-source", "designer-api"],
+  },
+  {
+    id: "runtime-import-call-not-rejected",
+    stage: "none",
+    message: "none — the validator does not reject a dynamic import() call expression",
+    messageVaries: false,
+    rejected: false,
+    note: "Accepted at write time and the element still renders; the call simply fails if it is ever executed. Treat as a bundler requirement, not a platform guarantee.",
+    evidence: ["product-runtime-source", "designer-api", "generated-runtime-browser"],
+  },
+];
+
+/** How the platform reports a rejected source, so a compiler can match the wording. */
+export const CELL_SOURCE_REJECTION_ENVELOPE = {
+  template: "Invalid AI-generated object 'ReactCellTypeCellType': ReactCellType 代码验证失败 [<stage>]：<message>",
+  stageTags: ["preview", "babel"],
+  evidence: ["designer-api"] as readonly RuntimeEvidenceChannel[],
+};
+
+/**
+ * What happens when a rejected source reaches the runtime anyway.
+ *
+ * Recorded from the runtime source, not executed: the designer refused every
+ * rejected sample, so no rejected source could be mounted to observe.
+ */
+export const CELL_RUNTIME_RENDER_FAILURE_BEHAVIOR = {
+  behavior: "the cell's root is rendered with null and the error is written to console.error",
+  rendersErrorTextInCell: false,
+  note: "Unrelated to frontend-library failures, which do render their message in the cell.",
+  evidence: ["product-runtime-source"] as readonly RuntimeEvidenceChannel[],
+};
+
+export function findCellSourceRejection(id: CellSourceRejectionId): CellSourceRejection {
+  const rejection = CELL_SOURCE_REJECTIONS.find(candidate => candidate.id === id);
+  if (!rejection) {
+    throw new Error(`Unknown ReactCellType source rejection "${id}".`);
+  }
+  return rejection;
+}
+
+/** Only the constructs the target actually refuses. */
+export function rejectedCellSourceConstructs(): readonly CellSourceRejection[] {
+  return CELL_SOURCE_REJECTIONS.filter(rejection => rejection.rejected);
+}
+
+// ---------------------------------------------------------------------------
+// Names visible inside user code
+// ---------------------------------------------------------------------------
+
+/** Where a name comes from, and therefore what it can be assumed to be. */
+export type CellBindingAvailability =
+  | "always"
+  | "after-the-declared-preset-resolves"
+  | "only-on-window";
+
+export interface CellUserScopeBinding {
+  readonly name: string;
+  readonly kind: "injected-parameter" | "wrapper-local" | "extension-global" | "page-global";
+  readonly availableInCellSource: CellBindingAvailability;
+  /** Is the name also a property of the page's `window`? */
+  readonly onWindow: CellBindingAvailability | "never";
+  readonly note?: string;
+  readonly evidence: readonly RuntimeEvidenceChannel[];
+}
+
+/**
+ * The names a cell source may reference without importing them.
+ *
+ * This is the whole `host` mapping surface: anything not listed here has to be
+ * `inline`d or supplied by an `extension`. The distinction between
+ * `injected-parameter` and `wrapper-local` is not cosmetic — the runtime passes
+ * the first set as `new Function` arguments, so their values are captured at the
+ * moment the cell renders, while the second set is created per render.
+ */
+export const CELL_USER_SCOPE_BINDINGS: readonly CellUserScopeBinding[] = [
+  {
+    name: "React",
+    kind: "injected-parameter",
+    availableInCellSource: "always",
+    onWindow: "always",
+    evidence: ["product-runtime-source", "generated-runtime-browser"],
+  },
+  {
+    name: "antd",
+    kind: "injected-parameter",
+    availableInCellSource: "after-the-declared-preset-resolves",
+    onWindow: "after-the-declared-preset-resolves",
+    note: "The AntDesign preset is the persisted default when `libraries` is omitted, so this is usually available — but see the per-render-instant caveat.",
+    evidence: ["product-runtime-source", "designer-api", "generated-runtime-browser"],
+  },
+  {
+    name: "dayjs",
+    kind: "injected-parameter",
+    availableInCellSource: "after-the-declared-preset-resolves",
+    onWindow: "after-the-declared-preset-resolves",
+    note: "Loaded as a dependency of the AntDesign preset, not as a preset of its own.",
+    evidence: ["product-runtime-source", "generated-runtime-browser"],
+  },
+  {
+    name: "echarts",
+    kind: "injected-parameter",
+    availableInCellSource: "after-the-declared-preset-resolves",
+    onWindow: "after-the-declared-preset-resolves",
+    note: "Only loaded when the cell declares the ECharts preset; the runtime asserts the global exists before rendering.",
+    evidence: ["product-runtime-source", "generated-runtime-browser"],
+  },
+  {
+    name: "ForguncyReactHelper",
+    kind: "injected-parameter",
+    availableInCellSource: "always",
+    onWindow: "never",
+    note: "Available as a parameter but is NOT a window property; reading it through `window` fails.",
+    evidence: ["product-runtime-source", "generated-runtime-browser"],
+  },
+  {
+    name: "props",
+    kind: "wrapper-local",
+    availableInCellSource: "always",
+    onWindow: "never",
+    evidence: ["product-runtime-source", "generated-runtime-browser"],
+  },
+  {
+    name: "useDataSource",
+    kind: "wrapper-local",
+    availableInCellSource: "always",
+    onWindow: "never",
+    evidence: ["product-runtime-source", "generated-runtime-browser"],
+  },
+  {
+    name: "DataSourceCompareType",
+    kind: "wrapper-local",
+    availableInCellSource: "always",
+    onWindow: "never",
+    evidence: ["product-runtime-source", "generated-runtime-browser"],
+  },
+  {
+    name: "DataSourceRelationType",
+    kind: "wrapper-local",
+    availableInCellSource: "always",
+    onWindow: "never",
+    evidence: ["product-runtime-source", "generated-runtime-browser"],
+  },
+  {
+    name: "render",
+    kind: "wrapper-local",
+    availableInCellSource: "always",
+    onWindow: "never",
+    evidence: ["product-runtime-source", "generated-runtime-browser"],
+  },
+  {
+    name: "useState",
+    kind: "wrapper-local",
+    availableInCellSource: "always",
+    onWindow: "never",
+    evidence: ["product-runtime-source", "generated-runtime-browser"],
+  },
+  {
+    name: "useEffect",
+    kind: "wrapper-local",
+    availableInCellSource: "always",
+    onWindow: "never",
+    evidence: ["product-runtime-source", "generated-runtime-browser"],
+  },
+  {
+    name: "useMemo",
+    kind: "wrapper-local",
+    availableInCellSource: "always",
+    onWindow: "never",
+    evidence: ["product-runtime-source", "generated-runtime-browser"],
+  },
+  {
+    name: "useRef",
+    kind: "wrapper-local",
+    availableInCellSource: "always",
+    onWindow: "never",
+    evidence: ["product-runtime-source", "generated-runtime-browser"],
+  },
+  {
+    name: "useCallback",
+    kind: "wrapper-local",
+    availableInCellSource: "always",
+    onWindow: "never",
+    evidence: ["product-runtime-source", "generated-runtime-browser"],
+  },
+  {
+    name: "ReactDOM",
+    kind: "page-global",
+    availableInCellSource: "always",
+    onWindow: "always",
+    note: "Not injected as a parameter, but present as a page global; the runtime itself mounts cells with it.",
+    evidence: ["product-runtime-source", "generated-runtime-browser"],
+  },
+];
+
+export function cellUserScopeBinding(name: string): CellUserScopeBinding | undefined {
+  return CELL_USER_SCOPE_BINDINGS.find(binding => binding.name === name);
+}
+
+// ---------------------------------------------------------------------------
+// Preset libraries
+// ---------------------------------------------------------------------------
+
+export interface CellPresetLibrary {
+  readonly name: "None" | "AntDesign" | "ECharts";
+  /** Host globals this preset makes available to the whole page. */
+  readonly providesGlobals: readonly string[];
+  /** Scripts loaded before those globals exist, in load order. */
+  readonly scriptChain: readonly string[];
+  /** Submitted to `Forguncy.LoadModule` instead of a script URL, when applicable. */
+  readonly runtimeModule?: string;
+  /** Persisted when the cell does not specify `libraries`. */
+  readonly isPersistedDefault: boolean;
+  readonly evidence: readonly RuntimeEvidenceChannel[];
+}
+
+/**
+ * Preset library chains.
+ *
+ * `None` is the important one: it is the only way to get a cell that does not
+ * pull antd, and the only reliable way to prove a cell has no host library
+ * dependency.
+ */
+export const CELL_PRESET_LIBRARIES: readonly CellPresetLibrary[] = [
+  {
+    name: "None",
+    providesGlobals: [],
+    scriptChain: [],
+    isPersistedDefault: false,
+    evidence: ["product-runtime-source", "generated-runtime-browser"],
+  },
+  {
+    name: "AntDesign",
+    providesGlobals: ["dayjs", "antd"],
+    scriptChain: [
+      "Resources/dayjs/dayjs.min.js",
+      "Resources/antd/antd.zh-cn.js",
+      "Resources/antd/antd.min.js",
+      "Resources/antd/reset.css",
+    ],
+    isPersistedDefault: true,
+    evidence: ["product-runtime-source", "designer-api", "generated-runtime-browser"],
+  },
+  {
+    name: "ECharts",
+    providesGlobals: ["echarts"],
+    scriptChain: [],
+    runtimeModule: "chart",
+    isPersistedDefault: false,
+    evidence: ["product-runtime-source", "generated-runtime-browser"],
+  },
+];
+
+export const CELL_PRESET_LIBRARY_DEFAULT = "AntDesign";
+
+export function findCellPresetLibrary(name: CellPresetLibrary["name"]): CellPresetLibrary {
+  const preset = CELL_PRESET_LIBRARIES.find(candidate => candidate.name === name);
+  if (!preset) {
+    throw new Error(`Unknown ReactCellType preset library "${name}".`);
+  }
+  return preset;
+}
+
+// ---------------------------------------------------------------------------
+// Props and platform bridge
+// ---------------------------------------------------------------------------
+
+/**
+ * The base `props` contract.
+ *
+ * The order is the runtime's own initialisation order, which is observable and
+ * therefore worth pinning: a generator that snapshots `Object.keys(props)` in a
+ * fixture will see base keys first, then configured properties, then
+ * `ImageContext`.
+ */
+export const CELL_PROPS_BASE_KEYS = ["Forguncy", "Permissions", "ServerCommands", "ImageContext"] as const;
+
+export const CELL_PROPS_KEY_ORDER = {
+  description:
+    "Forguncy, then Permissions, then configured properties[].propertyName, then ImageContext; event handlers and configured permissions are injected before properties",
+  evidence: ["product-runtime-source", "generated-runtime-browser"] as readonly RuntimeEvidenceChannel[],
+};
+
+export const CELL_FORGUNCY_PROP_KEYS = [
+  "ConvertDateToOADate",
+  "ConvertOADateToDate",
+  "ConvertToCssColor",
+  "DataSourceCompareType",
+  "DataSourceRelationType",
+  "Permissions",
+  "exposeMethod",
+  "getCurrentUser",
+  "getPermissions",
+  "getUploadLimit",
+  "hasPermission",
+  "logIn",
+  "logOut",
+  "uploadFiles",
+] as const;
+
+export const CELL_SERVER_COMMAND_RESULT_KEYS = ["errorCode", "errorMessage"] as const;
+
+export const CELL_SERVER_COMMANDS_CONTRACT = {
+  /** Only the names listed in `availableServerCommands` are present. */
+  shape: "a record of command name to async function",
+  /** Calling a name that was not configured is a plain TypeError, not a platform error. */
+  unconfiguredNameType: "undefined",
+  unconfiguredCallOutcome: "TypeError: <name> is not a function",
+  /** Extra keys beyond the two reserved ones are the command's own named returns. */
+  namedReturnsAreExtraKeys: true,
+  evidence: ["product-runtime-source", "product-documentation", "generated-runtime-browser"] as readonly RuntimeEvidenceChannel[],
+};
+
+export const CELL_DATA_SOURCE_CONTRACT = {
+  resultFieldsExecuted: ["data", "totalCount", "loading", "error"],
+  resultFieldsDocumented: ["data", "totalCount", "loading", "error", "reload"],
+  /** A name that was never declared is an error state, not a thrown exception. */
+  unknownSourceOutcome: "the hook returns an error state whose message contains the data source name",
+  pageSizeCountsAreServerSide: true,
+  evidence: ["product-documentation", "generated-runtime-browser"] as readonly RuntimeEvidenceChannel[],
+};
+
+// ---------------------------------------------------------------------------
+// Frontend libraries
+// ---------------------------------------------------------------------------
+
+/** The persisted shape of one `cellTypeProps.frontendLibraries` entry. */
+export interface FrontendLibraryReference {
+  /** The stable `id` returned by `api.app.listFrontendLibraries`, not a display name or file name. */
+  readonly libraryId: string;
+}
+
+export const FRONTEND_LIBRARY_REFERENCE_EXAMPLE: FrontendLibraryReference = {
+  libraryId: "<api.app.listFrontendLibraries[].id>",
+};
+
+export const FRONTEND_LIBRARY_RUNTIME_SEMANTICS = {
+  loadedThrough: "Forguncy.ensureFrontendLibrariesLoaded(libraryIds)",
+  /**
+   * A cell's own entry runs only after that cell's declared libraries resolve.
+   * This is the guarantee a generator may rely on.
+   */
+  perCellReadinessAwaited: true,
+  /**
+   * Once loaded, an extension global is a page-level `window` property, so other
+   * cells can observe it even though they never declared it.
+   */
+  globalsArePageWide: true,
+  /**
+   * Not guaranteed. Two cells declaring the same libraries in opposite order
+   * produced one page-level load order, and the second cell observed that order
+   * rather than its own.
+   */
+  loadOrderGuaranteed: false,
+  /**
+   * Not guaranteed. A cell can render while another cell's declared libraries are
+   * still in flight, so a cell must not assume a library it did not declare is
+   * present.
+   */
+  crossCellReadinessGuaranteed: false,
+  /**
+   * Host globals are bound as `new Function` parameters at the moment the cell
+   * renders, so two cells on one page can legitimately observe different
+   * snapshots of the same global.
+   */
+  presetGlobalsBoundPerRenderInstant: true,
+  /** A library that fails to load renders its error message inside the cell. */
+  failedLoadRendersMessageInCell: true,
+  evidence: [
+    "product-runtime-source",
+    "product-documentation",
+    "designer-api",
+    "generated-runtime-browser",
+  ] as readonly RuntimeEvidenceChannel[],
+};
+
+// ---------------------------------------------------------------------------
+// Cell code budget
+// ---------------------------------------------------------------------------
+
+/**
+ * What was measured about cell source size.
+ *
+ * No hard limit was found, so no limit is claimed. The transpiler notice is the
+ * one real cost: it is emitted at `console.error` level, which is why the
+ * project's "console Error count === 0" gate is a *budget* gate and not just a
+ * correctness gate. Turning this into a policy number is #21's decision, not
+ * this module's.
+ */
+export const CELL_SOURCE_SIZE_OBSERVATIONS = {
+  hardCharacterLimit: null,
+  largestAcceptedSourceCharacters: 2097214,
+  transpilerNoticeObservedAtCharacters: 2097214,
+  transpilerNoticeNotObservedAtCharacters: 524350,
+  transpilerNoticeConsoleLevel: "error",
+  transpilerNoticeMessage:
+    "[BABEL] Note: The code generator has deoptimised the styling of undefined as it exceeds the max of 500KB.",
+  note: "The threshold is the browser transpiler's, reported as 500KB; the platform itself accepted a source roughly four times that.",
+  evidence: ["designer-api", "generated-runtime-browser"] as readonly RuntimeEvidenceChannel[],
+};
+
+// ---------------------------------------------------------------------------
+// Open questions
+// ---------------------------------------------------------------------------
+
+export interface RuntimeContractUnknown {
+  readonly id: string;
+  readonly question: string;
+  readonly whyOpen: string;
+  /** The Issue expected to settle it, when one owns the question. */
+  readonly ownedBy?: string;
+}
+
+/**
+ * Questions the contract probe could not settle.
+ *
+ * Recorded in code rather than only in the Issue so that a consumer of this
+ * module cannot mistake an open question for a decided one.
+ */
+export const RUNTIME_CONTRACT_UNKNOWNS: readonly RuntimeContractUnknown[] = [
+  {
+    id: "shared-top-level-identifier",
+    question: "May two cells declare the same top-level identifier?",
+    whyOpen: "Each probe cell used a distinct name. The per-cell compilation scope implies yes, but this was not executed.",
+  },
+  {
+    id: "property-change-re-render",
+    question: "Does a property change re-execute the cell entry, or re-render the existing tree?",
+    whyOpen: "The runtime re-creates the element factory when a property value changes; not exercised with state to observe whether component state survives.",
+    ownedBy: "#6",
+  },
+  {
+    id: "absolute-source-ceiling",
+    question: "Is there any absolute ceiling on cell source size?",
+    whyOpen: "None found up to 2,097,214 characters; larger sources were not attempted and designer memory pressure was out of scope.",
+    ownedBy: "#21",
+  },
+  {
+    id: "permission-snapshot-empty",
+    question: "Can props.Permissions come back empty for a configured permission?",
+    whyOpen: "One early run reported an empty snapshot; a dedicated isolation run with the same configuration returned the expected value in three of three cells, so the observation is unreproduced.",
+  },
+  {
+    id: "load-order-stability",
+    question: "Is page-level frontend library load order stable across cells in general?",
+    whyOpen: "One conflicting-order sample. The safe reading is already recorded as loadOrderGuaranteed: false.",
+  },
+  {
+    id: "permission-refresh-without-reload",
+    question: "Does the permission snapshot refresh when the signed-in user's roles change?",
+    whyOpen: "Not exercised.",
+  },
+];
+
+export function openRuntimeContractQuestions(ownedBy?: string): readonly RuntimeContractUnknown[] {
+  return ownedBy === undefined
+    ? RUNTIME_CONTRACT_UNKNOWNS
+    : RUNTIME_CONTRACT_UNKNOWNS.filter(unknown => unknown.ownedBy === ownedBy);
+}
