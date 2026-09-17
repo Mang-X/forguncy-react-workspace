@@ -51,6 +51,7 @@ export {
   findPlatformConflictRule,
   isApplicationOwnedRole,
   isPlatformConflict,
+  isRoleMismatch,
   PLATFORM_CONFLICT_PACKAGE_NAMES,
   PLATFORM_CONFLICT_RULES,
 } from "./platform-conflicts";
@@ -60,6 +61,7 @@ export type {
   PlatformConflict,
   PlatformConflictAllowed,
   PlatformConflictAssessment,
+  PlatformConflictRoleMismatch,
   PlatformConflictRule,
   PlatformConflictUnclassified,
 } from "./platform-conflicts";
@@ -95,6 +97,7 @@ export {
   formatDecisionReference,
   GOVERNING_SPEC_REFERENCE_LINE,
   OWNERSHIP_AND_DEPENDENCY_DECISION,
+  OWNERSHIP_AND_DEPENDENCY_DECISION_QUALIFIED_REFERENCE,
   OWNERSHIP_AND_DEPENDENCY_DECISION_REFERENCE,
 } from "./governance";
 export type { ArchitectureDecisionSource } from "./governance";

@@ -8,6 +8,7 @@ import {
   findPlatformConflictRule,
   isApplicationOwnedRole,
   isPlatformConflict,
+  isRoleMismatch,
   PLATFORM_CONFLICT_PACKAGE_NAMES,
   PLATFORM_CONFLICT_RULES,
 } from "./platform-conflicts";
@@ -76,6 +77,52 @@ describe("platform conflicts", () => {
     if (duplicate.status === "platform-conflict") {
       expect(duplicate.rejection.code).toBe("duplicate-business-data-source");
     }
+  });
+
+  // A known package used for the wrong cell-local role is a bad pairing, not an
+  // ownership violation. Reporting it as architectural misreports "wrong tool"
+  // as "duplicates a Forguncy-owned capability".
+  describe("role mismatch is not an ownership conflict", () => {
+    it.each(["cell-local-state", "cell-local-ui"] as const)(
+      "reports a known data client requested for %s as a role mismatch",
+      role => {
+        const assessment = assessDependencyRole({ packageName: "@tanstack/react-query", role });
+
+        expect(assessment.status, role).toBe("role-mismatch");
+        expect(isPlatformConflict(assessment), role).toBe(false);
+        expect(isRoleMismatch(assessment), role).toBe(true);
+        if (assessment.status !== "role-mismatch") return;
+
+        expect(assessment.rule.id).toBe("duplicate-business-data-source");
+        expect(assessment.allowedCellLocalRoles).toEqual(["cell-local-data-access"]);
+        expect(assessment.reason).toMatch(/role mismatch, not an ownership conflict/);
+      },
+    );
+
+    it("still rejects a package that has no legitimate in-cell use at all", () => {
+      for (const packageName of ["react-router-dom", "@auth0/auth0-react"]) {
+        const assessment = assessDependencyRole({ packageName, role: "cell-local-ui" });
+
+        expect(assessment.status, packageName).toBe("platform-conflict");
+        if (assessment.status !== "platform-conflict") continue;
+        expect(isArchitecturalRejection(assessment.rejection), packageName).toBe(true);
+        expect(assessment.rule?.allowedCellLocalRoles, packageName).toEqual([]);
+      }
+    });
+
+    it("keeps every rule self-consistent about which side of the line it is on", () => {
+      for (const rule of PLATFORM_CONFLICT_RULES) {
+        const assessment = assessDependencyRole({ packageName: rule.packages[0]!, role: "cell-local-ui" });
+        if (rule.allowedCellLocalRoles.length === 0) {
+          // No in-cell use is legitimate, so even an unrelated cell-local role conflicts.
+          expect(assessment.status, rule.id).toBe("platform-conflict");
+        } else if (!rule.allowedCellLocalRoles.includes("cell-local-ui")) {
+          expect(assessment.status, rule.id).toBe("role-mismatch");
+        } else {
+          expect(assessment.status, rule.id).toBe("allowed");
+        }
+      }
+    });
   });
 
   it("treats auth frameworks as a platform conflict on the permissions concern", () => {

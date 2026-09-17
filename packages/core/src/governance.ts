@@ -29,6 +29,12 @@ export const OWNERSHIP_AND_DEPENDENCY_DECISION: ArchitectureDecisionSource = {
 export const OWNERSHIP_AND_DEPENDENCY_DECISION_REFERENCE = `#${OWNERSHIP_AND_DEPENDENCY_DECISION.issue}`;
 
 /**
+ * Repo-qualified short form, e.g. `Mang-X/forguncy-react-workspace#4`. Use it
+ * when a reference travels outside this repository.
+ */
+export const OWNERSHIP_AND_DEPENDENCY_DECISION_QUALIFIED_REFERENCE = `${OWNERSHIP_AND_DEPENDENCY_DECISION.repository}${OWNERSHIP_AND_DEPENDENCY_DECISION_REFERENCE}`;
+
+/**
  * The line every ownership/dependency Spec, plan and PR is expected to carry.
  * Used by repository templates and by the governance test.
  */
@@ -38,18 +44,37 @@ export function formatDecisionReference(source: ArchitectureDecisionSource = OWN
   return `${source.repository}#${source.issue} — ${source.title} (${source.url})`;
 }
 
+function escapeForRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /**
  * Patterns a governance document must match to count as citing the decision.
  *
  * Deliberately boundary-aware rather than substring-based: `#4` is a prefix of
  * `#40`, `#42` and so on, so `text.includes("#4")` would report a citation of a
- * completely different Issue as a citation of this one. Exported as data so the
- * governance test and any future lint share one definition.
+ * completely different Issue as a citation of this one.
+ *
+ * Three accepted forms, all boundary-checked:
+ *
+ * 1. the repo-qualified short form `owner/repo#4`, which is what
+ *    `formatDecisionReference` emits. The character before `#` here is
+ *    alphanumeric, so the bare `#4` pattern below cannot cover it;
+ * 2. a bare `#4` reference;
+ * 3. an `.../issues/4` URL.
+ *
+ * Exported as data so the governance test and any future lint share one
+ * definition.
  */
 export const DECISION_CITATION_PATTERNS: readonly RegExp[] = [
-  // `#4` as a whole reference, not the head of a longer number or identifier.
+  // 1. owner/repo#4 — anchored on the exact repository so this cannot degrade
+  //    into prefix matching.
+  new RegExp(
+    `${escapeForRegExp(OWNERSHIP_AND_DEPENDENCY_DECISION.repository)}#${OWNERSHIP_AND_DEPENDENCY_DECISION.issue}(?![0-9A-Za-z_])`,
+  ),
+  // 2. `#4` as a whole reference, not the head of a longer number or identifier.
   new RegExp(`(?:^|[^0-9A-Za-z_#])#${OWNERSHIP_AND_DEPENDENCY_DECISION.issue}(?![0-9A-Za-z_])`),
-  // `.../issues/4`, again not the head of `/issues/40`.
+  // 3. `.../issues/4`, again not the head of `/issues/40`.
   new RegExp(`/issues/${OWNERSHIP_AND_DEPENDENCY_DECISION.issue}(?![0-9])`),
 ];
 

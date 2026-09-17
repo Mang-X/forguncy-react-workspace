@@ -10,6 +10,7 @@ import {
   formatDecisionReference,
   GOVERNING_SPEC_REFERENCE_LINE,
   OWNERSHIP_AND_DEPENDENCY_DECISION,
+  OWNERSHIP_AND_DEPENDENCY_DECISION_QUALIFIED_REFERENCE,
   OWNERSHIP_AND_DEPENDENCY_DECISION_REFERENCE,
 } from "./governance";
 
@@ -36,7 +37,18 @@ describe("decision provenance", () => {
     expect(citesDecision("#4\n")).toBe(true);
     expect(citesDecision("(#4)")).toBe(true);
     expect(citesDecision("Governing architecture Spec Issue(s): #8")).toBe(false);
-    expect(DECISION_CITATION_PATTERNS).toHaveLength(2);
+    expect(DECISION_CITATION_PATTERNS).toHaveLength(3);
+  });
+
+  // Both helpers are exported as the canonical provenance API, so they must
+  // agree: whatever `formatDecisionReference()` emits has to read back as a
+  // citation.
+  it("stays consistent with the reference formatter", () => {
+    expect(citesDecision(formatDecisionReference())).toBe(true);
+    expect(citesDecision(OWNERSHIP_AND_DEPENDENCY_DECISION_QUALIFIED_REFERENCE)).toBe(true);
+    expect(citesDecision("see Mang-X/forguncy-react-workspace#4 for the decision")).toBe(true);
+    expect(OWNERSHIP_AND_DEPENDENCY_DECISION_QUALIFIED_REFERENCE).toBe("Mang-X/forguncy-react-workspace#4");
+    expect(formatDecisionReference()).toContain(OWNERSHIP_AND_DEPENDENCY_DECISION_QUALIFIED_REFERENCE);
   });
 
   it("does not treat a longer issue number as a citation of this one", () => {
@@ -48,6 +60,11 @@ describe("decision provenance", () => {
     expect(citesDecision("#4a")).toBe(false);
     expect(citesDecision("https://github.com/Mang-X/forguncy-react-workspace/issues/40")).toBe(false);
     expect(citesDecision("https://github.com/Mang-X/forguncy-react-workspace/issues/42")).toBe(false);
+    // The repo-qualified form must be anchored on the exact repository.
+    expect(citesDecision("Mang-X/forguncy-react-workspace#40")).toBe(false);
+    expect(citesDecision("Mang-X/forguncy-react-workspace#42")).toBe(false);
+    expect(citesDecision("other-org/other-repo#4")).toBe(false);
+    expect(citesDecision("Mang-X/other-repo#4")).toBe(false);
   });
 
   it("keeps the durable boundary rules in the repository agent rules", () => {

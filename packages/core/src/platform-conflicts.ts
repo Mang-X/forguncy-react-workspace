@@ -175,7 +175,31 @@ export interface PlatformConflictUnclassified {
   readonly reason: string;
 }
 
-export type PlatformConflictAssessment = PlatformConflictAllowed | PlatformConflict | PlatformConflictUnclassified;
+export interface PlatformConflictRoleMismatch {
+  /**
+   * The package is known and may legitimately be used inside a cell, but not for
+   * the requested cell-local role.
+   *
+   * Deliberately *not* a platform conflict. The requested role does not cross
+   * the ownership boundary, so reporting it as an architectural rejection would
+   * misreport "this package is the wrong tool for this local role" as "this
+   * duplicates a Forguncy-owned capability". Compare `react-router-dom` +
+   * `cell-local-ui`, where the package has no legitimate in-cell use at all and
+   * the conflict is genuine.
+   */
+  readonly status: "role-mismatch";
+  readonly packageName: string;
+  readonly role: DependencyRole;
+  readonly rule: PlatformConflictRule;
+  readonly allowedCellLocalRoles: readonly DependencyRole[];
+  readonly reason: string;
+}
+
+export type PlatformConflictAssessment =
+  | PlatformConflictAllowed
+  | PlatformConflict
+  | PlatformConflictUnclassified
+  | PlatformConflictRoleMismatch;
 
 /**
  * Assesses whether a package may be used in a role inside a React cell.
@@ -187,11 +211,18 @@ export type PlatformConflictAssessment = PlatformConflictAllowed | PlatformConfl
  *    or in-house package filling `application-navigation` is exactly as
  *    conflicting as React Router is.
  * 2. **Package rules refine cell-local cases.** Only for cell-local roles does
- *    the package rule decide anything: it lists the local roles in which that
- *    package does not drag the application-owned concern along.
+ *    the package rule decide anything:
+ *    - an empty `allowedCellLocalRoles` means the package has no legitimate
+ *      in-cell use at all (routers, auth frameworks), so any in-cell use is a
+ *      real architectural conflict;
+ *    - a non-empty list means the package *is* usable in a cell, just for those
+ *      roles. A different cell-local role is then a role mismatch, not an
+ *      ownership conflict, and is reported as such.
  *
- * Reversing this order (classify the package first) lets any package outside
- * the rule table fill an application-owned role as `unclassified`.
+ * Reversing step 1 (classify the package first) lets any package outside the
+ * rule table fill an application-owned role as `unclassified`. Collapsing
+ * step 2's two cases turns every wrong-tool pairing into a false architectural
+ * rejection.
  */
 export function assessDependencyRole(input: {
   readonly packageName: string;
@@ -245,6 +276,18 @@ export function assessDependencyRole(input: {
     };
   }
 
+  if (rule.allowedCellLocalRoles.length === 0) {
+    // No legitimate in-cell use exists for this package, so an in-cell request
+    // is a genuine boundary crossing rather than a mismatch.
+    return {
+      status: "platform-conflict",
+      packageName,
+      role,
+      rule,
+      rejection: rejectionForRole(rule, role, packageName),
+    };
+  }
+
   if (rule.allowedCellLocalRoles.includes(role)) {
     return {
       status: "allowed",
@@ -255,19 +298,24 @@ export function assessDependencyRole(input: {
     };
   }
 
+  // The package is usable in a cell, the requested role is cell-local, but the
+  // two do not pair up. This is a role mismatch: the declared role is wrong, not
+  // the architecture.
   return {
-    status: "platform-conflict",
+    status: "role-mismatch",
     packageName,
     role,
     rule,
-    rejection: rejectionForRole(rule, role, packageName),
+    allowedCellLocalRoles: rule.allowedCellLocalRoles,
+    reason: `"${packageName}" is a "${rule.label}" package and is usable inside a cell, but not for "${role}". The declared role does not match the package; this is a role mismatch, not an ownership conflict. Cell-local roles this package may fill: ${rule.allowedCellLocalRoles.join(", ")}.`,
   };
 }
 
 /**
- * Builds the architectural rejection for a package/role pair that a rule
- * forbids. Used both for an application-owned role and for a cell-local role
- * the rule does not permit.
+ * Builds the architectural rejection for a package/role pair that genuinely
+ * crosses the ownership boundary: either the role is application-owned, or the
+ * package has no legitimate in-cell use at all. A cell-local role mismatch does
+ * not reach here — see `PlatformConflictRoleMismatch`.
  */
 function rejectionForRole(rule: PlatformConflictRule, role: DependencyRole, packageName: string): DependencyRejection {
   return {
@@ -284,4 +332,8 @@ function rejectionForRole(rule: PlatformConflictRule, role: DependencyRole, pack
 
 export function isPlatformConflict(assessment: PlatformConflictAssessment): assessment is PlatformConflict {
   return assessment.status === "platform-conflict";
+}
+
+export function isRoleMismatch(assessment: PlatformConflictAssessment): assessment is PlatformConflictRoleMismatch {
+  return assessment.status === "role-mismatch";
 }
