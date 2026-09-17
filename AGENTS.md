@@ -21,10 +21,17 @@ Every non-workspace dependency used by generated cell code must resolve to one o
 
 Do not introduce application routers, a second application-wide state system, authentication frameworks, or a second business-data source of truth inside React cells.
 
+A rejected dependency is reported either as an **architectural rejection** (the capability belongs to Forguncy, so no replacement package can fix it) or as a **technical bundling failure** (the right role, the wrong artifact). These are different answers and must not be reported as one another. React Router `BrowserRouter` and application-wide duplicate business stores are platform conflicts, not packages to adapt.
+
+Ownership boundaries are role-sensitive: a state library used for one cell's local state is fine, the same library used as the cross-cell business-state source of truth is a platform conflict.
+
 ## Workflow
 
 1. Every design/specification is a GitHub Issue.
 2. Every implementation plan is represented by an Issue or Epic Issue.
 3. Implementation is delivered through a PR that references or closes its Issue.
-4. Do not add `specs/` or `plans/` documentation directories.
-5. Do not claim Forguncy runtime compatibility without an executed validation path.
+4. A Spec that decides ownership or dependency strategy must name the architecture Spec Issue that governs it.
+5. Do not add `specs/` or `plans/` documentation directories.
+6. Do not claim Forguncy runtime compatibility without an executed validation path.
+7. State local checks separately from real Forguncy runtime validation; a green local build is not runtime compatibility.
+

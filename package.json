@@ -10,9 +10,13 @@
   "scripts": {
     "check": "vp check",
     "test": "vp test",
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "build": "vp run -r build"
   },
   "devDependencies": {
-    "vite-plus": "0.3.2"
+    "@types/node": "24.13.5",
+    "typescript": "5.9.3",
+    "vite-plus": "0.3.2",
+    "vitest": "4.1.11"
   }
 }
