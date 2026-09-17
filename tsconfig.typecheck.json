@@ -1,0 +1,12 @@
+{
+  "//": [
+    "Type-checking project for CI. It exists because the repository-level tsconfig.json",
+    "deliberately still includes examples/**, which do not yet have React types installed",
+    "(tracked separately as repository bootstrap work).",
+    "",
+    "This project type-checks every package, including the *.test.ts files, so type-level",
+    "contracts in packages/core are actually gated rather than merely written down."
+  ],
+  "extends": "./tsconfig.json",
+  "include": ["packages/**/*.ts", "packages/**/*.tsx"]
+}

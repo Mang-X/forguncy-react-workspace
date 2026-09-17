@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   citesDecision,
-  DECISION_CITATION_TOKENS,
+  DECISION_CITATION_PATTERNS,
   formatDecisionReference,
   GOVERNING_SPEC_REFERENCE_LINE,
   OWNERSHIP_AND_DEPENDENCY_DECISION,
@@ -33,8 +33,21 @@ describe("decision provenance", () => {
   it("detects a citation by issue reference or URL", () => {
     expect(citesDecision("Governing architecture Spec Issue(s): #4")).toBe(true);
     expect(citesDecision("see https://github.com/Mang-X/forguncy-react-workspace/issues/4")).toBe(true);
+    expect(citesDecision("#4\n")).toBe(true);
+    expect(citesDecision("(#4)")).toBe(true);
     expect(citesDecision("Governing architecture Spec Issue(s): #8")).toBe(false);
-    expect(DECISION_CITATION_TOKENS).toContain("#4");
+    expect(DECISION_CITATION_PATTERNS).toHaveLength(2);
+  });
+
+  it("does not treat a longer issue number as a citation of this one", () => {
+    // `#4` is a prefix of `#40`, `#42`, ... so substring matching would report a
+    // citation of an unrelated Issue.
+    expect(citesDecision("Governing architecture Spec Issue(s): #40")).toBe(false);
+    expect(citesDecision("Governing architecture Spec Issue(s): #42")).toBe(false);
+    expect(citesDecision("blocked by #44 and #48")).toBe(false);
+    expect(citesDecision("#4a")).toBe(false);
+    expect(citesDecision("https://github.com/Mang-X/forguncy-react-workspace/issues/40")).toBe(false);
+    expect(citesDecision("https://github.com/Mang-X/forguncy-react-workspace/issues/42")).toBe(false);
   });
 
   it("keeps the durable boundary rules in the repository agent rules", () => {

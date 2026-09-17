@@ -213,13 +213,13 @@ export type DependencyDecision =
   | ReplaceDependencyDecision;
 
 /**
- * Checks a decision against the semantics above. Returns every problem instead
- * of throwing on the first one so a report can list all of them.
+ * Static self-consistency of a decision record — and nothing more.
+ *
+ * Shape-only on purpose: a record can be perfectly well formed and still
+ * completely unverified against a real Forguncy runtime. Use
+ * `validateDependencyDecision` when the runtime claim matters.
  */
-export function validateDependencyDecision(
-  decision: DependencyDecision,
-  options: { readonly realRuntimeValidated?: boolean } = {},
-): readonly string[] {
+export function validateDependencyDecisionShape(decision: DependencyDecision): readonly string[] {
   const problems: string[] = [];
 
   if (decision.packageName.trim().length === 0) {
@@ -252,11 +252,6 @@ export function validateDependencyDecision(
     if (decision.libraryId.trim().length === 0 || decision.globalName.trim().length === 0) {
       problems.push(`Extension decision for "${decision.packageName}" must name both the library id and the global.`);
     }
-    if (options.realRuntimeValidated !== true) {
-      problems.push(
-        `Extension decision for "${decision.packageName}" depends on a host capability that can only be verified in a real Forguncy project.`,
-      );
-    }
   }
 
   if (decision.strategy === "host" && decision.globalName.trim().length === 0) {
@@ -266,11 +261,48 @@ export function validateDependencyDecision(
   return problems;
 }
 
-export function assertDependencyDecision(
+export interface DependencyVerificationEvidence {
+  /**
+   * True only after the selected strategy's `real-runtime` checks actually ran
+   * inside a real Forguncy project. Local build success does not set this.
+   */
+  readonly realRuntimeValidated: boolean;
+}
+
+/**
+ * The runtime evidence the strategy's own semantics require.
+ *
+ * Every strategy in `DEPENDENCY_STRATEGY_SEMANTICS` declares
+ * `realRuntimeRequired: true`, so this applies uniformly: a `host` decision is
+ * no more self-certifying than an `extension` decision is.
+ */
+export function validateDependencyVerification(
   decision: DependencyDecision,
-  options: { readonly realRuntimeValidated?: boolean } = {},
-): void {
-  const problems = validateDependencyDecision(decision, options);
+  evidence: DependencyVerificationEvidence,
+): readonly string[] {
+  if (!requiresRealRuntimeValidation(decision.strategy) || evidence.realRuntimeValidated === true) {
+    return [];
+  }
+  return [
+    `"${decision.packageName}" cannot be reported as verified: strategy "${decision.strategy}" requires real-runtime validation that has not been provided. Run its real-runtime checks in a real Forguncy project and pass realRuntimeValidated: true.`,
+  ];
+}
+
+/**
+ * Shape problems plus the runtime-evidence problem.
+ *
+ * `evidence` is a required argument rather than an optional default, so a
+ * caller cannot silently omit the runtime claim and still look validated.
+ */
+export function validateDependencyDecision(
+  decision: DependencyDecision,
+  evidence: DependencyVerificationEvidence,
+): readonly string[] {
+  return [...validateDependencyDecisionShape(decision), ...validateDependencyVerification(decision, evidence)];
+}
+
+export function assertDependencyDecision(decision: DependencyDecision, evidence: DependencyVerificationEvidence): void {
+  const problems = validateDependencyDecision(decision, evidence);
   if (problems.length > 0) {
     throw new Error(`Invalid dependency decision for "${decision.packageName}":\n- ${problems.join("\n- ")}`);
   }

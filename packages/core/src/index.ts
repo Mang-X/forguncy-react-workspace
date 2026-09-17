@@ -34,11 +34,14 @@ export {
   TECHNICAL_REJECTION_CODES,
 } from "./rejection";
 export type {
+  ArchitecturalDependencyRejection,
   ArchitecturalRejectionCode,
   DependencyRejection,
   DependencyRejectionCode,
   DependencyRejectionKind,
   DependencyRejectionResponse,
+  GroupedRejections,
+  TechnicalDependencyRejection,
   TechnicalRejectionCode,
 } from "./rejection";
 
@@ -46,11 +49,20 @@ export {
   APPLICATION_OWNED_ROLES,
   assessDependencyRole,
   findPlatformConflictRule,
+  isApplicationOwnedRole,
   isPlatformConflict,
   PLATFORM_CONFLICT_PACKAGE_NAMES,
   PLATFORM_CONFLICT_RULES,
 } from "./platform-conflicts";
-export type { DependencyRole, PlatformConflictAssessment, PlatformConflictRule } from "./platform-conflicts";
+export type {
+  ApplicationOwnedRole,
+  DependencyRole,
+  PlatformConflict,
+  PlatformConflictAllowed,
+  PlatformConflictAssessment,
+  PlatformConflictRule,
+  PlatformConflictUnclassified,
+} from "./platform-conflicts";
 
 export {
   assertDependencyDecision,
@@ -61,6 +73,8 @@ export {
   requiresRealRuntimeValidation,
   strategySemantics,
   validateDependencyDecision,
+  validateDependencyDecisionShape,
+  validateDependencyVerification,
 } from "./strategy";
 export type {
   DependencyCheck,
@@ -68,6 +82,7 @@ export type {
   DependencyDecision,
   DependencyStrategy,
   DependencyStrategySemantics,
+  DependencyVerificationEvidence,
   ExtensionDependencyDecision,
   HostDependencyDecision,
   InlineDependencyDecision,
@@ -76,7 +91,7 @@ export type {
 
 export {
   citesDecision,
-  DECISION_CITATION_TOKENS,
+  DECISION_CITATION_PATTERNS,
   formatDecisionReference,
   GOVERNING_SPEC_REFERENCE_LINE,
   OWNERSHIP_AND_DEPENDENCY_DECISION,

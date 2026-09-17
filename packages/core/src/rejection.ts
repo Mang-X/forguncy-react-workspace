@@ -48,9 +48,13 @@ export type TechnicalRejectionCode =
 
 export type DependencyRejectionCode = ArchitecturalRejectionCode | TechnicalRejectionCode;
 
-export interface DependencyRejection {
-  readonly kind: DependencyRejectionKind;
-  readonly code: DependencyRejectionCode;
+/**
+ * An ownership conflict. The capability belongs to Forguncy, so the code can
+ * only ever come from the architectural family.
+ */
+export interface ArchitecturalDependencyRejection {
+  readonly kind: "architectural";
+  readonly code: ArchitecturalRejectionCode;
   /** One sentence a human reads in a report. Free text, but never the whole story. */
   readonly summary: string;
   /** Why we believe this: probe output, runtime observation, ownership concern id. */
@@ -58,6 +62,29 @@ export interface DependencyRejection {
   /** What to do instead. Required, so a rejection is never a dead end. */
   readonly remediation: string;
 }
+
+/**
+ * A bundling/runtime failure. The role is correct, so the code can only ever
+ * come from the technical family.
+ */
+export interface TechnicalDependencyRejection {
+  readonly kind: "technical";
+  readonly code: TechnicalRejectionCode;
+  readonly summary: string;
+  readonly evidence?: readonly string[];
+  readonly remediation: string;
+}
+
+/**
+ * Discriminated union, deliberately not `{ kind: Kind; code: Code }`.
+ *
+ * The whole point of this module is that the two families are not
+ * interchangeable, so the type must make a contradictory record such as
+ * `{ kind: "architectural", code: "amd-umd-branch-mismatch" }` impossible to
+ * write rather than merely discouraged. Callers that switch on `kind` and
+ * callers that switch on `code` then agree by construction.
+ */
+export type DependencyRejection = ArchitecturalDependencyRejection | TechnicalDependencyRejection;
 
 /**
  * Terminal response policy per rejection kind. This is what keeps an Agent from
@@ -98,11 +125,11 @@ export const DEPENDENCY_REJECTION_RESPONSE: Readonly<Record<DependencyRejectionK
   },
 };
 
-export function isArchitecturalRejection(rejection: DependencyRejection): boolean {
+export function isArchitecturalRejection(rejection: DependencyRejection): rejection is ArchitecturalDependencyRejection {
   return rejection.kind === "architectural";
 }
 
-export function isTechnicalRejection(rejection: DependencyRejection): boolean {
+export function isTechnicalRejection(rejection: DependencyRejection): rejection is TechnicalDependencyRejection {
   return rejection.kind === "technical";
 }
 
@@ -136,11 +163,15 @@ export const TECHNICAL_REJECTION_CODES: readonly TechnicalRejectionCode[] = [
 /**
  * Splits a rejection list so a report can say "3 dependencies were rejected for
  * architectural reasons, 2 for bundling reasons" instead of printing five
- * indistinguishable reasons.
+ * indistinguishable reasons. The two buckets keep their narrow types, so a
+ * consumer cannot pass a technical rejection into an ownership-conflict path.
  */
-export function groupRejectionsByKind(rejections: readonly DependencyRejection[]): Readonly<
-  Record<DependencyRejectionKind, readonly DependencyRejection[]>
-> {
+export interface GroupedRejections {
+  readonly architectural: readonly ArchitecturalDependencyRejection[];
+  readonly technical: readonly TechnicalDependencyRejection[];
+}
+
+export function groupRejectionsByKind(rejections: readonly DependencyRejection[]): GroupedRejections {
   return {
     architectural: rejections.filter(isArchitecturalRejection),
     technical: rejections.filter(isTechnicalRejection),

@@ -13,26 +13,46 @@
  * evaluated against the role the dependency is being asked to fill.
  */
 
+import { findOwnershipConcern } from "./ownership";
 import type { ApplicationOwner, OwnershipConcernId } from "./ownership";
 import type { ArchitecturalRejectionCode, DependencyRejection } from "./rejection";
 
 export type DependencyRole =
   // Application-owned roles: may not be filled by a React cell.
-  | "application-navigation"
-  | "application-state"
-  | "application-auth"
-  | "business-data-source"
+  | ApplicationOwnedRole
   // Cell-local roles: legitimate inside one cell.
   | "cell-local-ui"
   | "cell-local-state"
   | "cell-local-data-access";
 
-export const APPLICATION_OWNED_ROLES: readonly DependencyRole[] = [
+export type ApplicationOwnedRole =
+  | "application-navigation"
+  | "application-state"
+  | "application-auth"
+  | "business-data-source";
+
+export const APPLICATION_OWNED_ROLES: readonly ApplicationOwnedRole[] = [
   "application-navigation",
   "application-state",
   "application-auth",
   "business-data-source",
 ];
+
+export function isApplicationOwnedRole(role: DependencyRole): role is ApplicationOwnedRole {
+  return (APPLICATION_OWNED_ROLES as readonly string[]).includes(role);
+}
+
+/**
+ * Which Forguncy-owned concern an application role duplicates. Role is the
+ * primary key of the boundary, so this mapping — not the package name — decides
+ * whether a request crosses it.
+ */
+const CONCERN_BY_APPLICATION_ROLE: Readonly<Record<ApplicationOwnedRole, OwnershipConcernId>> = {
+  "application-navigation": "application-navigation",
+  "application-state": "application-state",
+  "application-auth": "permissions",
+  "business-data-source": "business-data-source",
+};
 
 export interface PlatformConflictRule {
   readonly id: string;
@@ -126,34 +146,52 @@ export function findPlatformConflictRule(packageName: string): PlatformConflictR
   return PLATFORM_CONFLICT_RULES.find(rule => packageMatches(rule, packageName));
 }
 
-export type PlatformConflictAssessment =
-  | {
-      readonly status: "allowed";
-      readonly packageName: string;
-      readonly role: DependencyRole;
-      readonly rule: PlatformConflictRule;
-      readonly reason: string;
-    }
-  | {
-      readonly status: "platform-conflict";
-      readonly packageName: string;
-      readonly role: DependencyRole;
-      readonly rule: PlatformConflictRule;
-      readonly rejection: DependencyRejection;
-    }
-  | {
-      /** No platform rule matched; the decision falls through to bundling. */
-      readonly status: "unclassified";
-      readonly packageName: string;
-      readonly role: DependencyRole;
-      readonly reason: string;
-    };
+export interface PlatformConflictAllowed {
+  readonly status: "allowed";
+  readonly packageName: string;
+  readonly role: DependencyRole;
+  readonly rule: PlatformConflictRule;
+  readonly reason: string;
+}
+
+export interface PlatformConflict {
+  readonly status: "platform-conflict";
+  readonly packageName: string;
+  readonly role: DependencyRole;
+  /**
+   * Present when a package-specific rule refines the conflict. An
+   * application-owned role conflicts even with no rule at all, so this is
+   * optional on purpose.
+   */
+  readonly rule?: PlatformConflictRule;
+  readonly rejection: DependencyRejection;
+}
+
+export interface PlatformConflictUnclassified {
+  /** No platform rule matched and the role is cell-local; falls through to bundling. */
+  readonly status: "unclassified";
+  readonly packageName: string;
+  readonly role: DependencyRole;
+  readonly reason: string;
+}
+
+export type PlatformConflictAssessment = PlatformConflictAllowed | PlatformConflict | PlatformConflictUnclassified;
 
 /**
  * Assesses whether a package may be used in a role inside a React cell.
  *
- * Returns `platform-conflict` when the role belongs to Forguncy, or when the
- * package has no legitimate cell-local role at all.
+ * Decision order matters and is deliberate:
+ *
+ * 1. **Ownership first.** If the requested role is application-owned, the
+ *    request crosses the boundary no matter which package is named. An unknown
+ *    or in-house package filling `application-navigation` is exactly as
+ *    conflicting as React Router is.
+ * 2. **Package rules refine cell-local cases.** Only for cell-local roles does
+ *    the package rule decide anything: it lists the local roles in which that
+ *    package does not drag the application-owned concern along.
+ *
+ * Reversing this order (classify the package first) lets any package outside
+ * the rule table fill an application-owned role as `unclassified`.
  */
 export function assessDependencyRole(input: {
   readonly packageName: string;
@@ -162,12 +200,48 @@ export function assessDependencyRole(input: {
   const { packageName, role } = input;
   const rule = findPlatformConflictRule(packageName);
 
+  if (isApplicationOwnedRole(role)) {
+    const concern = CONCERN_BY_APPLICATION_ROLE[role];
+
+    // A rule that duplicates this very concern supplies the precise code and
+    // guidance. A rule for a different concern, or no rule at all, does not
+    // excuse the request — it just makes the rejection generic.
+    if (rule && rule.concern === concern) {
+      return {
+        status: "platform-conflict",
+        packageName,
+        role,
+        rule,
+        rejection: rejectionForRole(rule, role, packageName),
+      };
+    }
+
+    const concernEntry = findOwnershipConcern(concern);
+    return {
+      status: "platform-conflict",
+      packageName,
+      role,
+      ...(rule ? { rule } : {}),
+      rejection: {
+        kind: "architectural",
+        code: "ownership-boundary-violation",
+        summary: `"${packageName}" was requested for "${role}", which is the Forguncy-owned concern "${concern}" regardless of the package used.`,
+        evidence: [
+          `ownership-concern:${concern}`,
+          `requested-role:${role}`,
+          ...(rule ? [`platform-rule:${rule.id}`] : []),
+        ],
+        remediation: `${concernEntry ? `${concernEntry.rationale} ` : ""}Implement it through the Forguncy host instead of "${packageName}".`,
+      },
+    };
+  }
+
   if (!rule) {
     return {
       status: "unclassified",
       packageName,
       role,
-      reason: `"${packageName}" is not known to implement a Forguncy-owned capability; decide it through the normal strategy evaluation.`,
+      reason: `"${packageName}" is not known to implement a Forguncy-owned capability, and "${role}" is cell-local; decide it through the normal strategy evaluation.`,
     };
   }
 
@@ -186,19 +260,28 @@ export function assessDependencyRole(input: {
     packageName,
     role,
     rule,
-    rejection: {
-      kind: "architectural",
-      code: rule.code,
-      summary:
-        rule.allowedCellLocalRoles.length === 0
-          ? `"${packageName}" has no legitimate cell-local role: "${role}" is the Forguncy-owned concern "${rule.concern}".`
-          : `"${packageName}" was requested for "${role}", which duplicates the Forguncy-owned concern "${rule.concern}".`,
-      evidence: [`platform-rule:${rule.id}`, `ownership-concern:${rule.concern}`, `requested-role:${role}`],
-      remediation: rule.guidance,
-    },
+    rejection: rejectionForRole(rule, role, packageName),
   };
 }
 
-export function isPlatformConflict(assessment: PlatformConflictAssessment): boolean {
+/**
+ * Builds the architectural rejection for a package/role pair that a rule
+ * forbids. Used both for an application-owned role and for a cell-local role
+ * the rule does not permit.
+ */
+function rejectionForRole(rule: PlatformConflictRule, role: DependencyRole, packageName: string): DependencyRejection {
+  return {
+    kind: "architectural",
+    code: rule.code,
+    summary:
+      rule.allowedCellLocalRoles.length === 0
+        ? `"${packageName}" has no legitimate cell-local role: "${role}" is the Forguncy-owned concern "${rule.concern}".`
+        : `"${packageName}" was requested for "${role}", which duplicates the Forguncy-owned concern "${rule.concern}".`,
+    evidence: [`platform-rule:${rule.id}`, `ownership-concern:${rule.concern}`, `requested-role:${role}`],
+    remediation: rule.guidance,
+  };
+}
+
+export function isPlatformConflict(assessment: PlatformConflictAssessment): assessment is PlatformConflict {
   return assessment.status === "platform-conflict";
 }

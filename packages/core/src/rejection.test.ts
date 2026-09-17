@@ -33,7 +33,9 @@ describe("dependency rejection classification", () => {
   });
 
   it("keeps the two rejection code families disjoint", () => {
-    const overlap = ARCHITECTURAL_REJECTION_CODES.filter(code => (TECHNICAL_REJECTION_CODES as readonly string[]).includes(code));
+    const overlap = ARCHITECTURAL_REJECTION_CODES.filter(code =>
+      (TECHNICAL_REJECTION_CODES as readonly string[]).includes(code),
+    );
     expect(overlap).toEqual([]);
   });
 
@@ -72,11 +74,51 @@ describe("dependency rejection classification", () => {
     expect(isArchitecturalRejection(technical)).toBe(false);
   });
 
+  it("couples kind to code so a narrowed rejection carries a code from the same family", () => {
+    function familyOf(rejection: DependencyRejection): string {
+      // After narrowing, `code` must belong to the same family. These two
+      // assertions stop compiling if `kind` and `code` are ever decoupled.
+      if (isArchitecturalRejection(rejection)) {
+        expect(isArchitecturalRejectionCode(rejection.code)).toBe(true);
+        return "architectural";
+      }
+      expect(isTechnicalRejectionCode(rejection.code)).toBe(true);
+      return "technical";
+    }
+
+    expect(familyOf(architectural)).toBe("architectural");
+    expect(familyOf(technical)).toBe("technical");
+  });
+
+  it("refuses a cross-paired kind and code at the type level", () => {
+    // @ts-expect-error an architectural rejection cannot carry a technical code
+    const architecturalWithTechnicalCode: DependencyRejection = {
+      kind: "architectural",
+      code: "amd-umd-branch-mismatch",
+      summary: "contradictory record",
+      remediation: "contradictory record",
+    };
+
+    // @ts-expect-error a technical rejection cannot carry an architectural code
+    const technicalWithArchitecturalCode: DependencyRejection = {
+      kind: "technical",
+      code: "application-state-conflict",
+      summary: "contradictory record",
+      remediation: "contradictory record",
+    };
+
+    expect(architecturalWithTechnicalCode.kind).toBe("architectural");
+    expect(technicalWithArchitecturalCode.kind).toBe("technical");
+  });
+
   it("groups a mixed rejection list into architectural and bundling buckets", () => {
     const grouped = groupRejectionsByKind([architectural, technical, architectural]);
 
     expect(grouped.architectural).toHaveLength(2);
     expect(grouped.technical).toHaveLength(1);
     expect(grouped.technical[0]).toBe(technical);
+    for (const rejection of grouped.architectural) {
+      expect(isArchitecturalRejectionCode(rejection.code)).toBe(true);
+    }
   });
 });

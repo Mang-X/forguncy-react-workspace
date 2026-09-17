@@ -39,14 +39,20 @@ export function formatDecisionReference(source: ArchitectureDecisionSource = OWN
 }
 
 /**
- * Tokens a governance document must contain to count as citing the decision.
- * Kept as data so the governance test and any future lint share one definition.
+ * Patterns a governance document must match to count as citing the decision.
+ *
+ * Deliberately boundary-aware rather than substring-based: `#4` is a prefix of
+ * `#40`, `#42` and so on, so `text.includes("#4")` would report a citation of a
+ * completely different Issue as a citation of this one. Exported as data so the
+ * governance test and any future lint share one definition.
  */
-export const DECISION_CITATION_TOKENS: readonly string[] = [
-  OWNERSHIP_AND_DEPENDENCY_DECISION_REFERENCE,
-  OWNERSHIP_AND_DEPENDENCY_DECISION.url,
+export const DECISION_CITATION_PATTERNS: readonly RegExp[] = [
+  // `#4` as a whole reference, not the head of a longer number or identifier.
+  new RegExp(`(?:^|[^0-9A-Za-z_#])#${OWNERSHIP_AND_DEPENDENCY_DECISION.issue}(?![0-9A-Za-z_])`),
+  // `.../issues/4`, again not the head of `/issues/40`.
+  new RegExp(`/issues/${OWNERSHIP_AND_DEPENDENCY_DECISION.issue}(?![0-9])`),
 ];
 
 export function citesDecision(text: string): boolean {
-  return DECISION_CITATION_TOKENS.some(token => text.includes(token));
+  return DECISION_CITATION_PATTERNS.some(pattern => pattern.test(text));
 }

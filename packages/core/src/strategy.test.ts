@@ -10,6 +10,8 @@ import {
   requiresRealRuntimeValidation,
   strategySemantics,
   validateDependencyDecision,
+  validateDependencyDecisionShape,
+  validateDependencyVerification,
 } from "./index";
 
 const technicalRejection: DependencyRejection = {
@@ -98,59 +100,112 @@ describe("dependency decision validation", () => {
     rejection: architecturalRejection,
   };
 
+  const verified = { realRuntimeValidated: true } as const;
+  const unverified = { realRuntimeValidated: false } as const;
+
   it("accepts well-formed decisions", () => {
-    expect(validateDependencyDecision(inline)).toEqual([]);
-    expect(validateDependencyDecision(host)).toEqual([]);
-    expect(validateDependencyDecision(replaceTechnical)).toEqual([]);
-    expect(validateDependencyDecision(replaceArchitectural)).toEqual([]);
-    expect(() => assertDependencyDecision(inline)).not.toThrow();
+    expect(validateDependencyDecision(inline, verified)).toEqual([]);
+    expect(validateDependencyDecision(host, verified)).toEqual([]);
+    expect(validateDependencyDecision(replaceTechnical, verified)).toEqual([]);
+    expect(validateDependencyDecision(replaceArchitectural, verified)).toEqual([]);
+    expect(() => assertDependencyDecision(inline, verified)).not.toThrow();
   });
 
   it("demands an evaluated alternative before a technical rejection becomes a repair", () => {
-    const problems = validateDependencyDecision({
-      strategy: "replace",
-      packageName: "heavy-chart-lib",
-      rejection: technicalRejection,
-    });
+    const problems = validateDependencyDecision(
+      {
+        strategy: "replace",
+        packageName: "heavy-chart-lib",
+        rejection: technicalRejection,
+      },
+      verified,
+    );
     expect(problems.join(" ")).toMatch(/at least one evaluated alternative/);
   });
 
   it("refuses a package alternative list for an architectural rejection", () => {
-    const problems = validateDependencyDecision({
-      strategy: "replace",
-      packageName: "react-router-dom",
-      rejection: architecturalRejection,
-      alternatives: ["wouter"],
-    });
+    const problems = validateDependencyDecision(
+      {
+        strategy: "replace",
+        packageName: "react-router-dom",
+        rejection: architecturalRejection,
+        alternatives: ["wouter"],
+      },
+      verified,
+    );
     expect(problems.join(" ")).toMatch(/ownership conflict/);
   });
 
   it("refuses to supersede an architectural rejection with another strategy", () => {
-    const problems = validateDependencyDecision({
-      strategy: "replace",
-      packageName: "react-router-dom",
-      rejection: architecturalRejection,
-      supersededBy: "inline",
-    });
+    const problems = validateDependencyDecision(
+      {
+        strategy: "replace",
+        packageName: "react-router-dom",
+        rejection: architecturalRejection,
+        supersededBy: "inline",
+      },
+      verified,
+    );
     expect(problems.join(" ")).toMatch(/cannot be superseded/);
   });
 
-  it("treats an extension as unverified until a real runtime confirms it", () => {
-    expect(validateDependencyDecision(extension).join(" ")).toMatch(/real Forguncy project/);
-    expect(validateDependencyDecision(extension, { realRuntimeValidated: true })).toEqual([]);
+  // Shape and verification are separate questions, and the API must not let a
+  // caller confuse "well formed" with "verified".
+  describe("shape versus runtime verification", () => {
+    it("reports shape problems without claiming anything about verification", () => {
+      const problems = validateDependencyDecisionShape({ strategy: "inline", packageName: "  " });
+
+      expect(problems.join(" ")).toMatch(/must name the package/);
+      expect(problems.join(" ")).not.toMatch(/verified/);
+    });
+
+    it("reports no shape problem for a decision that is merely unverified", () => {
+      expect(validateDependencyDecisionShape(inline)).toEqual([]);
+      expect(validateDependencyVerification(inline, unverified).join(" ")).toMatch(/requires real-runtime validation/);
+    });
+
+    it("applies the runtime-evidence requirement to every strategy, not only extension", () => {
+      for (const strategy of DEPENDENCY_STRATEGIES) {
+        expect(requiresRealRuntimeValidation(strategy), strategy).toBe(true);
+        const decision: DependencyDecision =
+          strategy === "host"
+            ? host
+            : strategy === "extension"
+              ? extension
+              : strategy === "replace"
+                ? replaceTechnical
+                : inline;
+
+        expect(validateDependencyVerification(decision, unverified).length, strategy).toBeGreaterThan(0);
+        expect(validateDependencyVerification(decision, verified), strategy).toEqual([]);
+      }
+    });
+
+    it("keeps a host decision unverified until its global is confirmed in a real runtime", () => {
+      // The previous behaviour only gated `extension`, which contradicted
+      // `host` semantics declaring realRuntimeRequired: true.
+      expect(validateDependencyDecision(host, unverified).join(" ")).toMatch(/"react" cannot be reported as verified/);
+      expect(validateDependencyDecision(extension, unverified).join(" ")).toMatch(/real Forguncy project/);
+    });
+
+    it("reports shape and verification problems together, and throws on both", () => {
+      const problems = validateDependencyDecision({ strategy: "extension", packageName: "apollo", libraryId: "", globalName: "" }, unverified);
+
+      expect(problems.join(" ")).toMatch(/library id and the global/);
+      expect(problems.join(" ")).toMatch(/cannot be reported as verified/);
+      expect(() =>
+        assertDependencyDecision({ strategy: "extension", packageName: "apollo", libraryId: "", globalName: "" }, unverified),
+      ).toThrow(/Invalid dependency decision for "apollo"/);
+    });
   });
 
   it("rejects incomplete decisions", () => {
-    expect(
-      validateDependencyDecision({ strategy: "host", packageName: "react", globalName: "" }).join(" "),
-    ).toMatch(/host global/);
-    expect(validateDependencyDecision({ strategy: "inline", packageName: "  " }).join(" ")).toMatch(/must name the package/);
-  });
-
-  it("throws a message naming the package and every problem", () => {
-    expect(() =>
-      assertDependencyDecision({ strategy: "extension", packageName: "apollo", libraryId: "", globalName: "" }),
-    ).toThrow(/Invalid dependency decision for "apollo"/);
+    expect(validateDependencyDecisionShape({ strategy: "host", packageName: "react", globalName: "" }).join(" ")).toMatch(
+      /host global/,
+    );
+    expect(validateDependencyDecisionShape({ strategy: "inline", packageName: "  " }).join(" ")).toMatch(
+      /must name the package/,
+    );
   });
 
   it("types the strategy set as a closed union", () => {
