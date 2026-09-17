@@ -45,6 +45,7 @@ describe("decision provenance", () => {
   // citation.
   it("stays consistent with the reference formatter", () => {
     expect(citesDecision(formatDecisionReference())).toBe(true);
+    expect(citesDecision(OWNERSHIP_AND_DEPENDENCY_DECISION.url)).toBe(true);
     expect(citesDecision(OWNERSHIP_AND_DEPENDENCY_DECISION_QUALIFIED_REFERENCE)).toBe(true);
     expect(citesDecision("see Mang-X/forguncy-react-workspace#4 for the decision")).toBe(true);
     expect(OWNERSHIP_AND_DEPENDENCY_DECISION_QUALIFIED_REFERENCE).toBe("Mang-X/forguncy-react-workspace#4");
@@ -58,13 +59,22 @@ describe("decision provenance", () => {
     expect(citesDecision("Governing architecture Spec Issue(s): #42")).toBe(false);
     expect(citesDecision("blocked by #44 and #48")).toBe(false);
     expect(citesDecision("#4a")).toBe(false);
-    expect(citesDecision("https://github.com/Mang-X/forguncy-react-workspace/issues/40")).toBe(false);
-    expect(citesDecision("https://github.com/Mang-X/forguncy-react-workspace/issues/42")).toBe(false);
-    // The repo-qualified form must be anchored on the exact repository.
     expect(citesDecision("Mang-X/forguncy-react-workspace#40")).toBe(false);
     expect(citesDecision("Mang-X/forguncy-react-workspace#42")).toBe(false);
+    expect(citesDecision("https://github.com/Mang-X/forguncy-react-workspace/issues/40")).toBe(false);
+  });
+
+  // The check exists to enforce a back-reference to *this* decision, so another
+  // repository's Issue #4 must not satisfy it.
+  it("does not accept a citation of a different repository", () => {
+    expect(citesDecision("https://github.com/other-org/other-repo/issues/4")).toBe(false);
+    expect(citesDecision("https://github.com/Mang-X/other-repo/issues/4")).toBe(false);
     expect(citesDecision("other-org/other-repo#4")).toBe(false);
     expect(citesDecision("Mang-X/other-repo#4")).toBe(false);
+    // A longer path that merely ends with the repository name is not the
+    // repository-qualified reference either.
+    expect(citesDecision("foo/Mang-X/forguncy-react-workspace#4")).toBe(false);
+    expect(citesDecision("not-Mang-X/forguncy-react-workspace#4")).toBe(false);
   });
 
   it("keeps the durable boundary rules in the repository agent rules", () => {

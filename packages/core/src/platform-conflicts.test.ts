@@ -110,6 +110,36 @@ describe("platform conflicts", () => {
       }
     });
 
+    // The package implements a host-owned concern; the requested cell-local role
+    // does not. Reporting the local role as the concern would be false.
+    it("blames the package, not the cell-local role, in the rejection summary", () => {
+      const cases = [
+        { packageName: "react-router-dom", concern: "application-navigation" },
+        { packageName: "@auth0/auth0-react", concern: "permissions" },
+      ] as const;
+
+      for (const { packageName, concern } of cases) {
+        const assessment = assessDependencyRole({ packageName, role: "cell-local-ui" });
+        expect(assessment.status, packageName).toBe("platform-conflict");
+        if (assessment.status !== "platform-conflict") continue;
+
+        const summary = assessment.rejection.summary;
+        expect(summary, packageName).toContain(`implements the Forguncy-owned concern "${concern}"`);
+        expect(summary, packageName).toContain("no legitimate cell-local role");
+        expect(summary, packageName).toContain('"cell-local-ui"');
+        expect(summary, packageName).not.toMatch(/"cell-local-ui" is the Forguncy-owned concern/);
+      }
+    });
+
+    it("does call the role itself Forguncy-owned when it really is", () => {
+      const assessment = assessDependencyRole({ packageName: "zustand", role: "application-state" });
+
+      expect(assessment.status).toBe("platform-conflict");
+      if (assessment.status !== "platform-conflict") return;
+      expect(assessment.rejection.summary).toContain('"application-state"');
+      expect(assessment.rejection.summary).toContain("is the Forguncy-owned concern");
+    });
+
     it("keeps every rule self-consistent about which side of the line it is on", () => {
       for (const rule of PLATFORM_CONFLICT_RULES) {
         const assessment = assessDependencyRole({ packageName: rule.packages[0]!, role: "cell-local-ui" });

@@ -316,6 +316,11 @@ export function assessDependencyRole(input: {
  * crosses the ownership boundary: either the role is application-owned, or the
  * package has no legitimate in-cell use at all. A cell-local role mismatch does
  * not reach here — see `PlatformConflictRoleMismatch`.
+ *
+ * The two cases need different wording, and getting it wrong is a real reporting
+ * bug: for a router in a cell-local role it is the *package* that implements a
+ * host-owned concern, not the requested role. Saying `"cell-local-ui" is the
+ * Forguncy-owned concern "application-navigation"` would be false.
  */
 function rejectionForRole(rule: PlatformConflictRule, role: DependencyRole, packageName: string): DependencyRejection {
   return {
@@ -323,8 +328,8 @@ function rejectionForRole(rule: PlatformConflictRule, role: DependencyRole, pack
     code: rule.code,
     summary:
       rule.allowedCellLocalRoles.length === 0
-        ? `"${packageName}" has no legitimate cell-local role: "${role}" is the Forguncy-owned concern "${rule.concern}".`
-        : `"${packageName}" was requested for "${role}", which duplicates the Forguncy-owned concern "${rule.concern}".`,
+        ? `"${packageName}" implements the Forguncy-owned concern "${rule.concern}" and has no legitimate cell-local role, so it cannot be used for "${role}".`
+        : `"${packageName}" was requested for "${role}", which is the Forguncy-owned concern "${rule.concern}".`,
     evidence: [`platform-rule:${rule.id}`, `ownership-concern:${rule.concern}`, `requested-role:${role}`],
     remediation: rule.guidance,
   };
