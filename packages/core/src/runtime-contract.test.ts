@@ -46,88 +46,177 @@ import {
   RUNTIME_CONTRACT_DECISION_REFERENCE,
 } from "./governance";
 
-const EVIDENCE_CHANNELS: readonly RuntimeEvidenceChannel[] = [
-  "product-runtime-source",
-  "product-documentation",
-  "designer-api",
-  "generated-runtime-browser",
-];
+/**
+ * The evidence vocabulary, read from the module rather than restated here, so a
+ * channel cannot be introduced by editing two places in step.
+ */
+const KNOWN_EVIDENCE_CHANNELS: readonly RuntimeEvidenceChannel[] = contract.RUNTIME_EVIDENCE_CHANNELS;
 
-interface EvidenceBearing {
-  readonly evidence: readonly RuntimeEvidenceChannel[];
-}
-
-function carriesEvidence(value: unknown): value is EvidenceBearing {
-  if (typeof value !== "object" || value === null) return false;
-  const candidate = (value as { evidence?: unknown }).evidence;
-  return Array.isArray(candidate) && candidate.length > 0;
+/** Why `value` cannot be trusted as a fact record, or `undefined` when it can. */
+function evidenceProblem(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null) {
+    return "is not a fact record";
+  }
+  const evidence = (value as { evidence?: unknown }).evidence;
+  if (!Array.isArray(evidence)) {
+    return "has no evidence array";
+  }
+  if (evidence.length === 0) {
+    return "has an empty evidence array";
+  }
+  const unknownChannels = evidence.filter(channel => !KNOWN_EVIDENCE_CHANNELS.includes(channel as RuntimeEvidenceChannel));
+  if (unknownChannels.length > 0) {
+    return `cites unknown evidence channel(s): ${unknownChannels.join(", ")}`;
+  }
+  return undefined;
 }
 
 /**
  * Values that are *not* facts about the target.
  *
- * Kept deliberately short: an unanswered question is recorded precisely because
- * nobody observed an answer, so requiring evidence on it would be backwards.
+ * Kept deliberately short and justified per entry: every name here is an escape
+ * from the evidence requirement.
  */
-const NON_FACT_EXPORTS: readonly string[] = ["RUNTIME_CONTRACT_UNKNOWNS"];
+const NON_FACT_EXPORTS: readonly string[] = [
+  // The vocabulary that facts are labelled with, not a fact about the target.
+  "RUNTIME_EVIDENCE_CHANNELS",
+  // An unanswered question is recorded precisely because nobody observed an
+  // answer, so requiring evidence on it would be backwards.
+  "RUNTIME_CONTRACT_UNKNOWNS",
+];
 
 /**
- * Values that restate an evidence-bearing record instead of carrying evidence
- * themselves, mapped to the record they are derived from.
+ * One hop inside an evidence-bearing record.
  *
- * Derivation is the point: a second copy of "AntDesign" or of the base props key
- * list is a value that can drift from its own observation, so a derived value is
- * only acceptable while it is genuinely produced from the evidenced record.
+ * A string reads a property. A `match` reads the first list entry whose property
+ * equals the given value — that is how "the preset marked as the persisted
+ * default" is expressed without accepting an arbitrary function.
  */
-const DERIVED_EXPORTS: Readonly<Record<string, string>> = {
-  CELL_PRESET_LIBRARY_DEFAULT: "CELL_PRESET_LIBRARIES",
-  CELL_PROPS_BASE_KEYS: "CELL_PROPS_KEY_ORDER",
-  CELL_FORGUNCY_PROP_KEYS: "CELL_FORGUNCY_FACADE",
-  CELL_SERVER_COMMAND_RESULT_KEYS: "CELL_SERVER_COMMANDS_CONTRACT",
-  FRONTEND_LIBRARY_REFERENCE_EXAMPLE: "FRONTEND_LIBRARY_REFERENCE_CONTRACT",
-};
+type DerivedPathStep = string | { readonly match: { readonly property: string; readonly equals: unknown } };
 
-function isEvidenceBearingExport(name: string): boolean {
-  const value = (contract as Record<string, unknown>)[name];
-  if (carriesEvidence(value)) return true;
-  return Array.isArray(value) && value.length > 0 && value.every(carriesEvidence);
+interface DerivedExportRule {
+  /** The export that must be a value taken from `source`. */
+  readonly name: string;
+  /** The evidence-bearing export it is taken from. */
+  readonly source: string;
+  readonly path: readonly DerivedPathStep[];
 }
 
-/** For the per-record assertions below: every fact record in the module. */
-const FACT_RECORDS: readonly { readonly name: string; readonly evidence: readonly RuntimeEvidenceChannel[] }[] = [
-  { name: "RUNTIME_CONTRACT_TARGET", evidence: RUNTIME_CONTRACT_TARGET.evidence },
-  { name: "CELL_SOURCE_EXECUTION_MODEL", evidence: CELL_SOURCE_EXECUTION_MODEL.evidence },
-  { name: "CELL_PROPS_KEY_ORDER", evidence: CELL_PROPS_KEY_ORDER.evidence },
-  { name: "CELL_FORGUNCY_FACADE", evidence: CELL_FORGUNCY_FACADE.evidence },
-  { name: "CELL_SERVER_COMMANDS_CONTRACT", evidence: CELL_SERVER_COMMANDS_CONTRACT.evidence },
-  { name: "CELL_DATA_SOURCE_CONTRACT", evidence: CELL_DATA_SOURCE_CONTRACT.evidence },
-  { name: "CELL_SOURCE_REJECTION_ENVELOPE", evidence: CELL_SOURCE_REJECTION_ENVELOPE.evidence },
-  { name: "CELL_RUNTIME_RENDER_FAILURE_BEHAVIOR", evidence: CELL_RUNTIME_RENDER_FAILURE_BEHAVIOR.evidence },
-  { name: "CELL_SOURCE_SIZE_OBSERVATIONS", evidence: CELL_SOURCE_SIZE_OBSERVATIONS.evidence },
-  { name: "FRONTEND_LIBRARY_REFERENCE_CONTRACT", evidence: FRONTEND_LIBRARY_REFERENCE_CONTRACT.evidence },
-  { name: "FRONTEND_LIBRARY_RUNTIME_SEMANTICS", evidence: FRONTEND_LIBRARY_RUNTIME_SEMANTICS.evidence },
-  ...CELL_ENTRY_SHAPES.map(shape => ({ name: `CELL_ENTRY_SHAPES.${shape.id}`, evidence: shape.evidence })),
-  ...CELL_ENTRY_RESOLUTION_ORDER.map(step => ({
-    name: `CELL_ENTRY_RESOLUTION_ORDER.${step.order}`,
-    evidence: step.evidence,
-  })),
-  ...CELL_HOST_RUNTIME_SEMANTICS.map(fact => ({
-    name: `CELL_HOST_RUNTIME_SEMANTICS.${fact.id}`,
-    evidence: fact.evidence,
-  })),
-  ...CELL_SOURCE_REJECTIONS.map(rejection => ({
-    name: `CELL_SOURCE_REJECTIONS.${rejection.id}`,
-    evidence: rejection.evidence,
-  })),
-  ...CELL_USER_SCOPE_BINDINGS.map(binding => ({
-    name: `CELL_USER_SCOPE_BINDINGS.${binding.name}`,
-    evidence: binding.evidence,
-  })),
-  ...CELL_PRESET_LIBRARIES.map(preset => ({
-    name: `CELL_PRESET_LIBRARIES.${preset.name}`,
-    evidence: preset.evidence,
-  })),
+/**
+ * Values that are *taken from* an evidence-bearing record instead of carrying
+ * evidence themselves.
+ *
+ * Expressed as a path rather than as a predicate on purpose: a predicate is one
+ * more place a restated value can hide, because it lets a name pass by declaring
+ * how it would like to be derived. A path instead points at where the value
+ * actually lives inside the record, so a value that is not in the record cannot
+ * be registered here.
+ */
+const DERIVED_EXPORTS: readonly DerivedExportRule[] = [
+  {
+    name: "CELL_PRESET_LIBRARY_DEFAULT",
+    source: "CELL_PRESET_LIBRARIES",
+    path: [{ match: { property: "isPersistedDefault", equals: true } }, "name"],
+  },
+  { name: "CELL_PROPS_BASE_KEYS", source: "CELL_PROPS_KEY_ORDER", path: ["baseKeys"] },
+  { name: "CELL_FORGUNCY_PROP_KEYS", source: "CELL_FORGUNCY_FACADE", path: ["keys"] },
+  { name: "CELL_SERVER_COMMAND_RESULT_KEYS", source: "CELL_SERVER_COMMANDS_CONTRACT", path: ["resultKeys"] },
+  {
+    name: "FRONTEND_LIBRARY_REFERENCE_EXAMPLE",
+    source: "FRONTEND_LIBRARY_REFERENCE_CONTRACT",
+    path: ["example"],
+  },
 ];
+
+function formatPath(path: readonly DerivedPathStep[]): string {
+  return path
+    .map(step => (typeof step === "string" ? `.${step}` : `[${step.match.property} == ${String(step.match.equals)}]`))
+    .join("");
+}
+
+function resolvePath(root: unknown, path: readonly DerivedPathStep[]): unknown {
+  let current = root;
+  for (const step of path) {
+    if (typeof step === "string") {
+      if (typeof current !== "object" || current === null) return undefined;
+      current = (current as Record<string, unknown>)[step];
+      continue;
+    }
+    if (!Array.isArray(current)) return undefined;
+    current = current.find(
+      item =>
+        typeof item === "object" &&
+        item !== null &&
+        (item as Record<string, unknown>)[step.match.property] === step.match.equals,
+    );
+  }
+  return current;
+}
+
+/**
+ * Walks the module's exported values and reports every one that is neither
+ * evidence-bearing, taken from an evidence-bearing record, nor declared
+ * non-factual.
+ *
+ * The traversal *is* the invariant: it is deliberately not a list of names, so an
+ * export added later cannot slip through unclassified, and it validates each
+ * evidence member against the vocabulary rather than only counting them.
+ */
+function auditExportedFacts(module: Record<string, unknown>): {
+  readonly problems: string[];
+  readonly inspected: number;
+} {
+  const problems: string[] = [];
+  let inspected = 0;
+
+  for (const [name, value] of Object.entries(module)) {
+    // Module-interop artifacts are not values this module chose to export.
+    if (name === "__esModule" || name === "default") continue;
+    if (typeof value === "function") continue;
+    inspected += 1;
+
+    if (NON_FACT_EXPORTS.includes(name)) continue;
+
+    const rule = DERIVED_EXPORTS.find(entry => entry.name === name);
+    if (rule) {
+      const source = module[rule.source];
+      if (source === undefined) {
+        problems.push(`${name}: source ${rule.source} is not exported`);
+      } else if (Array.isArray(source)) {
+        if (source.length === 0) {
+          problems.push(`${name}: source ${rule.source} is empty`);
+        } else {
+          source.forEach((item, index) => {
+            const why = evidenceProblem(item);
+            if (why) problems.push(`${name}: source ${rule.source}[${index}] ${why}`);
+          });
+        }
+      } else {
+        const why = evidenceProblem(source);
+        if (why) problems.push(`${name}: source ${rule.source} ${why}`);
+      }
+
+      if (resolvePath(source, rule.path) !== value) {
+        problems.push(`${name}: is not the value at ${rule.source}${formatPath(rule.path)}`);
+      }
+      continue;
+    }
+
+    if (Array.isArray(value)) {
+      if (value.length === 0) problems.push(`${name}: is an empty list`);
+      value.forEach((item, index) => {
+        const why = evidenceProblem(item);
+        if (why) problems.push(`${name}[${index}] ${why}`);
+      });
+      continue;
+    }
+
+    const why = evidenceProblem(value);
+    if (why) problems.push(`${name} ${why}`);
+  }
+
+  return { problems, inspected };
+}
 
 describe("runtime contract target", () => {
   it("pins the exact product build the contract was established against", () => {
@@ -158,72 +247,75 @@ describe("runtime contract target", () => {
 // channel; the checks below assert the weaker runtime property that no recorded
 // fact was left without one.
 describe("evidence discipline", () => {
-  it("gives every fact record at least one evidence channel", () => {
-    for (const record of FACT_RECORDS) {
-      expect(record.evidence.length, record.name).toBeGreaterThan(0);
-    }
-  });
-
-  it("uses only known evidence channels", () => {
-    for (const record of FACT_RECORDS) {
-      for (const channel of record.evidence) {
-        expect(EVIDENCE_CHANNELS, record.name).toContain(channel);
-      }
-    }
-  });
-
   // The earlier version of this suite enumerated fact tables by hand, so a new
   // exported constant could be added with no provenance while the suite stayed
-  // green. This walks the module namespace instead: every exported value has to
-  // be evidence-bearing, registered as derived from something evidenced, or
-  // explicitly declared non-factual.
-  it("classifies every exported value", () => {
-    const unclassified: string[] = [];
-    let examined = 0;
-    for (const [name, value] of Object.entries(contract as Record<string, unknown>)) {
-      // Module-interop artifacts are not values this module chose to export.
-      if (name === "__esModule" || name === "default") continue;
-      if (typeof value === "function") continue;
-      examined += 1;
-      if (NON_FACT_EXPORTS.includes(name)) continue;
-      if (name in DERIVED_EXPORTS) continue;
-
-      if (Array.isArray(value)) {
-        if (value.length === 0) unclassified.push(`${name} (empty list)`);
-        else if (!value.every(carriesEvidence)) unclassified.push(`${name} (item without evidence)`);
-        continue;
-      }
-
-      if (!carriesEvidence(value)) unclassified.push(`${name} (no evidence)`);
-    }
-
+  // green. The traversal below *is* the invariant: every exported value has to be
+  // evidence-bearing, taken from an evidence-bearing record, or explicitly
+  // declared non-factual — and every evidence member is checked against the
+  // vocabulary, not merely counted.
+  it("audits every exported value", () => {
+    const { problems, inspected } = auditExportedFacts(contract as Record<string, unknown>);
     expect(
-      unclassified,
-      "An exported value must carry evidence, be registered in DERIVED_EXPORTS, or be declared non-factual.",
+      problems,
+      "An exported value must carry real evidence, be taken from an evidence-bearing record, or be declared non-factual.",
     ).toEqual([]);
 
     // Guard against a vacuous pass: if the namespace stopped being enumerable,
-    // the loop above would examine nothing and still report success.
-    expect(examined, "the guard must have inspected the module's exported values").toBeGreaterThan(15);
+    // the traversal would inspect nothing and still report success.
+    expect(inspected, "the audit must have inspected the module's exported values").toBeGreaterThan(15);
   });
 
-  it("keeps every derived export attached to an evidenced record", () => {
-    for (const [name, source] of Object.entries(DERIVED_EXPORTS)) {
-      expect((contract as Record<string, unknown>)[name], `${name} must still be exported`).toBeDefined();
-      expect((contract as Record<string, unknown>)[source], `${name} derives from ${source}`).toBeDefined();
-      expect(isEvidenceBearingExport(source), `${name} derives from ${source}`).toBe(true);
-    }
+  // The concrete bypass this guard exists to stop: a count-only check is satisfied
+  // by an untyped export claiming a channel that does not exist.
+  it("rejects a fact that cites an invented evidence channel", () => {
+    expect(evidenceProblem({ value: "guess", evidence: ["assumption"] })).toMatch(
+      /unknown evidence channel\(s\): assumption/,
+    );
+    expect(evidenceProblem({ value: "guess", evidence: ["generated-runtime-browser", "probably"] })).toMatch(
+      /unknown evidence channel\(s\): probably/,
+    );
+    expect(evidenceProblem({ evidence: ["generated-runtime-browser"] })).toBeUndefined();
   });
 
-  // `toBe`, not `toEqual`: proof of derivation is that the value *is* the record's
-  // value, not a copy that happens to match today.
-  it("derives the derived values instead of restating them", () => {
+  it("rejects a fact with no usable evidence", () => {
+    expect(evidenceProblem({ evidence: [] })).toMatch(/empty evidence array/);
+    expect(evidenceProblem({ value: "guess" })).toMatch(/no evidence array/);
+    expect(evidenceProblem("guess")).toMatch(/is not a fact record/);
+    expect(evidenceProblem(null)).toMatch(/is not a fact record/);
+  });
+
+  it("pins the evidence vocabulary", () => {
+    // Adding a channel has to be a deliberate edit here too, so a single untyped
+    // export cannot introduce a new label on its own.
+    expect([...KNOWN_EVIDENCE_CHANNELS]).toEqual([
+      "product-runtime-source",
+      "product-documentation",
+      "designer-api",
+      "generated-runtime-browser",
+    ]);
+  });
+
+  // A registered derivation has to point at where the value actually lives, so
+  // DERIVED_EXPORTS cannot be used as a general escape hatch: a value that is not
+  // present inside the record cannot resolve.
+  it("only accepts a derivation that resolves to the registered value", () => {
+    expect(resolvePath(CELL_PROPS_KEY_ORDER, ["baseKeys"])).toBe(CELL_PROPS_BASE_KEYS);
+    expect(resolvePath(CELL_FORGUNCY_FACADE, ["keys"])).toBe(CELL_FORGUNCY_PROP_KEYS);
+    expect(resolvePath(CELL_SERVER_COMMANDS_CONTRACT, ["resultKeys"])).toBe(CELL_SERVER_COMMAND_RESULT_KEYS);
+    expect(resolvePath(FRONTEND_LIBRARY_REFERENCE_CONTRACT, ["example"])).toBe(FRONTEND_LIBRARY_REFERENCE_EXAMPLE);
+    expect(
+      resolvePath(CELL_PRESET_LIBRARIES, [{ match: { property: "isPersistedDefault", equals: true } }, "name"]),
+    ).toBe(CELL_PRESET_LIBRARY_DEFAULT);
+
+    expect(resolvePath(CELL_PROPS_KEY_ORDER, ["baseKeys", "nope"])).toBeUndefined();
+    expect(resolvePath(CELL_PROPS_KEY_ORDER, [{ match: { property: "nope", equals: true } }, "name"])).toBeUndefined();
+    expect(resolvePath("a string", ["anything"])).toBeUndefined();
+  });
+
+  it("keeps AntDesign as the persisted default that the constant reports", () => {
+    expect(CELL_PRESET_LIBRARY_DEFAULT).toBe("AntDesign");
     expect(CELL_PRESET_LIBRARY_DEFAULT).toBe(persistedDefaultCellPreset().name);
     expect(CELL_PRESET_LIBRARY_DEFAULT).toBe(findCellPresetLibrary("AntDesign").name);
-    expect(CELL_PROPS_BASE_KEYS).toBe(CELL_PROPS_KEY_ORDER.baseKeys);
-    expect(CELL_FORGUNCY_PROP_KEYS).toBe(CELL_FORGUNCY_FACADE.keys);
-    expect(CELL_SERVER_COMMAND_RESULT_KEYS).toBe(CELL_SERVER_COMMANDS_CONTRACT.resultKeys);
-    expect(FRONTEND_LIBRARY_REFERENCE_EXAMPLE).toBe(FRONTEND_LIBRARY_REFERENCE_CONTRACT.example);
   });
 
   it("records the open questions rather than guessing them", () => {
@@ -243,9 +335,9 @@ describe("evidence discipline", () => {
   });
 });
 
-// The multi-cell facts are a class of their own: they describe the page the cells
-// share, not one cell's source, and they are what makes hooks and Context
-// cell-local by construction rather than by convention.
+// The multi-cell facts describe the page the cells share. They make component
+// state, hooks and React Context local to a cell by construction — but *not*
+// module identity, which stays page-global (the record says so at length).
 describe("host runtime across cells", () => {
   it("records that the page has one React instance shared by every cell", () => {
     const fact = findCellHostRuntimeFact("single-react-instance-per-page");
@@ -292,6 +384,21 @@ describe("host runtime across cells", () => {
   it("rejects unknown fact ids", () => {
     // @ts-expect-error an unknown id must not be accepted at the type level either
     expect(() => findCellHostRuntimeFact("not-a-fact")).toThrow(/Unknown ReactCellType host runtime fact/);
+  });
+});
+
+describe("cell render failure", () => {
+  it("records that a failed cell clears its root instead of showing the error", () => {
+    expect(CELL_RUNTIME_RENDER_FAILURE_BEHAVIOR.rendersErrorTextInCell).toBe(false);
+    expect(CELL_RUNTIME_RENDER_FAILURE_BEHAVIOR.behavior).toMatch(/rendered with null/);
+  });
+
+  // A source-only fact must not look like an executed one, and this one could not
+  // be executed at all: the designer refused every rejected sample, so no rejected
+  // source ever reached a page.
+  it("marks the failure behaviour as read rather than executed", () => {
+    expect(CELL_RUNTIME_RENDER_FAILURE_BEHAVIOR.evidence).toEqual(["product-runtime-source"]);
+    expect(CELL_RUNTIME_RENDER_FAILURE_BEHAVIOR.note).toMatch(/frontend-library failures/);
   });
 });
 
@@ -345,6 +452,16 @@ describe("entry shapes", () => {
     const brokenEntries = nonWorkingCellEntryShapes().filter(shape => shape.id !== "no-entry");
     expect(brokenEntries.map(shape => shape.id)).toEqual(["app-async-function-declaration"]);
     expect(brokenEntries[0]?.note).toContain("#482");
+  });
+
+  // `findCellEntryShape` is a lookup by id, so duplicate ids would silently make
+  // one shape unreachable.
+  it("gives every entry shape a unique id and a described shape", () => {
+    const ids = CELL_ENTRY_SHAPES.map(shape => shape.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const shape of CELL_ENTRY_SHAPES) {
+      expect(shape.shape.trim().length, shape.id).toBeGreaterThan(0);
+    }
   });
 
   it("flags the silent no-entry case", () => {
@@ -433,6 +550,16 @@ describe("names visible inside a cell", () => {
   it("returns undefined for an unknown name rather than inventing a binding", () => {
     expect(cellUserScopeBinding("Reactify")).toBeUndefined();
     expect(cellUserScopeBinding("")).toBeUndefined();
+  });
+
+  // The binding list is the whole `host` mapping surface, so a duplicate name would
+  // make one entry unreachable and silently widen or narrow what a cell may use.
+  it("lists each host-provided name once", () => {
+    const names = CELL_USER_SCOPE_BINDINGS.map(binding => binding.name);
+    expect(new Set(names).size).toBe(names.length);
+    for (const binding of CELL_USER_SCOPE_BINDINGS) {
+      expect(cellUserScopeBinding(binding.name), binding.name).toBe(binding);
+    }
   });
 });
 

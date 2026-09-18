@@ -151,6 +151,7 @@ export {
   rejectedCellSourceConstructs,
   RUNTIME_CONTRACT_TARGET,
   RUNTIME_CONTRACT_UNKNOWNS,
+  RUNTIME_EVIDENCE_CHANNELS,
 } from "./runtime-contract";
 export type {
   CellBindingAvailability,

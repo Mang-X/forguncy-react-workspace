@@ -36,11 +36,23 @@
 import type { ArchitectureDecisionSource } from "./governance";
 import { RUNTIME_CONTRACT_DECISION } from "./governance";
 
-export type RuntimeEvidenceChannel =
-  | "product-runtime-source"
-  | "product-documentation"
-  | "designer-api"
-  | "generated-runtime-browser";
+export type RuntimeEvidenceChannel = (typeof RUNTIME_EVIDENCE_CHANNELS)[number];
+
+/**
+ * The evidence vocabulary.
+ *
+ * Exported as data rather than only as a type so the invariant guard and any
+ * future lint share one definition, the same way `DEPENDENCY_STRATEGIES` is
+ * shared in `strategy.ts`. There is deliberately no "assumption" / "expected" /
+ * "likely" member: a claim that was never observed cannot be recorded without
+ * inventing a channel, and the guard rejects a channel outside this list.
+ */
+export const RUNTIME_EVIDENCE_CHANNELS = [
+  "product-runtime-source",
+  "product-documentation",
+  "designer-api",
+  "generated-runtime-browser",
+] as const;
 
 // ---------------------------------------------------------------------------
 // Pinned target
@@ -141,9 +153,18 @@ export type CellHostRuntimeFactId =
  * A fact about the page the cells live in, rather than about one cell's source.
  *
  * These are the facts a downstream consumer needs in order to reason about *more
- * than one* cell at once, and they are the reason the target has no page-wide
- * React subtree: it is what makes hooks, Context and module singletons
- * cell-local by construction instead of by convention.
+ * than one* cell at once.
+ *
+ * Two different kinds of locality are easy to conflate here, and this module keeps
+ * them apart on purpose. Component state, hooks and React Context are local to a
+ * cell *because* every cell is its own React root (`one-react-root-per-cell`,
+ * `context-does-not-cross-cells`). JavaScript module identity is **not** covered by
+ * that: page-global identity stays page-global, which is why
+ * `FRONTEND_LIBRARY_RUNTIME_SEMANTICS.globalsArePageWide` is true and why
+ * `strategy.ts` selects `extension` whenever shared module identity or a cross-cell
+ * singleton is required. What is local to a cell is an *inlined copy* of a
+ * dependency, and that locality comes from the per-cell `new Function` scope
+ * (`CELL_SOURCE_EXECUTION_MODEL.perCellCompilationScope`), not from the React root.
  */
 export interface CellHostRuntimeFact {
   readonly id: CellHostRuntimeFactId;
