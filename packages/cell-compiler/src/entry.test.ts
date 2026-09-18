@@ -4,9 +4,11 @@ import { CELL_ENTRY_SHAPES, findCellEntryShape } from "@forguncy-react-workspace
 
 import {
   CELL_ARTIFACT_DEFAULT_ENTRY_KIND,
+  CELL_ENTRY_COMPONENT_BINDING,
   CELL_ENTRY_COMPONENT_PLACEHOLDER,
   CELL_ENTRY_WRAPPER_HOST_NAMES,
   CELL_ENTRY_WRAPPER_SUPPORT,
+  JAVASCRIPT_IDENTIFIER_PATTERN,
   acceptedButNotEmittableCellEntryKinds,
   cellEntryWrapperHostNames,
   cellEntryWrapperNamesAreVerified,
@@ -16,8 +18,6 @@ import {
   runtimeContractEmittableCellEntryKinds,
 } from "./entry";
 import { scanCellArtifactSource } from "./source-guard";
-
-const BINDING = "__forguncyCellEntry";
 
 describe("entry wrapper support table", () => {
   // A new entry shape in the runtime contract must force an edit here rather than
@@ -81,13 +81,13 @@ describe("entry wrapper support table", () => {
 
 describe("rendered entry wrapper", () => {
   it("emits a function App binding by default", () => {
-    const rendered = renderCellEntryWrapper({ componentBinding: BINDING });
+    const rendered = renderCellEntryWrapper();
     expect(rendered.status).toBe("emitted");
     if (rendered.status !== "emitted") return;
 
     expect(rendered.kind).toBe("app-function-declaration");
     expect(rendered.source).toBe(
-      `function App(props) {\n  return React.createElement(${BINDING}, props);\n}`,
+      `function App(props) {\n  return React.createElement(${CELL_ENTRY_COMPONENT_BINDING}, props);\n}`,
     );
   });
 
@@ -96,7 +96,7 @@ describe("rendered entry wrapper", () => {
   // entry would be accepted and render nothing.
   it("emits a wrapper the source guard accepts, for every expressible shape", () => {
     for (const kind of expressibleCellEntryKinds()) {
-      const rendered = renderCellEntryWrapper({ componentBinding: BINDING, entryKind: kind });
+      const rendered = renderCellEntryWrapper({ entryKind: kind });
       expect(rendered.status, kind).toBe("emitted");
       if (rendered.status !== "emitted") continue;
 
@@ -112,7 +112,28 @@ describe("rendered entry wrapper", () => {
       ).toBe(true);
 
       expect(rendered.source).not.toContain(CELL_ENTRY_COMPONENT_PLACEHOLDER);
+      expect(rendered.source).toContain(CELL_ENTRY_COMPONENT_BINDING);
     }
+  });
+
+  // The binding used to be a caller option, which could not work: the bundler
+  // never learned the name, so any other value produced a wrapper referencing an
+  // identifier nothing declared. It is fixed now, and being fixed is only safe if
+  // the one value is actually a usable identifier — which is a property of our
+  // constant, so it is a test rather than a runtime branch on caller input.
+  it("keeps the single component binding a legal identifier nothing else can shadow", () => {
+    expect(JAVASCRIPT_IDENTIFIER_PATTERN.test(CELL_ENTRY_COMPONENT_BINDING)).toBe(true);
+    expect(CELL_ENTRY_COMPONENT_BINDING.startsWith("__")).toBe(true);
+    // Not a name a generated wrapper may reference from the host, so it cannot be
+    // confused with a verified binding.
+    expect(CELL_ENTRY_WRAPPER_HOST_NAMES).not.toContain(CELL_ENTRY_COMPONENT_BINDING);
+    // Negative cases, so the pattern is known to discriminate rather than accept
+    // anything.
+    for (const invalid of ["", "has space", "1leading", "has-dash", "a.b"]) {
+      expect(JAVASCRIPT_IDENTIFIER_PATTERN.test(invalid), invalid).toBe(false);
+    }
+    // `$` and `_` are legal identifier characters, so they must be accepted.
+    expect(JAVASCRIPT_IDENTIFIER_PATTERN.test("$_ok")).toBe(true);
   });
 
   it("uses only names the runtime contract verified inside cell source", () => {
@@ -153,28 +174,19 @@ describe("rendered entry wrapper", () => {
   });
 
   it("honours an explicitly requested shape", () => {
-    const rendered = renderCellEntryWrapper({ componentBinding: BINDING, entryKind: "render-call" });
+    const rendered = renderCellEntryWrapper({ entryKind: "render-call" });
     expect(rendered.status).toBe("emitted");
     if (rendered.status !== "emitted") return;
     expect(rendered.kind).toBe("render-call");
-    expect(rendered.source).toBe(`render(React.createElement(${BINDING}, props));`);
+    expect(rendered.source).toBe(`render(React.createElement(${CELL_ENTRY_COMPONENT_BINDING}, props));`);
   });
 
   it("refuses a shape it cannot emit instead of silently substituting one", () => {
     for (const kind of ["app-async-function-declaration", "no-entry", "whole-source-expression"] as const) {
-      const rendered = renderCellEntryWrapper({ componentBinding: BINDING, entryKind: kind });
+      const rendered = renderCellEntryWrapper({ entryKind: kind });
       expect(rendered.status, kind).toBe("unsupported");
       if (rendered.status !== "unsupported") continue;
       expect(rendered.diagnostics.map(diagnostic => diagnostic.code)).toEqual(["rejected-cell-entry-shape"]);
     }
-  });
-
-  it("refuses a binding the wrapper cannot reference", () => {
-    for (const binding of ["", "has space", "1leading-digit", "has-dash", "a.b"]) {
-      const rendered = renderCellEntryWrapper({ componentBinding: binding });
-      expect(rendered.status, binding).toBe("unsupported");
-    }
-    // `$` and `_` are legal identifier characters, so they must still be accepted.
-    expect(renderCellEntryWrapper({ componentBinding: "$_ok" }).status).toBe("emitted");
   });
 });

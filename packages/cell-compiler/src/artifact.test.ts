@@ -4,7 +4,6 @@ import type { CellEntryKind, DependencyDecision } from "@forguncy-react-workspac
 
 import {
   CELL_ARTIFACT_BANNER,
-  CELL_ARTIFACT_COMPONENT_BINDING_DEFAULT,
   compileCell,
   formatCompileCellOutcome,
   packageNameOfSpecifier,
@@ -20,6 +19,7 @@ import type {
   CompileCellResult,
 } from "./artifact";
 import { formatCellArtifactDiagnostics } from "./diagnostics";
+import { CELL_ENTRY_COMPONENT_BINDING } from "./entry";
 import { frontendLibraryReference } from "./frontend-libraries";
 
 // ---------------------------------------------------------------------------
@@ -28,11 +28,19 @@ import { frontendLibraryReference } from "./frontend-libraries";
 
 /** What a bundler would return for a component with no third-party imports. */
 const TRIVIAL_BUNDLE = [
-  `var ${CELL_ARTIFACT_COMPONENT_BINDING_DEFAULT} = (function () {`,
+  `var ${CELL_ENTRY_COMPONENT_BINDING} = (function () {`,
   '  return function App() { return React.createElement("div", null, "trivial"); };',
   "})();",
 ].join("\n");
 
+/**
+ * A bundler fixture.
+ *
+ * It returns the module it was given, which already declares the component under
+ * `CELL_ENTRY_COMPONENT_BINDING` — the name the request asks for. The request's
+ * own contents are asserted separately, so the fixture does not need to prove
+ * anything about them.
+ */
 const bundlerOf = (module: BundledCellModule): CellBundlerPort => ({ bundle: async () => module });
 
 const TRIVIAL_BUNDLER = bundlerOf({ code: TRIVIAL_BUNDLE, inlinedPackages: [] });
@@ -41,7 +49,6 @@ function compile(overrides: {
   readonly module?: BundledCellModule;
   readonly dependencies?: readonly DependencyDecision[];
   readonly entryKind?: CellEntryKind;
-  readonly componentBinding?: string;
   readonly codeBudgetCharacters?: number;
   readonly bundler?: CellBundlerPort;
 }): Promise<CompileCellOutcome> {
@@ -50,7 +57,6 @@ function compile(overrides: {
     {
       bundler: overrides.bundler ?? (overrides.module === undefined ? TRIVIAL_BUNDLER : bundlerOf(overrides.module)),
       ...(overrides.entryKind === undefined ? {} : { entryKind: overrides.entryKind }),
-      ...(overrides.componentBinding === undefined ? {} : { componentBinding: overrides.componentBinding }),
       ...(overrides.codeBudgetCharacters === undefined
         ? {}
         : { codeBudgetCharacters: overrides.codeBudgetCharacters }),
@@ -116,7 +122,7 @@ describe("compiling a trivial entry with no third-party dependency", () => {
 
     expect(artifact.code.startsWith(CELL_ARTIFACT_BANNER)).toBe(true);
     expect(artifact.code).toContain("function App(props)");
-    expect(artifact.code).toContain(CELL_ARTIFACT_COMPONENT_BINDING_DEFAULT);
+    expect(artifact.code).toContain(CELL_ENTRY_COMPONENT_BINDING);
     expect(artifact.frontendLibraries).toEqual([]);
     expect(verifyCellArtifact(artifact)).toEqual([]);
   });
@@ -167,7 +173,30 @@ describe("compiling a trivial entry with no third-party dependency", () => {
     await compileCell(input, { bundler, entryKind: "render-call" });
 
     expect(Object.keys(input)).toEqual(["entry", "dependencies"]);
-    expect(requests).toEqual([{ entry: "src/App.tsx", dependencies: [] }]);
+    expect(requests[0]?.entry).toBe("src/App.tsx");
+    expect(requests[0]?.dependencies).toEqual([]);
+  });
+
+  // The wrapper and the bundle are produced by different halves of the pipeline,
+  // and the one thing that has to agree between them is the binding. It used to be
+  // a caller option that never reached the bundler, so a caller setting it
+  // produced a wrapper referencing an identifier nothing declared — an artifact
+  // that assembled cleanly and failed only in ReactCellType.
+  it("tells the bundler which identifier to bind the component to", async () => {
+    const requests: CellBundlingRequest[] = [];
+    const bundler: CellBundlerPort = {
+      bundle: request => {
+        requests.push(request);
+        return Promise.resolve({ code: TRIVIAL_BUNDLE });
+      },
+    };
+
+    const outcome = await compileCell({ entry: "src/App.tsx", dependencies: [] }, { bundler });
+    const artifact = artifactOf(outcome);
+
+    expect(requests.map(request => request.componentBinding)).toEqual([CELL_ENTRY_COMPONENT_BINDING]);
+    // The same name the wrapper references, so the two halves cannot disagree.
+    expect(artifact.code).toContain(`React.createElement(${CELL_ENTRY_COMPONENT_BINDING}, props)`);
   });
 });
 
@@ -436,12 +465,6 @@ describe("entry selection", () => {
       expect(rejectionCodes(await compile({ entryKind })), entryKind).toEqual(["rejected-cell-entry-shape"]);
     }
   });
-
-  it("refuses a binding the wrapper cannot reference", async () => {
-    expect(rejectionCodes(await compile({ componentBinding: "not an identifier" }))).toEqual([
-      "rejected-cell-entry-shape",
-    ]);
-  });
 });
 
 describe("the source guard", () => {
@@ -450,6 +473,16 @@ describe("the source guard", () => {
       module: { code: `export default function App() { return null; }` },
     });
     expect(rejectionCodes(outcome)).toEqual(["rejected-cell-source-construct"]);
+  });
+
+  // The guard looks at syntax positions only, so a bundle that merely *mentions* a
+  // refused name in text is not refused — the platform's own AST walk would not
+  // refuse it either.
+  it("accepts a bundle that only mentions a refused name in a string", async () => {
+    const outcome = await compile({
+      module: { code: `${TRIVIAL_BUNDLE}\nvar hint = "useFormStatus() is unsupported";` },
+    });
+    expect(outcome.status).toBe("compiled");
   });
 
   // Rejected by bare name, so a library that defines one is indistinguishable to

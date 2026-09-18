@@ -67,9 +67,11 @@ export type {
 export {
   acceptedButNotEmittableCellEntryKinds,
   CELL_ARTIFACT_DEFAULT_ENTRY_KIND,
+  CELL_ENTRY_COMPONENT_BINDING,
   CELL_ENTRY_COMPONENT_PLACEHOLDER,
   CELL_ENTRY_WRAPPER_HOST_NAMES,
   CELL_ENTRY_WRAPPER_SUPPORT,
+  JAVASCRIPT_IDENTIFIER_PATTERN,
   cellEntryWrapperHostNames,
   cellEntryWrapperNamesAreVerified,
   expressibleCellEntryKinds,
@@ -96,10 +98,12 @@ export type { FrontendLibrariesCollection } from "./frontend-libraries";
 
 // The source guard
 export {
+  blankNonSyntaxText,
   CELL_SOURCE_SCAN_RULES,
   CELL_SOURCE_SCAN_SKIPPED,
   DYNAMIC_IMPORT_CALL_PATTERN,
   findDynamicImportCall,
+  refusedCalleeNames,
   scanCellArtifactSource,
 } from "./source-guard";
 export type {
@@ -113,7 +117,6 @@ export type {
 export {
   assembleCellArtifact,
   CELL_ARTIFACT_BANNER,
-  CELL_ARTIFACT_COMPONENT_BINDING_DEFAULT,
   compileCell,
   formatCompileCellOutcome,
   packageNameOfSpecifier,

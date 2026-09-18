@@ -7,80 +7,216 @@
  * that "Generated code is accepted by ReactCellType".
  *
  * That promise cannot be fully checked locally, and this module does not pretend
- * otherwise. What it can do is refuse to emit the constructs the runtime contract
- * records as refused, so the artifact fails here — where the report names the
- * construct and the fix — instead of failing later inside the designer with a
- * message the caller has to reverse-engineer.
+ * otherwise. What it can do is refuse to emit the constructs `core` records as
+ * refused, so the artifact fails here — where the report names the construct and
+ * the fix — instead of failing later inside the designer.
  *
- * The split that makes this honest is between what a lexical scan can decide and
- * what only a parser can. `CELL_SOURCE_SCAN_RULES` holds the first group;
- * `CELL_SOURCE_SCAN_SKIPPED` holds the second, with the reason written down. A
- * scan that claimed the second group too would produce false refusals, and a gate
- * that refuses valid artifacts gets switched off.
+ * ## Why this module blanks text before it looks
  *
- * One consequence is worth stating because it looks like a bug and is not: the
- * platform rejects these names, so it cannot tell a library that *implements*
- * `useFormStatus` from cell code that calls it. Inlining such a library therefore
- * fails rather than warns, and a finding against a bundled dependency is a real
- * finding, not a false positive.
+ * The first version of this module ran raw regular expressions over the whole
+ * artifact. That was wrong, and the reason is a fact about the target rather than
+ * a matter of taste: the target refuses *syntax nodes*
+ * (`CELL_SOURCE_VALIDATION_MECHANISM`), and its AST walk does not descend into
+ * comments or tokens at all. `const s = "useFormStatus(";` is a string literal to
+ * the platform, not a call, so a raw-text scan refusing it would reject an
+ * artifact the platform accepts. A guard that refuses correct output is worse than
+ * no guard: it blocks real work and teaches its caller to switch it off.
+ *
+ * So the scan runs against {@link blankNonSyntaxText}, which replaces comment
+ * bodies and string/template contents with spaces while preserving every offset
+ * and newline. Text inside a comment can then never match, and a match is a
+ * *syntax position* — the same domain the target checks.
+ *
+ * ## What is still approximate
+ *
+ * This is a lexer, not a parser, and the limits are stated rather than left to be
+ * discovered:
+ *
+ * - A regular-expression literal is not recognised, so a regex containing a quote
+ *   or `//` can hide part of a line from the scan. The damage is bounded — a
+ *   misread `'` or `"` cannot outlive its own line, because JavaScript forbids a
+ *   raw newline in those literals — and it can only *lose* a finding, never invent
+ *   one.
+ * - A `${...}` expression inside a template literal is blanked with the literal,
+ *   so a refused call inside one is not reported here.
+ * - `new useFormStatus()` is a `NewExpression` to the platform and a match here.
+ *
+ * Every one of those shortfalls defers to the platform's own validator, which is
+ * the authority and refuses the artifact at write time. None of them can let a
+ * broken artifact through unnoticed; they only move where it gets reported.
  */
 
-import { findCellSourceRejection } from "@forguncy-react-workspace/core";
+import {
+  CELL_SOURCE_VALIDATION_MECHANISM,
+  findCellSourceRejection,
+} from "@forguncy-react-workspace/core";
 import type { CellSourceRejectionId } from "@forguncy-react-workspace/core";
+
+/**
+ * Blanks everything that is not a syntax position.
+ *
+ * Preserves the length of the input and every newline, so offsets and line numbers
+ * computed against the result are valid against the original — which is what lets
+ * the scan match here and report from there.
+ *
+ * Three properties are deliberate:
+ *
+ * - A `'` or `"` literal cannot span a newline (JavaScript forbids it), so a
+ *   misread quote is contained to one line rather than swallowing the artifact.
+ * - An unterminated `/*` blanks to the end, which is what an unterminated comment
+ *   means anyway.
+ * - Quotes are kept while their contents are blanked, so a rule can still see that
+ *   a literal is there even though it cannot see what is in it.
+ */
+export function blankNonSyntaxText(source: string): string {
+  const characters = source.split("");
+  const length = source.length;
+
+  const blank = (from: number, to: number): void => {
+    for (let index = from; index < Math.min(to, length); index += 1) {
+      if (characters[index] !== "\n") characters[index] = " ";
+    }
+  };
+
+  let position = 0;
+  while (position < length) {
+    const current = source[position];
+    const next = source[position + 1] ?? "";
+
+    if (current === "/" && next === "/") {
+      const newline = source.indexOf("\n", position);
+      const end = newline === -1 ? length : newline;
+      blank(position, end);
+      position = end;
+      continue;
+    }
+
+    if (current === "/" && next === "*") {
+      const close = source.indexOf("*/", position + 2);
+      const end = close === -1 ? length : close + 2;
+      blank(position, end);
+      position = end;
+      continue;
+    }
+
+    if (current === '"' || current === "'") {
+      let cursor = position + 1;
+      while (cursor < length) {
+        const character = source[cursor];
+        if (character === "\\") {
+          cursor += 2;
+          continue;
+        }
+        if (character === current || character === "\n") break;
+        cursor += 1;
+      }
+      const closed = cursor < length && source[cursor] === current;
+      blank(position + 1, cursor);
+      position = closed ? cursor + 1 : cursor;
+      continue;
+    }
+
+    if (current === "`") {
+      let cursor = position + 1;
+      while (cursor < length) {
+        const character = source[cursor];
+        if (character === "\\") {
+          cursor += 2;
+          continue;
+        }
+        if (character === "`") break;
+        cursor += 1;
+      }
+      const closed = cursor < length && source[cursor] === "`";
+      blank(position + 1, cursor);
+      position = closed ? cursor + 1 : cursor;
+      continue;
+    }
+
+    position += 1;
+  }
+
+  return characters.join("");
+}
 
 export interface CellSourceScanRule {
   readonly id: CellSourceRejectionId;
-  /** Compiled with the `m` and `g` flags. */
+  /**
+   * Compiled with the `m` and `g` flags and matched against
+   * {@link blankNonSyntaxText} output, so it can only match a syntax position.
+   */
   readonly pattern: string;
-  /** Capture group holding the offending specifier, when the construct names one. */
-  readonly specifierGroup?: number;
-  /** Why a lexical scan is sufficient for this construct. */
-  readonly whyLexicallyDecidable: string;
+  /**
+   * Applied to the original source from the match to the end of its line, to
+   * recover a detail the blanked text no longer carries — an import specifier is a
+   * string literal, and string contents are blanked by design.
+   */
+  readonly specifierPattern?: string;
+  /** Why this is the target's own rule rather than a guess. */
+  readonly whyFaithfulToTarget: string;
 }
 
 /**
- * Constructs a lexical scan can decide.
+ * The constructs this scan reproduces, expressed as the target's rule.
  *
- * Every pattern is anchored so that it matches source position rather than any
- * occurrence of a word: an `import` or `export` declaration only counts at the
- * start of a line, and `import(` is deliberately excluded from the import rule so
- * that a dynamic import is reported once, as a chunk-loading problem, rather than
- * twice.
+ * The mapping is not "these words look suspicious"; it is
+ * `CELL_SOURCE_VALIDATION_MECHANISM` written as patterns:
+ *
+ * - a line-initial `import` is how an `ImportDeclaration` starts, and `import(`
+ *   is deliberately excluded because the target refuses the declaration node, not
+ *   the call;
+ * - `export` followed by a declaration keyword or a brace is how every node type
+ *   beginning with `Export` starts;
+ * - a refused call is either the bare callee or a non-computed member of `React`
+ *   or `ReactDOM`, which is why each name has exactly one rule covering both
+ *   forms. One rule per name, not one per form, so a `React . useOptimistic()`
+ *   call cannot be reported twice.
+ *
+ * Two details are load-bearing rather than stylistic:
+ *
+ * - Indentation is `[ \t]`, never `\s`. `\s` matches a newline, so `^\s*export`
+ *   would happily start matching on the blanked line above and report the
+ *   construct at the wrong line — and, worse, at a comment.
+ * - The bare form carries `(?<!\.\s*)` as well as `(?<![\w$])`, because a
+ *   *spaced* member access (`foo . useFormStatus()`) is still a member access the
+ *   target accepts, and a single-character lookbehind would miss it.
  */
 export const CELL_SOURCE_SCAN_RULES: readonly CellSourceScanRule[] = [
   {
     id: "import-declaration",
-    pattern: "^\\s*import\\s+[^\"']*?[\"']([^\"']+)[\"']",
-    specifierGroup: 1,
-    whyLexicallyDecidable:
-      "A static import declaration is line-initial and always names its module in a string literal. Anchoring on the whitespace after `import` also keeps `import(` out of this rule.",
+    pattern: "^[ \\t]*import[ \\t]+",
+    specifierPattern: "[\"']([^\"']+)[\"']",
+    whyFaithfulToTarget:
+      "An `ImportDeclaration` cannot begin anywhere but a statement start, and it is the declaration the target refuses — not the `import(...)` call, which the target does not.",
   },
   {
     id: "export-declaration",
-    pattern: "^\\s*export\\s+(?:default\\b|const\\b|let\\b|var\\b|function\\b|class\\b|async\\b|\\*|\\{|\\[)",
-    whyLexicallyDecidable:
-      "An export declaration is line-initial and begins with one of a closed set of keywords, so a line starting with `export` followed by any other word is not reported.",
+    pattern: "^[ \\t]*export[ \\t]+(?:default\\b|const\\b|let\\b|var\\b|function\\b|class\\b|async\\b|\\*|\\{|\\[)",
+    whyFaithfulToTarget:
+      "Any node type beginning with `Export` is refused, and every one of them starts with the `export` keyword followed by a declaration or a brace.",
   },
   {
     id: "react-use",
-    pattern: "\\bReact\\s*\\.\\s*use\\s*\\(",
-    whyLexicallyDecidable:
-      "The runtime rejects `React.use` by name, and the call form is unambiguous; there is no legitimate artifact in which this expression means something else.",
+    pattern: "(?<![\\w$])(?<!\\.\\s*)React\\s*\\.\\s*use\\s*\\(",
+    whyFaithfulToTarget:
+      "`React.use(...)` is refused as a non-computed member call. A spaced dot and a `React` that is itself somebody's member are both excluded, because neither is the node the target refuses.",
   },
   {
     id: "use-action-state",
-    pattern: "\\buseActionState\\s*\\(",
-    whyLexicallyDecidable: "Rejected by bare name, so the call form is the whole signal.",
+    pattern: "(?<![\\w$])(?<!\\.\\s*)(?:useActionState|(?:React|ReactDOM)\\s*\\.\\s*useActionState)\\s*\\(",
+    whyFaithfulToTarget:
+      "Refused as a bare callee identifier, and refused again as a non-computed member of `React` or `ReactDOM` under the same message — one rule, because both produce the same report.",
   },
   {
     id: "use-optimistic",
-    pattern: "\\buseOptimistic\\s*\\(",
-    whyLexicallyDecidable: "Rejected by bare name, so the call form is the whole signal.",
+    pattern: "(?<![\\w$])(?<!\\.\\s*)(?:useOptimistic|(?:React|ReactDOM)\\s*\\.\\s*useOptimistic)\\s*\\(",
+    whyFaithfulToTarget: "The same bare-or-member rule as the other refused hook names.",
   },
   {
     id: "use-form-status",
-    pattern: "\\buseFormStatus\\s*\\(",
-    whyLexicallyDecidable: "Rejected by bare name, so the call form is the whole signal.",
+    pattern: "(?<![\\w$])(?<!\\.\\s*)(?:useFormStatus|(?:React|ReactDOM)\\s*\\.\\s*useFormStatus)\\s*\\(",
+    whyFaithfulToTarget:
+      "The same bare-or-member rule. `ReactDOM.use` is absent from the message table, so no rule refuses it — only the three listed names have a member form.",
   },
 ];
 
@@ -126,12 +262,12 @@ export const CELL_SOURCE_SCAN_SKIPPED: readonly CellSourceScanOmission[] = [
 /**
  * Where a match was found, and how often.
  *
- * Shared by both finding types rather than copy-pasted into each: the fields are
- * a clump — a match is never useful without its position, and a position is never
+ * Shared by both finding types rather than copy-pasted into each: the fields are a
+ * clump — a match is never useful without its position, and a position is never
  * useful without the text — so they travel together as one thing.
  */
 export interface CellSourceFindingLocation {
-  /** The first matching text, trimmed for a report line. */
+  /** The matching text, taken from the original source and trimmed for a report line. */
   readonly match: string;
   /** 1-based line of the first match. */
   readonly line: number;
@@ -155,6 +291,12 @@ export interface CellSourceScanFinding extends CellSourceFindingLocation {
   readonly specifier?: string;
 }
 
+/** The original line a match starts on, which is where a blanked specifier still exists. */
+function originalLineOf(source: string, index: number): string {
+  const newline = source.indexOf("\n", index);
+  return source.slice(index, newline === -1 ? source.length : newline);
+}
+
 function lineOf(source: string, index: number): number {
   let line = 1;
   for (let position = 0; position < index; position += 1) {
@@ -163,14 +305,21 @@ function lineOf(source: string, index: number): number {
   return line;
 }
 
+/** The original text of a match, cut at its line end so a minified line cannot dominate a report. */
+function reportTextOf(source: string, index: number, matched: string): string {
+  const line = originalLineOf(source, index).trim();
+  return (line.length > 0 ? line : matched.trim()).slice(0, 120);
+}
+
 /**
- * Scans an assembled artifact for the constructs `#5` records as refused.
+ * Scans an assembled artifact for the constructs the target refuses.
  *
  * One finding per rule, not per occurrence: the diagnostic is about the artifact,
  * and a 2 MB bundle that mentions `export` forty times is one problem. The
  * `occurrences` count keeps the difference visible.
  */
 export function scanCellArtifactSource(source: string): readonly CellSourceScanFinding[] {
+  const blanked = blankNonSyntaxText(source);
   const findings: CellSourceScanFinding[] = [];
 
   for (const rule of CELL_SOURCE_SCAN_RULES) {
@@ -179,14 +328,17 @@ export function scanCellArtifactSource(source: string): readonly CellSourceScanF
     let occurrences = 0;
     let first: CellSourceScanFinding | undefined;
 
-    while ((match = pattern.exec(source)) !== null) {
+    while ((match = pattern.exec(blanked)) !== null) {
       occurrences += 1;
       if (first === undefined) {
-        const specifier = rule.specifierGroup === undefined ? undefined : match[rule.specifierGroup];
+        const specifier =
+          rule.specifierPattern === undefined
+            ? undefined
+            : new RegExp(rule.specifierPattern).exec(originalLineOf(source, match.index))?.[1];
         first = {
           id: rule.id,
           platformMessage: findCellSourceRejection(rule.id).message,
-          match: match[0].trim().slice(0, 120),
+          match: reportTextOf(source, match.index, match[0]),
           line: lineOf(source, match.index),
           index: match.index,
           occurrences: 0,
@@ -206,13 +358,14 @@ export function scanCellArtifactSource(source: string): readonly CellSourceScanF
 }
 
 /**
- * A dynamic `import()` call, which the platform validator accepts and the
- * artifact contract forbids.
+ * A dynamic `import()` call, which the platform validator accepts and the artifact
+ * contract forbids.
  *
  * Reported against the chunk-loading rule (#6's "avoid runtime chunk loading")
- * rather than against a rejection record, because the runtime contract is
- * explicit that the validator does not refuse it. Conflating the two would have a
- * reader believe the platform will catch a surviving dynamic import.
+ * rather than against a rejection record, because the runtime contract is explicit
+ * that the validator does not refuse it — it is a call, not a declaration.
+ * Conflating the two would have a reader believe the platform will catch a
+ * surviving dynamic import.
  */
 export const DYNAMIC_IMPORT_CALL_PATTERN = "(?:^|[^\\w$.])import\\s*\\(";
 
@@ -220,18 +373,35 @@ export const DYNAMIC_IMPORT_CALL_PATTERN = "(?:^|[^\\w$.])import\\s*\\(";
 export type CellSourceCallFinding = CellSourceFindingLocation;
 
 export function findDynamicImportCall(source: string): CellSourceCallFinding | undefined {
+  const blanked = blankNonSyntaxText(source);
   const pattern = new RegExp(DYNAMIC_IMPORT_CALL_PATTERN, "gm");
   let match: RegExpExecArray | null;
   let occurrences = 0;
   let first: CellSourceCallFinding | undefined;
 
-  while ((match = pattern.exec(source)) !== null) {
+  while ((match = pattern.exec(blanked)) !== null) {
     occurrences += 1;
     if (first === undefined) {
-      first = { match: match[0].trim(), line: lineOf(source, match.index), index: match.index, occurrences: 0 };
+      first = {
+        match: reportTextOf(source, match.index, match[0]),
+        line: lineOf(source, match.index),
+        index: match.index,
+        occurrences: 0,
+      };
     }
     if (match[0].length === 0) pattern.lastIndex += 1;
   }
 
   return first === undefined ? undefined : { ...first, occurrences };
+}
+
+/**
+ * The names the target refuses as a call, so the tests can prove this module's
+ * rule table still covers the recorded mechanism after either one changes.
+ */
+export function refusedCalleeNames(): readonly string[] {
+  return [
+    ...CELL_SOURCE_VALIDATION_MECHANISM.refusedBareCalleeNames,
+    ...CELL_SOURCE_VALIDATION_MECHANISM.refusedReactOnlyMemberNames,
+  ];
 }

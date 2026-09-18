@@ -44,6 +44,25 @@ import { createCellArtifactDiagnostic } from "./diagnostics";
  */
 export const CELL_ENTRY_COMPONENT_PLACEHOLDER = "{{component}}";
 
+/**
+ * The identifier the generated wrapper references, and therefore the identifier
+ * the bundle has to declare.
+ *
+ * Fixed rather than configurable, and owned here rather than by the caller. An
+ * earlier version exposed it as a compiler option, which could not work: the
+ * bundler never learned the name, so a caller passing anything other than the
+ * default produced a wrapper referencing an identifier nothing declared — an
+ * artifact that assembled cleanly and failed only inside ReactCellType. A knob
+ * whose wrong settings are invisible is worse than no knob, and there is nothing
+ * to configure: each cell compiles in its own function scope, so one binding name
+ * cannot collide with another cell.
+ *
+ * The bundler is told the name rather than left to guess: `CellBundlingRequest`
+ * carries it, so `#7`'s implementation has it in hand (an IIFE `output.name` is
+ * the direct expression of "bind the entry to this identifier").
+ */
+export const CELL_ENTRY_COMPONENT_BINDING = "__forguncyCellEntry";
+
 export interface CellEntryWrapperSupport {
   readonly kind: CellEntryKind;
   /** Can the compiler emit this shape around a bundled module? */
@@ -164,11 +183,10 @@ function defaultEntryKind(): CellEntryKind {
 }
 
 /** Identifiers a generated wrapper can reference. Deliberately ASCII-only, like the platform's own bindings. */
-const JAVASCRIPT_IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+export const JAVASCRIPT_IDENTIFIER_PATTERN = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 
 export interface RenderCellEntryWrapperInput {
-  /** The identifier the bundled component is bound to inside the artifact. */
-  readonly componentBinding: string;
+  /** Which entry shape to emit. Defaults to the documented default. */
   readonly entryKind?: CellEntryKind;
 }
 
@@ -183,8 +201,11 @@ export type CellEntryWrapperRender =
  * channel for diagnostics (`rejected-cell-entry-shape` is one of #6's own error
  * model entries), so throwing here would force the caller to catch a string and
  * re-invent the diagnostic it already knows how to carry.
+ *
+ * The component binding is not a parameter — see {@link CELL_ENTRY_COMPONENT_BINDING}.
+ * The only input is the shape, which is the only part of this that is a choice.
  */
-export function renderCellEntryWrapper(input: RenderCellEntryWrapperInput): CellEntryWrapperRender {
+export function renderCellEntryWrapper(input: RenderCellEntryWrapperInput = {}): CellEntryWrapperRender {
   const kind = input.entryKind ?? CELL_ARTIFACT_DEFAULT_ENTRY_KIND;
   const support = findCellEntryWrapperSupport(kind);
 
@@ -199,23 +220,12 @@ export function renderCellEntryWrapper(input: RenderCellEntryWrapperInput): Cell
     };
   }
 
-  if (!JAVASCRIPT_IDENTIFIER.test(input.componentBinding)) {
-    return {
-      status: "unsupported",
-      diagnostics: [
-        createCellArtifactDiagnostic("rejected-cell-entry-shape", input.componentBinding, {
-          detail: `Entry shape "${kind}" needs the bundled component bound to a JavaScript identifier, so "${input.componentBinding}" cannot be referenced from the generated wrapper.`,
-        }),
-      ],
-    };
-  }
-
   return {
     status: "emitted",
     kind,
     // `split`/`join` rather than `String.replace`, because a replacement string
     // treats `$` specially and `$` is a legal identifier character.
-    source: support.template.split(CELL_ENTRY_COMPONENT_PLACEHOLDER).join(input.componentBinding),
+    source: support.template.split(CELL_ENTRY_COMPONENT_PLACEHOLDER).join(CELL_ENTRY_COMPONENT_BINDING),
   };
 }
 

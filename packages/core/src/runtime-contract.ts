@@ -605,6 +605,92 @@ export function rejectedCellSourceConstructs(): readonly CellSourceRejection[] {
 }
 
 // ---------------------------------------------------------------------------
+// How the target decides what to refuse
+// ---------------------------------------------------------------------------
+
+/**
+ * The mechanism behind `CELL_SOURCE_REJECTIONS`, as opposed to its messages.
+ *
+ * Decision source: GitHub Issue #5 — see `CELL_SOURCE_REJECTIONS` above for the
+ * messages. This record exists because the messages cannot answer a question a
+ * consumer has to answer: *may I look for these constructs in raw source text?*
+ *
+ * A message like "React.use is not supported" is equally consistent with a name
+ * match over the whole file and with a syntax-node check, and the two disagree
+ * exactly where it matters — a string, template literal or comment that contains
+ * the same characters. A consumer that guesses "textual" refuses artifacts the
+ * platform accepts, which is worse than not checking locally at all: it blocks
+ * correct output and teaches the caller to disable the check.
+ *
+ * Read from the shipped plugin resource of the ReactCellType cell type
+ * (`Resources/ReactCellTypeCellType.js` under plugin
+ * `96205a31-0c2e-4b98-9ce5-6555088e6cbd`), so the answer is observed rather than
+ * inferred. The answer is: syntax nodes, never text. `AST_TRAVERSAL_SKIPPED_KEYS`
+ * is the load-bearing detail — the walk does not descend into comment or token
+ * properties at all, so a construct that exists only inside a comment cannot be
+ * refused by it.
+ */
+export interface CellSourceValidationMechanism {
+  /** The parse the checks run through. */
+  readonly parseCall: string;
+  /** The scope the declaration check parses in. */
+  readonly declarationSourceType: string;
+  /** Declaration node types refused outright. */
+  readonly refusedDeclarationNodeTypes: readonly string[];
+  /** Any node type starting with this prefix is refused as an export declaration. */
+  readonly refusedDeclarationNodeTypePrefix: string;
+  /** How the call check wraps the source before parsing it. */
+  readonly reactCallCheckWrap: string;
+  /** Bare callee identifiers refused when called. */
+  readonly refusedBareCalleeNames: readonly string[];
+  /** Objects whose non-computed members are refused when called. */
+  readonly refusedMemberCalleeObjects: readonly string[];
+  /** Member names refused on every object in {@link refusedMemberCalleeObjects}. */
+  readonly refusedMemberNames: readonly string[];
+  /** The member name refused on `React` alone. */
+  readonly refusedReactOnlyMemberNames: readonly string[];
+  /**
+   * AST keys the walk does not descend into. Comments and tokens are here, which
+   * is the whole reason text inside a comment can never be refused.
+   */
+  readonly skippedAstKeys: readonly string[];
+  /**
+   * A parse failure is swallowed by the declaration check rather than reported,
+   * because the same failure is reported later, from the transform step.
+   */
+  readonly ignoresParseFailure: boolean;
+  readonly note: string;
+  readonly evidence: readonly RuntimeEvidenceChannel[];
+}
+
+export const CELL_SOURCE_VALIDATION_MECHANISM: CellSourceValidationMechanism = {
+  parseCall: 'Babel.transform(source, { presets: ["react"], ast: true, code: false, sourceType })',
+  declarationSourceType: "module",
+  refusedDeclarationNodeTypes: ["ImportDeclaration"],
+  refusedDeclarationNodeTypePrefix: "Export",
+  reactCallCheckWrap: "(() => {\n<source>\n})();",
+  refusedBareCalleeNames: ["useActionState", "useOptimistic", "useFormStatus"],
+  refusedMemberCalleeObjects: ["React", "ReactDOM"],
+  refusedMemberNames: ["useActionState", "useOptimistic", "useFormStatus"],
+  refusedReactOnlyMemberNames: ["use"],
+  // Comments and tokens are skipped, so nothing inside them is ever visited.
+  skippedAstKeys: ["loc", "start", "end", "leadingComments", "trailingComments", "innerComments", "tokens"],
+  ignoresParseFailure: true,
+  note: "Both checks walk parsed syntax nodes, so a string, template literal or comment that merely contains the same characters is not refused. The call check also ignores a computed member (`React[\"use\"]()`), and `import(...)` is a call rather than a declaration, which is why the validator does not reject it.",
+  evidence: ["product-runtime-source"],
+};
+
+/**
+ * AST keys the target's own walk never descends into.
+ *
+ * Exported as a predicate rather than left to a consumer to re-derive from the
+ * array, so "the target does not see comments" is asserted in one place.
+ */
+export function cellSourceValidationVisitsAstKey(key: string): boolean {
+  return !CELL_SOURCE_VALIDATION_MECHANISM.skippedAstKeys.includes(key);
+}
+
+// ---------------------------------------------------------------------------
 // Names visible inside user code
 // ---------------------------------------------------------------------------
 

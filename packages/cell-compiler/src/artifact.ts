@@ -45,7 +45,7 @@ import {
   dedupeCellArtifactDiagnostics,
   formatCellArtifactDiagnostics,
 } from "./diagnostics";
-import { renderCellEntryWrapper } from "./entry";
+import { CELL_ENTRY_COMPONENT_BINDING, renderCellEntryWrapper } from "./entry";
 import {
   auditFrontendLibraries,
   collectFrontendLibraries,
@@ -81,6 +81,11 @@ export interface CompileCellResult {
  * cannot be recovered from `code` afterwards without re-parsing it — and #6's
  * acceptance criteria explicitly require the artifact to be passable to
  * `mcp-sync` "without additional semantic transformation".
+ *
+ * One obligation is not written in this type because it cannot be: `code` must
+ * bind the entry's component to `CELL_ENTRY_COMPONENT_BINDING`. That is what
+ * `CellBundlingRequest.componentBinding` is for, and the two are the same value by
+ * construction.
  */
 export interface BundledCellModule {
   /** The artifact body: one script, no runtime chunk loading. */
@@ -96,6 +101,18 @@ export interface BundledCellModule {
 export interface CellBundlingRequest {
   readonly entry: string;
   readonly dependencies: readonly DependencyDecision[];
+  /**
+   * The identifier the bundle must bind the entry's component to, so the generated
+   * wrapper can reference it.
+   *
+   * Carried in the request rather than left implicit on purpose. The wrapper and
+   * the bundle are produced by different halves of the pipeline, and the one thing
+   * that must agree between them is this name; a bundler that has to go and read a
+   * constant to discover it is one refactor away from disagreeing. For an IIFE
+   * output this is the `output.name` — literally "bind the entry to this
+   * identifier".
+   */
+  readonly componentBinding: string;
 }
 
 /**
@@ -137,8 +154,6 @@ export interface CompileCellOptions {
   readonly bundler: CellBundlerPort;
   /** Which #5 entry shape to expose. Defaults to a function `App` binding. */
   readonly entryKind?: CellEntryKind;
-  /** Identifier the bundled component is bound to. Defaults to a generated-safe name. */
-  readonly componentBinding?: string;
   /**
    * The caller's cell code budget, in characters, measured on the composed
    * artifact. No default is applied: #5 found no hard platform limit, so the
@@ -158,9 +173,6 @@ export interface CompileCellOptions {
 export type CompileCellOutcome =
   | { readonly status: "compiled"; readonly artifact: CompileCellResult; readonly entryKind: CellEntryKind }
   | { readonly status: "rejected"; readonly diagnostics: readonly CellArtifactDiagnostic[] };
-
-/** The default binding for the bundled component. Prefixed so it cannot collide with user code. */
-export const CELL_ARTIFACT_COMPONENT_BINDING_DEFAULT = "__forguncyCellEntry";
 
 /**
  * The first line of every artifact.
@@ -219,7 +231,6 @@ export interface AssembleCellArtifactInput {
   readonly module: BundledCellModule;
   readonly dependencies: readonly DependencyDecision[];
   readonly entryKind?: CellEntryKind;
-  readonly componentBinding?: string;
   readonly codeBudgetCharacters?: number;
 }
 
@@ -239,10 +250,9 @@ export function assembleCellArtifact(input: AssembleCellArtifactInput): CompileC
   const assetDiagnostics = auditEmittedAssets(module.emittedAssets ?? []);
   const collection = collectFrontendLibraries(dependencies);
 
-  const wrapper = renderCellEntryWrapper({
-    componentBinding: input.componentBinding ?? CELL_ARTIFACT_COMPONENT_BINDING_DEFAULT,
-    ...(input.entryKind === undefined ? {} : { entryKind: input.entryKind }),
-  });
+  const wrapper = renderCellEntryWrapper(
+    input.entryKind === undefined ? {} : { entryKind: input.entryKind },
+  );
 
   const wrapperSource = wrapper.status === "emitted" ? wrapper.source : "";
   const code = `${CELL_ARTIFACT_BANNER}\n${module.code}\n${wrapperSource}\n`;
@@ -706,7 +716,13 @@ export async function compileCell(
 ): Promise<CompileCellOutcome> {
   let module: BundledCellModule;
   try {
-    module = await options.bundler.bundle({ entry: input.entry, dependencies: input.dependencies });
+    module = await options.bundler.bundle({
+      entry: input.entry,
+      dependencies: input.dependencies,
+      // The one thing the two halves of the pipeline must agree on, handed over
+      // rather than assumed.
+      componentBinding: CELL_ENTRY_COMPONENT_BINDING,
+    });
   } catch (error) {
     return {
       status: "rejected",
@@ -722,7 +738,6 @@ export async function compileCell(
     module,
     dependencies: input.dependencies,
     ...(options.entryKind === undefined ? {} : { entryKind: options.entryKind }),
-    ...(options.componentBinding === undefined ? {} : { componentBinding: options.componentBinding }),
     ...(options.codeBudgetCharacters === undefined
       ? {}
       : { codeBudgetCharacters: options.codeBudgetCharacters }),
