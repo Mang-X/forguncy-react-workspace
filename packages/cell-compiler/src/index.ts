@@ -98,19 +98,18 @@ export type { FrontendLibrariesCollection } from "./frontend-libraries";
 
 // The source guard
 export {
-  blankNonSyntaxText,
-  CELL_SOURCE_SCAN_RULES,
+  auditCellSource,
   CELL_SOURCE_SCAN_SKIPPED,
-  DYNAMIC_IMPORT_CALL_PATTERN,
   findDynamicImportCall,
   refusedCalleeNames,
+  rejectionForRefusedCalleeName,
   scanCellArtifactSource,
 } from "./source-guard";
 export type {
+  CellSourceAudit,
   CellSourceCallFinding,
   CellSourceScanFinding,
   CellSourceScanOmission,
-  CellSourceScanRule,
 } from "./source-guard";
 
 // The boundary

@@ -3,23 +3,39 @@ import { describe, expect, it } from "vitest";
 import { CELL_SOURCE_VALIDATION_MECHANISM, findCellSourceRejection } from "@forguncy-react-workspace/core";
 
 import {
-  blankNonSyntaxText,
-  CELL_SOURCE_SCAN_RULES,
+  auditCellSource,
   CELL_SOURCE_SCAN_SKIPPED,
   findDynamicImportCall,
   refusedCalleeNames,
+  rejectionForRefusedCalleeName,
   scanCellArtifactSource,
 } from "./source-guard";
+import type { CellSourceCallFinding } from "./source-guard";
 
+/**
+ * The rejections a source draws.
+ *
+ * Asserts the source parsed first: a source that does not parse yields no
+ * findings, so without this every "nothing is reported" expectation below could
+ * pass because the input was invalid rather than because the construct is legal.
+ */
 function findingsFor(source: string): readonly string[] {
-  return scanCellArtifactSource(source).map(finding => finding.id);
+  const audit = auditCellSource(source);
+  expect(audit.parsed, `source must parse: ${source}`).toBe(true);
+  return audit.findings.map(finding => finding.id);
+}
+
+/** The first dynamic import in a source, with the same parse guard. */
+function dynamicImportOf(source: string): CellSourceCallFinding | undefined {
+  expect(auditCellSource(source).parsed, `source must parse: ${source}`).toBe(true);
+  return findDynamicImportCall(source);
 }
 
 // The target decides on parsed syntax nodes with comments and tokens skipped, so
-// text that merely contains the same characters is not refused. Every case in
-// this block is a construct the platform accepts, and a scan that reports one is
+// text that merely contains the same characters is not refused. Every case in this
+// block is a construct the platform accepts, and a guard that reports one is
 // refusing correct output.
-describe("false positives the raw-text scan used to produce", () => {
+describe("text that is not a construct", () => {
   it("ignores a refused name inside a string literal", () => {
     expect(findingsFor('const s = "useFormStatus(";')).toEqual([]);
     expect(findingsFor("const s = 'useActionState(';")).toEqual([]);
@@ -28,9 +44,9 @@ describe("false positives the raw-text scan used to produce", () => {
   });
 
   it("ignores a declaration inside a comment", () => {
-    expect(
-      findingsFor(["/*", 'import x from "pkg"', "export default function App() {}", "*/"].join("\n")),
-    ).toEqual([]);
+    expect(findingsFor(["/*", 'import x from "pkg"', "export default function App() {}", "*/"].join("\n"))).toEqual(
+      [],
+    );
     expect(findingsFor('// import y from "pkg"\nconst a = 1;')).toEqual([]);
     expect(findingsFor("/* useFormStatus( */\nconst a = 1;")).toEqual([]);
   });
@@ -40,88 +56,105 @@ describe("false positives the raw-text scan used to produce", () => {
     expect(findingsFor("const s = `\nimport x from \"pkg\"\n`;")).toEqual([]);
   });
 
-  // A template's `${…}` is real syntax the platform's AST visits, so blanking the
-  // whole literal would hide code — and for the chunk rule that is not a deferred
-  // finding, because the platform does not refuse `import(...)` at all.
+  // A template's `${…}` is real syntax the target's AST visits, so its contents
+  // are scanned — including for the chunk rule, which has no platform backstop.
   it("scans template interpolations as code rather than blanking them", () => {
     expect(findingsFor("const s = `${useFormStatus()}`;")).toEqual(["use-form-status"]);
     expect(findingsFor("const s = `a${ `b${useFormStatus()}` }`;")).toEqual(["use-form-status"]);
     expect(findingsFor("const s = `${React.useOptimistic(state)}`;")).toEqual(["use-optimistic"]);
 
-    const dynamicImport = findDynamicImportCall('const value = `${import("./heavy.js")}`;');
-    expect(dynamicImport?.occurrences).toBe(1);
+    expect(dynamicImportOf('const value = `${import("./heavy.js")}`;')?.occurrences).toBe(1);
   });
 
-  // The interpolation is code, but what is *inside* it still obeys the same rules:
-  // a string within an interpolation is text again.
-  it("keeps a literal inside an interpolation blank", () => {
+  it("keeps a literal inside an interpolation inert", () => {
     expect(findingsFor('const s = `${"useFormStatus("}`;')).toEqual([]);
-    expect(findDynamicImportCall('const s = `${"import(\\"./x.js\\")"}`;')).toBeUndefined();
-    // Braces inside the interpolation close it, and the literal resumes.
-    expect(findingsFor('const s = `${ {a: 1} }`;\nuseFormStatus();')).toEqual(["use-form-status"]);
+    expect(dynamicImportOf('const s = `${"import(\\"./x.js\\")"}`;')).toBeUndefined();
   });
 
   it("ignores a `new` expression, which the target never sees", () => {
     expect(findingsFor("new useFormStatus();")).toEqual([]);
     expect(findingsFor("new React.useFormStatus();")).toEqual([]);
     expect(findingsFor("const x = new  useOptimistic(a, b);")).toEqual([]);
-    // `renew` is not `new`, so the call behind it is still refused.
-    expect(findingsFor("renew useFormStatus();")).toEqual(["use-form-status"]);
+    // An identifier that merely contains `new` is not the keyword: the call inside
+    // it is still refused.
+    expect(findingsFor("renew(useFormStatus());")).toEqual(["use-form-status"]);
+    expect(findingsFor("const renewal = useFormStatus();")).toEqual(["use-form-status"]);
   });
 
-  // Matching the keyword by shape rather than by position is what keeps a property
-  // named `import` from reading as a declaration.
-  it("ignores `import` and `export` used as property names", () => {
+  it("ignores reserved words used as property names", () => {
     expect(findingsFor("const o = { import: 1 };")).toEqual([]);
     expect(findingsFor("const o = { export: 1 };")).toEqual([]);
     expect(findingsFor("obj.import = 1;")).toEqual([]);
     expect(findingsFor("module.exports = App;")).toEqual([]);
+    expect(dynamicImportOf('obj.import("./x.js");')).toBeUndefined();
+    expect(dynamicImportOf('module.import("./x.js");')).toBeUndefined();
+  });
+});
+
+// A `/` is a division or the start of a literal depending on grammar, not on the
+// character before it. Getting that wrong errs in both directions, and it matters
+// most for the chunk rule — the one check the platform does not back up. The
+// hand-written lexer needed four rounds of patches here; these are the cases that
+// broke it, kept as regression tests now that the parse decides.
+describe("regular expressions and division", () => {
+  it("does not let a quote inside a regex hide a real call", () => {
+    expect(dynamicImportOf("const re = /'/; import(\"./heavy.js\");")?.occurrences).toBe(1);
+    expect(findingsFor("const re = /'/; useFormStatus();")).toEqual(["use-form-status"]);
   });
 
-  it("ignores a dynamic import inside a string", () => {
-    expect(findDynamicImportCall('const s = "import(\\"./heavy.js\\")";')).toBeUndefined();
-    expect(findDynamicImportCall("// import('./x.js')")).toBeUndefined();
+  it("does not read a regex whose text looks like a call as a call", () => {
+    expect(dynamicImportOf("const re = /import()/;")).toBeUndefined();
+    expect(findingsFor("const re = /useFormStatus(/;")).toEqual([]);
+    expect(findingsFor('const re = /import{x}from"y"/;')).toEqual([]);
+    expect(findingsFor("const re = /[useFormStatus(/]/;")).toEqual([]);
   });
 
-  // The lookbehind matters: the target refuses a *bare* identifier and refuses
-  // members only on React/ReactDOM, so a member call on anything else is legal.
-  it("ignores a refused name used as someone else's member", () => {
-    expect(findingsFor("obj.useFormStatus();")).toEqual([]);
-    expect(findingsFor("foo.useActionState();")).toEqual([]);
-    // A spaced dot is still a member access, which a single-character lookbehind
-    // would have missed.
-    expect(findingsFor("foo . useFormStatus();")).toEqual([]);
-    // A `React` that is itself somebody's member is not the object the target
-    // refuses either.
-    expect(findingsFor("foo.React.use(promise);")).toEqual([]);
-    expect(findingsFor("ReactDOM.use(promise);")).toEqual([]);
-    expect(findingsFor('React["use"](promise);')).toEqual([]);
+  // The case that ended the lexer: `++` is read as an operator, so the `/` after
+  // it was treated as a literal opener and swallowed the dynamic import behind it.
+  it("keeps a division after a postfix operator a division", () => {
+    expect(dynamicImportOf('n++ / 2; import("./heavy.js");')?.occurrences).toBe(1);
+    expect(findingsFor("n++ / 2; useFormStatus();")).toEqual(["use-form-status"]);
+    expect(dynamicImportOf('n-- / 2; import("./heavy.js");')?.occurrences).toBe(1);
   });
 
-  it("does not report a specifier that only appears in a comment", () => {
-    expect(findingsFor('// import x from "pkg"\nconst a = 1;')).toEqual([]);
-    expect(findingsFor('/*\nimport x from "pkg"\n*/\nconst a = 1;')).toEqual([]);
+  it("keeps a division after a value a division, whatever the value is", () => {
+    expect(dynamicImportOf('"x" / 2; import("./heavy.js");')?.occurrences).toBe(1);
+    expect(dynamicImportOf("`x` / 2; import('./heavy.js');")?.occurrences).toBe(1);
+    expect(dynamicImportOf('ratio() / 2; import("./heavy.js");')?.occurrences).toBe(1);
+    expect(dynamicImportOf('total / 2; import("./heavy.js");')?.occurrences).toBe(1);
+    expect(dynamicImportOf('list[0] / 2; import("./heavy.js");')?.occurrences).toBe(1);
+    expect(findingsFor("total / 2; useOptimistic(a);")).toEqual(["use-optimistic"]);
   });
 
-  // Indentation is `[ \t]`, never `\s`: `\s` matches a newline, so `^\s*export`
-  // would start matching on the blanked line above and report a real declaration
-  // at a comment's line — or, with a comment in between, at the wrong line.
-  it("reports a declaration at its own line, even directly after a comment", () => {
-    const findings = scanCellArtifactSource('// import x from "pkg"\nexport {}');
-    expect(findings.map(finding => finding.id)).toEqual(["export-declaration"]);
-    expect(findings[0]?.line).toBe(2);
-    expect(findings[0]?.match).toBe("export {}");
+  // Previously a characterisation test asserting a known wrong answer. With a
+  // parser it is simply correct, so it is asserted as the expected behaviour.
+  it("reads a literal after a block as a literal", () => {
+    expect(dynamicImportOf("if (x) {} /import()/;")).toBeUndefined();
+    expect(findingsFor("function f() {} /useFormStatus(/;")).toEqual([]);
+  });
+
+  it("reads a keyword-position literal as a literal", () => {
+    expect(dynamicImportOf("function f() { return /import()/; }")).toBeUndefined();
+    expect(findingsFor("function f() { return /useFormStatus(/; }")).toEqual([]);
+    expect(dynamicImportOf("const x = typeof /import()/;")).toBeUndefined();
+  });
+
+  it("handles an escaped slash and a character class", () => {
+    expect(dynamicImportOf("const re = /x\\/y/; import('./x.js');")?.occurrences).toBe(1);
+    expect(dynamicImportOf("const re = /[/]/; import('./x.js');")?.occurrences).toBe(1);
   });
 });
 
 // The other half of the same contract: the constructs the target really does
-// refuse must still be found, including the ones a previous version missed.
-describe("constructs the target refuses are still found", () => {
-  it("finds a real import declaration and reads its specifier", () => {
+// refuse must be found, including the minified module syntax that a rule keyed on
+// line shape used to miss.
+describe("constructs the target refuses are found", () => {
+  it("finds a real import declaration and reads its specifier from the node", () => {
     const findings = scanCellArtifactSource('import x from "es-toolkit";');
     expect(findings.map(finding => finding.id)).toEqual(["import-declaration"]);
     expect(findings[0]?.specifier).toBe("es-toolkit");
     expect(findings[0]?.line).toBe(1);
+    expect(findings[0]?.match).toBe('import x from "es-toolkit";');
   });
 
   it("finds a side-effect import and a brace import", () => {
@@ -130,13 +163,7 @@ describe("constructs the target refuses are still found", () => {
     expect(scanCellArtifactSource('import * as ns from "pkg";')[0]?.specifier).toBe("pkg");
   });
 
-  // `ImportDeclaration` is an AST concept, not "a line that starts with import
-  // followed by a space". Minifiers emit all of these, and the platform refuses
-  // every one of them.
-  it("finds the minified module syntax a line-anchored rule would miss", () => {
-    expect(scanCellArtifactSource('import{x}from"x";').map(finding => finding.id)).toEqual([
-      "import-declaration",
-    ]);
+  it("finds the minified module syntax a line-shaped rule would miss", () => {
     expect(scanCellArtifactSource('import{x}from"x";')[0]?.specifier).toBe("x");
     expect(scanCellArtifactSource('import"x";')[0]?.specifier).toBe("x");
     expect(scanCellArtifactSource('import*as n from"x";')[0]?.specifier).toBe("x");
@@ -146,20 +173,15 @@ describe("constructs the target refuses are still found", () => {
     expect(sameLine[0]?.index).toBe(10);
   });
 
-  it("still excludes the two other meanings of `import`", () => {
-    // The call form is refused by nobody: not by the target, and by this module
-    // only through the chunk rule.
-    expect(findingsFor('import("./x.js");')).toEqual([]);
-    expect(findingsFor("import.meta.url;")).toEqual([]);
-    expect(scanCellArtifactSource("import (x);").map(finding => finding.id)).not.toContain(
-      "import-declaration",
-    );
-  });
-
-  it("finds an export declaration", () => {
+  it("finds an export declaration in every form", () => {
     expect(findingsFor("export default function App() {}")).toEqual(["export-declaration"]);
     expect(findingsFor("export const a = 1;")).toEqual(["export-declaration"]);
-    expect(findingsFor("export { a };")).toEqual(["export-declaration"]);
+    // Declared first, because `export { a }` with no binding is a syntax error
+    // rather than an export the target would see.
+    expect(findingsFor("const a = 1; export { a };")).toEqual(["export-declaration"]);
+    expect(findingsFor('export * from "pkg";')).toEqual(["export-declaration"]);
+    expect(findingsFor("export default class App {}")).toEqual(["export-declaration"]);
+    expect(findingsFor("export function App() {}")).toEqual(["export-declaration"]);
   });
 
   it("finds the bare refused hooks", () => {
@@ -168,22 +190,32 @@ describe("constructs the target refuses are still found", () => {
     expect(findingsFor("useOptimistic(state);")).toEqual(["use-optimistic"]);
   });
 
-  // The member forms are reported under the name's own code, because that is the
-  // message the target throws for them: `React.useOptimistic()` is refused with
-  // the `useOptimistic` message, and only `React.use` has a message of its own.
   it("finds the member forms the target also refuses, under the target's own code", () => {
     expect(findingsFor("React.useFormStatus();")).toEqual(["use-form-status"]);
     expect(findingsFor("React.use(promise);")).toEqual(["react-use"]);
     expect(findingsFor("ReactDOM.useActionState(fn, 0);")).toEqual(["use-action-state"]);
     expect(findingsFor("React . useOptimistic (state);")).toEqual(["use-optimistic"]);
-    expect(findingsFor("React.useActionState(fn, 0);")).toEqual(["use-action-state"]);
+  });
+
+  it("does not report a member the target does not refuse", () => {
+    expect(findingsFor("obj.useFormStatus();")).toEqual([]);
+    expect(findingsFor("foo . useActionState();")).toEqual([]);
+    expect(findingsFor("ReactDOM.use(promise);")).toEqual([]);
+    expect(findingsFor('React["use"](promise);')).toEqual([]);
   });
 
   it("finds a dynamic import call, which the platform validator does not", () => {
-    const finding = findDynamicImportCall('var later = () => import("./heavy.js");');
+    const finding = dynamicImportOf('var later = () => import("./heavy.js");');
     expect(finding).toBeDefined();
     expect(finding?.occurrences).toBe(1);
     expect(finding?.line).toBe(1);
+    expect(finding?.match).toBe('import("./heavy.js")');
+  });
+
+  it("treats a parenthesised import argument as a dynamic import, not a declaration", () => {
+    expect(findingsFor("import (x);")).toEqual([]);
+    expect(dynamicImportOf("import (x);")?.occurrences).toBe(1);
+    expect(dynamicImportOf("import.meta.url;")).toBeUndefined();
   });
 
   it("counts repeated occurrences rather than reporting each one", () => {
@@ -192,189 +224,127 @@ describe("constructs the target refuses are still found", () => {
     expect(findings[0]?.occurrences).toBe(3);
   });
 
+  it("reports one finding per rejection, in first-seen order", () => {
+    const findings = scanCellArtifactSource('import a from "x";\nuseFormStatus();\nexport {};');
+    expect(findings.map(finding => finding.id)).toEqual([
+      "import-declaration",
+      "use-form-status",
+      "export-declaration",
+    ]);
+  });
+
   it("reports the line and the platform's own wording", () => {
-    const finding = scanCellArtifactSource('const a = 1;\nconst b = 2;\nuseFormStatus();').find(
+    const finding = scanCellArtifactSource("const a = 1;\nconst b = 2;\nuseFormStatus();").find(
       candidate => candidate.id === "use-form-status",
     );
     expect(finding?.line).toBe(3);
     expect(finding?.platformMessage).toBe(findCellSourceRejection("use-form-status").message);
     expect(finding?.platformMessage).toContain("useFormStatus is not supported");
   });
-});
 
-// The blanker is what makes the two blocks above true, so it is tested directly
-// rather than only through the rules it enables.
-describe("blanking preserves position and reports nothing of its own", () => {
-  it("keeps the source length and every newline", () => {
-    const source = [
-      'import x from "pkg";',
-      "// a comment",
-      "const regex = /'/;",
-      "/* multi",
-      "   line */",
-      "const s = 'text';",
-      "const t = `template",
-      "still template`;",
-    ].join("\n");
-
-    const blanked = blankNonSyntaxText(source);
-    expect(blanked).toHaveLength(source.length);
-    expect(blanked.split("\n")).toHaveLength(source.split("\n").length);
-
-    // Offsets of the surviving syntax are unchanged, which the scan depends on.
-    expect(blanked.indexOf("const regex")).toBe(source.indexOf("const regex"));
-    expect(blanked.indexOf("const s =")).toBe(source.indexOf("const s ="));
-    expect(blanked.indexOf("const t =")).toBe(source.indexOf("const t ="));
-  });
-
-  it("removes comment text but keeps the code around it", () => {
-    const blanked = blankNonSyntaxText("const a = 1; /* import x from \"pkg\" */ const b = 2;");
-    expect(blanked).not.toContain("import");
-    expect(blanked).toContain("const a = 1;");
-    expect(blanked).toContain("const b = 2;");
-  });
-
-  // JavaScript forbids a raw newline inside a ' or " literal, so a quote the
-  // lexer misreads as a literal opener cannot hide more than its own line. That
-  // bound is what keeps a regular expression such as /'/ from swallowing the
-  // artifact. Templates may span lines, so they are not bounded this way.
-  it("contains a misread quote to its own line", () => {
-    const blanked = blankNonSyntaxText("const re = /'/;\nconst kept = useFormStatus();");
-    expect(blanked).toContain("const re");
-    expect(blanked.split("\n")[1]).toBe("const kept = useFormStatus();");
-  });
-
-  it("treats an unterminated block comment as running to the end", () => {
-    expect(blankNonSyntaxText("const a = 1;\n/* never closed").trimEnd()).toBe("const a = 1;");
-  });
-
-  it("leaves source with nothing to blank untouched", () => {
-    const source = "function App(props) {\n  return React.createElement(Entry, props);\n}";
-    expect(blankNonSyntaxText(source)).toBe(source);
+  // Indentation is not part of the rule, so a declaration after a comment belongs
+  // to its own line — a hand-written pattern once reported it at the comment.
+  it("reports a declaration at its own line, even directly after a comment", () => {
+    const findings = scanCellArtifactSource('// import x from "pkg"\nexport {}');
+    expect(findings.map(finding => finding.id)).toEqual(["export-declaration"]);
+    expect(findings[0]?.line).toBe(2);
+    expect(findings[0]?.match).toBe("export {}");
   });
 });
 
-// A `/` is a division or the start of a literal depending on what precedes it, and
-// getting that wrong errs in both directions — which matters most for the chunk
-// rule, the one check the platform does not back up.
-describe("regular expression literals", () => {
-  it("does not let a quote inside a regex hide the rest of its line", () => {
-    // The earlier version read the `'` as a string opener and blanked the rest of
-    // the line, including a real dynamic import that the platform would not catch.
-    expect(findDynamicImportCall("const re = /'/; import(\"./heavy.js\");")?.occurrences).toBe(1);
-    expect(findingsFor("const re = /'/; useFormStatus();")).toEqual(["use-form-status"]);
+// Unparseable source is not this module's verdict to give, and it says so rather
+// than reporting a guess.
+describe("a source that does not parse", () => {
+  it("yields no findings and reports that it did not parse", () => {
+    const audit = auditCellSource("const x: number = 1;");
+    expect(audit).toEqual({ findings: [], dynamicImports: [], parsed: false });
+    // The raw entry points are silent too — the target's own parse is what refuses
+    // this source, and it says so with a code frame.
+    expect(findDynamicImportCall("const x: number = 1;")).toBeUndefined();
+    expect(scanCellArtifactSource("const x: number = 1;")).toEqual([]);
   });
 
-  it("does not read a regex whose text looks like a call as a call", () => {
-    expect(findDynamicImportCall("const re = /import()/;")).toBeUndefined();
-    expect(findingsFor("const re = /useFormStatus(/;")).toEqual([]);
-    expect(findingsFor('const re = /import{x}from"y"/;')).toEqual([]);
-    expect(findDynamicImportCall("const ends = /x\\/y/; import('./x.js');")?.occurrences).toBe(1);
+  it("still parses the JSX the target's react preset accepts", () => {
+    const audit = auditCellSource('const element = <div className="x" />;');
+    expect(audit.parsed).toBe(true);
+    expect(audit.findings).toEqual([]);
   });
 
-  // Division has to stay division, or the scanner would treat the operator as a
-  // literal opener and skip everything up to the next slash.
-  it("keeps a division an operator and keeps what follows it visible", () => {
-    expect(findDynamicImportCall('const half = total / 2; import("./x.js");')?.occurrences).toBe(1);
-    expect(findingsFor("const half = total / 2; useFormStatus();")).toEqual(["use-form-status"]);
-    expect(findingsFor("const x = ratio() / 2; useOptimistic(a);")).toEqual(["use-optimistic"]);
-
-    const source = "const half = total / 2;\nconst re = /'/;\n";
-    const blanked = blankNonSyntaxText(source);
-    expect(blanked).toHaveLength(source.length);
-    expect(blanked.split("\n")[0]).toBe("const half = total / 2;");
-  });
-
-  // `/` is legal inside a character class, so the literal ends at the final slash.
-  it("tracks a character class so a slash inside one does not end the literal", () => {
-    expect(findDynamicImportCall("const re = /[/]/; import('./x.js');")?.occurrences).toBe(1);
-    expect(findingsFor("const re = /[useFormStatus(/]/;")).toEqual([]);
-  });
-
-  it("treats a regex after a keyword as a literal", () => {
-    expect(findDynamicImportCall("function f() { return /import()/; }")).toBeUndefined();
-    expect(findingsFor("function f() { return /useFormStatus(/; }")).toEqual([]);
-  });
-
-  // A member call on a property named `import` is legal JavaScript, and the spaced
-  // form is the one an adjacent-dot check misses.
-  it("ignores import used as a property name", () => {
-    expect(findDynamicImportCall('obj . import("./x.js");')).toBeUndefined();
-    expect(findDynamicImportCall('obj.import("./x.js");')).toBeUndefined();
-    expect(findDynamicImportCall('module.import("./x.js");')).toBeUndefined();
-    expect(findDynamicImportCall('const m = import("./x.js");')?.occurrences).toBe(1);
-    // Nested in a call is still a dynamic import, not a member access on `foo`.
-    expect(findDynamicImportCall('foo(import("./x.js"));')?.occurrences).toBe(1);
-  });
-
-  // The residual limit, pinned so it cannot change silently: `}` is read as ending
-  // a value, so a literal straight after a block reads as a division and its
-  // contents are scanned as code. See the module doc.
-  it("documents the one case the division rule gets wrong", () => {
-    expect(findDynamicImportCall("if (x) {} /import()/;")?.occurrences).toBe(1);
+  it("audits both checks from one parse", () => {
+    const audit = auditCellSource('import a from "x";\nconst later = () => import("./y");');
+    expect(audit.parsed).toBe(true);
+    expect(audit.findings.map(finding => finding.id)).toEqual(["import-declaration"]);
+    expect(audit.dynamicImports).toHaveLength(1);
   });
 });
 
 // The guard is a reproduction of a recorded mechanism, so the two can be checked
 // against each other instead of drifting apart one edit at a time.
 describe("faithfulness to the recorded mechanism", () => {
-  it("has a rule for every callee the target refuses", () => {
-    const patterns = CELL_SOURCE_SCAN_RULES.map(rule => rule.pattern).join("\n");
-    for (const name of refusedCalleeNames()) {
-      expect(patterns, name).toContain(name);
-    }
-  });
-
-  it("models the member objects the mechanism names, and no others", () => {
-    const patterns = CELL_SOURCE_SCAN_RULES.map(rule => rule.pattern).join("\n");
-    for (const object of CELL_SOURCE_VALIDATION_MECHANISM.refusedMemberCalleeObjects) {
-      expect(patterns, object).toContain(object);
-    }
-    // `ReactDOM.use` is absent from the mechanism's message table, so no rule may
-    // refuse it — asserted as a false positive above, pinned here as a rule.
-    expect(findingsFor("ReactDOM.use(promise);")).toEqual([]);
-    // And one construct is one finding, never two: the bare and member forms share
-    // a rule, so they cannot both fire.
-    expect(findingsFor("React . useOptimistic (state);")).toHaveLength(1);
-  });
-
-  it("skips exactly the constructs a lexer cannot decide, and says why", () => {
-    const skipped = CELL_SOURCE_SCAN_SKIPPED.map(omission => omission.id);
-    expect(skipped).toEqual([
-      "typescript-annotation",
-      "top-level-await",
-      "top-level-return",
-      "duplicate-top-level-declaration",
-      "runtime-import-call-not-rejected",
-    ]);
-    for (const omission of CELL_SOURCE_SCAN_SKIPPED) {
-      expect(omission.whyNotLexical.trim().length, omission.id).toBeGreaterThan(20);
-    }
-  });
-
-  it("every rule names a rejection the contract records, and says why it is faithful", () => {
-    for (const rule of CELL_SOURCE_SCAN_RULES) {
-      expect(findCellSourceRejection(rule.id)).toBeDefined();
-      expect(rule.whyFaithfulToTarget.trim().length, rule.id).toBeGreaterThan(20);
-      // Never compiled without the anchors that keep it off raw text.
-      expect(() => new RegExp(rule.pattern, "gm")).not.toThrow();
-    }
-  });
-
-  // The callee-kind boundary, checked per recorded name rather than by example:
-  // the mechanism visits `CallExpression` nodes, so a `new` expression must be
-  // silent here for every name, not merely for the one in the test above.
-  it("refuses a call and never a `new` expression, for every recorded name", () => {
+  it("names the parser the target uses, and the scope it parses in", () => {
+    expect(CELL_SOURCE_VALIDATION_MECHANISM.parseCall).toContain("Babel.transform");
+    expect(CELL_SOURCE_VALIDATION_MECHANISM.declarationSourceType).toBe("module");
     expect(CELL_SOURCE_VALIDATION_MECHANISM.refusedCalleeNodeType).toBe("CallExpression");
+    // The walk consults this list, so the module's own comment about comments can
+    // be checked rather than trusted.
+    for (const key of ["leadingComments", "trailingComments", "innerComments", "tokens"]) {
+      expect(CELL_SOURCE_VALIDATION_MECHANISM.skippedAstKeys).toContain(key);
+    }
+  });
 
+  it("has a rejection for every callee the target refuses", () => {
+    // Every name refused as a *bare* call has a rejection of its own.
+    for (const name of CELL_SOURCE_VALIDATION_MECHANISM.refusedBareCalleeNames) {
+      const rejection = rejectionForRefusedCalleeName(name);
+      expect(rejection, name).toBeDefined();
+      expect(findCellSourceRejection(rejection ?? "react-use")).toBeDefined();
+    }
+    // The remaining name is member-only, so it is checked by behaviour: `use` on
+    // `React` is refused as `react-use`, and there is no bare `use()` rule.
+    for (const name of CELL_SOURCE_VALIDATION_MECHANISM.refusedReactOnlyMemberNames) {
+      expect(findingsFor(`React.${name}(promise);`), name).toEqual(["react-use"]);
+      expect(findingsFor(`${name}(promise);`), name).toEqual([]);
+    }
+    expect(refusedCalleeNames()).toEqual([
+      ...CELL_SOURCE_VALIDATION_MECHANISM.refusedBareCalleeNames,
+      ...CELL_SOURCE_VALIDATION_MECHANISM.refusedReactOnlyMemberNames,
+    ]);
+  });
+
+  // Per recorded name rather than by example: the mechanism visits `CallExpression`
+  // nodes, so a `new` expression must be silent for every name.
+  it("refuses a call and never a `new` expression, for every recorded name", () => {
     for (const name of CELL_SOURCE_VALIDATION_MECHANISM.refusedBareCalleeNames) {
       expect(findingsFor(`${name}();`), name).toHaveLength(1);
       expect(findingsFor(`new ${name}();`), name).toEqual([]);
     }
     for (const object of CELL_SOURCE_VALIDATION_MECHANISM.refusedMemberCalleeObjects) {
-      const member = `React.useActionState(fn, 0)`;
-      expect(findingsFor(member.replace("React", object))).toHaveLength(1);
-      expect(findingsFor(`new ${member.replace("React", object)}`)).toEqual([]);
+      const member = `${object}.useActionState(fn, 0)`;
+      expect(findingsFor(member), member).toHaveLength(1);
+      expect(findingsFor(`new ${member}`), member).toEqual([]);
     }
+  });
+
+  it("does not refuse the forms the mechanism excludes", () => {
+    // A computed member is excluded by the target's `callee.computed === true`.
+    for (const name of CELL_SOURCE_VALIDATION_MECHANISM.refusedBareCalleeNames) {
+      expect(findingsFor(`React["${name}"]();`), name).toEqual([]);
+    }
+  });
+
+  it("skips exactly the constructs that belong to the target's own parse, and says why", () => {
+    const skipped = CELL_SOURCE_SCAN_SKIPPED.map(omission => omission.id);
+    expect(skipped).toEqual([
+      "typescript-annotation",
+      "top-level-return",
+      "duplicate-top-level-declaration",
+      "top-level-await",
+      "runtime-import-call-not-rejected",
+    ]);
+    for (const omission of CELL_SOURCE_SCAN_SKIPPED) {
+      expect(omission.whyNotDecided.trim().length, omission.id).toBeGreaterThan(20);
+    }
+    // The last one is not a rejection at all, which is why the chunk rule exists.
+    expect(findCellSourceRejection("runtime-import-call-not-rejected").rejected).toBe(false);
   });
 });

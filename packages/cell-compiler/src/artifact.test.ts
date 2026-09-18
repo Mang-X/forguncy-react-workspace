@@ -470,7 +470,10 @@ describe("entry selection", () => {
 describe("the source guard", () => {
   it("refuses an export declaration in the bundle", async () => {
     const outcome = await compile({
-      module: { code: `export default function App() { return null; }` },
+      // Named so it cannot collide with the wrapper's own `App` binding: a
+      // duplicate would stop the artifact parsing, and then the source would be
+      // refused by the platform's parse rather than by this contract.
+      module: { code: `export default function Leaked() { return null; }` },
     });
     expect(rejectionCodes(outcome)).toEqual(["rejected-cell-source-construct"]);
   });

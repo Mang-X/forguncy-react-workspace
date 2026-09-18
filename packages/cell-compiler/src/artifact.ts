@@ -52,7 +52,7 @@ import {
   FRONTEND_LIBRARIES_FIELD_NAME,
   frontendLibraryIds,
 } from "./frontend-libraries";
-import { findDynamicImportCall, scanCellArtifactSource } from "./source-guard";
+import { auditCellSource } from "./source-guard";
 
 // ---------------------------------------------------------------------------
 // The finalized public interfaces
@@ -574,14 +574,18 @@ function auditEmittedAssets(emittedAssets: readonly string[]): readonly CellArti
  * so the origin is a function of the offset rather than a reason to write the
  * checks twice. Two copies would be two places for the wording or the code to
  * drift, which is exactly what makes a report disagree with itself.
+ *
+ * One audit call, not two, because both checks need the same parse and an artifact
+ * can be megabytes of minified bundle.
  */
 function auditArtifactSource(
   composedCode: string,
   originOf: (index: number) => string,
 ): readonly CellArtifactDiagnostic[] {
   const diagnostics: CellArtifactDiagnostic[] = [];
+  const audit = auditCellSource(composedCode);
 
-  for (const finding of scanCellArtifactSource(composedCode)) {
+  for (const finding of audit.findings) {
     diagnostics.push(
       createCellArtifactDiagnostic("rejected-cell-source-construct", finding.specifier ?? finding.match, {
         detail: `Found ${finding.occurrences} time(s) in ${originOf(finding.index)}, at line ${finding.line}. ReactCellType rejects it with: "${finding.platformMessage}"`,
@@ -590,11 +594,10 @@ function auditArtifactSource(
     );
   }
 
-  const dynamicImport = findDynamicImportCall(composedCode);
-  if (dynamicImport !== undefined) {
+  for (const dynamicImport of audit.dynamicImports) {
     diagnostics.push(
-      createCellArtifactDiagnostic("unsupported-runtime-asset", `${dynamicImport.match} (line ${dynamicImport.line})`, {
-        detail: `Found ${dynamicImport.occurrences} dynamic import call(s) in ${originOf(dynamicImport.index)}. The platform validator does not reject these, so nothing downstream will catch one that survives into production.`,
+      createCellArtifactDiagnostic("unsupported-runtime-asset", dynamicImport.match, {
+        detail: `Found ${dynamicImport.occurrences} dynamic import call(s) in ${originOf(dynamicImport.index)}, at line ${dynamicImport.line}. The platform validator does not reject these, so nothing downstream will catch one that survives into production.`,
         location: `line ${dynamicImport.line}`,
       }),
     );
