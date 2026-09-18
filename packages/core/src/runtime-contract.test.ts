@@ -19,7 +19,9 @@ import {
   CELL_SOURCE_REJECTIONS,
   CELL_SOURCE_REJECTION_ENVELOPE,
   CELL_SOURCE_SIZE_OBSERVATIONS,
+  CELL_SOURCE_VALIDATION_MECHANISM,
   CELL_USER_SCOPE_BINDINGS,
+  cellSourceValidationVisitsAstKey,
   cellUserScopeBinding,
   describeRuntimeContractTarget,
   emitCellEntryShapes,
@@ -526,6 +528,78 @@ describe("rejected source", () => {
     expect(() => findCellSourceRejection("not-a-rejection")).toThrow(/Unknown ReactCellType source rejection/);
   });
 });
+
+// The messages in `CELL_SOURCE_REJECTIONS` say what is refused; they cannot say
+// whether a construct is refused by its text or by its syntax. That difference
+// decides whether a local guard may scan raw source at all, so it is recorded
+// separately and pinned here.
+describe("how the target decides what to refuse", () => {
+  it("decides on parsed syntax nodes, not on text", () => {
+    const mechanism = CELL_SOURCE_VALIDATION_MECHANISM;
+
+    // Comments and tokens are skipped by the walk, so text inside them is never
+    // even visited — which is what makes a raw-text scan an over-rejection.
+    for (const key of ["leadingComments", "trailingComments", "innerComments", "tokens"]) {
+      expect(mechanism.skippedAstKeys, key).toContain(key);
+      expect(cellSourceValidationVisitsAstKey(key), key).toBe(false);
+    }
+    // The ordinary children of a node are still visited, so the predicate is not
+    // simply "false for everything".
+    expect(cellSourceValidationVisitsAstKey("body")).toBe(true);
+    expect(cellSourceValidationVisitsAstKey("callee")).toBe(true);
+  });
+
+  it("names the declaration nodes and the callee shapes it refuses", () => {
+    const mechanism = CELL_SOURCE_VALIDATION_MECHANISM;
+    expect(mechanism.refusedDeclarationNodeTypes).toEqual(["ImportDeclaration"]);
+    expect(mechanism.refusedDeclarationNodeTypePrefix).toBe("Export");
+    expect(mechanism.refusedBareCalleeNames).toEqual(["useActionState", "useOptimistic", "useFormStatus"]);
+    expect(mechanism.refusedMemberCalleeObjects).toEqual(["React", "ReactDOM"]);
+    expect(mechanism.refusedReactOnlyMemberNames).toEqual(["use"]);
+
+    // A `new X()` is a `NewExpression`, so this boundary is what stops a local
+    // guard from refusing something the platform accepts.
+    expect(mechanism.refusedCalleeNodeType).toBe("CallExpression");
+    expect(mechanism.note).toMatch(/new useFormStatus\(\)/);
+    expect(mechanism.note).toMatch(/computed member/);
+
+    // Every name refused as a bare call must also be the property of a refused
+    // member call, which is why one message table serves both.
+    for (const name of mechanism.refusedBareCalleeNames) {
+      expect(mechanism.refusedMemberNames, name).toContain(name);
+      expect(findCellSourceRejection(rejectionIdForCalleeName(name))).toBeDefined();
+    }
+  });
+
+  // The wrap is the reason a top-level `return` is legal to this pass and still
+  // refused later by the parse of the raw source.
+  it("wraps the source before checking calls, so this pass is not the raw parse", () => {
+    expect(CELL_SOURCE_VALIDATION_MECHANISM.reactCallCheckWrap).toContain("() =>");
+    expect(CELL_SOURCE_VALIDATION_MECHANISM.declarationSourceType).toBe("module");
+    expect(CELL_SOURCE_VALIDATION_MECHANISM.parseCall).toContain('presets: ["react"]');
+    expect(CELL_SOURCE_VALIDATION_MECHANISM.ignoresParseFailure).toBe(true);
+  });
+
+  it("carries the evidence channel it was read through, and a caveat", () => {
+    expect(CELL_SOURCE_VALIDATION_MECHANISM.evidence).toEqual(["product-runtime-source"]);
+    expect(CELL_SOURCE_VALIDATION_MECHANISM.note).toMatch(/is not refused/);
+    expect(CELL_SOURCE_VALIDATION_MECHANISM.note).toMatch(/import\(\.\.\.\)/);
+  });
+});
+
+/** The rejection record whose message the target throws for a refused callee name. */
+function rejectionIdForCalleeName(name: string): Parameters<typeof findCellSourceRejection>[0] {
+  const byName: Readonly<Record<string, Parameters<typeof findCellSourceRejection>[0]>> = {
+    useActionState: "use-action-state",
+    useOptimistic: "use-optimistic",
+    useFormStatus: "use-form-status",
+  };
+  const id = byName[name];
+  if (id === undefined) {
+    throw new Error(`No source rejection record is registered for the refused callee "${name}".`);
+  }
+  return id;
+}
 
 describe("names visible inside a cell", () => {
   it("keeps the injected parameters distinguishable from window globals", () => {
