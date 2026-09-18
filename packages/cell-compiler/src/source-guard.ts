@@ -32,11 +32,16 @@
  * This is a lexer, not a parser, and the limits are stated rather than left to be
  * discovered:
  *
- * - A regular-expression literal is not recognised, so a regex containing a quote
- *   or `//` can hide part of a line from the scan. The damage is bounded — a
- *   misread `'` or `"` cannot outlive its own line, because JavaScript forbids a
- *   raw newline in those literals — and it can only *lose* a finding, never invent
- *   one.
+ * - A regular-expression literal is recognised by looking backwards at the last
+ *   significant character — a `/` after a value is a division, after anything that
+ *   cannot end an expression it starts a literal. That rule is what keeps
+ *   `const re = /'/;` from swallowing the rest of its line and `const re =
+ *   /import()/;` from reading as a call. It is still a rule of thumb in one
+ *   corner: `)` and `}` are treated as ending an expression, so a regex used
+ *   immediately after a block (`if (x) {} /re/.test(y)`) reads as division, and
+ *   its contents are then scanned as code. Unlike the text-versus-syntax cases,
+ *   this one can go wrong in *both* directions, which is why it is stated here
+ *   rather than waved through.
  * - A line is the only window used to recover an import specifier, because the
  *   specifier is a string literal and strings are blanked by design. Minified
  *   output can put a whole module on one line, in which case the specifier read is
@@ -55,8 +60,9 @@
  *   does not refuse `import(...)`, so this module is the only thing standing
  *   between a runtime chunk load and production. That is why a template
  *   literal's `${...}` expressions are scanned as code rather than blanked with
- *   the surrounding text — the one place where a "safe" approximation would not
- *   have been safe.
+ *   the surrounding text, and why a regular expression has to be recognised rather
+ *   than guessed at — the two places where a "safe" approximation would not have
+ *   been safe.
  */
 
 import {
@@ -151,6 +157,19 @@ export function blankNonSyntaxText(source: string): string {
       continue;
     }
 
+    // After comments, so `//` and `/*` are already handled: a lone `/` is either a
+    // division or the start of a regular expression, and getting that wrong is the
+    // one approximation this module cannot afford — a regex holding `'` would hide
+    // the rest of its line from the chunk check.
+    if (current === "/" && startsRegularExpression(source, position)) {
+      const end = endOfRegularExpression(source, position);
+      if (end !== undefined) {
+        blank(position + 1, end - 1);
+        position = end;
+        continue;
+      }
+    }
+
     if (current === '"' || current === "'") {
       let cursor = position + 1;
       while (cursor < length) {
@@ -198,6 +217,104 @@ export function blankNonSyntaxText(source: string): string {
   }
 
   return characters.join("");
+}
+
+/**
+ * Keywords after which a `/` begins a regular expression rather than a division.
+ *
+ * Deliberately short: a word that is *not* listed is treated as a value, which is
+ * the common case (`x / y`), and listing fewer words can only turn a regex into a
+ * division, never the other way round.
+ */
+const EXPRESSION_POSITION_KEYWORDS = new Set([
+  "await",
+  "case",
+  "delete",
+  "do",
+  "else",
+  "extends",
+  "in",
+  "instanceof",
+  "new",
+  "of",
+  "return",
+  "throw",
+  "typeof",
+  "void",
+  "yield",
+]);
+
+/** Identifier characters, including the non-ASCII range a Chinese-language codebase actually uses. */
+function isIdentifierCharacter(character: string): boolean {
+  return /[A-Za-z0-9_$\u0080-\uFFFF]/.test(character);
+}
+
+/**
+ * Whether the `/` at `index` opens a regular expression.
+ *
+ * The rule is the grammatical one: a `/` after a value is a division, and after
+ * anything that cannot end an expression it begins a literal. It is decided by
+ * looking *backwards* from the one ambiguous character rather than by threading
+ * token state forwards, which keeps the decision local to the place it matters.
+ *
+ * `)` and `]` end a value; `}` is treated the same way, which is the single place
+ * this can be wrong — a regex straight after a block (`if (x) {} /re/.test(y)`)
+ * reads as a division. That is documented at the top of the module rather than
+ * hidden, because unlike the text-versus-syntax cases it can err in both
+ * directions.
+ */
+function startsRegularExpression(source: string, index: number): boolean {
+  let cursor = index - 1;
+  while (cursor >= 0 && /\s/.test(source[cursor] ?? "")) cursor -= 1;
+  if (cursor < 0) return true;
+
+  const character = source[cursor] ?? "";
+  if (character === ")" || character === "]" || character === "}") return false;
+  if (!isIdentifierCharacter(character)) return true;
+
+  let start = cursor;
+  while (start > 0 && isIdentifierCharacter(source[start - 1] ?? "")) start -= 1;
+  return EXPRESSION_POSITION_KEYWORDS.has(source.slice(start, cursor + 1));
+}
+
+/**
+ * The index just past the closing `/` of the regular expression beginning at
+ * `start`, or `undefined` when this is not one after all.
+ *
+ * `undefined` is the safe answer: the caller then treats the `/` as an ordinary
+ * character, so the text stays visible to the rules rather than being skipped. A
+ * literal cannot span a line, so running out of line ends the attempt — which is
+ * what keeps a division being guessed at as a regex from swallowing the file.
+ *
+ * Character classes are tracked because `/` is legal inside one: `/[/]/` has to
+ * end at its final slash, not at the one inside the brackets.
+ */
+function endOfRegularExpression(source: string, start: number): number | undefined {
+  let cursor = start + 1;
+  let inClass = false;
+
+  while (cursor < source.length) {
+    const character = source[cursor] ?? "";
+    if (character === "\\") {
+      cursor += 2;
+      continue;
+    }
+    if (character === "\n") return undefined;
+    if (inClass) {
+      if (character === "]") inClass = false;
+      cursor += 1;
+      continue;
+    }
+    if (character === "[") {
+      inClass = true;
+      cursor += 1;
+      continue;
+    }
+    if (character === "/") return cursor + 1;
+    cursor += 1;
+  }
+
+  return undefined;
 }
 
 export interface CellSourceScanRule {
@@ -425,8 +542,13 @@ export function scanCellArtifactSource(source: string): readonly CellSourceScanF
  * that the validator does not refuse it — it is a call, not a declaration.
  * Conflating the two would have a reader believe the platform will catch a
  * surviving dynamic import.
+ *
+ * The lookbehinds mirror the hook rules: `import` may not follow an identifier
+ * character or a dot, and `obj . import(...)` is a member call on a property named
+ * `import`, which is legal JavaScript and not a dynamic import — so a spaced dot
+ * has to be excluded too, not just an adjacent one.
  */
-export const DYNAMIC_IMPORT_CALL_PATTERN = "(?:^|[^\\w$.])import\\s*\\(";
+export const DYNAMIC_IMPORT_CALL_PATTERN = "(?<![\\w$.])(?<!\\.\\s*)import\\s*\\(";
 
 /** A dynamic `import()` call: a location like any other match, with nothing else to say about it. */
 export type CellSourceCallFinding = CellSourceFindingLocation;

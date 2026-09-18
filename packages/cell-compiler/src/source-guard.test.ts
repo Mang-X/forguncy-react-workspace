@@ -254,6 +254,67 @@ describe("blanking preserves position and reports nothing of its own", () => {
   });
 });
 
+// A `/` is a division or the start of a literal depending on what precedes it, and
+// getting that wrong errs in both directions — which matters most for the chunk
+// rule, the one check the platform does not back up.
+describe("regular expression literals", () => {
+  it("does not let a quote inside a regex hide the rest of its line", () => {
+    // The earlier version read the `'` as a string opener and blanked the rest of
+    // the line, including a real dynamic import that the platform would not catch.
+    expect(findDynamicImportCall("const re = /'/; import(\"./heavy.js\");")?.occurrences).toBe(1);
+    expect(findingsFor("const re = /'/; useFormStatus();")).toEqual(["use-form-status"]);
+  });
+
+  it("does not read a regex whose text looks like a call as a call", () => {
+    expect(findDynamicImportCall("const re = /import()/;")).toBeUndefined();
+    expect(findingsFor("const re = /useFormStatus(/;")).toEqual([]);
+    expect(findingsFor('const re = /import{x}from"y"/;')).toEqual([]);
+    expect(findDynamicImportCall("const ends = /x\\/y/; import('./x.js');")?.occurrences).toBe(1);
+  });
+
+  // Division has to stay division, or the scanner would treat the operator as a
+  // literal opener and skip everything up to the next slash.
+  it("keeps a division an operator and keeps what follows it visible", () => {
+    expect(findDynamicImportCall('const half = total / 2; import("./x.js");')?.occurrences).toBe(1);
+    expect(findingsFor("const half = total / 2; useFormStatus();")).toEqual(["use-form-status"]);
+    expect(findingsFor("const x = ratio() / 2; useOptimistic(a);")).toEqual(["use-optimistic"]);
+
+    const source = "const half = total / 2;\nconst re = /'/;\n";
+    const blanked = blankNonSyntaxText(source);
+    expect(blanked).toHaveLength(source.length);
+    expect(blanked.split("\n")[0]).toBe("const half = total / 2;");
+  });
+
+  // `/` is legal inside a character class, so the literal ends at the final slash.
+  it("tracks a character class so a slash inside one does not end the literal", () => {
+    expect(findDynamicImportCall("const re = /[/]/; import('./x.js');")?.occurrences).toBe(1);
+    expect(findingsFor("const re = /[useFormStatus(/]/;")).toEqual([]);
+  });
+
+  it("treats a regex after a keyword as a literal", () => {
+    expect(findDynamicImportCall("function f() { return /import()/; }")).toBeUndefined();
+    expect(findingsFor("function f() { return /useFormStatus(/; }")).toEqual([]);
+  });
+
+  // A member call on a property named `import` is legal JavaScript, and the spaced
+  // form is the one an adjacent-dot check misses.
+  it("ignores import used as a property name", () => {
+    expect(findDynamicImportCall('obj . import("./x.js");')).toBeUndefined();
+    expect(findDynamicImportCall('obj.import("./x.js");')).toBeUndefined();
+    expect(findDynamicImportCall('module.import("./x.js");')).toBeUndefined();
+    expect(findDynamicImportCall('const m = import("./x.js");')?.occurrences).toBe(1);
+    // Nested in a call is still a dynamic import, not a member access on `foo`.
+    expect(findDynamicImportCall('foo(import("./x.js"));')?.occurrences).toBe(1);
+  });
+
+  // The residual limit, pinned so it cannot change silently: `}` is read as ending
+  // a value, so a literal straight after a block reads as a division and its
+  // contents are scanned as code. See the module doc.
+  it("documents the one case the division rule gets wrong", () => {
+    expect(findDynamicImportCall("if (x) {} /import()/;")?.occurrences).toBe(1);
+  });
+});
+
 // The guard is a reproduction of a recorded mechanism, so the two can be checked
 // against each other instead of drifting apart one edit at a time.
 describe("faithfulness to the recorded mechanism", () => {
