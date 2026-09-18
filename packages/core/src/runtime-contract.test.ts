@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 
+import * as contract from "./runtime-contract";
 import {
   CELL_DATA_SOURCE_CONTRACT,
   CELL_ENTRY_RESOLUTION_ORDER,
   CELL_ENTRY_SHAPES,
+  CELL_FORGUNCY_FACADE,
   CELL_FORGUNCY_PROP_KEYS,
+  CELL_HOST_RUNTIME_SEMANTICS,
   CELL_PRESET_LIBRARIES,
   CELL_PRESET_LIBRARY_DEFAULT,
   CELL_PROPS_BASE_KEYS,
@@ -21,12 +24,15 @@ import {
   describeRuntimeContractTarget,
   emitCellEntryShapes,
   findCellEntryShape,
+  findCellHostRuntimeFact,
   findCellPresetLibrary,
   findCellSourceRejection,
+  FRONTEND_LIBRARY_REFERENCE_CONTRACT,
   FRONTEND_LIBRARY_REFERENCE_EXAMPLE,
   FRONTEND_LIBRARY_RUNTIME_SEMANTICS,
   nonWorkingCellEntryShapes,
   openRuntimeContractQuestions,
+  persistedDefaultCellPreset,
   rejectedCellSourceConstructs,
   RUNTIME_CONTRACT_TARGET,
   RUNTIME_CONTRACT_UNKNOWNS,
@@ -47,24 +53,67 @@ const EVIDENCE_CHANNELS: readonly RuntimeEvidenceChannel[] = [
   "generated-runtime-browser",
 ];
 
+interface EvidenceBearing {
+  readonly evidence: readonly RuntimeEvidenceChannel[];
+}
+
+function carriesEvidence(value: unknown): value is EvidenceBearing {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = (value as { evidence?: unknown }).evidence;
+  return Array.isArray(candidate) && candidate.length > 0;
+}
+
 /**
- * Every fact table in the module, so the "no unverified claim" rule is enforced
- * over the whole file instead of only the parts a reviewer happens to read.
+ * Values that are *not* facts about the target.
+ *
+ * Kept deliberately short: an unanswered question is recorded precisely because
+ * nobody observed an answer, so requiring evidence on it would be backwards.
  */
-const FACT_TABLES: readonly { readonly name: string; readonly evidence: readonly RuntimeEvidenceChannel[] }[] = [
+const NON_FACT_EXPORTS: readonly string[] = ["RUNTIME_CONTRACT_UNKNOWNS"];
+
+/**
+ * Values that restate an evidence-bearing record instead of carrying evidence
+ * themselves, mapped to the record they are derived from.
+ *
+ * Derivation is the point: a second copy of "AntDesign" or of the base props key
+ * list is a value that can drift from its own observation, so a derived value is
+ * only acceptable while it is genuinely produced from the evidenced record.
+ */
+const DERIVED_EXPORTS: Readonly<Record<string, string>> = {
+  CELL_PRESET_LIBRARY_DEFAULT: "CELL_PRESET_LIBRARIES",
+  CELL_PROPS_BASE_KEYS: "CELL_PROPS_KEY_ORDER",
+  CELL_FORGUNCY_PROP_KEYS: "CELL_FORGUNCY_FACADE",
+  CELL_SERVER_COMMAND_RESULT_KEYS: "CELL_SERVER_COMMANDS_CONTRACT",
+  FRONTEND_LIBRARY_REFERENCE_EXAMPLE: "FRONTEND_LIBRARY_REFERENCE_CONTRACT",
+};
+
+function isEvidenceBearingExport(name: string): boolean {
+  const value = (contract as Record<string, unknown>)[name];
+  if (carriesEvidence(value)) return true;
+  return Array.isArray(value) && value.length > 0 && value.every(carriesEvidence);
+}
+
+/** For the per-record assertions below: every fact record in the module. */
+const FACT_RECORDS: readonly { readonly name: string; readonly evidence: readonly RuntimeEvidenceChannel[] }[] = [
   { name: "RUNTIME_CONTRACT_TARGET", evidence: RUNTIME_CONTRACT_TARGET.evidence },
   { name: "CELL_SOURCE_EXECUTION_MODEL", evidence: CELL_SOURCE_EXECUTION_MODEL.evidence },
   { name: "CELL_PROPS_KEY_ORDER", evidence: CELL_PROPS_KEY_ORDER.evidence },
+  { name: "CELL_FORGUNCY_FACADE", evidence: CELL_FORGUNCY_FACADE.evidence },
   { name: "CELL_SERVER_COMMANDS_CONTRACT", evidence: CELL_SERVER_COMMANDS_CONTRACT.evidence },
   { name: "CELL_DATA_SOURCE_CONTRACT", evidence: CELL_DATA_SOURCE_CONTRACT.evidence },
   { name: "CELL_SOURCE_REJECTION_ENVELOPE", evidence: CELL_SOURCE_REJECTION_ENVELOPE.evidence },
   { name: "CELL_RUNTIME_RENDER_FAILURE_BEHAVIOR", evidence: CELL_RUNTIME_RENDER_FAILURE_BEHAVIOR.evidence },
   { name: "CELL_SOURCE_SIZE_OBSERVATIONS", evidence: CELL_SOURCE_SIZE_OBSERVATIONS.evidence },
+  { name: "FRONTEND_LIBRARY_REFERENCE_CONTRACT", evidence: FRONTEND_LIBRARY_REFERENCE_CONTRACT.evidence },
   { name: "FRONTEND_LIBRARY_RUNTIME_SEMANTICS", evidence: FRONTEND_LIBRARY_RUNTIME_SEMANTICS.evidence },
   ...CELL_ENTRY_SHAPES.map(shape => ({ name: `CELL_ENTRY_SHAPES.${shape.id}`, evidence: shape.evidence })),
   ...CELL_ENTRY_RESOLUTION_ORDER.map(step => ({
     name: `CELL_ENTRY_RESOLUTION_ORDER.${step.order}`,
     evidence: step.evidence,
+  })),
+  ...CELL_HOST_RUNTIME_SEMANTICS.map(fact => ({
+    name: `CELL_HOST_RUNTIME_SEMANTICS.${fact.id}`,
+    evidence: fact.evidence,
   })),
   ...CELL_SOURCE_REJECTIONS.map(rejection => ({
     name: `CELL_SOURCE_REJECTIONS.${rejection.id}`,
@@ -106,21 +155,75 @@ describe("runtime contract target", () => {
 
 // The Issue's fifth acceptance criterion is "no claim relies solely on
 // implementation guesses". The type system already forbids an `assumption`
-// channel; this asserts the weaker runtime property that no recorded fact was
-// left without one.
+// channel; the checks below assert the weaker runtime property that no recorded
+// fact was left without one.
 describe("evidence discipline", () => {
-  it("gives every fact at least one evidence channel", () => {
-    for (const table of FACT_TABLES) {
-      expect(table.evidence.length, table.name).toBeGreaterThan(0);
+  it("gives every fact record at least one evidence channel", () => {
+    for (const record of FACT_RECORDS) {
+      expect(record.evidence.length, record.name).toBeGreaterThan(0);
     }
   });
 
   it("uses only known evidence channels", () => {
-    for (const table of FACT_TABLES) {
-      for (const channel of table.evidence) {
-        expect(EVIDENCE_CHANNELS, table.name).toContain(channel);
+    for (const record of FACT_RECORDS) {
+      for (const channel of record.evidence) {
+        expect(EVIDENCE_CHANNELS, record.name).toContain(channel);
       }
     }
+  });
+
+  // The earlier version of this suite enumerated fact tables by hand, so a new
+  // exported constant could be added with no provenance while the suite stayed
+  // green. This walks the module namespace instead: every exported value has to
+  // be evidence-bearing, registered as derived from something evidenced, or
+  // explicitly declared non-factual.
+  it("classifies every exported value", () => {
+    const unclassified: string[] = [];
+    let examined = 0;
+    for (const [name, value] of Object.entries(contract as Record<string, unknown>)) {
+      // Module-interop artifacts are not values this module chose to export.
+      if (name === "__esModule" || name === "default") continue;
+      if (typeof value === "function") continue;
+      examined += 1;
+      if (NON_FACT_EXPORTS.includes(name)) continue;
+      if (name in DERIVED_EXPORTS) continue;
+
+      if (Array.isArray(value)) {
+        if (value.length === 0) unclassified.push(`${name} (empty list)`);
+        else if (!value.every(carriesEvidence)) unclassified.push(`${name} (item without evidence)`);
+        continue;
+      }
+
+      if (!carriesEvidence(value)) unclassified.push(`${name} (no evidence)`);
+    }
+
+    expect(
+      unclassified,
+      "An exported value must carry evidence, be registered in DERIVED_EXPORTS, or be declared non-factual.",
+    ).toEqual([]);
+
+    // Guard against a vacuous pass: if the namespace stopped being enumerable,
+    // the loop above would examine nothing and still report success.
+    expect(examined, "the guard must have inspected the module's exported values").toBeGreaterThan(15);
+  });
+
+  it("keeps every derived export attached to an evidenced record", () => {
+    for (const [name, source] of Object.entries(DERIVED_EXPORTS)) {
+      expect((contract as Record<string, unknown>)[name], `${name} must still be exported`).toBeDefined();
+      expect((contract as Record<string, unknown>)[source], `${name} derives from ${source}`).toBeDefined();
+      expect(isEvidenceBearingExport(source), `${name} derives from ${source}`).toBe(true);
+    }
+  });
+
+  // `toBe`, not `toEqual`: proof of derivation is that the value *is* the record's
+  // value, not a copy that happens to match today.
+  it("derives the derived values instead of restating them", () => {
+    expect(CELL_PRESET_LIBRARY_DEFAULT).toBe(persistedDefaultCellPreset().name);
+    expect(CELL_PRESET_LIBRARY_DEFAULT).toBe(findCellPresetLibrary("AntDesign").name);
+    expect(CELL_PROPS_BASE_KEYS).toBe(CELL_PROPS_KEY_ORDER.baseKeys);
+    expect(CELL_FORGUNCY_PROP_KEYS).toBe(CELL_FORGUNCY_FACADE.keys);
+    expect(CELL_SERVER_COMMAND_RESULT_KEYS).toBe(CELL_SERVER_COMMANDS_CONTRACT.resultKeys);
+    expect(FRONTEND_LIBRARY_REFERENCE_EXAMPLE).toBe(FRONTEND_LIBRARY_REFERENCE_CONTRACT.example);
   });
 
   it("records the open questions rather than guessing them", () => {
@@ -137,6 +240,58 @@ describe("evidence discipline", () => {
     const forBudget = openRuntimeContractQuestions("#21");
     expect(forBudget.map(unknown => unknown.id)).toContain("absolute-source-ceiling");
     expect(openRuntimeContractQuestions("#6").map(unknown => unknown.id)).toContain("property-change-re-render");
+  });
+});
+
+// The multi-cell facts are a class of their own: they describe the page the cells
+// share, not one cell's source, and they are what makes hooks and Context
+// cell-local by construction rather than by convention.
+describe("host runtime across cells", () => {
+  it("records that the page has one React instance shared by every cell", () => {
+    const fact = findCellHostRuntimeFact("single-react-instance-per-page");
+    expect(fact.statement).toMatch(/one React instance/);
+    expect(fact.evidence).toContain("generated-runtime-browser");
+  });
+
+  it("records the shared globalThis and the per-cell root", () => {
+    expect(findCellHostRuntimeFact("shared-global-this").statement).toMatch(/share one globalThis/);
+    expect(findCellHostRuntimeFact("one-react-root-per-cell").statement).toMatch(/its own ReactDOM root/);
+  });
+
+  it("states that React Context does not cross cell roots", () => {
+    const fact = findCellHostRuntimeFact("context-does-not-cross-cells");
+    expect(fact.statement).toMatch(/not visible to another cell/);
+    // This one was only established in the browser: the source shows separate
+    // roots, but the isolation itself was executed.
+    expect(fact.evidence).toEqual(["generated-runtime-browser"]);
+  });
+
+  it("says cell initialisation order is not layout order", () => {
+    expect(findCellHostRuntimeFact("initialisation-order-is-not-layout-order").statement).toMatch(
+      /not the layout order/,
+    );
+  });
+
+  it("gives every host runtime fact a way to be observed again", () => {
+    expect(CELL_HOST_RUNTIME_SEMANTICS.length).toBeGreaterThanOrEqual(5);
+    const ids = CELL_HOST_RUNTIME_SEMANTICS.map(fact => fact.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const fact of CELL_HOST_RUNTIME_SEMANTICS) {
+      expect(fact.statement.trim().length, fact.id).toBeGreaterThan(0);
+      expect(fact.howToObserve.trim().length, fact.id).toBeGreaterThan(0);
+    }
+  });
+
+  // Source-only facts must not look like executed ones.
+  it("marks the teardown fact as read rather than executed", () => {
+    const fact = findCellHostRuntimeFact("unmount-clears-the-cell-root");
+    expect(fact.evidence).toEqual(["product-runtime-source"]);
+    expect(fact.howToObserve).toMatch(/Not executed/);
+  });
+
+  it("rejects unknown fact ids", () => {
+    // @ts-expect-error an unknown id must not be accepted at the type level either
+    expect(() => findCellHostRuntimeFact("not-a-fact")).toThrow(/Unknown ReactCellType host runtime fact/);
   });
 });
 

@@ -126,6 +126,102 @@ export const CELL_SOURCE_EXECUTION_MODEL: CellSourceExecutionModel = {
 };
 
 // ---------------------------------------------------------------------------
+// Host runtime across cells
+// ---------------------------------------------------------------------------
+
+export type CellHostRuntimeFactId =
+  | "single-react-instance-per-page"
+  | "shared-global-this"
+  | "one-react-root-per-cell"
+  | "context-does-not-cross-cells"
+  | "initialisation-order-is-not-layout-order"
+  | "unmount-clears-the-cell-root";
+
+/**
+ * A fact about the page the cells live in, rather than about one cell's source.
+ *
+ * These are the facts a downstream consumer needs in order to reason about *more
+ * than one* cell at once, and they are the reason the target has no page-wide
+ * React subtree: it is what makes hooks, Context and module singletons
+ * cell-local by construction instead of by convention.
+ */
+export interface CellHostRuntimeFact {
+  readonly id: CellHostRuntimeFactId;
+  readonly statement: string;
+  /**
+   * How to re-run the observation. Kept because these facts are the kind that a
+   * later Forguncy version can silently change.
+   */
+  readonly howToObserve: string;
+  readonly evidence: readonly RuntimeEvidenceChannel[];
+}
+
+/**
+ * The verified multi-cell host runtime behaviour.
+ *
+ * `generated-runtime-browser` here means the fact was produced by executing
+ * probes on a page holding two or three React cells and reading the result back
+ * out of the live document — not by reading the product source and reasoning
+ * about it.
+ */
+export const CELL_HOST_RUNTIME_SEMANTICS: readonly CellHostRuntimeFact[] = [
+  {
+    id: "single-react-instance-per-page",
+    statement:
+      "Every cell receives the same host React object: there is one React instance for the whole page, not one per cell.",
+    howToObserve:
+      "Stamp a property on React from one cell and read it back from a second cell's entry; the second cell observes the first cell's stamp.",
+    evidence: ["product-runtime-source", "generated-runtime-browser"],
+  },
+  {
+    id: "shared-global-this",
+    statement:
+      "All cells on a page share one globalThis, so state published on a page global is visible to every cell.",
+    howToObserve:
+      "Have each cell append to a page-level array on globalThis and compare the accumulated length at each entry execution.",
+    evidence: ["product-runtime-source", "generated-runtime-browser"],
+  },
+  {
+    id: "one-react-root-per-cell",
+    statement:
+      "Each cell owns its own container element and its own ReactDOM root; cells are sibling roots rather than branches of one page-wide root.",
+    howToObserve:
+      "After the page settles, count the distinct elements carrying a __reactContainer$ property: one per React cell.",
+    evidence: ["product-runtime-source", "generated-runtime-browser"],
+  },
+  {
+    id: "context-does-not-cross-cells",
+    statement:
+      "A React context provided inside one cell is not visible to another cell, even though both cells share the same React object and can reference the same context object.",
+    howToObserve:
+      "Publish a context on globalThis from cell A, provide a non-default value inside cell A, and read that same context object from cell B: cell B sees the default value.",
+    evidence: ["generated-runtime-browser"],
+  },
+  {
+    id: "initialisation-order-is-not-layout-order",
+    statement: "Cell entry execution order is not the layout order of the cells on the page.",
+    howToObserve:
+      "Record an execution marker from every cell and compare the recorded order with the cell addresses; on the probe page the order was A, C, B for cells laid out at columns 1, 25 and 13.",
+    evidence: ["generated-runtime-browser"],
+  },
+  {
+    id: "unmount-clears-the-cell-root",
+    statement: "Teardown renders null into the cell's own root instead of unmounting a shared page root.",
+    howToObserve:
+      "Not executed: read from the runtime teardown path. Observing it needs a live page navigation while watching a cell root.",
+    evidence: ["product-runtime-source"],
+  },
+];
+
+export function findCellHostRuntimeFact(id: CellHostRuntimeFactId): CellHostRuntimeFact {
+  const fact = CELL_HOST_RUNTIME_SEMANTICS.find(candidate => candidate.id === id);
+  if (!fact) {
+    throw new Error(`Unknown ReactCellType host runtime fact "${id}".`);
+  }
+  return fact;
+}
+
+// ---------------------------------------------------------------------------
 // Entry shapes
 // ---------------------------------------------------------------------------
 
@@ -694,7 +790,22 @@ export const CELL_PRESET_LIBRARIES: readonly CellPresetLibrary[] = [
   },
 ];
 
-export const CELL_PRESET_LIBRARY_DEFAULT = "AntDesign";
+/**
+ * The preset the platform persists when a cell omits `libraries`.
+ *
+ * Derived rather than restated: "the default is AntDesign" is a property of the
+ * preset record above, so writing the name a second time would create a value
+ * that can drift away from its own evidence.
+ */
+export function persistedDefaultCellPreset(): CellPresetLibrary {
+  const preset = CELL_PRESET_LIBRARIES.find(candidate => candidate.isPersistedDefault);
+  if (!preset) {
+    throw new Error("No ReactCellType preset library is marked as the persisted default.");
+  }
+  return preset;
+}
+
+export const CELL_PRESET_LIBRARY_DEFAULT = persistedDefaultCellPreset().name;
 
 export function findCellPresetLibrary(name: CellPresetLibrary["name"]): CellPresetLibrary {
   const preset = CELL_PRESET_LIBRARIES.find(candidate => candidate.name === name);
@@ -709,50 +820,67 @@ export function findCellPresetLibrary(name: CellPresetLibrary["name"]): CellPres
 // ---------------------------------------------------------------------------
 
 /**
- * The base `props` contract.
+ * The base `props` contract: the keys the runtime always injects, in the order it
+ * injects them.
  *
- * The order is the runtime's own initialisation order, which is observable and
- * therefore worth pinning: a generator that snapshots `Object.keys(props)` in a
- * fixture will see base keys first, then configured properties, then
- * `ImageContext`.
+ * The order is observable and therefore worth pinning: a generator that snapshots
+ * `Object.keys(props)` in a fixture sees the base keys first, then configured
+ * properties, then `ImageContext`. The key list lives on the record itself so it
+ * cannot drift away from its evidence.
  */
-export const CELL_PROPS_BASE_KEYS = ["Forguncy", "Permissions", "ServerCommands", "ImageContext"] as const;
-
 export const CELL_PROPS_KEY_ORDER = {
+  /** Always present, in this order, before any configured property. */
+  baseKeys: ["Forguncy", "Permissions", "ServerCommands", "ImageContext"] as const,
   description:
     "Forguncy, then Permissions, then configured properties[].propertyName, then ImageContext; event handlers and configured permissions are injected before properties",
   evidence: ["product-runtime-source", "generated-runtime-browser"] as readonly RuntimeEvidenceChannel[],
 };
 
-export const CELL_FORGUNCY_PROP_KEYS = [
-  "ConvertDateToOADate",
-  "ConvertOADateToDate",
-  "ConvertToCssColor",
-  "DataSourceCompareType",
-  "DataSourceRelationType",
-  "Permissions",
-  "exposeMethod",
-  "getCurrentUser",
-  "getPermissions",
-  "getUploadLimit",
-  "hasPermission",
-  "logIn",
-  "logOut",
-  "uploadFiles",
-] as const;
+/** Derived from {@link CELL_PROPS_KEY_ORDER}. */
+export const CELL_PROPS_BASE_KEYS = CELL_PROPS_KEY_ORDER.baseKeys;
 
-export const CELL_SERVER_COMMAND_RESULT_KEYS = ["errorCode", "errorMessage"] as const;
+export const CELL_FORGUNCY_FACADE = {
+  /** The runtime API surface exposed to a cell as `props.Forguncy`. */
+  keys: [
+    "ConvertDateToOADate",
+    "ConvertOADateToDate",
+    "ConvertToCssColor",
+    "DataSourceCompareType",
+    "DataSourceRelationType",
+    "Permissions",
+    "exposeMethod",
+    "getCurrentUser",
+    "getPermissions",
+    "getUploadLimit",
+    "hasPermission",
+    "logIn",
+    "logOut",
+    "uploadFiles",
+  ] as const,
+  description: "the cell's handle on Forguncy-owned capabilities, injected as props.Forguncy",
+  evidence: ["product-runtime-source", "generated-runtime-browser"] as readonly RuntimeEvidenceChannel[],
+};
+
+/** Derived from {@link CELL_FORGUNCY_FACADE}. */
+export const CELL_FORGUNCY_PROP_KEYS = CELL_FORGUNCY_FACADE.keys;
 
 export const CELL_SERVER_COMMANDS_CONTRACT = {
   /** Only the names listed in `availableServerCommands` are present. */
   shape: "a record of command name to async function",
+  /**
+   * The reserved result keys. Every other key on a result is one of the
+   * command's own named returns.
+   */
+  resultKeys: ["errorCode", "errorMessage"] as const,
   /** Calling a name that was not configured is a plain TypeError, not a platform error. */
   unconfiguredNameType: "undefined",
   unconfiguredCallOutcome: "TypeError: <name> is not a function",
-  /** Extra keys beyond the two reserved ones are the command's own named returns. */
   namedReturnsAreExtraKeys: true,
   evidence: ["product-runtime-source", "product-documentation", "generated-runtime-browser"] as readonly RuntimeEvidenceChannel[],
 };
+
+/** Derived from {@link CELL_SERVER_COMMANDS_CONTRACT}. */
+export const CELL_SERVER_COMMAND_RESULT_KEYS = CELL_SERVER_COMMANDS_CONTRACT.resultKeys;
 
 export const CELL_DATA_SOURCE_CONTRACT = {
   resultFieldsExecuted: ["data", "totalCount", "loading", "error"],
@@ -773,9 +901,18 @@ export interface FrontendLibraryReference {
   readonly libraryId: string;
 }
 
-export const FRONTEND_LIBRARY_REFERENCE_EXAMPLE: FrontendLibraryReference = {
-  libraryId: "<api.app.listFrontendLibraries[].id>",
+export const FRONTEND_LIBRARY_REFERENCE_CONTRACT = {
+  /** The only field a reference carries. */
+  fieldName: "libraryId",
+  /** Where the value has to come from. */
+  fieldSource: "api.app.listFrontendLibraries[].id",
+  example: { libraryId: "<api.app.listFrontendLibraries[].id>" },
+  evidence: ["product-documentation", "designer-api", "generated-runtime-browser"] as readonly RuntimeEvidenceChannel[],
 };
+
+/** Derived from {@link FRONTEND_LIBRARY_REFERENCE_CONTRACT}. */
+export const FRONTEND_LIBRARY_REFERENCE_EXAMPLE: FrontendLibraryReference =
+  FRONTEND_LIBRARY_REFERENCE_CONTRACT.example;
 
 export const FRONTEND_LIBRARY_RUNTIME_SEMANTICS = {
   loadedThrough: "Forguncy.ensureFrontendLibrariesLoaded(libraryIds)",
