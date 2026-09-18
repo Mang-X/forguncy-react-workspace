@@ -2,12 +2,15 @@
  * `@forguncy-react-workspace/core` — the executable projection of the
  * architecture decisions that every other package must obey.
  *
- * Governing Spec Issue: #4 "application ownership boundaries and dependency
- * strategy semantics" — https://github.com/Mang-X/forguncy-react-workspace/issues/4
+ * Governing architecture Spec Issues:
+ * - #4 "application ownership boundaries and dependency strategy semantics"
+ *   — https://github.com/Mang-X/forguncy-react-workspace/issues/4
+ * - #5 "establish the ReactCellType target/runtime contract on Forguncy 12.0.100"
+ *   — https://github.com/Mang-X/forguncy-react-workspace/issues/5
  *
- * Scope note: this package states *semantics and boundaries*. It intentionally
- * does not resolve dependencies, bundle anything, or maintain a package
- * compatibility database; those are separate Issues.
+ * Scope note: this package states *semantics, boundaries and verified target
+ * facts*. It intentionally does not resolve dependencies, bundle anything, or
+ * maintain a package compatibility database; those are separate Issues.
  */
 
 export {
@@ -93,11 +96,77 @@ export type {
 
 export {
   citesDecision,
+  citesEveryArchitectureDecision,
+  citationPatternsFor,
   DECISION_CITATION_PATTERNS,
+  decisionReference,
   formatDecisionReference,
+  formatGoverningSpecReferenceLine,
+  GOVERNING_ARCHITECTURE_DECISIONS,
+  GOVERNING_ARCHITECTURE_SPEC_REFERENCE_LINE,
   GOVERNING_SPEC_REFERENCE_LINE,
   OWNERSHIP_AND_DEPENDENCY_DECISION,
   OWNERSHIP_AND_DEPENDENCY_DECISION_QUALIFIED_REFERENCE,
   OWNERSHIP_AND_DEPENDENCY_DECISION_REFERENCE,
+  qualifiedDecisionReference,
+  RUNTIME_CONTRACT_CITATION_PATTERNS,
+  RUNTIME_CONTRACT_DECISION,
+  RUNTIME_CONTRACT_DECISION_QUALIFIED_REFERENCE,
+  RUNTIME_CONTRACT_DECISION_REFERENCE,
 } from "./governance";
 export type { ArchitectureDecisionSource } from "./governance";
+
+export {
+  CELL_DATA_SOURCE_CONTRACT,
+  CELL_ENTRY_RESOLUTION_ORDER,
+  CELL_ENTRY_SHAPES,
+  CELL_FORGUNCY_FACADE,
+  CELL_FORGUNCY_PROP_KEYS,
+  CELL_HOST_RUNTIME_SEMANTICS,
+  CELL_PRESET_LIBRARIES,
+  CELL_PRESET_LIBRARY_DEFAULT,
+  CELL_PROPS_BASE_KEYS,
+  CELL_PROPS_KEY_ORDER,
+  CELL_RUNTIME_RENDER_FAILURE_BEHAVIOR,
+  CELL_SERVER_COMMANDS_CONTRACT,
+  CELL_SERVER_COMMAND_RESULT_KEYS,
+  CELL_SOURCE_EXECUTION_MODEL,
+  CELL_SOURCE_REJECTIONS,
+  CELL_SOURCE_REJECTION_ENVELOPE,
+  CELL_SOURCE_SIZE_OBSERVATIONS,
+  CELL_USER_SCOPE_BINDINGS,
+  cellUserScopeBinding,
+  describeRuntimeContractTarget,
+  emitCellEntryShapes,
+  findCellEntryShape,
+  findCellHostRuntimeFact,
+  findCellPresetLibrary,
+  findCellSourceRejection,
+  FRONTEND_LIBRARY_REFERENCE_CONTRACT,
+  FRONTEND_LIBRARY_REFERENCE_EXAMPLE,
+  FRONTEND_LIBRARY_RUNTIME_SEMANTICS,
+  nonWorkingCellEntryShapes,
+  openRuntimeContractQuestions,
+  persistedDefaultCellPreset,
+  rejectedCellSourceConstructs,
+  RUNTIME_CONTRACT_TARGET,
+  RUNTIME_CONTRACT_UNKNOWNS,
+  RUNTIME_EVIDENCE_CHANNELS,
+} from "./runtime-contract";
+export type {
+  CellBindingAvailability,
+  CellEntryKind,
+  CellEntryResolutionStep,
+  CellEntryShape,
+  CellHostRuntimeFact,
+  CellHostRuntimeFactId,
+  CellPresetLibrary,
+  CellSourceExecutionModel,
+  CellSourceRejection,
+  CellSourceRejectionId,
+  CellUserScopeBinding,
+  FrontendLibraryReference,
+  RuntimeContractTarget,
+  RuntimeContractUnknown,
+  RuntimeEvidenceChannel,
+} from "./runtime-contract";

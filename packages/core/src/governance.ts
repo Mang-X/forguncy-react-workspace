@@ -1,14 +1,14 @@
 /**
  * Decision provenance.
  *
- * Decision source: GitHub Issue #4, acceptance criterion "Later Specs reference
- * this Issue when deciding ownership".
+ * Decision sources: GitHub Issues #4 and #5, which are the architecture Specs
+ * this repository's code has to obey.
  *
  * Repository rules put Specs in Issues and forbid a duplicated `specs/` tree.
- * That removes the usual place to cite a design decision, so ownership and
- * dependency decisions need a canonical, machine-readable back-reference. It is
- * exported from `core` rather than written into a document so a later Spec,
- * Agent flow or test can assert it instead of remembering it.
+ * That removes the usual place to cite a design decision, so decisions need a
+ * canonical, machine-readable back-reference. They are exported from `core`
+ * rather than written into a document so a later Spec, Agent flow or test can
+ * assert them instead of remembering them.
  */
 
 export interface ArchitectureDecisionSource {
@@ -25,20 +25,64 @@ export const OWNERSHIP_AND_DEPENDENCY_DECISION: ArchitectureDecisionSource = {
   url: "https://github.com/Mang-X/forguncy-react-workspace/issues/4",
 };
 
+/**
+ * The verified target contract. Specs and implementations that make a claim
+ * about Forguncy runtime behaviour are governed by this Issue, because it is
+ * where those claims were converted into observed facts.
+ */
+export const RUNTIME_CONTRACT_DECISION: ArchitectureDecisionSource = {
+  repository: "Mang-X/forguncy-react-workspace",
+  issue: 5,
+  title: "Research: establish the ReactCellType target/runtime contract on Forguncy 12.0.100",
+  url: "https://github.com/Mang-X/forguncy-react-workspace/issues/5",
+};
+
+/** Every governing architecture Spec, in the order a document should cite them. */
+export const GOVERNING_ARCHITECTURE_DECISIONS: readonly ArchitectureDecisionSource[] = [
+  OWNERSHIP_AND_DEPENDENCY_DECISION,
+  RUNTIME_CONTRACT_DECISION,
+];
+
 /** Short form, e.g. `#4`. For checklists and report headers. */
-export const OWNERSHIP_AND_DEPENDENCY_DECISION_REFERENCE = `#${OWNERSHIP_AND_DEPENDENCY_DECISION.issue}`;
+export function decisionReference(source: ArchitectureDecisionSource): string {
+  return `#${source.issue}`;
+}
 
 /**
- * Repo-qualified short form, e.g. `Mang-X/forguncy-react-workspace#4`. Use it
+ * Repo-qualified short form, e.g. `Mang-X/forguncy-react-workspace#5`. Use it
  * when a reference travels outside this repository.
  */
-export const OWNERSHIP_AND_DEPENDENCY_DECISION_QUALIFIED_REFERENCE = `${OWNERSHIP_AND_DEPENDENCY_DECISION.repository}${OWNERSHIP_AND_DEPENDENCY_DECISION_REFERENCE}`;
+export function qualifiedDecisionReference(source: ArchitectureDecisionSource): string {
+  return `${source.repository}${decisionReference(source)}`;
+}
+
+export const OWNERSHIP_AND_DEPENDENCY_DECISION_REFERENCE = decisionReference(OWNERSHIP_AND_DEPENDENCY_DECISION);
+
+export const OWNERSHIP_AND_DEPENDENCY_DECISION_QUALIFIED_REFERENCE = qualifiedDecisionReference(
+  OWNERSHIP_AND_DEPENDENCY_DECISION,
+);
+
+export const RUNTIME_CONTRACT_DECISION_REFERENCE = decisionReference(RUNTIME_CONTRACT_DECISION);
+
+export const RUNTIME_CONTRACT_DECISION_QUALIFIED_REFERENCE = qualifiedDecisionReference(RUNTIME_CONTRACT_DECISION);
 
 /**
  * The line every ownership/dependency Spec, plan and PR is expected to carry.
- * Used by repository templates and by the governance test.
+ *
+ * Deliberately still single-Spec: it is the reference line for the ownership and
+ * dependency decision specifically, and documents that also answer to the
+ * runtime contract decision should use {@link GOVERNING_ARCHITECTURE_SPEC_REFERENCE_LINE}.
  */
 export const GOVERNING_SPEC_REFERENCE_LINE = `Governing architecture Spec Issue(s): ${OWNERSHIP_AND_DEPENDENCY_DECISION_REFERENCE}`;
+
+/** The full reference line for a document governed by every architecture Spec. */
+export const GOVERNING_ARCHITECTURE_SPEC_REFERENCE_LINE = formatGoverningSpecReferenceLine();
+
+export function formatGoverningSpecReferenceLine(
+  sources: readonly ArchitectureDecisionSource[] = GOVERNING_ARCHITECTURE_DECISIONS,
+): string {
+  return `Governing architecture Spec Issue(s): ${sources.map(decisionReference).join(", ")}`;
+}
 
 export function formatDecisionReference(source: ArchitectureDecisionSource = OWNERSHIP_AND_DEPENDENCY_DECISION): string {
   return `${source.repository}#${source.issue} — ${source.title} (${source.url})`;
@@ -48,16 +92,13 @@ function escapeForRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-const decisionIssue = String(OWNERSHIP_AND_DEPENDENCY_DECISION.issue);
-const decisionRepositoryPattern = escapeForRegExp(OWNERSHIP_AND_DEPENDENCY_DECISION.repository);
-
 /**
- * Patterns a governance document must match to count as citing the decision.
+ * Patterns a governance document must match to count as citing `source`.
  *
  * Deliberately boundary-aware rather than substring-based: `#4` is a prefix of
  * `#40`, `#42` and so on, so `text.includes("#4")` would report a citation of a
  * completely different Issue as a citation of this one. Every accepted form is
- * anchored on this decision — a bare `#4`, or an `/issues/4` URL, belonging to
+ * anchored on the decision — a bare `#4`, or an `/issues/4` URL, belonging to
  * some other repository must not satisfy this decision's check.
  *
  * Three accepted forms:
@@ -70,19 +111,44 @@ const decisionRepositoryPattern = escapeForRegExp(OWNERSHIP_AND_DEPENDENCY_DECIS
  * 2. a bare `#4` reference;
  * 3. `owner/repo/issues/4`.
  *
- * Exported as data so the governance test and any future lint share one
- * definition.
+ * Generalised to any decision so that a second governing Spec does not have to
+ * duplicate the boundary reasoning above and get it subtly wrong.
  */
-export const DECISION_CITATION_PATTERNS: readonly RegExp[] = [
-  // 1. owner/repo#4
-  new RegExp(`(?:^|[^0-9A-Za-z_./-])${decisionRepositoryPattern}#${decisionIssue}(?![0-9A-Za-z_])`),
-  // 2. `#4` as a whole reference, not the head of a longer number or identifier.
-  new RegExp(`(?:^|[^0-9A-Za-z_#])#${decisionIssue}(?![0-9A-Za-z_])`),
-  // 3. <repository>/issues/4, anchored on the exact repository path and not the
-  //    head of `/issues/40`.
-  new RegExp(`${decisionRepositoryPattern}/issues/${decisionIssue}(?![0-9])`),
-];
+export function citationPatternsFor(source: ArchitectureDecisionSource): readonly RegExp[] {
+  const issue = String(source.issue);
+  const repositoryPattern = escapeForRegExp(source.repository);
+  return [
+    // 1. owner/repo#4
+    new RegExp(`(?:^|[^0-9A-Za-z_./-])${repositoryPattern}#${issue}(?![0-9A-Za-z_])`),
+    // 2. `#4` as a whole reference, not the head of a longer number or identifier.
+    new RegExp(`(?:^|[^0-9A-Za-z_#])#${issue}(?![0-9A-Za-z_])`),
+    // 3. <repository>/issues/4, anchored on the exact repository path and not the
+    //    head of `/issues/40`.
+    new RegExp(`${repositoryPattern}/issues/${issue}(?![0-9])`),
+  ];
+}
 
-export function citesDecision(text: string): boolean {
-  return DECISION_CITATION_PATTERNS.some(pattern => pattern.test(text));
+/**
+ * Patterns a governance document must match to count as citing the ownership and
+ * dependency decision. Exported as data so the governance test and any future
+ * lint share one definition.
+ */
+export const DECISION_CITATION_PATTERNS: readonly RegExp[] = citationPatternsFor(OWNERSHIP_AND_DEPENDENCY_DECISION);
+
+export const RUNTIME_CONTRACT_CITATION_PATTERNS: readonly RegExp[] =
+  citationPatternsFor(RUNTIME_CONTRACT_DECISION);
+
+export function citesDecision(
+  text: string,
+  source: ArchitectureDecisionSource = OWNERSHIP_AND_DEPENDENCY_DECISION,
+): boolean {
+  return citationPatternsFor(source).some(pattern => pattern.test(text));
+}
+
+/** True when a document cites every governing architecture Spec. */
+export function citesEveryArchitectureDecision(
+  text: string,
+  sources: readonly ArchitectureDecisionSource[] = GOVERNING_ARCHITECTURE_DECISIONS,
+): boolean {
+  return sources.every(source => citesDecision(text, source));
 }
