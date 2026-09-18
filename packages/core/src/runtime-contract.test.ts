@@ -557,6 +557,12 @@ describe("how the target decides what to refuse", () => {
     expect(mechanism.refusedMemberCalleeObjects).toEqual(["React", "ReactDOM"]);
     expect(mechanism.refusedReactOnlyMemberNames).toEqual(["use"]);
 
+    // A `new X()` is a `NewExpression`, so this boundary is what stops a local
+    // guard from refusing something the platform accepts.
+    expect(mechanism.refusedCalleeNodeType).toBe("CallExpression");
+    expect(mechanism.note).toMatch(/new useFormStatus\(\)/);
+    expect(mechanism.note).toMatch(/computed member/);
+
     // Every name refused as a bare call must also be the property of a refused
     // member call, which is why one message table serves both.
     for (const name of mechanism.refusedBareCalleeNames) {

@@ -40,6 +40,44 @@ describe("false positives the raw-text scan used to produce", () => {
     expect(findingsFor("const s = `\nimport x from \"pkg\"\n`;")).toEqual([]);
   });
 
+  // A template's `${…}` is real syntax the platform's AST visits, so blanking the
+  // whole literal would hide code — and for the chunk rule that is not a deferred
+  // finding, because the platform does not refuse `import(...)` at all.
+  it("scans template interpolations as code rather than blanking them", () => {
+    expect(findingsFor("const s = `${useFormStatus()}`;")).toEqual(["use-form-status"]);
+    expect(findingsFor("const s = `a${ `b${useFormStatus()}` }`;")).toEqual(["use-form-status"]);
+    expect(findingsFor("const s = `${React.useOptimistic(state)}`;")).toEqual(["use-optimistic"]);
+
+    const dynamicImport = findDynamicImportCall('const value = `${import("./heavy.js")}`;');
+    expect(dynamicImport?.occurrences).toBe(1);
+  });
+
+  // The interpolation is code, but what is *inside* it still obeys the same rules:
+  // a string within an interpolation is text again.
+  it("keeps a literal inside an interpolation blank", () => {
+    expect(findingsFor('const s = `${"useFormStatus("}`;')).toEqual([]);
+    expect(findDynamicImportCall('const s = `${"import(\\"./x.js\\")"}`;')).toBeUndefined();
+    // Braces inside the interpolation close it, and the literal resumes.
+    expect(findingsFor('const s = `${ {a: 1} }`;\nuseFormStatus();')).toEqual(["use-form-status"]);
+  });
+
+  it("ignores a `new` expression, which the target never sees", () => {
+    expect(findingsFor("new useFormStatus();")).toEqual([]);
+    expect(findingsFor("new React.useFormStatus();")).toEqual([]);
+    expect(findingsFor("const x = new  useOptimistic(a, b);")).toEqual([]);
+    // `renew` is not `new`, so the call behind it is still refused.
+    expect(findingsFor("renew useFormStatus();")).toEqual(["use-form-status"]);
+  });
+
+  // Matching the keyword by shape rather than by position is what keeps a property
+  // named `import` from reading as a declaration.
+  it("ignores `import` and `export` used as property names", () => {
+    expect(findingsFor("const o = { import: 1 };")).toEqual([]);
+    expect(findingsFor("const o = { export: 1 };")).toEqual([]);
+    expect(findingsFor("obj.import = 1;")).toEqual([]);
+    expect(findingsFor("module.exports = App;")).toEqual([]);
+  });
+
   it("ignores a dynamic import inside a string", () => {
     expect(findDynamicImportCall('const s = "import(\\"./heavy.js\\")";')).toBeUndefined();
     expect(findDynamicImportCall("// import('./x.js')")).toBeUndefined();
@@ -90,6 +128,32 @@ describe("constructs the target refuses are still found", () => {
     expect(scanCellArtifactSource('import "antd/reset.css";')[0]?.specifier).toBe("antd/reset.css");
     expect(scanCellArtifactSource('import { a } from "pkg";')[0]?.specifier).toBe("pkg");
     expect(scanCellArtifactSource('import * as ns from "pkg";')[0]?.specifier).toBe("pkg");
+  });
+
+  // `ImportDeclaration` is an AST concept, not "a line that starts with import
+  // followed by a space". Minifiers emit all of these, and the platform refuses
+  // every one of them.
+  it("finds the minified module syntax a line-anchored rule would miss", () => {
+    expect(scanCellArtifactSource('import{x}from"x";').map(finding => finding.id)).toEqual([
+      "import-declaration",
+    ]);
+    expect(scanCellArtifactSource('import{x}from"x";')[0]?.specifier).toBe("x");
+    expect(scanCellArtifactSource('import"x";')[0]?.specifier).toBe("x");
+    expect(scanCellArtifactSource('import*as n from"x";')[0]?.specifier).toBe("x");
+
+    const sameLine = scanCellArtifactSource("const x=1;export{x};");
+    expect(sameLine.map(finding => finding.id)).toEqual(["export-declaration"]);
+    expect(sameLine[0]?.index).toBe(10);
+  });
+
+  it("still excludes the two other meanings of `import`", () => {
+    // The call form is refused by nobody: not by the target, and by this module
+    // only through the chunk rule.
+    expect(findingsFor('import("./x.js");')).toEqual([]);
+    expect(findingsFor("import.meta.url;")).toEqual([]);
+    expect(scanCellArtifactSource("import (x);").map(finding => finding.id)).not.toContain(
+      "import-declaration",
+    );
   });
 
   it("finds an export declaration", () => {
@@ -233,6 +297,23 @@ describe("faithfulness to the recorded mechanism", () => {
       expect(rule.whyFaithfulToTarget.trim().length, rule.id).toBeGreaterThan(20);
       // Never compiled without the anchors that keep it off raw text.
       expect(() => new RegExp(rule.pattern, "gm")).not.toThrow();
+    }
+  });
+
+  // The callee-kind boundary, checked per recorded name rather than by example:
+  // the mechanism visits `CallExpression` nodes, so a `new` expression must be
+  // silent here for every name, not merely for the one in the test above.
+  it("refuses a call and never a `new` expression, for every recorded name", () => {
+    expect(CELL_SOURCE_VALIDATION_MECHANISM.refusedCalleeNodeType).toBe("CallExpression");
+
+    for (const name of CELL_SOURCE_VALIDATION_MECHANISM.refusedBareCalleeNames) {
+      expect(findingsFor(`${name}();`), name).toHaveLength(1);
+      expect(findingsFor(`new ${name}();`), name).toEqual([]);
+    }
+    for (const object of CELL_SOURCE_VALIDATION_MECHANISM.refusedMemberCalleeObjects) {
+      const member = `React.useActionState(fn, 0)`;
+      expect(findingsFor(member.replace("React", object))).toHaveLength(1);
+      expect(findingsFor(`new ${member.replace("React", object)}`)).toEqual([]);
     }
   });
 });

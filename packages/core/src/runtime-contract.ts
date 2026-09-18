@@ -641,6 +641,14 @@ export interface CellSourceValidationMechanism {
   readonly refusedDeclarationNodeTypePrefix: string;
   /** How the call check wraps the source before parsing it. */
   readonly reactCallCheckWrap: string;
+  /**
+   * The node type the callee check visits.
+   *
+   * Recorded because it is a boundary a consumer gets wrong by assuming "a call":
+   * `new useFormStatus()` is a `NewExpression`, which this check never sees, so
+   * refusing it locally would refuse something the platform accepts.
+   */
+  readonly refusedCalleeNodeType: string;
   /** Bare callee identifiers refused when called. */
   readonly refusedBareCalleeNames: readonly string[];
   /** Objects whose non-computed members are refused when called. */
@@ -669,6 +677,7 @@ export const CELL_SOURCE_VALIDATION_MECHANISM: CellSourceValidationMechanism = {
   refusedDeclarationNodeTypes: ["ImportDeclaration"],
   refusedDeclarationNodeTypePrefix: "Export",
   reactCallCheckWrap: "(() => {\n<source>\n})();",
+  refusedCalleeNodeType: "CallExpression",
   refusedBareCalleeNames: ["useActionState", "useOptimistic", "useFormStatus"],
   refusedMemberCalleeObjects: ["React", "ReactDOM"],
   refusedMemberNames: ["useActionState", "useOptimistic", "useFormStatus"],
@@ -676,7 +685,7 @@ export const CELL_SOURCE_VALIDATION_MECHANISM: CellSourceValidationMechanism = {
   // Comments and tokens are skipped, so nothing inside them is ever visited.
   skippedAstKeys: ["loc", "start", "end", "leadingComments", "trailingComments", "innerComments", "tokens"],
   ignoresParseFailure: true,
-  note: "Both checks walk parsed syntax nodes, so a string, template literal or comment that merely contains the same characters is not refused. The call check also ignores a computed member (`React[\"use\"]()`), and `import(...)` is a call rather than a declaration, which is why the validator does not reject it.",
+  note: "Both checks walk parsed syntax nodes, so a string, template literal or comment that merely contains the same characters is not refused. Three boundaries follow from the node types and are easy to get wrong: the callee check visits `CallExpression` only, so `new useFormStatus()` is not refused; a computed member (`React[\"use\"]()`) is not refused; and `import(...)` is a call rather than a declaration, which is why the validator does not reject it.",
   evidence: ["product-runtime-source"],
 };
 

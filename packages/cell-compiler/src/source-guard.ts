@@ -37,13 +37,26 @@
  *   misread `'` or `"` cannot outlive its own line, because JavaScript forbids a
  *   raw newline in those literals — and it can only *lose* a finding, never invent
  *   one.
- * - A `${...}` expression inside a template literal is blanked with the literal,
- *   so a refused call inside one is not reported here.
- * - `new useFormStatus()` is a `NewExpression` to the platform and a match here.
+ * - A line is the only window used to recover an import specifier, because the
+ *   specifier is a string literal and strings are blanked by design. Minified
+ *   output can put a whole module on one line, in which case the specifier read is
+ *   the first literal after the keyword — which is the specifier, since no other
+ *   literal can precede it in an import declaration.
  *
- * Every one of those shortfalls defers to the platform's own validator, which is
- * the authority and refuses the artifact at write time. None of them can let a
- * broken artifact through unnoticed; they only move where it gets reported.
+ * ## Why the asymmetry between the two kinds of finding matters
+ *
+ * Losing a finding is not always equally bad, and the difference decides how much
+ * machinery this module needs:
+ *
+ * - For a construct the *platform* refuses, a miss is merely deferred: the
+ *   platform's own validator rejects the artifact at write time, with its own
+ *   message. A local miss costs a report, not an artifact.
+ * - For the chunk-loading rule it is **not** deferred: the platform's validator
+ *   does not refuse `import(...)`, so this module is the only thing standing
+ *   between a runtime chunk load and production. That is why a template
+ *   literal's `${...}` expressions are scanned as code rather than blanked with
+ *   the surrounding text — the one place where a "safe" approximation would not
+ *   have been safe.
  */
 
 import {
@@ -58,6 +71,13 @@ import type { CellSourceRejectionId } from "@forguncy-react-workspace/core";
  * Preserves the length of the input and every newline, so offsets and line numbers
  * computed against the result are valid against the original — which is what lets
  * the scan match here and report from there.
+ *
+ * A template literal is the reason this is a loop with a mode rather than a loop
+ * with a few skips: it is the only construct where text and code alternate inside
+ * one literal. Its raw text is blanked, but each `${…}` is real syntax the
+ * platform's AST visits, so the interpolation is scanned as code — including the
+ * strings, comments and nested templates inside it, which the code path handles
+ * recursively through the same mode switch.
  *
  * Three properties are deliberate:
  *
@@ -77,11 +97,43 @@ export function blankNonSyntaxText(source: string): string {
       if (characters[index] !== "\n") characters[index] = " ";
     }
   };
+  const blankAt = (index: number): void => blank(index, index + 1);
+
+  /** Which kind of text the scanner is inside. Only a template literal alternates. */
+  let mode: "code" | "literal" = "code";
+  /**
+   * Brace depth of each open `${…}`, innermost last, so an interpolation ends at
+   * the `}` that closes it and not at a `}` inside an object literal within it.
+   */
+  const interpolationDepths: number[] = [];
 
   let position = 0;
   while (position < length) {
     const current = source[position];
     const next = source[position + 1] ?? "";
+
+    if (mode === "literal") {
+      if (current === "\\") {
+        blankAt(position);
+        blankAt(position + 1);
+        position += 2;
+        continue;
+      }
+      if (current === "`") {
+        mode = "code";
+        position += 1;
+        continue;
+      }
+      if (current === "$" && next === "{") {
+        interpolationDepths.push(0);
+        mode = "code";
+        position += 2;
+        continue;
+      }
+      blankAt(position);
+      position += 1;
+      continue;
+    }
 
     if (current === "/" && next === "/") {
       const newline = source.indexOf("\n", position);
@@ -117,20 +169,29 @@ export function blankNonSyntaxText(source: string): string {
     }
 
     if (current === "`") {
-      let cursor = position + 1;
-      while (cursor < length) {
-        const character = source[cursor];
-        if (character === "\\") {
-          cursor += 2;
-          continue;
-        }
-        if (character === "`") break;
-        cursor += 1;
-      }
-      const closed = cursor < length && source[cursor] === "`";
-      blank(position + 1, cursor);
-      position = closed ? cursor + 1 : cursor;
+      mode = "literal";
+      position += 1;
       continue;
+    }
+
+    if (interpolationDepths.length > 0) {
+      const lastIndex = interpolationDepths.length - 1;
+      if (current === "{") {
+        interpolationDepths[lastIndex] = (interpolationDepths[lastIndex] ?? 0) + 1;
+        position += 1;
+        continue;
+      }
+      if (current === "}") {
+        const depth = interpolationDepths[lastIndex] ?? 0;
+        if (depth === 0) {
+          interpolationDepths.pop();
+          mode = "literal";
+        } else {
+          interpolationDepths[lastIndex] = depth - 1;
+        }
+        position += 1;
+        continue;
+      }
     }
 
     position += 1;
@@ -160,61 +221,59 @@ export interface CellSourceScanRule {
  * The constructs this scan reproduces, expressed as the target's rule.
  *
  * The mapping is not "these words look suspicious"; it is
- * `CELL_SOURCE_VALIDATION_MECHANISM` written as patterns:
+ * `CELL_SOURCE_VALIDATION_MECHANISM` written as patterns. Nothing here is anchored
+ * to a line or to whitespace, because the target's checks are not: minified output
+ * legally contains `import{x}from"x"`, `import"x"` and `const x=1;export{x}`, and
+ * all three are `ImportDeclaration` / `Export…` nodes the platform refuses.
  *
- * - a line-initial `import` is how an `ImportDeclaration` starts, and `import(`
- *   is deliberately excluded because the target refuses the declaration node, not
- *   the call;
- * - `export` followed by a declaration keyword or a brace is how every node type
- *   beginning with `Export` starts;
- * - a refused call is either the bare callee or a non-computed member of `React`
- *   or `ReactDOM`, which is why each name has exactly one rule covering both
- *   forms. One rule per name, not one per form, so a `React . useOptimistic()`
- *   call cannot be reported twice.
+ * Four details are load-bearing rather than stylistic:
  *
- * Two details are load-bearing rather than stylistic:
- *
- * - Indentation is `[ \t]`, never `\s`. `\s` matches a newline, so `^\s*export`
- *   would happily start matching on the blanked line above and report the
- *   construct at the wrong line — and, worse, at a comment.
- * - The bare form carries `(?<!\.\s*)` as well as `(?<![\w$])`, because a
- *   *spaced* member access (`foo . useFormStatus()`) is still a member access the
- *   target accepts, and a single-character lookbehind would miss it.
+ * - A refused *call* is a `CallExpression`, so the callee shape is what matters:
+ *   bare, or a non-computed member of `React`/`ReactDOM`. One rule per name covers
+ *   both, so a construct cannot be reported twice.
+ * - `(?<!\bnew\s+)` is required, not defensive: `new X()` is a `NewExpression`,
+ *   which the mechanism's `CallExpression` check never sees, so reporting it would
+ *   be this module refusing something the platform accepts.
+ * - `(?<!\.\s*)` catches a *spaced* member access (`foo . useFormStatus()`), which
+ *   a single-character lookbehind would report as a bare call.
+ * - `import` is excluded when followed by `(` or `.`, because those are the call
+ *   and the `import.meta` meta-property, neither of which is a declaration.
  */
 export const CELL_SOURCE_SCAN_RULES: readonly CellSourceScanRule[] = [
   {
     id: "import-declaration",
-    pattern: "^[ \\t]*import[ \\t]+",
+    pattern: "(?<![\\w$.])import\\b\\s*(?![.(])(?=[{*\"'\\w$])",
     specifierPattern: "[\"']([^\"']+)[\"']",
     whyFaithfulToTarget:
-      "An `ImportDeclaration` cannot begin anywhere but a statement start, and it is the declaration the target refuses — not the `import(...)` call, which the target does not.",
+      "An `ImportDeclaration` starts with the `import` keyword, and the lookaheads exclude exactly the two other meanings of that keyword — the `import(...)` call, which the target does not refuse, and `import.meta`. The brace/star/quote/identifier lookahead is what keeps a property named `import` out.",
   },
   {
     id: "export-declaration",
-    pattern: "^[ \\t]*export[ \\t]+(?:default\\b|const\\b|let\\b|var\\b|function\\b|class\\b|async\\b|\\*|\\{|\\[)",
+    pattern: "(?<![\\w$.])export\\b\\s*(?:default\\b|const\\b|let\\b|var\\b|function\\b|class\\b|async\\b|\\*|\\{|\\[)",
     whyFaithfulToTarget:
-      "Any node type beginning with `Export` is refused, and every one of them starts with the `export` keyword followed by a declaration or a brace.",
+      "Any node type beginning with `Export` is refused, and each of them continues with one of these tokens — with or without whitespace, which is why the separator is optional.",
   },
   {
     id: "react-use",
-    pattern: "(?<![\\w$])(?<!\\.\\s*)React\\s*\\.\\s*use\\s*\\(",
+    pattern: "(?<![\\w$])(?<!\\.\\s*)(?<!\\bnew\\s+)React\\s*\\.\\s*use\\s*\\(",
     whyFaithfulToTarget:
-      "`React.use(...)` is refused as a non-computed member call. A spaced dot and a `React` that is itself somebody's member are both excluded, because neither is the node the target refuses.",
+      "`React.use(...)` is refused as a non-computed member call. A spaced dot, a `React` that is itself somebody's member, and a `new React.use(...)` are all excluded, because none of them is the node the target refuses.",
   },
   {
     id: "use-action-state",
-    pattern: "(?<![\\w$])(?<!\\.\\s*)(?:useActionState|(?:React|ReactDOM)\\s*\\.\\s*useActionState)\\s*\\(",
+    pattern:
+      "(?<![\\w$])(?<!\\.\\s*)(?<!\\bnew\\s+)(?:useActionState|(?:React|ReactDOM)\\s*\\.\\s*useActionState)\\s*\\(",
     whyFaithfulToTarget:
       "Refused as a bare callee identifier, and refused again as a non-computed member of `React` or `ReactDOM` under the same message — one rule, because both produce the same report.",
   },
   {
     id: "use-optimistic",
-    pattern: "(?<![\\w$])(?<!\\.\\s*)(?:useOptimistic|(?:React|ReactDOM)\\s*\\.\\s*useOptimistic)\\s*\\(",
+    pattern: "(?<![\\w$])(?<!\\.\\s*)(?<!\\bnew\\s+)(?:useOptimistic|(?:React|ReactDOM)\\s*\\.\\s*useOptimistic)\\s*\\(",
     whyFaithfulToTarget: "The same bare-or-member rule as the other refused hook names.",
   },
   {
     id: "use-form-status",
-    pattern: "(?<![\\w$])(?<!\\.\\s*)(?:useFormStatus|(?:React|ReactDOM)\\s*\\.\\s*useFormStatus)\\s*\\(",
+    pattern: "(?<![\\w$])(?<!\\.\\s*)(?<!\\bnew\\s+)(?:useFormStatus|(?:React|ReactDOM)\\s*\\.\\s*useFormStatus)\\s*\\(",
     whyFaithfulToTarget:
       "The same bare-or-member rule. `ReactDOM.use` is absent from the message table, so no rule refuses it — only the three listed names have a member form.",
   },
