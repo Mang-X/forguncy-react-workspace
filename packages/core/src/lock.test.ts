@@ -31,6 +31,8 @@ import {
   lockEvidenceProfileOf,
   matchesForguncyTargetIdentity,
   parseFgcLockDocument,
+  requiresRealRuntimeValidation,
+  requiresRuntimeValidation,
   RUNTIME_CONTRACT_TARGET,
   serializeFgcLock,
   SUPPORTED_FGC_LOCK_SCHEMA_VERSIONS,
@@ -220,9 +222,6 @@ describe("fgc.lock.json model", () => {
   });
 
   it("owes a runtime check to every profile that produces a dependency", () => {
-    // #4 declares realRuntimeRequired for every strategy, so an inlined bundle is
-    // not verified by a local probe alone either.
-    expect(LOCK_EVIDENCE_POLICY["resolved-dependency"].requiresRuntimeValidation).toBe(true);
     expect(LOCK_EVIDENCE_POLICY["resolved-dependency"].requiresTargetIdentity).toBe(true);
     expect(LOCK_EVIDENCE_POLICY["resolved-dependency"].probeRequirement).toBe("passed");
     expect(LOCK_EVIDENCE_POLICY["architectural-rejection"].invalidatedByTargetChange).toBe(false);
@@ -233,6 +232,23 @@ describe("fgc.lock.json model", () => {
       expect(participates, profile).toBe(profile === "resolved-dependency");
     }
     expect([...DECISION_EVIDENCE_KINDS]).toEqual(["spec-issue", "probe", "pull-request", "runtime-observation"]);
+  });
+
+  // The lock must not be a second place that decides whether a strategy owes a
+  // runtime check: #4 already answers that, and two tables answering it is how
+  // they drift apart.
+  it("takes the runtime-check requirement from #4 instead of restating it", () => {
+    for (const record of [hostRecord, inlineRecord, extensionRecord]) {
+      expect(requiresRuntimeValidation(record), record.strategy).toBe(requiresRealRuntimeValidation(record.strategy));
+      expect(requiresRealRuntimeValidation(record.strategy), record.strategy).toBe(true);
+    }
+
+    // The documented divergence: #4's flag for `replace` is a check on the
+    // replacement, which carries its own record, not on this one.
+    expect(requiresRealRuntimeValidation("replace")).toBe(true);
+    expect(requiresRuntimeValidation(architecturalRejection)).toBe(false);
+    expect(requiresRuntimeValidation(technicalRejection)).toBe(false);
+    expect(lockEvidenceProfileOf(technicalRejection)).toBe("technical-rejection");
   });
 
   it("projects a record onto #4's decision model without the lock metadata", () => {
@@ -474,6 +490,17 @@ describe("lock metadata validation", () => {
 
   it("refuses a toolchain recorded for a probe that never ran", () => {
     expect(problemsFor({ ...architecturalRejection, probedWith: TOOLCHAIN })).toMatch(/probe that never ran/);
+  });
+
+  // Without the toolchain identity there is nothing to compare, so a Vite+
+  // upgrade could never invalidate the evidence: the record would be verified
+  // for ever. #8 allows the *version* to be immaterial, not the identity.
+  it("makes a record that ran a probe name the toolchain it ran under", () => {
+    expect(problemsFor({ ...inlineRecord, probedWith: null })).toMatch(
+      /without the toolchain it ran under/,
+    );
+    expect(problemsFor({ ...inlineRecord, probedWith: { vitePlus: null } })).toBe("");
+    expect(problemsFor({ ...technicalRejection, probedWith: null })).toMatch(/without the toolchain it ran under/);
   });
 
   it("makes a technical rejection name the candidate it rejected", () => {

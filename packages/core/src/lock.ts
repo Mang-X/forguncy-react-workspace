@@ -38,7 +38,7 @@ import {
 import type { RuntimeContractTarget } from "./runtime-contract";
 import { RUNTIME_CONTRACT_TARGET } from "./runtime-contract";
 import type { DependencyDecision, DependencyStrategy } from "./strategy";
-import { strategySemantics, validateDependencyDecisionShape } from "./strategy";
+import { requiresRealRuntimeValidation, strategySemantics, validateDependencyDecisionShape } from "./strategy";
 
 // ---------------------------------------------------------------------------
 // Provenance
@@ -319,16 +319,6 @@ export interface LockEvidencePolicy {
   readonly requiresTargetIdentity: boolean;
   /** How much probe evidence the record must carry. */
   readonly probeRequirement: LockProbeRequirement;
-  /**
-   * The strategy's real-runtime checks must have run against a named target
-   * before the record may be reported as verified.
-   *
-   * Taken from #4's own semantics: every strategy declares
-   * `realRuntimeRequired: true`, so a green local probe is never on its own a
-   * Forguncy runtime compatibility claim. `inline` is included deliberately —
-   * an inlined bundle is still executed by the runtime it was built for.
-   */
-  readonly requiresRuntimeValidation: boolean;
   /** The package appears in the generated dependency graph (rule 4 of #8). */
   readonly participatesInCompilation: boolean;
 }
@@ -339,7 +329,6 @@ export const LOCK_EVIDENCE_POLICY: Readonly<Record<LockEvidenceProfile, LockEvid
     invalidatedByTargetChange: true,
     requiresTargetIdentity: true,
     probeRequirement: "passed",
-    requiresRuntimeValidation: true,
     participatesInCompilation: true,
   },
   "architectural-rejection": {
@@ -349,7 +338,6 @@ export const LOCK_EVIDENCE_POLICY: Readonly<Record<LockEvidenceProfile, LockEvid
     invalidatedByTargetChange: false,
     requiresTargetIdentity: false,
     probeRequirement: "none",
-    requiresRuntimeValidation: false,
     participatesInCompilation: false,
   },
   "technical-rejection": {
@@ -361,10 +349,27 @@ export const LOCK_EVIDENCE_POLICY: Readonly<Record<LockEvidenceProfile, LockEvid
     // so demanding a target would block a legitimate local rejection.
     requiresTargetIdentity: false,
     probeRequirement: "measured",
-    requiresRuntimeValidation: false,
     participatesInCompilation: false,
   },
 };
+
+/**
+ * Whether the strategy's real-runtime checks are still owed for this record.
+ *
+ * Delegates to #4 instead of restating its answer: `strategy.ts` already declares
+ * `realRuntimeRequired: true` for every strategy, and a second table deciding the
+ * same question is exactly how the two drift apart. `inline` is included, which
+ * is the point — an inlined bundle is still executed by the runtime it was built
+ * for, so a green local probe is never on its own a compatibility claim.
+ *
+ * `replace` is the one divergence, and it is not a disagreement: #4's
+ * `realRuntimeRequired` for `replace` is a check on the *replacement*, which
+ * carries its own record. This record compiles nothing, so it owes no runtime
+ * check of its own.
+ */
+export function requiresRuntimeValidation(record: LockedDependencyDecision): boolean {
+  return record.strategy === "replace" ? false : requiresRealRuntimeValidation(record.strategy);
+}
 
 export function lockEvidenceProfileOf(record: LockedDependencyDecision): LockEvidenceProfile {
   if (record.strategy !== "replace") {
@@ -787,7 +792,7 @@ export function validateFgcLockDocument(lock: FgcLockDocument): readonly string[
     problems.push(...validateVersions(where, record));
     problems.push(...validateProbe(where, record, policy));
     problems.push(...validateTarget(where, record, policy));
-    problems.push(...validateProbedWith(where, record));
+    problems.push(...validateProbedWith(where, record, policy));
     problems.push(...validateExtension(where, record));
     problems.push(...validateRejectedCandidate(where, record));
     problems.push(...validateRationale(where, record));
@@ -888,10 +893,10 @@ function validateTarget(
   }
 
   // A target means "this evidence was observed under that runtime", which is a
-  // compatibility claim only for the profiles that make one. For a technical
+  // compatibility claim only for the records that make one. For a technical
   // rejection it is the opposite — the failure is the evidence — so the passing
-  // probe is asked for only where the profile claims compatibility.
-  if (policy.requiresRuntimeValidation && target !== null && record.probe.status !== "passed") {
+  // probe is asked for only where the record claims compatibility.
+  if (requiresRuntimeValidation(record) && target !== null && record.probe.status !== "passed") {
     problems.push(
       `${where} names a Forguncy target while its probe is "${record.probe.status}". Runtime compatibility cannot be claimed from a probe that has not passed; record target as null until the probe passes against it.`,
     );
@@ -913,7 +918,11 @@ function validateTarget(
   return problems;
 }
 
-function validateProbedWith(where: string, record: LockedDependencyDecision): readonly string[] {
+function validateProbedWith(
+  where: string,
+  record: LockedDependencyDecision,
+  policy: LockEvidencePolicy,
+): readonly string[] {
   const { probedWith, probe } = record;
 
   if (probedWith !== null && probedWith.vitePlus !== null && probedWith.vitePlus.trim().length === 0) {
@@ -923,6 +932,15 @@ function validateProbedWith(where: string, record: LockedDependencyDecision): re
   if (probedWith !== null && probe.status === "not-run") {
     return [
       `${where} records a toolchain for a probe that never ran. Either run the probe or record probedWith as null.`,
+    ];
+  }
+
+  // #8 asks for the toolchain "when material", so the version may be null — but
+  // the identity itself cannot be absent, or a Vite+ upgrade could never
+  // invalidate this evidence and the record would be verified for ever.
+  if (policy.probeRequirement !== "none" && probedWith === null) {
+    return [
+      `${where} records a "${probe.status}" probe without the toolchain it ran under. Record probedWith, and record vitePlus as null there only when its version is genuinely immaterial.`,
     ];
   }
 

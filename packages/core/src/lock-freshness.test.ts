@@ -5,10 +5,10 @@ import {
   assessLockDecision,
   findLockDecision,
   forguncyTargetIdentity,
-  LOCK_EVIDENCE_POLICY,
   LOCK_STALENESS_REASONS,
   lockDecisionBlockers,
   lockEvidenceProfileOf,
+  requiresRuntimeValidation,
   resolveLockDecision,
   RUNTIME_CONTRACT_TARGET,
 } from "./index";
@@ -288,6 +288,15 @@ describe("staleness: recorded inputs versus current inputs", () => {
     ).toEqual(["toolchain-changed"]);
   });
 
+  it("keeps the toolchain comparison honest when its version is declared immaterial", () => {
+    // #8 records the toolchain "when material": a null version says the upgrade
+    // cannot matter for this probe, so there is nothing to compare against.
+    const immaterial: LockedDependencyDecision = { ...inlineRecord, probedWith: { vitePlus: null } };
+
+    expect(reasonsFor(immaterial, lockEnvironment()).freshness).toBe("fresh");
+    expect(reasonsFor(immaterial, lockEnvironment({ toolchain: { vitePlus: "9.9.9" } })).freshness).toBe("fresh");
+  });
+
   it("re-checks an extension record that records only a content identity", () => {
     const identityOnly: LockedDependencyDecision = {
       ...extensionRecord,
@@ -417,6 +426,7 @@ describe("decision lookup", () => {
   it("keeps the reason vocabulary closed and the profiles aligned", () => {
     expect([...LOCK_STALENESS_REASONS]).toHaveLength(new Set(LOCK_STALENESS_REASONS).size);
     expect(lockEvidenceProfileOf(inlineRecord)).toBe("resolved-dependency");
-    expect(LOCK_EVIDENCE_POLICY["resolved-dependency"].requiresRuntimeValidation).toBe(true);
+    expect(requiresRuntimeValidation(inlineRecord)).toBe(true);
+    expect(requiresRuntimeValidation(architecturalRejection)).toBe(false);
   });
 });

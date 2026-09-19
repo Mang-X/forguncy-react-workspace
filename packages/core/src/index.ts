@@ -210,6 +210,7 @@ export {
   matchesForguncyTargetIdentity,
   parseFgcLockDocument,
   PROBE_STATUSES,
+  requiresRuntimeValidation,
   serializeFgcLock,
   SUPPORTED_FGC_LOCK_SCHEMA_VERSIONS,
   validateFgcLockDocument,

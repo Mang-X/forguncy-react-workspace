@@ -81,6 +81,7 @@ export {
   lockEvidenceProfileOf,
   matchesForguncyTargetIdentity,
   parseFgcLockDocument,
+  requiresRuntimeValidation,
   resolveLockDecision,
   serializeFgcLock,
   validateFgcLockDocument,

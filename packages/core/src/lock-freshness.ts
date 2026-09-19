@@ -39,6 +39,7 @@ import {
   LOCK_EVIDENCE_POLICY,
   lockEvidenceProfileOf,
   matchesForguncyTargetIdentity,
+  requiresRuntimeValidation,
 } from "./lock";
 import type { ForguncyTargetIdentity, ToolchainIdentity } from "./lock";
 import type { RuntimeContractTarget } from "./runtime-contract";
@@ -134,7 +135,7 @@ export function assessLockDecision(
     profile,
     freshness: reasons.length === 0 ? "fresh" : "stale",
     stalenessReasons: reasons,
-    realRuntimeValidation: realRuntimeValidationOf(record, policy),
+    realRuntimeValidation: realRuntimeValidationOf(record),
   };
 }
 
@@ -282,11 +283,8 @@ function assessExtensionFreshness(
  * be recorded once a probe against it has passed — so the presence of the target
  * is the whole claim.
  */
-function realRuntimeValidationOf(
-  record: LockedDependencyDecision,
-  policy: LockEvidencePolicy,
-): LockRealRuntimeValidation {
-  if (!policy.requiresRuntimeValidation) {
+function realRuntimeValidationOf(record: LockedDependencyDecision): LockRealRuntimeValidation {
+  if (!requiresRuntimeValidation(record)) {
     return "not-required";
   }
   return record.target === null ? "not-validated" : "validated";
