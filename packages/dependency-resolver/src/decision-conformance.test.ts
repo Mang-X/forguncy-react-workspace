@@ -17,6 +17,7 @@ import {
   forguncyTargetIdentity,
   JSX_RUNTIME_MODULE_IDS,
   PRESET_PROVIDED_HOST_GLOBALS,
+  validateFgcLockDocument,
   validateLockDecisionConformance,
 } from "./index";
 
@@ -57,6 +58,12 @@ function inlineRecord(packageName: string): LockedDependencyDecision {
  *
  * `host-module-identity-mismatch` is #4's own code for "this module's identity has to
  * be the host's", which is the reason the JSX runtime cannot be an ordinary dependency.
+ *
+ * Legal under `core`'s lock rules, not merely acceptable to the audit, which is what
+ * makes it a real fixture: the `technical-rejection` profile requires a probe that did
+ * **not** pass, so a `passed` probe carried over from the base record would be refused
+ * by `validateProbe` — the positive case would then have proved only that the audit
+ * does not object to a record nobody could write.
  */
 function replaceRecord(packageName: string): LockedDependencyDecision {
   return {
@@ -64,6 +71,7 @@ function replaceRecord(packageName: string): LockedDependencyDecision {
     strategy: "replace",
     packageName,
     resolvedVersion: null,
+    probe: { status: "failed", fingerprint: FINGERPRINT, versionIndependent: false },
     // A `host-module-identity-mismatch` rejection is runtime-confirmed, so #8 requires
     // the record to name the target its evidence is about.
     target: forguncyTargetIdentity(),
@@ -221,10 +229,13 @@ describe("host records against #9", () => {
   // that already exists for this reason; refusing it too would leave no way to record
   // the refusal, so the question would be re-decided on every run.
   it("allows a replace decision for a JSX runtime module id", () => {
-    const diagnostics = auditLockDecisionConformance(lock(replaceRecord("react/jsx-runtime")));
+    const recorded = lock(replaceRecord("react/jsx-runtime"));
 
-    expect(codes(diagnostics)).not.toContain("jsx-runtime-requires-adapter");
-    expect(diagnostics).toEqual([]);
+    // Both layers, so the carve-out is a claim about a writable lock rather than only
+    // about what the audit tolerates: `core` has to accept the record and the audit has
+    // to stay quiet about it.
+    expect(validateFgcLockDocument(recorded)).toEqual([]);
+    expect(auditLockDecisionConformance(recorded)).toEqual([]);
   });
 
   it("does not claim a JSX runtime global is unprovided on top of the refusal", () => {
