@@ -51,7 +51,7 @@
  */
 
 import type { DependencyStrategy, LockedDependencyDecision } from "@forguncy-react-workspace/core";
-import { CELL_PRESET_LIBRARIES, compareLockDecisions } from "@forguncy-react-workspace/core";
+import { CELL_PRESET_LIBRARIES, compareLockDecisions, DEPENDENCY_STRATEGIES } from "@forguncy-react-workspace/core";
 
 // ---------------------------------------------------------------------------
 // Inputs
@@ -150,8 +150,8 @@ export interface ConformanceOptions {
  * The entries below are the candidates #9 lists. `react-dom/client` is a subpath id,
  * so it rides on its package's mapping; the two JSX runtime ids are *not* listed at
  * all, because #9 bridges them with an adapter the compiler generates rather than
- * with a page global — see `host-jsx-runtime-requires-adapter`, which is why a
- * `host` record cannot express them.
+ * with a page global — see `jsx-runtime-requires-adapter`, which refuses them under
+ * every strategy that would claim they are provided.
  *
  * `antd` is here as a mapping and separately reported as preset-provided, which is
  * the honest combination: #9 says the import maps to the host `antd` global, and
@@ -174,12 +174,12 @@ export const DEFAULT_HOST_BRIDGE_MANIFEST: HostBridgeManifest = {
 /**
  * The JSX runtime module ids, which #9 bridges with a generated adapter.
  *
- * These are not host-mappable at all, which is why they appear in no mapping.
- * #9 says they resolve to "an explicit adapter preserving JSX runtime semantics",
- * and that adapter is produced by the compiler — so there is no page global that
- * *is* the adapter. A `host` decision's entire content is "map the import to this
- * global", so it cannot express one; the audit refuses the record instead of
- * accepting a global that happens not to be React.
+ * No decision strategy can express one, which is why they appear in no mapping. #9
+ * says these resolve to "an explicit adapter preserving JSX runtime semantics", and
+ * that adapter is produced by the compiler — so it is not a page global (`host`), not
+ * the published implementation (`inline`), and not a library global (`extension`).
+ * Any of those three claims the module is provided; the audit refuses all three and
+ * leaves `replace`, which claims the opposite.
  */
 export const JSX_RUNTIME_MODULE_IDS: readonly string[] = ["react/jsx-runtime", "react/jsx-dev-runtime"];
 
@@ -205,7 +205,7 @@ export const PRESET_PROVIDED_HOST_GLOBALS: readonly PresetProvidedGlobal[] = CEL
 export const CONFORMANCE_PROBLEM_CODES = [
   "host-global-not-provided",
   "host-mapping-mismatch",
-  "host-jsx-runtime-requires-adapter",
+  "jsx-runtime-requires-adapter",
   "host-react-version-is-not-host-identity",
   "host-inline-conflict",
   "host-global-is-preset-provided",
@@ -275,6 +275,66 @@ function presetProvidingGlobal(globalName: string): PresetProvidedGlobal | undef
 }
 
 // ---------------------------------------------------------------------------
+// JSX runtimes (#9)
+// ---------------------------------------------------------------------------
+
+/**
+ * The strategies that claim a module is *provided*.
+ *
+ * Derived from #4's list rather than written out, and defined by what is left out:
+ * `replace` is the one strategy whose content is that the candidate is *refused*, so
+ * it is the one that can coexist with "no strategy provides this".
+ */
+const PROVIDING_STRATEGIES: readonly DependencyStrategy[] = DEPENDENCY_STRATEGIES.filter(
+  strategy => strategy !== "replace",
+);
+
+/** Why the given strategy cannot be the thing that supplies a JSX runtime. */
+function whyStrategyCannotSupplyJsxRuntime(strategy: DependencyStrategy): string {
+  switch (strategy) {
+    case "host":
+      return "`host` can only name a page global, and no page global is the adapter — the React object is the substitution #9 names explicitly, because it has no `jsx`";
+    case "inline":
+      return "`inline` would ship a second real JSX runtime into the cell, which is the implementation the adapter exists to replace";
+    case "extension":
+      return "`extension` resolves the module to a global published by a frontend library, which is a different contract from an adapter";
+    case "replace":
+      return "`replace` records a refusal rather than a provider";
+  }
+}
+
+/**
+ * The JSX runtime ids are bridged by an adapter, and no decision can record one.
+ *
+ * Checked before the strategy-specific audits and for every providing strategy, which
+ * is what the review of the second draft caught: refusing only `host` left
+ * `react/jsx-runtime` reachable as `inline`, and an `inline` decision ships the real
+ * JSX runtime implementation into the cell — the same violation of #9 by a different
+ * route. The repository's own frontend-library build tooling states the requirement
+ * the same way: `react/jsx-runtime` is mapped to a generated `jsxRuntimeAdapter`, and
+ * `build-strategies.md` says it may not simply be pointed at React.
+ *
+ * `replace` is deliberately not refused. It is the strategy #4 provides for recording
+ * that a candidate is not usable, `host-module-identity-mismatch` is the rejection code
+ * that already exists for exactly this reason, and refusing it too would leave an Agent
+ * no way to record the refusal at all — so the same question would be re-decided on
+ * every run, which is the outcome #8's lock exists to prevent.
+ */
+function auditJsxRuntimeRecord(record: LockedDependencyDecision): readonly ConformanceDiagnostic[] {
+  if (!JSX_RUNTIME_MODULE_IDS.includes(record.packageName) || !PROVIDING_STRATEGIES.includes(record.strategy)) {
+    return [];
+  }
+
+  return [
+    error(
+      "jsx-runtime-requires-adapter",
+      record.packageName,
+      `"${record.packageName}" cannot be provided by a \`${record.strategy}\` decision: #9 bridges it with an adapter the compiler generates to preserve \`jsx(type, props, key)\`, and ${whyStrategyCannotSupplyJsxRuntime(record.strategy)}. Record the adapter contract (#9), or decide it \`replace\` if what needs recording is that the specifier is not usable as an ordinary dependency.`,
+    ),
+  ];
+}
+
+// ---------------------------------------------------------------------------
 // Host (#9)
 // ---------------------------------------------------------------------------
 
@@ -284,24 +344,6 @@ function auditHostRecord(
 ): readonly ConformanceDiagnostic[] {
   const diagnostics: ConformanceDiagnostic[] = [];
   const { packageName, globalName } = record;
-
-  // Refused before anything else, and for every global rather than only for the React
-  // object. #9's requirement is a generated adapter that preserves
-  // `jsx(type, props, key)`; "some page global other than React" is not that, and the
-  // React object is only the mistake #9 happens to name. Nothing downstream can catch a
-  // substitution: `ReactDOM` is a verified host identity of kind `page-global`, so the
-  // cell compiler's binding check passes it, which makes this the only place the
-  // distinction exists.
-  if (JSX_RUNTIME_MODULE_IDS.includes(packageName)) {
-    return [
-      error(
-        "host-jsx-runtime-requires-adapter",
-        packageName,
-        `"${packageName}" is not host-mappable: #9 bridges it with an adapter the compiler generates to preserve \`jsx(type, props, key)\`, and a \`host\` decision can only record a page global. The React object is the substitution #9 names explicitly — it has no \`jsx\` — but no page global is the adapter, so this has to cite the adapter contract rather than a global.`,
-      ),
-    ];
-  }
-
   const mapping = hostMappingFor(manifest, packageName);
   const preset = presetProvidingGlobal(globalName);
 
@@ -549,6 +591,16 @@ export function auditLockDecisionConformance(
   })[] = [];
 
   for (const record of decisions) {
+    // Before the strategy-specific audits, because the rule is about the module id
+    // rather than about how it was decided: any of the three providing strategies is
+    // wrong here, and reporting the adapter requirement once is clearer than three
+    // strategy-shaped ways of saying the same thing.
+    const jsxRuntime = auditJsxRuntimeRecord(record);
+    if (jsxRuntime.length > 0) {
+      diagnostics.push(...jsxRuntime);
+      continue;
+    }
+
     // Folded through the manifest so a subpath id and its package are one module:
     // `react-dom/client` decided `inline` is a second copy of the same ReactDOM that
     // `react-dom` decided `host`, and keying on the specifier would hide it.

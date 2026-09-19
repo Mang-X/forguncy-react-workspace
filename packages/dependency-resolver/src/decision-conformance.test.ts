@@ -52,6 +52,33 @@ function inlineRecord(packageName: string): LockedDependencyDecision {
   return { ...recordBase, strategy: "inline", packageName, resolvedVersion: "1.11.13", target: forguncyTargetIdentity() };
 }
 
+/**
+ * A `replace` record — the strategy that records a refusal rather than a provider.
+ *
+ * `host-module-identity-mismatch` is #4's own code for "this module's identity has to
+ * be the host's", which is the reason the JSX runtime cannot be an ordinary dependency.
+ */
+function replaceRecord(packageName: string): LockedDependencyDecision {
+  return {
+    ...recordBase,
+    strategy: "replace",
+    packageName,
+    resolvedVersion: null,
+    // A `host-module-identity-mismatch` rejection is runtime-confirmed, so #8 requires
+    // the record to name the target its evidence is about.
+    target: forguncyTargetIdentity(),
+    rejectedCandidate: { version: "19.2.7" },
+    rationale: "The specifier is not usable as an ordinary dependency; the adapter takes its place.",
+    rejection: {
+      kind: "technical",
+      code: "host-module-identity-mismatch",
+      summary: "A JSX runtime has to share the host React's module identity.",
+      remediation: "Use the JSX runtime adapter the compiler generates.",
+    },
+    alternatives: ["jsx-runtime-adapter"],
+  };
+}
+
 function extensionRecord(
   packageName: string,
   libraryId: string,
@@ -151,9 +178,53 @@ describe("host records against #9", () => {
     for (const globalName of ["React", "ReactDOM", "ReactJsxRuntime"]) {
       const diagnostics = auditLockDecisionConformance(lock(hostRecord("react/jsx-runtime", globalName)));
 
-      expect(codes(diagnostics), globalName).toEqual(["host-jsx-runtime-requires-adapter"]);
+      expect(codes(diagnostics), globalName).toEqual(["jsx-runtime-requires-adapter"]);
       expect(diagnostics[0]?.detail, globalName).toContain("jsx(type, props, key)");
     }
+  });
+
+  // Review regression (#44, second round). Refusing only `host` left the module id
+  // reachable as `inline`, which ships the real JSX runtime into the cell — the same
+  // violation of #9 by a different route. The rule is about the module id, so it holds
+  // for every strategy that would claim the module is *provided*.
+  it("refuses the JSX runtime under every strategy that would provide it", () => {
+    for (const moduleId of JSX_RUNTIME_MODULE_IDS) {
+      const providing = [hostRecord(moduleId, "React"), inlineRecord(moduleId), extensionRecord(moduleId, "some-ext", "SomeExt")];
+
+      for (const record of providing) {
+        const diagnostics = auditLockDecisionConformance(lock(record));
+
+        expect(codes(diagnostics), `${moduleId} as ${record.strategy}`).toEqual(["jsx-runtime-requires-adapter"]);
+        expect(diagnostics[0]?.detail, `${moduleId} as ${record.strategy}`).toContain(
+          `by a \`${record.strategy}\` decision`,
+        );
+      }
+    }
+  });
+
+  it("refuses hosting React while its JSX runtime is inlined", () => {
+    // The combination the reviewer asked for. The conflict check cannot see it — with the
+    // JSX runtime out of the manifest these two records no longer fold onto one module —
+    // so the adapter rule is what has to catch it.
+    const diagnostics = auditLockDecisionConformance(
+      lock(hostRecord("react", "React"), inlineRecord("react/jsx-runtime")),
+    );
+
+    expect(codes(diagnostics)).toEqual(["jsx-runtime-requires-adapter"]);
+    // `react` itself is untouched by the finding, so the message points at the record
+    // that is wrong rather than at the host decision beside it.
+    expect(diagnostics[0]?.subject).toBe("react/jsx-runtime");
+  });
+
+  // The deliberate carve-out. `replace` is the strategy #4 provides for recording that a
+  // candidate is not usable, and `host-module-identity-mismatch` is the rejection code
+  // that already exists for this reason; refusing it too would leave no way to record
+  // the refusal, so the question would be re-decided on every run.
+  it("allows a replace decision for a JSX runtime module id", () => {
+    const diagnostics = auditLockDecisionConformance(lock(replaceRecord("react/jsx-runtime")));
+
+    expect(codes(diagnostics)).not.toContain("jsx-runtime-requires-adapter");
+    expect(diagnostics).toEqual([]);
   });
 
   it("does not claim a JSX runtime global is unprovided on top of the refusal", () => {
@@ -162,7 +233,7 @@ describe("host records against #9", () => {
     // finding would describe a rule they are not subject to.
     const diagnostics = auditLockDecisionConformance(lock(hostRecord("react/jsx-dev-runtime", "ReactDOM")));
 
-    expect(codes(diagnostics)).toEqual(["host-jsx-runtime-requires-adapter"]);
+    expect(codes(diagnostics)).toEqual(["jsx-runtime-requires-adapter"]);
   });
 
   // Review regression (#44, finding 3). Identity-sensitivity belongs to the mapping,
