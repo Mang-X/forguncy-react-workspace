@@ -182,6 +182,7 @@ export type {
 
 export {
   assertFgcLockDocument,
+  assertFgcLockDocumentShape,
   assertSupportedFgcLockSchemaVersion,
   canonicalizeFgcLock,
   compareLockDecisions,

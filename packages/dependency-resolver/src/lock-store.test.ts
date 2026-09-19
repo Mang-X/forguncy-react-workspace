@@ -154,6 +154,71 @@ describe("fgc.lock.json as a project artifact", () => {
     });
   });
 
+  // Canonicalization assumes the shape — `[...lock.decisions]`,
+  // `[...record.evidence]` — so checking it after canonicalizing meant a
+  // malformed value threw a native TypeError from inside the canonicalizer.
+  it("refuses malformed input on the write path without a TypeError", async () => {
+    const projectRoot = await emptyProject();
+    const malformed: readonly unknown[] = [
+      { schemaVersion: FGC_LOCK_SCHEMA_VERSION, decisions: undefined },
+      { schemaVersion: FGC_LOCK_SCHEMA_VERSION, decisions: [{ ...inlineRecord, evidence: undefined }] },
+      { schemaVersion: FGC_LOCK_SCHEMA_VERSION, decisions: [{ ...inlineRecord, evidence: "docs/probes/inline-dayjs.md" }] },
+      { schemaVersion: FGC_LOCK_SCHEMA_VERSION, decisions: [{ ...inlineRecord, probe: undefined }] },
+    ];
+
+    for (const lock of malformed) {
+      await expect(writeFgcLock(projectRoot, lock as never)).rejects.toThrow(FgcLockValidationError);
+    }
+    await expect(readFgcLock(projectRoot)).resolves.toEqual({
+      schemaVersion: FGC_LOCK_SCHEMA_VERSION,
+      decisions: [],
+    });
+  });
+
+  // The model describes `not-validated`, `probe-failed` and `probe-never-run` for
+  // a resolved dependency. A lock file that cannot hold them makes those states
+  // unreachable, so this round-trips them through the real artifact path.
+  it("can persist a decision that makes no runtime claim yet", async () => {
+    const projectRoot = await emptyProject();
+    const locallyProbed: LockedDependencyDecision = { ...inlineRecord, packageName: "locally-probed", target: null };
+    const failed: LockedDependencyDecision = {
+      ...inlineRecord,
+      packageName: "probe-failed",
+      target: null,
+      probe: { status: "failed", fingerprint: CELL_FINGERPRINT, versionIndependent: false },
+    };
+    const notRun: LockedDependencyDecision = {
+      ...inlineRecord,
+      packageName: "probe-not-run",
+      target: null,
+      probedWith: null,
+      probe: { status: "not-run", fingerprint: null, versionIndependent: false },
+    };
+
+    await writeFgcLock(projectRoot, {
+      schemaVersion: FGC_LOCK_SCHEMA_VERSION,
+      decisions: [locallyProbed, failed, notRun],
+    });
+    const read = await readFgcLock(projectRoot);
+    const environment = fixtureEnvironment({
+      resolvedVersions: { "locally-probed": "1.11.13", "probe-failed": "1.11.13", "probe-not-run": "1.11.13" },
+      probeFingerprints: { "locally-probed": CELL_FINGERPRINT, "probe-failed": CELL_FINGERPRINT },
+    });
+
+    expect(resolveLockDecision(read, { packageName: "locally-probed" }, environment).assessment).toMatchObject({
+      freshness: "fresh",
+      stalenessReasons: [],
+      realRuntimeValidation: "not-validated",
+    });
+    expect(resolveLockDecision(read, { packageName: "probe-failed" }, environment).assessment).toMatchObject({
+      freshness: "stale",
+      stalenessReasons: ["probe-failed"],
+    });
+    expect(resolveLockDecision(read, { packageName: "probe-not-run" }, environment).assessment).toMatchObject({
+      stalenessReasons: ["probe-never-run"],
+    });
+  });
+
   it("refuses to read a lock it does not understand", async () => {
     const projectRoot = await emptyProject();
     await writeFile(fgcLockPath(projectRoot), JSON.stringify({ schemaVersion: 99, decisions: [] }), "utf8");

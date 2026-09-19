@@ -226,7 +226,6 @@ describe("fgc.lock.json model", () => {
   });
 
   it("owes a runtime check to every profile that produces a dependency", () => {
-    expect(LOCK_EVIDENCE_POLICY["resolved-dependency"].requiresTargetIdentity).toBe(true);
     expect(LOCK_EVIDENCE_POLICY["resolved-dependency"].probeRequirement).toBe("passed");
     expect(LOCK_EVIDENCE_POLICY["architectural-rejection"].invalidatedByTargetChange).toBe(false);
     // A rejection's evidence is a probe that did not succeed — a passing one
@@ -266,8 +265,11 @@ describe("fgc.lock.json model", () => {
       expect(problemsFor({ ...runtimeFailure, target: null })).toMatch(/must name the target it was observed under/);
     }
 
+    // A resolved dependency names its target when it has a runtime claim to
+    // make; a missing target there is a state (`not-validated`), not a shape
+    // error — see the persistability test below.
     for (const record of [hostRecord, inlineRecord, extensionRecord]) {
-      expect(requiresTargetIdentity(record), record.strategy).toBe(true);
+      expect(requiresTargetIdentity(record), record.strategy).toBe(false);
     }
     expect(requiresTargetIdentity(architecturalRejection)).toBe(false);
   });
@@ -346,11 +348,33 @@ describe("portability", () => {
       "\\\\build-server\\share\\App.tsx",
       "file at ~/project/App.tsx",
       "notes: see /var/tmp/probe.json",
+      "file:///Users/mang/project/App.tsx",
+      "probe=x;entry=file:///Users/mang/project/App.tsx",
+      "file:///home/ci/project/App.tsx",
+      "entry=file:///Volumes/work/App.tsx",
     ];
 
     for (const value of cases) {
       expect(findMachineSpecificPaths({ value }), value).toContain(value);
     }
+  });
+
+  // The scheme guard that keeps `https://` out must not become a hole for the
+  // scheme a probe actually produces: `import.meta.url` is a file URL, and it is
+  // the most likely way a machine path re-enters the lock through #17.
+  it("treats a file URL as machine-specific while still allowing http URLs", () => {
+    expect(
+      findMachineSpecificPaths({ reference: "https://github.com/Mang-X/forguncy-react-workspace/issues/8" }),
+    ).toEqual([]);
+    expect(findMachineSpecificPaths({ reference: "file:///Users/mang/project/App.tsx" })).toEqual([
+      "file:///Users/mang/project/App.tsx",
+    ]);
+    expect(
+      problemsFor({
+        ...inlineRecord,
+        probe: { ...inlineRecord.probe, fingerprint: "probe=x;entry=file:///Users/mang/project/App.tsx" },
+      }),
+    ).toMatch(/machine-specific absolute path/);
   });
 
   it("does not mistake a URL or a relative path for an absolute one", () => {
@@ -521,12 +545,27 @@ describe("lock metadata validation", () => {
   });
 
   it("ties a runtime-compatibility claim to a probe that actually passed", () => {
-    // For a resolved dependency the target *is* the runtime claim, so it cannot
-    // be recorded from a probe that failed or never ran.
+    // A target *is* the runtime claim, so it cannot be recorded from a probe
+    // that failed or never ran.
     expect(problemsFor({ ...inlineRecord, probe: { ...inlineRecord.probe, status: "failed" } })).toMatch(
       /Runtime compatibility cannot be claimed from a probe that has not passed/,
     );
-    expect(problemsFor({ ...inlineRecord, target: null })).toMatch(/must name the target it was observed under/);
+  });
+
+  // A target is a verification claim, not a required field. Without that split,
+  // "probed locally, runtime check still owed" and "the probe failed" would be
+  // states the model describes but no real lock file can hold.
+  it("lets a resolved dependency persist without a runtime claim", () => {
+    expect(problemsFor({ ...inlineRecord, target: null })).toBe("");
+    expect(problemsFor({ ...inlineRecord, target: null, probe: { ...inlineRecord.probe, status: "failed" } })).toBe("");
+    expect(
+      problemsFor({
+        ...inlineRecord,
+        target: null,
+        probedWith: null,
+        probe: { status: "not-run", fingerprint: null, versionIndependent: false },
+      }),
+    ).toBe("");
   });
 
   // A technical rejection records the target the failure was observed under, and

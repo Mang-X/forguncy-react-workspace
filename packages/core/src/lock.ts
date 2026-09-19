@@ -250,10 +250,14 @@ export interface LockRecordMetadata {
   readonly resolvedVersion: string | null;
   readonly probe: LockProbeEvidence;
   /**
-   * Non-null only when runtime compatibility was validated against a known
-   * Forguncy identity. Its presence *is* the record's runtime claim, and
-   * validation ties it to a passing probe so the claim cannot be made from a
-   * probe that failed or never ran.
+   * The runtime this evidence was validated against, or null when it has not
+   * been validated in one yet.
+   *
+   * Null is a state rather than a gap: a locally probed decision awaiting its
+   * first real-page check is exactly this, and `resolveLockDecision` reports it
+   * as `not-validated` instead of verified. Its presence *is* the runtime claim,
+   * and validation ties it to a passing probe, so the claim cannot be made from
+   * a probe that failed or never ran.
    */
   readonly target: ForguncyTargetIdentity | null;
   /** Toolchain used for the technical probe, when material. */
@@ -342,9 +346,7 @@ export interface LockEvidencePolicy {
   readonly profile: LockEvidenceProfile;
   /** A different Forguncy target invalidates this record's evidence. */
   readonly invalidatedByTargetChange: boolean;
-  /** The record must name the target its runtime evidence is about. */
-  readonly requiresTargetIdentity: boolean;
-  /** How much probe evidence the record must carry. */
+  /** Which probe outcome the record's evidence is. */
   readonly probeRequirement: LockProbeRequirement;
   /** The package appears in the generated dependency graph (rule 4 of #8). */
   readonly participatesInCompilation: boolean;
@@ -354,7 +356,6 @@ export const LOCK_EVIDENCE_POLICY: Readonly<Record<LockEvidenceProfile, LockEvid
   "resolved-dependency": {
     profile: "resolved-dependency",
     invalidatedByTargetChange: true,
-    requiresTargetIdentity: true,
     probeRequirement: "passed",
     participatesInCompilation: true,
   },
@@ -363,7 +364,6 @@ export const LOCK_EVIDENCE_POLICY: Readonly<Record<LockEvidenceProfile, LockEvid
     // The capability cannot be moved by a product upgrade, so there is nothing
     // in the runtime to invalidate this. Its evidence is the ownership decision.
     invalidatedByTargetChange: false,
-    requiresTargetIdentity: false,
     probeRequirement: "none",
     participatesInCompilation: false,
   },
@@ -372,11 +372,6 @@ export const LOCK_EVIDENCE_POLICY: Readonly<Record<LockEvidenceProfile, LockEvid
     // A product upgrade can fix a bundling failure, so the rejection is tied to
     // the target it was observed under.
     invalidatedByTargetChange: true,
-    // Not required by default: a bundling failure can be reproduced without a
-    // Forguncy page, so demanding a target would block a legitimate local
-    // rejection. Codes that only a runtime can confirm override this — see
-    // `requiresTargetIdentity`.
-    requiresTargetIdentity: false,
     probeRequirement: "not-passed",
     participatesInCompilation: false,
   },
@@ -404,15 +399,21 @@ export const RUNTIME_CONFIRMED_TECHNICAL_REJECTION_CODES: readonly TechnicalReje
 ];
 
 /**
- * Whether this record has to name the Forguncy target its evidence is about.
+ * Whether the record has to name the Forguncy target its evidence is about.
  *
- * The profile's default, refined per rejection code where the runtime is what
- * the failure was observed in.
+ * Deliberately narrow, and narrow is the point. For a resolved dependency a
+ * target is a *verification claim*, and its absence is a state —
+ * `not-validated` — not a shape error. Requiring the field there made the states
+ * the model exists to express unpresentable: a locally probed record awaiting its
+ * runtime check, and a record whose probe failed or has not run, could not be
+ * written to a real lock file at all, so `not-validated`, `probe-failed` and
+ * `probe-never-run` only ever existed in hand-built test objects.
+ *
+ * The one place the field remains a shape requirement is a rejection that only a
+ * runtime can observe: without a target the record would claim a runtime fact it
+ * never saw. Which codes those are is {@link RUNTIME_CONFIRMED_TECHNICAL_REJECTION_CODES}.
  */
 export function requiresTargetIdentity(record: LockedDependencyDecision): boolean {
-  if (LOCK_EVIDENCE_POLICY[lockEvidenceProfileOf(record)].requiresTargetIdentity) {
-    return true;
-  }
   return (
     record.strategy === "replace" &&
     record.rejection.kind === "technical" &&
@@ -541,6 +542,11 @@ export class FgcLockValidationError extends Error {
  * `/`, so neither is the start of a path.
  */
 const ABSOLUTE_PATH_OCCURRENCES: readonly RegExp[] = [
+  // A file URL is a filesystem path wearing a scheme, and it is what a Node/Vite
+  // probe produces from `import.meta.url` — so it is the shape a machine path
+  // most easily re-enters the lock in. `http(s)://` stays allowed; this one
+  // cannot be portable on any machine.
+  /(?:^|[^0-9A-Za-z])file:[\\/]/i,
   // C:\Users\... or C:/Users/... — the guard keeps `https:` out (`s` is alphanumeric).
   /(?:^|[^0-9A-Za-z])[A-Za-z]:[\\/]/,
   // \\server\share
@@ -1316,6 +1322,23 @@ function validateEvidence(where: string, record: LockedDependencyDecision): read
 
 export function assertFgcLockDocument(lock: FgcLockDocument): void {
   const problems = validateFgcLockDocument(lock);
+  if (problems.length > 0) {
+    throw new FgcLockValidationError(problems);
+  }
+}
+
+/**
+ * Throws unless the document is structurally sound, judging no rule.
+ *
+ * Exported because canonicalization *assumes* the shape — `[...lock.decisions]`,
+ * `[...record.evidence]` — so a writer that canonicalizes before validating
+ * throws a native `TypeError` from the canonicalizer instead of reporting a
+ * broken document. Shape first, canonical form second, rules third; a canonical
+ * order this has no opinion about, which is why it is not just
+ * `assertFgcLockDocument`.
+ */
+export function assertFgcLockDocumentShape(input: unknown): void {
+  const problems = inspectFgcLockDocument(input);
   if (problems.length > 0) {
     throw new FgcLockValidationError(problems);
   }

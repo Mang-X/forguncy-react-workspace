@@ -41,6 +41,7 @@ import type {
 } from "@forguncy-react-workspace/core";
 import {
   assertFgcLockDocument,
+  assertFgcLockDocumentShape,
   canonicalizeFgcLock,
   createEmptyFgcLock,
   dependencyDecisionOf,
@@ -84,13 +85,16 @@ export async function readFgcLock(projectRoot: string): Promise<FgcLockDocument>
  * later run has to read: the read path refuses such a file, and leaving one
  * behind turns a writer's mistake into a lock nobody can load.
  *
- * It validates the *canonical* form, because ordering is this function's job
- * anyway — demanding that a caller pre-sort its decisions would push a
- * serialization concern into every producer. The pure transforms above stay
- * unchecked on purpose: they are typed, and this is the boundary where a value
- * becomes project state.
+ * Three steps in this order, and the order is the point: shape first, because
+ * canonicalization *assumes* it (`[...lock.decisions]`, `[...record.evidence]`)
+ * and would otherwise throw a native `TypeError` from inside the canonicalizer;
+ * then the canonical form, because ordering is this function's job and demanding
+ * that a caller pre-sort would push a serialization concern into every producer;
+ * then the rules. The pure transforms above stay unchecked on purpose — they are
+ * typed, and this is the boundary where a value becomes project state.
  */
 export async function writeFgcLock(projectRoot: string, lock: FgcLockDocument): Promise<void> {
+  assertFgcLockDocumentShape(lock);
   const canonical = canonicalizeFgcLock(lock);
   assertFgcLockDocument(canonical);
   const path = fgcLockPath(projectRoot);

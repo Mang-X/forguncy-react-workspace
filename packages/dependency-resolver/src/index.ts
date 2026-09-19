@@ -58,6 +58,7 @@ export type {
 export {
   assessLockDecision,
   assertFgcLockDocument,
+  assertFgcLockDocumentShape,
   assertSupportedFgcLockSchemaVersion,
   canonicalizeFgcLock,
   createEmptyFgcLock,
