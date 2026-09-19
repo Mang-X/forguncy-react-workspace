@@ -10,18 +10,31 @@
  * - #4 — https://github.com/Mang-X/forguncy-react-workspace/issues/4
  * - #5 — https://github.com/Mang-X/forguncy-react-workspace/issues/5
  *
- * What is implemented here: the lock as a project artifact (read, write, upsert,
- * remove) and the projection onto compilation. The decision model, its
- * validation, its canonical form and its freshness rules are re-exported from
- * `core` so a consumer of this package gets the whole `fgc.lock.json` contract
- * without reaching into a second import.
+ * What is implemented here:
+ *
+ * - the lock as a project artifact — read (with migration), write, upsert,
+ *   remove, exact-key and target-preferring lookup (`lock-store`);
+ * - the projection onto compilation, which hands the compiler verified decisions
+ *   only (`lock-store`);
+ * - the exact installed versions the staleness rules compare against, read out of
+ *   the workspace install graph (`install-graph`);
+ * - the update API an Agent or probe flow records through, which merges a
+ *   measurement into a record instead of replacing the record (`decision-recording`);
+ * - conformance auditing against the facts a lock cannot contain — the target's
+ *   host globals (#9) and the verified extension catalog (#12)
+ *   (`decision-conformance`).
+ *
+ * The decision model, its validation, its canonical form, its migration chain and
+ * its freshness rules are re-exported from `core` so a consumer of this package
+ * gets the whole `fgc.lock.json` contract without reaching into a second import.
  *
  * What is *not* implemented here: the empirical probe that produces the evidence
  * a record cites (`Implement: deterministic dependency probe engine` #17) and the
  * Agent-driven library selection that decides a strategy in the first place
  * (`Implement: Forguncy React dependency-selection Agent Skill` #18). Neither is
  * a non-goal of #8; both are downstream of it. Composing a probe fingerprint is
- * #17's, which is why this package only compares the values it is given.
+ * #17's, which is why this package only compares the values it is given, and #9's
+ * real host-bridge table replaces `DEFAULT_HOST_BRIDGE_MANIFEST` once #9 lands.
  */
 
 import type { DependencyDecision } from "@forguncy-react-workspace/core";
@@ -93,7 +106,9 @@ export {
 export {
   compilationDependencies,
   fgcLockPath,
+  findExactLockDecision,
   readFgcLock,
+  recordedPackageNames,
   removeLockDecision,
   upsertLockDecision,
   writeFgcLock,
@@ -103,6 +118,45 @@ export type {
   CompilationDependencyOptions,
   WithheldCompilationDependency,
 } from "./lock-store";
+
+export { resolveInstalledVersions } from "./install-graph";
+export type {
+  InstalledVersions,
+  UnresolvedInstalledPackage,
+  UnresolvedInstalledPackageReason,
+} from "./install-graph";
+
+export {
+  mergeDependencyDecisionUpdate,
+  recordDependencyDecision,
+  recordDependencyDecisions,
+} from "./decision-recording";
+export type {
+  DependencyDecisionUpdate,
+  RecordedDependencyDecision,
+  RecordedDependencyDecisions,
+} from "./decision-recording";
+
+export {
+  auditLockDecisionConformance,
+  conformanceErrors,
+  CONFORMANCE_PROBLEM_CODES,
+  DEFAULT_HOST_BRIDGE_MANIFEST,
+  JSX_RUNTIME_MODULE_IDS,
+  PRESET_PROVIDED_HOST_GLOBALS,
+  validateLockDecisionConformance,
+} from "./decision-conformance";
+export type {
+  ConformanceDiagnostic,
+  ConformanceOptions,
+  ConformanceProblemCode,
+  ConformanceSeverity,
+  ExtensionCatalog,
+  HostBridgeManifest,
+  HostBridgeMapping,
+  PresetProvidedGlobal,
+  VerifiedExtensionMapping,
+} from "./decision-conformance";
 
 export interface ResolveDependencyInput {
   packageName: string;

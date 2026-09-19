@@ -649,7 +649,16 @@ export function compareLockDecisions(a: LockedDependencyDecision, b: LockedDepen
   return compareStrings(a.packageName, b.packageName) || compareStrings(a.cellTarget ?? "", b.cellTarget ?? "");
 }
 
-function compareEvidenceLinks(a: DecisionEvidenceLink, b: DecisionEvidenceLink): number {
+/**
+ * Canonical order for evidence links: kind, then reference.
+ *
+ * Exported because a *writer* that merges new evidence into an existing record has
+ * to produce the same order this serializer does, or the record it returns is not
+ * the record on disk. Sharing the comparator is what keeps that true; a second
+ * copy in the writer would be a second definition of "canonical", and the two
+ * would only have to disagree once.
+ */
+export function compareEvidenceLinks(a: DecisionEvidenceLink, b: DecisionEvidenceLink): number {
   return compareStrings(a.kind, b.kind) || compareStrings(a.reference, b.reference);
 }
 
