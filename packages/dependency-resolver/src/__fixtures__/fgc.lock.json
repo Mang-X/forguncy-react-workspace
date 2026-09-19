@@ -1,0 +1,216 @@
+{
+  "schemaVersion": 1,
+  "decisions": [
+    {
+      "packageName": "@tanstack/react-query",
+      "cellTarget": null,
+      "strategy": "extension",
+      "resolvedVersion": "5.90.2",
+      "globalName": "TanStackQuery",
+      "libraryId": "tanstack-query",
+      "probe": {
+        "status": "passed",
+        "fingerprint": "probe=inline-bundle;entry=src/cells/orders-table/App.tsx;toolchain=vite-plus@0.3.2",
+        "versionIndependent": false
+      },
+      "target": {
+        "product": "Forguncy",
+        "productVersion": "12.0.100.0",
+        "productBuild": "12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623",
+        "hostReactVersion": "19.2.7"
+      },
+      "probedWith": {
+        "vitePlus": "0.3.2"
+      },
+      "extension": {
+        "version": "5.90.2",
+        "identity": "sha256:9f1c2b7d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091"
+      },
+      "rejectedCandidate": null,
+      "rationale": "A bundled copy would give every cell its own query cache, so the shared extension global is required.",
+      "evidence": [
+        {
+          "kind": "runtime-observation",
+          "reference": "docs/probes/extension-tanstack-query.md"
+        },
+        {
+          "kind": "spec-issue",
+          "reference": "https://github.com/Mang-X/forguncy-react-workspace/issues/12"
+        }
+      ]
+    },
+    {
+      "packageName": "dayjs",
+      "cellTarget": "customers-card",
+      "strategy": "inline",
+      "resolvedVersion": "1.11.13",
+      "probe": {
+        "status": "passed",
+        "fingerprint": "probe=inline-bundle;entry=src/cells/customers-card/App.tsx;toolchain=vite-plus@0.3.2",
+        "versionIndependent": false
+      },
+      "target": {
+        "product": "Forguncy",
+        "productVersion": "12.0.100.0",
+        "productBuild": "12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623",
+        "hostReactVersion": "19.2.7"
+      },
+      "probedWith": {
+        "vitePlus": "0.3.2"
+      },
+      "extension": null,
+      "rejectedCandidate": null,
+      "rationale": null,
+      "evidence": [
+        {
+          "kind": "probe",
+          "reference": "docs/probes/inline-dayjs.md"
+        },
+        {
+          "kind": "spec-issue",
+          "reference": "https://github.com/Mang-X/forguncy-react-workspace/issues/8"
+        }
+      ]
+    },
+    {
+      "packageName": "es-toolkit",
+      "cellTarget": null,
+      "strategy": "inline",
+      "resolvedVersion": "1.39.8",
+      "probe": {
+        "status": "passed",
+        "fingerprint": "probe=inline-bundle;entry=src/cells/orders-table/App.tsx;toolchain=vite-plus@0.3.2",
+        "versionIndependent": false
+      },
+      "target": {
+        "product": "Forguncy",
+        "productVersion": "12.0.100.0",
+        "productBuild": "12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623",
+        "hostReactVersion": "19.2.7"
+      },
+      "probedWith": {
+        "vitePlus": "0.3.2"
+      },
+      "extension": null,
+      "rejectedCandidate": null,
+      "rationale": null,
+      "evidence": [
+        {
+          "kind": "probe",
+          "reference": "docs/probes/inline-es-toolkit.md"
+        },
+        {
+          "kind": "spec-issue",
+          "reference": "https://github.com/Mang-X/forguncy-react-workspace/issues/8"
+        }
+      ]
+    },
+    {
+      "packageName": "react",
+      "cellTarget": null,
+      "strategy": "host",
+      "resolvedVersion": "19.2.7",
+      "globalName": "React",
+      "probe": {
+        "status": "passed",
+        "fingerprint": "probe=inline-bundle;entry=src/cells/orders-table/App.tsx;toolchain=vite-plus@0.3.2",
+        "versionIndependent": false
+      },
+      "target": {
+        "product": "Forguncy",
+        "productVersion": "12.0.100.0",
+        "productBuild": "12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623",
+        "hostReactVersion": "19.2.7"
+      },
+      "probedWith": {
+        "vitePlus": "0.3.2"
+      },
+      "extension": null,
+      "rejectedCandidate": null,
+      "rationale": null,
+      "evidence": [
+        {
+          "kind": "runtime-observation",
+          "reference": "docs/probes/host-react.md"
+        },
+        {
+          "kind": "spec-issue",
+          "reference": "https://github.com/Mang-X/forguncy-react-workspace/issues/9"
+        }
+      ]
+    },
+    {
+      "packageName": "react-router-dom",
+      "cellTarget": null,
+      "strategy": "replace",
+      "resolvedVersion": null,
+      "rejection": {
+        "kind": "architectural",
+        "code": "application-router-conflict",
+        "summary": "Requested as the application router for the whole page.",
+        "remediation": "Keep routing in Forguncy and let the cell render the view for the current route."
+      },
+      "probe": {
+        "status": "not-run",
+        "fingerprint": null,
+        "versionIndependent": false
+      },
+      "target": null,
+      "probedWith": null,
+      "extension": null,
+      "rejectedCandidate": null,
+      "rationale": "Routing is application-owned; the cell renders a route, it does not own the router.",
+      "evidence": [
+        {
+          "kind": "spec-issue",
+          "reference": "https://github.com/Mang-X/forguncy-react-workspace/issues/4"
+        }
+      ]
+    },
+    {
+      "packageName": "some-amd-package",
+      "cellTarget": null,
+      "strategy": "replace",
+      "resolvedVersion": null,
+      "rejection": {
+        "kind": "technical",
+        "code": "amd-umd-branch-mismatch",
+        "summary": "The published entry resolves to an AMD branch the cell bundler cannot rewrite.",
+        "remediation": "Evaluate a browser-first ESM alternative with the same capability."
+      },
+      "alternatives": [
+        "browser-first-alternative"
+      ],
+      "supersededBy": "inline",
+      "probe": {
+        "status": "failed",
+        "fingerprint": "probe=amd-detect;entry=src/cells/orders-table/App.tsx;toolchain=vite-plus@0.3.2",
+        "versionIndependent": false
+      },
+      "target": {
+        "product": "Forguncy",
+        "productVersion": "12.0.100.0",
+        "productBuild": "12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623",
+        "hostReactVersion": "19.2.7"
+      },
+      "probedWith": {
+        "vitePlus": "0.3.2"
+      },
+      "extension": null,
+      "rejectedCandidate": {
+        "version": "2.4.0"
+      },
+      "rationale": "The failure is a property of this published artifact, so the candidate version is recorded to re-open the decision on upgrade.",
+      "evidence": [
+        {
+          "kind": "probe",
+          "reference": "docs/probes/technical-some-amd-package.md"
+        },
+        {
+          "kind": "spec-issue",
+          "reference": "https://github.com/Mang-X/forguncy-react-workspace/issues/8"
+        }
+      ]
+    }
+  ]
+}

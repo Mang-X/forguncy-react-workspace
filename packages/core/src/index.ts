@@ -8,9 +8,11 @@
  * - #5 "establish the ReactCellType target/runtime contract on Forguncy 12.0.100"
  *   — https://github.com/Mang-X/forguncy-react-workspace/issues/5
  *
- * Scope note: this package states *semantics, boundaries and verified target
- * facts*. It intentionally does not resolve dependencies, bundle anything, or
- * maintain a package compatibility database; those are separate Issues.
+ * Scope note: this package states *semantics, boundaries, verified target facts
+ * and the dependency-decision model*. It intentionally does not resolve
+ * dependencies, bundle anything, or maintain a package compatibility database;
+ * those are separate Issues. Reading and writing `fgc.lock.json` as a project
+ * artifact is `dependency-resolver`'s job.
  */
 
 export {
@@ -100,6 +102,10 @@ export {
   citationPatternsFor,
   DECISION_CITATION_PATTERNS,
   decisionReference,
+  DEPENDENCY_LOCK_CITATION_PATTERNS,
+  DEPENDENCY_LOCK_DECISION,
+  DEPENDENCY_LOCK_DECISION_QUALIFIED_REFERENCE,
+  DEPENDENCY_LOCK_DECISION_REFERENCE,
   formatDecisionReference,
   formatGoverningSpecReferenceLine,
   GOVERNING_ARCHITECTURE_DECISIONS,
@@ -173,3 +179,74 @@ export type {
   RuntimeContractUnknown,
   RuntimeEvidenceChannel,
 } from "./runtime-contract";
+
+export {
+  assertFgcLockDocument,
+  assertSupportedFgcLockSchemaVersion,
+  canonicalizeFgcLock,
+  compareLockDecisions,
+  createEmptyFgcLock,
+  DECISION_EVIDENCE_KINDS,
+  dependencyDecisionOf,
+  FGC_LOCK_FILE_NAME,
+  FGC_LOCK_SCHEMA_VERSION,
+  FgcLockSchemaVersionError,
+  FgcLockValidationError,
+  findMachineSpecificPaths,
+  forguncyTargetIdentity,
+  inspectFgcLockDocument,
+  isCanonicallyOrdered,
+  isEvidenceReference,
+  isEvidenceUrl,
+  isRepositoryRelativeReference,
+  isSupportedFgcLockSchemaVersion,
+  LOCK_EVIDENCE_POLICY,
+  LOCK_EVIDENCE_PROFILES,
+  LOCK_GOVERNING_DECISIONS,
+  LOCK_GOVERNING_SPEC_REFERENCE_LINE,
+  LOCK_PROBE_REQUIREMENTS,
+  lockEvidencePolicyFor,
+  lockEvidenceProfileOf,
+  matchesForguncyTargetIdentity,
+  parseFgcLockDocument,
+  PROBE_STATUSES,
+  serializeFgcLock,
+  SUPPORTED_FGC_LOCK_SCHEMA_VERSIONS,
+  validateFgcLockDocument,
+} from "./lock";
+export type {
+  DecisionEvidenceKind,
+  DecisionEvidenceLink,
+  ExtensionEvidence,
+  FgcLockDocument,
+  ForguncyTargetIdentity,
+  LockedDependencyDecision,
+  LockEvidencePolicy,
+  LockEvidenceProfile,
+  LockProbeEvidence,
+  LockProbeRequirement,
+  LockRecordMetadata,
+  ProbeStatus,
+  RejectedCandidateEvidence,
+  ToolchainIdentity,
+} from "./lock";
+
+export {
+  assessLockDecision,
+  findLockDecision,
+  LOCK_FRESHNESS_STATES,
+  LOCK_REAL_RUNTIME_VALIDATIONS,
+  LOCK_STALENESS_REASONS,
+  lockDecisionBlockers,
+  resolveLockDecision,
+} from "./lock-freshness";
+export type {
+  LockDecisionAssessment,
+  LockDecisionQuery,
+  LockDecisionResolution,
+  LockDecisionState,
+  LockEnvironment,
+  LockFreshness,
+  LockRealRuntimeValidation,
+  LockStalenessReason,
+} from "./lock-freshness";
