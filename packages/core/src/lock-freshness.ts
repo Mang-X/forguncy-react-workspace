@@ -147,19 +147,22 @@ function assessProbeFreshness(
   const { probe } = record;
   const reasons: LockStalenessReason[] = [];
 
-  if (policy.probeRequirement === "passed" || policy.probeRequirement === "measured") {
+  if (policy.probeRequirement !== "none") {
     if (probe.status === "not-run") {
       reasons.push("probe-never-run");
+    } else if (policy.probeRequirement === "passed" && probe.status !== "passed") {
+      // A failed probe on a dependency is a legitimate record — an Agent should
+      // be able to see the attempt — so it reports as stale here instead of
+      // being refused when the record is written.
+      reasons.push("probe-failed");
     }
   }
 
-  if (policy.probeRequirement === "passed" && probe.status === "failed") {
-    reasons.push("probe-failed");
-  }
-
-  // The fingerprint is why a change to the entry, the probe configuration or a
-  // bundler input is detected at all: every version in the record can still match
-  // while the thing that was measured has moved.
+  // The fingerprint is why a change to the entry or the probe configuration is
+  // detected at all: every version in the record can still match while the thing
+  // that was measured has moved. It covers only the inputs no other field
+  // models, so a version, target or toolchain change is reported once, by its
+  // own reason, rather than also as a fingerprint change.
   if (probe.status !== "not-run" && probe.fingerprint !== null) {
     const current = environment.probeFingerprints[record.packageName];
     if (current === undefined) {

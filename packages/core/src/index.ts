@@ -211,6 +211,8 @@ export {
   parseFgcLockDocument,
   PROBE_STATUSES,
   requiresRuntimeValidation,
+  requiresTargetIdentity,
+  RUNTIME_CONFIRMED_TECHNICAL_REJECTION_CODES,
   serializeFgcLock,
   SUPPORTED_FGC_LOCK_SCHEMA_VERSIONS,
   validateFgcLockDocument,

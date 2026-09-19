@@ -18,8 +18,12 @@ const SPEC_8 = "https://github.com/Mang-X/forguncy-react-workspace/issues/8";
 const SPEC_9 = "https://github.com/Mang-X/forguncy-react-workspace/issues/9";
 const SPEC_12 = "https://github.com/Mang-X/forguncy-react-workspace/issues/12";
 
-const CELL_FINGERPRINT = "probe=inline-bundle;entry=src/cells/orders-table/App.tsx;toolchain=vite-plus@0.3.2";
-const BUNDLER_FINGERPRINT = "probe=amd-detect;entry=src/cells/orders-table/App.tsx;toolchain=vite-plus@0.3.2";
+// A fingerprint covers only the probe inputs no other field models — the entry,
+// the probe id, the probe configuration. The version, target and toolchain are
+// recorded separately, so a real recomputation after any of them moves leaves
+// this value unchanged and the change is reported once, by its own reason.
+const CELL_FINGERPRINT = "probe=inline-bundle;entry=src/cells/orders-table/App.tsx";
+const BUNDLER_FINGERPRINT = "probe=amd-detect;entry=src/cells/orders-table/App.tsx";
 const EXTENSION_IDENTITY = "sha256:9f1c2b7d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091";
 
 /** What a record stores: the identity derived from the verified contract. */
@@ -221,6 +225,43 @@ describe("staleness: recorded inputs versus current inputs", () => {
     };
 
     expect(reasonsFor(independent, lockEnvironment({ resolvedVersions: { "es-toolkit": "1.40.0" } })).freshness).toBe("fresh");
+  });
+
+  // The flag only means anything if this holds: a fingerprint that carried the
+  // version would move on an upgrade the flag permits, so the record would go
+  // stale anyway and `versionIndependent` would be decoration.
+  it("lets versionIndependent survive a real fingerprint recomputation", () => {
+    const independent: LockedDependencyDecision = {
+      ...inlineRecord,
+      probe: { ...inlineRecord.probe, versionIndependent: true },
+    };
+    const upgraded = lockEnvironment({
+      resolvedVersions: { "es-toolkit": "1.40.0" },
+      // Recomputed from the inputs a fingerprint covers: the entry and probe id
+      // have not changed, so the value does not either.
+      probeFingerprints: { "es-toolkit": CELL_FINGERPRINT },
+    });
+
+    expect(reasonsFor(independent, upgraded).stalenessReasons).toEqual([]);
+    expect(reasonsFor(inlineRecord, upgraded).stalenessReasons).toEqual(["package-version-changed"]);
+  });
+
+  // Each separately modelled input reports once. Double counting would be the
+  // symptom of a fingerprint that repeats what the record already carries.
+  it("reports a changed input in the vocabulary of that input, exactly once", () => {
+    expect(reasonsFor(inlineRecord, lockEnvironment({ resolvedVersions: { "es-toolkit": "1.40.0" } })).stalenessReasons).toEqual([
+      "package-version-changed",
+    ]);
+    expect(reasonsFor(inlineRecord, lockEnvironment({ target: futureTarget() })).stalenessReasons).toEqual([
+      "forguncy-target-changed",
+    ]);
+    expect(reasonsFor(inlineRecord, lockEnvironment({ toolchain: { vitePlus: "0.4.0" } })).stalenessReasons).toEqual([
+      "toolchain-changed",
+    ]);
+    expect(
+      reasonsFor(inlineRecord, lockEnvironment({ probeFingerprints: { "es-toolkit": "probe=inline-bundle;entry=src/other/App.tsx" } }))
+        .stalenessReasons,
+    ).toEqual(["probe-fingerprint-changed"]);
   });
 
   it("cannot verify a package whose installed version is unknown", () => {

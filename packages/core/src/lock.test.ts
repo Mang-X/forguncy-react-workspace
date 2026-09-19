@@ -16,6 +16,7 @@ import {
   FGC_LOCK_FILE_NAME,
   FGC_LOCK_SCHEMA_VERSION,
   FgcLockSchemaVersionError,
+  FgcLockValidationError,
   findMachineSpecificPaths,
   forguncyTargetIdentity,
   GOVERNING_ARCHITECTURE_DECISIONS,
@@ -28,11 +29,14 @@ import {
   LOCK_EVIDENCE_PROFILES,
   LOCK_GOVERNING_DECISIONS,
   LOCK_GOVERNING_SPEC_REFERENCE_LINE,
+  LOCK_PROBE_REQUIREMENTS,
   lockEvidenceProfileOf,
   matchesForguncyTargetIdentity,
   parseFgcLockDocument,
   requiresRealRuntimeValidation,
   requiresRuntimeValidation,
+  requiresTargetIdentity,
+  RUNTIME_CONFIRMED_TECHNICAL_REJECTION_CODES,
   RUNTIME_CONTRACT_TARGET,
   serializeFgcLock,
   SUPPORTED_FGC_LOCK_SCHEMA_VERSIONS,
@@ -49,8 +53,8 @@ const SPEC_12 = "https://github.com/Mang-X/forguncy-react-workspace/issues/12";
 /** The target the #5 contract verified, rather than a version restated here. */
 const TARGET: ForguncyTargetIdentity = forguncyTargetIdentity();
 const TOOLCHAIN = { vitePlus: "0.3.2" };
-const CELL_FINGERPRINT = "probe=inline-bundle;entry=src/cells/orders-table/App.tsx;toolchain=vite-plus@0.3.2";
-const BUNDLER_FINGERPRINT = "probe=amd-detect;entry=src/cells/orders-table/App.tsx;toolchain=vite-plus@0.3.2";
+const CELL_FINGERPRINT = "probe=inline-bundle;entry=src/cells/orders-table/App.tsx";
+const BUNDLER_FINGERPRINT = "probe=amd-detect;entry=src/cells/orders-table/App.tsx";
 
 const inlineRecord: LockedDependencyDecision = {
   strategy: "inline",
@@ -225,13 +229,47 @@ describe("fgc.lock.json model", () => {
     expect(LOCK_EVIDENCE_POLICY["resolved-dependency"].requiresTargetIdentity).toBe(true);
     expect(LOCK_EVIDENCE_POLICY["resolved-dependency"].probeRequirement).toBe("passed");
     expect(LOCK_EVIDENCE_POLICY["architectural-rejection"].invalidatedByTargetChange).toBe(false);
-    expect(LOCK_EVIDENCE_POLICY["technical-rejection"].probeRequirement).toBe("measured");
+    // A rejection's evidence is a probe that did not succeed — a passing one
+    // beside a technical rejection contradicts the decision.
+    expect(LOCK_EVIDENCE_POLICY["technical-rejection"].probeRequirement).toBe("not-passed");
     expect(LOCK_EVIDENCE_POLICY["technical-rejection"].invalidatedByTargetChange).toBe(true);
+    expect([...LOCK_PROBE_REQUIREMENTS]).toEqual(["none", "passed", "not-passed"]);
     for (const profile of LOCK_EVIDENCE_PROFILES) {
       const participates = LOCK_EVIDENCE_POLICY[profile].participatesInCompilation;
       expect(participates, profile).toBe(profile === "resolved-dependency");
     }
     expect([...DECISION_EVIDENCE_KINDS]).toEqual(["spec-issue", "probe", "pull-request", "runtime-observation"]);
+  });
+
+  it("asks a runtime-only rejection for the target it was observed under", () => {
+    // A local bundling failure needs no runtime; a host observation does.
+    expect(requiresTargetIdentity(technicalRejection)).toBe(false);
+    expect(RUNTIME_CONFIRMED_TECHNICAL_REJECTION_CODES).toEqual([
+      "host-module-identity-mismatch",
+      "global-namespace-collision",
+      "runtime-api-unavailable",
+    ]);
+
+    for (const code of RUNTIME_CONFIRMED_TECHNICAL_REJECTION_CODES) {
+      const runtimeFailure: LockedDependencyDecision = {
+        ...technicalRejection,
+        rejection: {
+          kind: "technical",
+          code,
+          summary: "The package needs a runtime API the target does not expose.",
+          remediation: "Route the capability to Forguncy, or evaluate a browser-first alternative.",
+        },
+      };
+
+      expect(requiresTargetIdentity(runtimeFailure), code).toBe(true);
+      expect(problemsFor(runtimeFailure)).toBe("");
+      expect(problemsFor({ ...runtimeFailure, target: null })).toMatch(/must name the target it was observed under/);
+    }
+
+    for (const record of [hostRecord, inlineRecord, extensionRecord]) {
+      expect(requiresTargetIdentity(record), record.strategy).toBe(true);
+    }
+    expect(requiresTargetIdentity(architecturalRejection)).toBe(false);
   });
 
   // The lock must not be a second place that decides whether a strategy owes a
@@ -416,6 +454,59 @@ describe("schema versioning", () => {
     );
     expect(() => parseFgcLockDocument("{ not json")).toThrow(/not valid JSON/);
   });
+  // The first revision checked four fields and then ran the semantic rules over
+  // whatever was left, so a record missing `cellTarget` reached
+  // `record.cellTarget.trim()` and threw a native TypeError out of the parser.
+  it("reports every malformed shape instead of throwing a TypeError", () => {
+    const malformed: readonly Record<string, unknown>[] = [
+      { ...inlineRecord, cellTarget: undefined },
+      { ...inlineRecord, resolvedVersion: undefined },
+      { ...inlineRecord, rationale: 7 },
+      { ...inlineRecord, probe: { fingerprint: null, versionIndependent: false } },
+      { ...inlineRecord, probe: { status: "passed", fingerprint: null } },
+      { ...inlineRecord, target: { product: "Forguncy" } },
+      { ...inlineRecord, probedWith: {} },
+      { ...inlineRecord, evidence: ["docs/probes/inline-es-toolkit.md"] },
+      { ...hostRecord, globalName: undefined },
+      { ...extensionRecord, libraryId: undefined },
+      { ...architecturalRejection, rejection: { kind: "architectural", summary: "Requested as the router." } },
+      { ...technicalRejection, rejectedCandidate: { version: 2 } },
+      { ...technicalRejection, alternatives: "browser-first-alternative" },
+      { ...technicalRejection, supersededBy: "bundle" },
+    ];
+
+    for (const record of malformed) {
+      const lock = { schemaVersion: FGC_LOCK_SCHEMA_VERSION, decisions: [record] };
+
+      expect(validateFgcLockDocument(lock as never).length, JSON.stringify(record)).toBeGreaterThan(0);
+      expect(() => parseFgcLockDocument(JSON.stringify(lock))).toThrow(FgcLockValidationError);
+    }
+  });
+
+  it("says which field is missing rather than reading it as absent-and-fine", () => {
+    const problems = inspectFgcLockDocument({
+      schemaVersion: 1,
+      decisions: [{ packageName: "es-toolkit", strategy: "inline" }],
+    }).join("\n");
+
+    expect(problems).toMatch(/must declare `cellTarget` as a string or null/);
+    expect(problems).toMatch(/must record probe evidence/);
+    expect(problems).toMatch(/must record an `evidence` array/);
+  });
+
+  it("refuses a rejection whose code belongs to the other family", () => {
+    expect(
+      problemsFor({
+        ...technicalRejection,
+        rejection: {
+          kind: "technical",
+          code: "application-router-conflict" as never,
+          summary: "The published entry resolves to an AMD branch.",
+          remediation: "Evaluate a browser-first ESM alternative.",
+        },
+      }),
+    ).toMatch(/must declare a rejection code from the technical family/);
+  });
 });
 
 describe("lock metadata validation", () => {
@@ -435,7 +526,7 @@ describe("lock metadata validation", () => {
     expect(problemsFor({ ...inlineRecord, probe: { ...inlineRecord.probe, status: "failed" } })).toMatch(
       /Runtime compatibility cannot be claimed from a probe that has not passed/,
     );
-    expect(problemsFor({ ...inlineRecord, target: null })).toMatch(/must name the target it was validated against/);
+    expect(problemsFor({ ...inlineRecord, target: null })).toMatch(/must name the target it was observed under/);
   });
 
   // A technical rejection records the target the failure was observed under, and
@@ -486,6 +577,26 @@ describe("lock metadata validation", () => {
         target: null,
       }),
     ).toMatch(/a probe run here would claim a measurement that this profile does not make/);
+  });
+
+  it("refuses a technical rejection whose probe passed", () => {
+    // Without this rule the record could be rejected and accepted at once, and
+    // `resolveLockDecision` would report it as verified.
+    expect(
+      problemsFor({ ...technicalRejection, probe: { ...technicalRejection.probe, status: "passed" } }),
+    ).toMatch(/status "passed" contradicts the rejection/);
+
+    // Recording a rejection whose failure has not been measured stays possible —
+    // it is a decision an Agent can legitimately reach by reading the package's
+    // requirements — it just cannot be verified.
+    expect(
+      problemsFor({
+        ...technicalRejection,
+        probe: { status: "not-run", fingerprint: null, versionIndependent: false },
+        probedWith: null,
+        target: null,
+      }),
+    ).toBe("");
   });
 
   it("refuses a toolchain recorded for a probe that never ran", () => {

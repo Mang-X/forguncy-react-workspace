@@ -37,6 +37,8 @@ import {
 } from "./governance";
 import type { RuntimeContractTarget } from "./runtime-contract";
 import { RUNTIME_CONTRACT_TARGET } from "./runtime-contract";
+import { ARCHITECTURAL_REJECTION_CODES, TECHNICAL_REJECTION_CODES } from "./rejection";
+import type { TechnicalRejectionCode } from "./rejection";
 import type { DependencyDecision, DependencyStrategy } from "./strategy";
 import { requiresRealRuntimeValidation, strategySemantics, validateDependencyDecisionShape } from "./strategy";
 
@@ -143,18 +145,27 @@ export type ProbeStatus = (typeof PROBE_STATUSES)[number];
 export interface LockProbeEvidence {
   readonly status: ProbeStatus;
   /**
-   * Identity of the probe's declared inputs — entry, probe id, resolved version,
-   * toolchain, target.
+   * Identity of the probe inputs the lock does *not* model separately.
    *
-   * The contract is that this value is a deterministic function of those inputs
+   * Deliberately not a fingerprint of everything the probe saw. The resolved
+   * version, the Forguncy target and the toolchain each have their own field on
+   * this record and their own freshness reason, so folding them in here would
+   * report one change twice — and it would silently defeat `versionIndependent`:
+   * an upgrade that flag permits would still move a fingerprint containing the
+   * version, so the record would go stale anyway and the flag would mean nothing.
+   *
+   * What belongs here is the rest of the probe's declared inputs: the entry, the
+   * probe id, the probe configuration, and any bundler input no other field
+   * captures.
+   *
+   * The contract is that the value is a deterministic function of those inputs
    * and can therefore be *recomputed without re-running the probe*. That is what
-   * lets `LockEnvironment.currentProbeFingerprint` be compared against it, and
-   * why an entry, probe configuration or bundler input change is detectable
-   * even when every version in the record still matches.
-   *
-   * Composing the value is the probe engine's job (#17); this module only
-   * requires that both sides compose it the same way. Required once a probe has
-   * run, null while `status` is `not-run`.
+   * lets `LockEnvironment.probeFingerprints` be compared against it, and why an
+   * entry or configuration change is detectable while every version in the
+   * record still matches. Composing it is the probe engine's job (#17); this
+   * module only requires that both sides compose it the same way, and only over
+   * the inputs listed above. Required once a probe has run, null while `status`
+   * is `not-run`.
    */
   readonly fingerprint: string | null;
   /**
@@ -307,8 +318,24 @@ export const LOCK_EVIDENCE_PROFILES = [
 ] as const;
 export type LockEvidenceProfile = (typeof LOCK_EVIDENCE_PROFILES)[number];
 
-/** How much probe evidence a profile needs before its record can be used. */
-export const LOCK_PROBE_REQUIREMENTS = ["none", "measured", "passed"] as const;
+/**
+ * Which probe outcome a profile's evidence is.
+ *
+ * Named for the outcome rather than for "how much evidence", because the three
+ * profiles want three different outcomes and the difference is semantic:
+ *
+ * - `none` — no probe belongs to this record at all.
+ * - `passed` — the record is usable once a probe passes. A failed or missing
+ *   probe is still a legitimate record — an Agent should be able to see the
+ *   attempt — so it is recorded and evaluates as stale rather than being refused
+ *   when it is written. A failure is history; only success is compatibility.
+ * - `not-passed` — a rejection's evidence is a probe that did *not* succeed.
+ *   `not-run` is allowed, because a rejection can come from reading the
+ *   package's requirements rather than from a bundle attempt, and freshness
+ *   reports it as unverified. `passed` is refused: a record cannot both reject a
+ *   candidate and hold a probe that accepted it.
+ */
+export const LOCK_PROBE_REQUIREMENTS = ["none", "passed", "not-passed"] as const;
 export type LockProbeRequirement = (typeof LOCK_PROBE_REQUIREMENTS)[number];
 
 export interface LockEvidencePolicy {
@@ -345,13 +372,53 @@ export const LOCK_EVIDENCE_POLICY: Readonly<Record<LockEvidenceProfile, LockEvid
     // A product upgrade can fix a bundling failure, so the rejection is tied to
     // the target it was observed under.
     invalidatedByTargetChange: true,
-    // Not required: a bundling failure is reproducible without a Forguncy page,
-    // so demanding a target would block a legitimate local rejection.
+    // Not required by default: a bundling failure can be reproduced without a
+    // Forguncy page, so demanding a target would block a legitimate local
+    // rejection. Codes that only a runtime can confirm override this — see
+    // `requiresTargetIdentity`.
     requiresTargetIdentity: false,
-    probeRequirement: "measured",
+    probeRequirement: "not-passed",
     participatesInCompilation: false,
   },
 };
+
+/**
+ * Technical rejections that cannot be confirmed without a real Forguncy runtime.
+ *
+ * The profile default — "a bundling failure is reproducible locally" — is true
+ * for the artifact-shaped failures, and false for the three below, which are
+ * observations of the host: which module identity a global actually has, whether
+ * a global name collides with the host's, and whether a runtime API the package
+ * needs exists at all. A record citing one of these without naming the target it
+ * was observed under would claim a runtime fact it never observed, so validation
+ * requires the target for exactly these codes.
+ *
+ * The split is a judgement per code rather than a property of `replace`, and
+ * later Specs (#12 extension externals, #17 probe engine) may refine it — hence
+ * a named list instead of logic buried in a validator.
+ */
+export const RUNTIME_CONFIRMED_TECHNICAL_REJECTION_CODES: readonly TechnicalRejectionCode[] = [
+  "host-module-identity-mismatch",
+  "global-namespace-collision",
+  "runtime-api-unavailable",
+];
+
+/**
+ * Whether this record has to name the Forguncy target its evidence is about.
+ *
+ * The profile's default, refined per rejection code where the runtime is what
+ * the failure was observed in.
+ */
+export function requiresTargetIdentity(record: LockedDependencyDecision): boolean {
+  if (LOCK_EVIDENCE_POLICY[lockEvidenceProfileOf(record)].requiresTargetIdentity) {
+    return true;
+  }
+  return (
+    record.strategy === "replace" &&
+    record.rejection.kind === "technical" &&
+    RUNTIME_CONFIRMED_TECHNICAL_REJECTION_CODES.includes(record.rejection.code)
+  );
+}
 
 /**
  * Whether the strategy's real-runtime checks are still owed for this record.
@@ -701,9 +768,13 @@ function isKnownStrategy(value: unknown): value is DependencyStrategy {
 /**
  * Structural problems with untrusted input, before any typed access.
  *
- * Split out from `validateFgcLockDocument` so `parseFgcLockDocument` can reject a
- * malformed file with a readable message instead of crashing while reading a
- * field the document does not have.
+ * Complete on purpose, and that completeness is the whole point: the semantic
+ * pass reads fields with `.trim()`, `.kind`, `.length` and friends, so any field
+ * this misses becomes a native `TypeError` thrown out of the parser instead of a
+ * `FgcLockValidationError` naming the record. A missing field is therefore a
+ * problem here even when `null` would be legal: the file is generated and
+ * reviewed, so an absent key means the writer was wrong, and "must declare null"
+ * is a better message than reading it as absent-and-fine.
  */
 export function inspectFgcLockDocument(input: unknown): readonly string[] {
   if (!isPlainObject(input)) {
@@ -727,25 +798,191 @@ export function inspectFgcLockDocument(input: unknown): readonly string[] {
   }
 
   decisions.forEach((record, index) => {
-    const where = `decisions[${index}]`;
-    if (!isPlainObject(record)) {
-      problems.push(`${where} must be an object.`);
-      return;
-    }
-    if (typeof record.packageName !== "string" || record.packageName.trim().length === 0) {
-      problems.push(`${where} must name the package it decides about.`);
-    }
-    if (!isKnownStrategy(record.strategy)) {
-      problems.push(`${where} must declare one of the four dependency strategies.`);
-    }
-    if (!isPlainObject(record.probe)) {
-      problems.push(`${where} must record probe evidence, even when no probe has run.`);
-    }
-    if (!Array.isArray(record.evidence)) {
-      problems.push(`${where} must record an \`evidence\` array linking the decision to its probe/decision evidence.`);
-    }
+    problems.push(...inspectLockRecord(record, `decisions[${index}]`));
   });
 
+  return problems;
+}
+
+function inspectString(problems: string[], source: Record<string, unknown>, field: string, where: string): void {
+  if (typeof source[field] !== "string") {
+    problems.push(`${where} must declare \`${field}\` as a string.`);
+  }
+}
+
+function inspectNullableString(
+  problems: string[],
+  source: Record<string, unknown>,
+  field: string,
+  where: string,
+): void {
+  const value = source[field];
+  if (value !== null && typeof value !== "string") {
+    problems.push(`${where} must declare \`${field}\` as a string or null.`);
+  }
+}
+
+function inspectStringArrayOrAbsent(
+  problems: string[],
+  source: Record<string, unknown>,
+  field: string,
+  where: string,
+): void {
+  const value = source[field];
+  if (value === undefined) {
+    return;
+  }
+  if (!Array.isArray(value) || value.some(item => typeof item !== "string")) {
+    problems.push(`${where} must declare \`${field}\` as an array of strings when it is present.`);
+  }
+}
+
+function inspectOptionalObject(
+  problems: string[],
+  source: Record<string, unknown>,
+  field: string,
+  where: string,
+  inspect: (value: Record<string, unknown>, where: string) => readonly string[],
+): void {
+  const value = source[field];
+  if (value === null) {
+    return;
+  }
+  if (!isPlainObject(value)) {
+    problems.push(`${where} must declare \`${field}\` as an object or null.`);
+    return;
+  }
+  problems.push(...inspect(value, `${where}.${field}`));
+}
+
+function inspectLockRecord(record: unknown, where: string): readonly string[] {
+  if (!isPlainObject(record)) {
+    return [`${where} must be an object.`];
+  }
+
+  const problems: string[] = [];
+
+  inspectString(problems, record, "packageName", where);
+  if (typeof record.packageName === "string" && record.packageName.trim().length === 0) {
+    problems.push(`${where} must name the package it decides about.`);
+  }
+
+  inspectNullableString(problems, record, "cellTarget", where);
+  if (typeof record.cellTarget === "string" && record.cellTarget.trim().length === 0) {
+    problems.push(`${where} must either name a cell target or record null for "applies to every target".`);
+  }
+
+  inspectNullableString(problems, record, "resolvedVersion", where);
+  inspectNullableString(problems, record, "rationale", where);
+
+  if (!isKnownStrategy(record.strategy)) {
+    problems.push(`${where} must declare one of the four dependency strategies.`);
+  } else if (record.strategy === "host") {
+    inspectString(problems, record, "globalName", where);
+  } else if (record.strategy === "extension") {
+    inspectString(problems, record, "globalName", where);
+    inspectString(problems, record, "libraryId", where);
+  } else if (record.strategy === "replace") {
+    problems.push(...inspectRejection(record.rejection, `${where}.rejection`));
+    inspectStringArrayOrAbsent(problems, record, "alternatives", where);
+    if (record.supersededBy !== undefined && !isKnownStrategy(record.supersededBy)) {
+      problems.push(`${where} must declare \`supersededBy\` as one of the four dependency strategies.`);
+    }
+  }
+
+  if (!isPlainObject(record.probe)) {
+    problems.push(`${where} must record probe evidence, even when no probe has run.`);
+  } else {
+    problems.push(...inspectProbe(record.probe, `${where}.probe`));
+  }
+
+  inspectOptionalObject(problems, record, "target", where, inspectTarget);
+  inspectOptionalObject(problems, record, "probedWith", where, inspectToolchain);
+  inspectOptionalObject(problems, record, "extension", where, inspectExtension);
+  inspectOptionalObject(problems, record, "rejectedCandidate", where, inspectRejectedCandidate);
+
+  if (!Array.isArray(record.evidence)) {
+    problems.push(`${where} must record an \`evidence\` array linking the decision to its probe/decision evidence.`);
+  } else {
+    record.evidence.forEach((link, index) => {
+      const evidenceWhere = `${where}.evidence[${index}]`;
+      if (!isPlainObject(link)) {
+        problems.push(`${evidenceWhere} must be an object.`);
+        return;
+      }
+      inspectString(problems, link, "kind", evidenceWhere);
+      inspectString(problems, link, "reference", evidenceWhere);
+    });
+  }
+
+  return problems;
+}
+
+function inspectProbe(probe: Record<string, unknown>, where: string): readonly string[] {
+  const problems: string[] = [];
+
+  if (typeof probe.status !== "string" || !PROBE_STATUSES.includes(probe.status as ProbeStatus)) {
+    problems.push(`${where} must record a probe status of ${PROBE_STATUSES.join(", ")}.`);
+  }
+  inspectNullableString(problems, probe, "fingerprint", where);
+  if (typeof probe.versionIndependent !== "boolean") {
+    problems.push(`${where} must declare \`versionIndependent\` as a boolean.`);
+  }
+
+  return problems;
+}
+
+function inspectRejection(rejection: unknown, where: string): readonly string[] {
+  if (!isPlainObject(rejection)) {
+    return [`${where} must be an object describing why the package was rejected.`];
+  }
+
+  const problems: string[] = [];
+
+  if (rejection.kind !== "architectural" && rejection.kind !== "technical") {
+    problems.push(`${where} must declare \`kind\` as "architectural" or "technical".`);
+  } else if (typeof rejection.code === "string") {
+    // A code from the other family would make the record claim both answers at
+    // once, which is the one distinction #4 exists to keep apart.
+    const family = rejection.kind === "architectural" ? ARCHITECTURAL_REJECTION_CODES : TECHNICAL_REJECTION_CODES;
+    if (!(family as readonly string[]).includes(rejection.code)) {
+      problems.push(`${where} must declare a rejection code from the ${rejection.kind} family.`);
+    }
+  } else {
+    problems.push(`${where} must declare \`code\` as a string.`);
+  }
+
+  inspectString(problems, rejection, "summary", where);
+  inspectString(problems, rejection, "remediation", where);
+  inspectStringArrayOrAbsent(problems, rejection, "evidence", where);
+
+  return problems;
+}
+
+function inspectTarget(target: Record<string, unknown>, where: string): readonly string[] {
+  const problems: string[] = [];
+  for (const field of ["product", "productVersion", "productBuild", "hostReactVersion"]) {
+    inspectString(problems, target, field, where);
+  }
+  return problems;
+}
+
+function inspectToolchain(toolchain: Record<string, unknown>, where: string): readonly string[] {
+  const problems: string[] = [];
+  inspectNullableString(problems, toolchain, "vitePlus", where);
+  return problems;
+}
+
+function inspectExtension(extension: Record<string, unknown>, where: string): readonly string[] {
+  const problems: string[] = [];
+  inspectNullableString(problems, extension, "version", where);
+  inspectNullableString(problems, extension, "identity", where);
+  return problems;
+}
+
+function inspectRejectedCandidate(candidate: Record<string, unknown>, where: string): readonly string[] {
+  const problems: string[] = [];
+  inspectString(problems, candidate, "version", where);
   return problems;
 }
 
@@ -753,11 +990,24 @@ export function inspectFgcLockDocument(input: unknown): readonly string[] {
  * The lock's own contract: schema version, required metadata, the evidence each
  * profile owes, portable references, canonical ordering, and unique keys.
  *
+ * Shape first, and shape alone when the document fails it: the rules below read
+ * typed fields, and running them over a document that is not that shape is how a
+ * `.trim()` on `undefined` escapes the parser as a `TypeError`. A structurally
+ * broken file is reported as broken rather than half-interpreted.
+ *
  * Decision-field semantics (a host global must be named, an architectural
  * rejection may not list package alternatives, …) stay in
  * `validateDependencyDecisionShape`, so #4's rules have one implementation.
  */
-export function validateFgcLockDocument(lock: FgcLockDocument): readonly string[] {
+export function validateFgcLockDocument(input: FgcLockDocument): readonly string[] {
+  const structural = inspectFgcLockDocument(input);
+  if (structural.length > 0) {
+    return structural;
+  }
+  return validateFgcLockDocumentRules(input);
+}
+
+function validateFgcLockDocumentRules(lock: FgcLockDocument): readonly string[] {
   const problems: string[] = [];
 
   if (!isSupportedFgcLockSchemaVersion(lock.schemaVersion)) {
@@ -792,7 +1042,7 @@ export function validateFgcLockDocument(lock: FgcLockDocument): readonly string[
     problems.push(...validateVersions(where, record));
     problems.push(...validateProbe(where, record, policy));
     problems.push(...validateTarget(where, record, policy));
-    problems.push(...validateProbedWith(where, record, policy));
+    problems.push(...validateProbedWith(where, record));
     problems.push(...validateExtension(where, record));
     problems.push(...validateRejectedCandidate(where, record));
     problems.push(...validateRationale(where, record));
@@ -872,6 +1122,16 @@ function validateProbe(
     );
   }
 
+  // A rejection's evidence is a probe that did not succeed. A `passed` probe
+  // beside it would mean the record both rejected and accepted the same
+  // candidate, and the current shape would carry that into the lock and evaluate
+  // it as verified — so it is refused rather than interpreted.
+  if (policy.probeRequirement === "not-passed" && status === "passed") {
+    problems.push(
+      `${where} is a "${policy.profile}" record, whose evidence is a probe that did not pass; status "passed" contradicts the rejection. Record the failure, or record the strategy the package actually resolved to.`,
+    );
+  }
+
   return problems;
 }
 
@@ -909,20 +1169,18 @@ function validateTarget(
     );
   }
 
-  if (policy.requiresTargetIdentity && target === null) {
+  if (requiresTargetIdentity(record) && target === null) {
     problems.push(
-      `${where} uses strategy "${record.strategy}", whose evidence is a property of the Forguncy runtime; the record must name the target it was validated against.`,
+      `${where} uses strategy "${record.strategy}"${
+        record.strategy === "replace" ? ` and rejection code "${record.rejection.code}"` : ""
+      }, whose evidence is a property of the Forguncy runtime; the record must name the target it was observed under.`,
     );
   }
 
   return problems;
 }
 
-function validateProbedWith(
-  where: string,
-  record: LockedDependencyDecision,
-  policy: LockEvidencePolicy,
-): readonly string[] {
+function validateProbedWith(where: string, record: LockedDependencyDecision): readonly string[] {
   const { probedWith, probe } = record;
 
   if (probedWith !== null && probedWith.vitePlus !== null && probedWith.vitePlus.trim().length === 0) {
@@ -936,9 +1194,10 @@ function validateProbedWith(
   }
 
   // #8 asks for the toolchain "when material", so the version may be null — but
-  // the identity itself cannot be absent, or a Vite+ upgrade could never
-  // invalidate this evidence and the record would be verified for ever.
-  if (policy.probeRequirement !== "none" && probedWith === null) {
+  // once a probe has run the identity itself cannot be absent, or a Vite+ upgrade
+  // could never invalidate this evidence and the record would be verified for
+  // ever. A probe that never ran has no toolchain to record.
+  if (probe.status !== "not-run" && probedWith === null) {
     return [
       `${where} records a "${probe.status}" probe without the toolchain it ran under. Record probedWith, and record vitePlus as null there only when its version is genuinely immaterial.`,
     ];

@@ -9,6 +9,7 @@ import type { FgcLockDocument, LockEnvironment, LockedDependencyDecision } from 
 import {
   canonicalizeFgcLock,
   FGC_LOCK_SCHEMA_VERSION,
+  FgcLockValidationError,
   findMachineSpecificPaths,
   forguncyTargetIdentity,
   parseFgcLockDocument,
@@ -28,9 +29,9 @@ import {
 
 const FIXTURE = fileURLToPath(new URL("./__fixtures__/fgc.lock.json", import.meta.url));
 
-const CELL_FINGERPRINT = "probe=inline-bundle;entry=src/cells/orders-table/App.tsx;toolchain=vite-plus@0.3.2";
-const CUSTOMERS_FINGERPRINT = "probe=inline-bundle;entry=src/cells/customers-card/App.tsx;toolchain=vite-plus@0.3.2";
-const BUNDLER_FINGERPRINT = "probe=amd-detect;entry=src/cells/orders-table/App.tsx;toolchain=vite-plus@0.3.2";
+const CELL_FINGERPRINT = "probe=inline-bundle;entry=src/cells/orders-table/App.tsx";
+const CUSTOMERS_FINGERPRINT = "probe=inline-bundle;entry=src/cells/customers-card/App.tsx";
+const BUNDLER_FINGERPRINT = "probe=amd-detect;entry=src/cells/orders-table/App.tsx";
 
 /** The environment the committed example was validated in. */
 function fixtureEnvironment(overrides: Partial<LockEnvironment> = {}): LockEnvironment {
@@ -138,6 +139,21 @@ describe("fgc.lock.json as a project artifact", () => {
     expect(await readFile(fgcLockPath(projectRoot), "utf8")).toBe(written);
   });
 
+  it("refuses to write a lock the read path would refuse", async () => {
+    const projectRoot = await emptyProject();
+    const broken = {
+      schemaVersion: FGC_LOCK_SCHEMA_VERSION,
+      decisions: [{ ...inlineRecord, cellTarget: undefined }],
+    };
+
+    await expect(writeFgcLock(projectRoot, broken as never)).rejects.toThrow(FgcLockValidationError);
+    // Nothing was written, so a later run does not inherit a file it cannot read.
+    await expect(readFgcLock(projectRoot)).resolves.toEqual({
+      schemaVersion: FGC_LOCK_SCHEMA_VERSION,
+      decisions: [],
+    });
+  });
+
   it("refuses to read a lock it does not understand", async () => {
     const projectRoot = await emptyProject();
     await writeFile(fgcLockPath(projectRoot), JSON.stringify({ schemaVersion: 99, decisions: [] }), "utf8");
@@ -204,6 +220,30 @@ describe("compiler projection", () => {
       stalenessReasons: ["package-version-changed"],
       realRuntimeValidation: "validated",
     });
+  });
+
+  // A rejection is checked for staleness before it is treated as a cache:
+  // otherwise an expired technical rejection would be reported as a decision that
+  // simply does not compile, and the caller would never learn it needs re-probing.
+  it("reports an expired technical rejection as stale, not as a cache", async () => {
+    const lock = await readFixture();
+
+    const { dependencies, withheld } = compilationDependencies(
+      lock,
+      fixtureEnvironment({ resolvedVersions: { ...fixtureEnvironment().resolvedVersions, "some-amd-package": "2.5.0" } }),
+    );
+
+    expect(dependencies.map(decision => decision.packageName)).not.toContain("some-amd-package");
+    expect(withheld).toContainEqual({
+      packageName: "some-amd-package",
+      strategy: "replace",
+      reason: "not-verified",
+      stalenessReasons: ["rejected-candidate-version-changed"],
+      realRuntimeValidation: "not-required",
+    });
+    // The architectural rejection is not tied to any candidate, so it is still a
+    // cache rather than something to re-probe.
+    expect(withheld).toContainEqual({ packageName: "react-router-dom", strategy: "replace", reason: "replace-cache" });
   });
 
   it("withholds a decision whose runtime check never happened", async () => {

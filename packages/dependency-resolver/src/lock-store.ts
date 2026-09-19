@@ -40,6 +40,7 @@ import type {
   LockStalenessReason,
 } from "@forguncy-react-workspace/core";
 import {
+  assertFgcLockDocument,
   canonicalizeFgcLock,
   createEmptyFgcLock,
   dependencyDecisionOf,
@@ -76,10 +77,25 @@ export async function readFgcLock(projectRoot: string): Promise<FgcLockDocument>
   return parseFgcLockDocument(text);
 }
 
+/**
+ * Writes the canonical lock.
+ *
+ * Validates before it writes, so a malformed record cannot reach a file every
+ * later run has to read: the read path refuses such a file, and leaving one
+ * behind turns a writer's mistake into a lock nobody can load.
+ *
+ * It validates the *canonical* form, because ordering is this function's job
+ * anyway — demanding that a caller pre-sort its decisions would push a
+ * serialization concern into every producer. The pure transforms above stay
+ * unchecked on purpose: they are typed, and this is the boundary where a value
+ * becomes project state.
+ */
 export async function writeFgcLock(projectRoot: string, lock: FgcLockDocument): Promise<void> {
+  const canonical = canonicalizeFgcLock(lock);
+  assertFgcLockDocument(canonical);
   const path = fgcLockPath(projectRoot);
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, serializeFgcLock(lock), "utf8");
+  await writeFile(path, serializeFgcLock(canonical), "utf8");
 }
 
 function lockKey(record: Pick<LockedDependencyDecision, "packageName" | "cellTarget">): string {
@@ -178,12 +194,10 @@ export function compilationDependencies(
       continue;
     }
 
-    const profile = lockEvidenceProfileOf(resolution.record);
-    if (!LOCK_EVIDENCE_POLICY[profile].participatesInCompilation) {
-      withheld.push({ packageName, strategy: resolution.record.strategy, reason: "replace-cache" });
-      continue;
-    }
-
+    // Staleness is checked before participation on purpose. A technical
+    // rejection can expire — its candidate, toolchain, target or probe inputs can
+    // move — and reporting that as `replace-cache` would hide the fact that the
+    // rejection needs re-probing. Only a rejection that still holds is a cache.
     if (resolution.state !== "verified") {
       withheld.push({
         packageName,
@@ -192,6 +206,12 @@ export function compilationDependencies(
         stalenessReasons: resolution.assessment.stalenessReasons,
         realRuntimeValidation: resolution.assessment.realRuntimeValidation,
       });
+      continue;
+    }
+
+    const profile = lockEvidenceProfileOf(resolution.record);
+    if (!LOCK_EVIDENCE_POLICY[profile].participatesInCompilation) {
+      withheld.push({ packageName, strategy: resolution.record.strategy, reason: "replace-cache" });
       continue;
     }
 

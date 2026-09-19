@@ -82,7 +82,9 @@ export {
   matchesForguncyTargetIdentity,
   parseFgcLockDocument,
   requiresRuntimeValidation,
+  requiresTargetIdentity,
   resolveLockDecision,
+  RUNTIME_CONFIRMED_TECHNICAL_REJECTION_CODES,
   serializeFgcLock,
   validateFgcLockDocument,
 } from "@forguncy-react-workspace/core";

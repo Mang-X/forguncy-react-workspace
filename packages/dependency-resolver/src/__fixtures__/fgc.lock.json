@@ -10,7 +10,7 @@
       "libraryId": "tanstack-query",
       "probe": {
         "status": "passed",
-        "fingerprint": "probe=inline-bundle;entry=src/cells/orders-table/App.tsx;toolchain=vite-plus@0.3.2",
+        "fingerprint": "probe=inline-bundle;entry=src/cells/orders-table/App.tsx",
         "versionIndependent": false
       },
       "target": {
@@ -46,7 +46,7 @@
       "resolvedVersion": "1.11.13",
       "probe": {
         "status": "passed",
-        "fingerprint": "probe=inline-bundle;entry=src/cells/customers-card/App.tsx;toolchain=vite-plus@0.3.2",
+        "fingerprint": "probe=inline-bundle;entry=src/cells/customers-card/App.tsx",
         "versionIndependent": false
       },
       "target": {
@@ -79,7 +79,7 @@
       "resolvedVersion": "1.39.8",
       "probe": {
         "status": "passed",
-        "fingerprint": "probe=inline-bundle;entry=src/cells/orders-table/App.tsx;toolchain=vite-plus@0.3.2",
+        "fingerprint": "probe=inline-bundle;entry=src/cells/orders-table/App.tsx",
         "versionIndependent": false
       },
       "target": {
@@ -113,7 +113,7 @@
       "globalName": "React",
       "probe": {
         "status": "passed",
-        "fingerprint": "probe=inline-bundle;entry=src/cells/orders-table/App.tsx;toolchain=vite-plus@0.3.2",
+        "fingerprint": "probe=inline-bundle;entry=src/cells/orders-table/App.tsx",
         "versionIndependent": false
       },
       "target": {
@@ -184,7 +184,7 @@
       "supersededBy": "inline",
       "probe": {
         "status": "failed",
-        "fingerprint": "probe=amd-detect;entry=src/cells/orders-table/App.tsx;toolchain=vite-plus@0.3.2",
+        "fingerprint": "probe=amd-detect;entry=src/cells/orders-table/App.tsx",
         "versionIndependent": false
       },
       "target": {
