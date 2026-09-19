@@ -37,6 +37,27 @@ export const RUNTIME_CONTRACT_DECISION: ArchitectureDecisionSource = {
   url: "https://github.com/Mang-X/forguncy-react-workspace/issues/5",
 };
 
+/**
+ * The dependency-decision lock Spec.
+ *
+ * Declared here, beside #4 and #5, because the lock is the persisted form of #4's
+ * dependency strategies: every package that reads or writes a decision obeys it,
+ * and `core` is where a record a second package has to reference belongs.
+ *
+ * Deliberately **not** added to {@link GOVERNING_ARCHITECTURE_DECISIONS}. That
+ * list is the architecture Specs — the decisions that say who owns what — and #8
+ * is a dependency Spec built on #4, so listing it there would relabel it as an
+ * architecture decision and silently change what the list means. A module that
+ * also answers to #8 composes its own list from this record; see
+ * `LOCK_GOVERNING_DECISIONS`.
+ */
+export const DEPENDENCY_LOCK_DECISION: ArchitectureDecisionSource = {
+  repository: "Mang-X/forguncy-react-workspace",
+  issue: 8,
+  title: "Spec: reproducible dependency decisions and `fgc.lock.json`",
+  url: "https://github.com/Mang-X/forguncy-react-workspace/issues/8",
+};
+
 /** Every governing architecture Spec, in the order a document should cite them. */
 export const GOVERNING_ARCHITECTURE_DECISIONS: readonly ArchitectureDecisionSource[] = [
   OWNERSHIP_AND_DEPENDENCY_DECISION,
@@ -65,6 +86,10 @@ export const OWNERSHIP_AND_DEPENDENCY_DECISION_QUALIFIED_REFERENCE = qualifiedDe
 export const RUNTIME_CONTRACT_DECISION_REFERENCE = decisionReference(RUNTIME_CONTRACT_DECISION);
 
 export const RUNTIME_CONTRACT_DECISION_QUALIFIED_REFERENCE = qualifiedDecisionReference(RUNTIME_CONTRACT_DECISION);
+
+export const DEPENDENCY_LOCK_DECISION_REFERENCE = decisionReference(DEPENDENCY_LOCK_DECISION);
+
+export const DEPENDENCY_LOCK_DECISION_QUALIFIED_REFERENCE = qualifiedDecisionReference(DEPENDENCY_LOCK_DECISION);
 
 /**
  * The line every ownership/dependency Spec, plan and PR is expected to carry.
@@ -137,6 +162,8 @@ export const DECISION_CITATION_PATTERNS: readonly RegExp[] = citationPatternsFor
 
 export const RUNTIME_CONTRACT_CITATION_PATTERNS: readonly RegExp[] =
   citationPatternsFor(RUNTIME_CONTRACT_DECISION);
+
+export const DEPENDENCY_LOCK_CITATION_PATTERNS: readonly RegExp[] = citationPatternsFor(DEPENDENCY_LOCK_DECISION);
 
 export function citesDecision(
   text: string,

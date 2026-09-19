@@ -1,0 +1,381 @@
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { describe, expect, it } from "vitest";
+
+import type { FgcLockDocument, LockEnvironment, LockedDependencyDecision } from "@forguncy-react-workspace/core";
+import {
+  canonicalizeFgcLock,
+  FGC_LOCK_SCHEMA_VERSION,
+  FgcLockValidationError,
+  findMachineSpecificPaths,
+  forguncyTargetIdentity,
+  parseFgcLockDocument,
+  RUNTIME_CONTRACT_TARGET,
+  resolveLockDecision,
+  serializeFgcLock,
+} from "@forguncy-react-workspace/core";
+
+import {
+  compilationDependencies,
+  fgcLockPath,
+  readFgcLock,
+  removeLockDecision,
+  upsertLockDecision,
+  writeFgcLock,
+} from "./index";
+
+const FIXTURE = fileURLToPath(new URL("./__fixtures__/fgc.lock.json", import.meta.url));
+
+const CELL_FINGERPRINT = "probe=inline-bundle;entry=src/cells/orders-table/App.tsx";
+const CUSTOMERS_FINGERPRINT = "probe=inline-bundle;entry=src/cells/customers-card/App.tsx";
+const BUNDLER_FINGERPRINT = "probe=amd-detect;entry=src/cells/orders-table/App.tsx";
+
+/** The environment the committed example was validated in. */
+function fixtureEnvironment(overrides: Partial<LockEnvironment> = {}): LockEnvironment {
+  return {
+    resolvedVersions: {
+      "@tanstack/react-query": "5.90.2",
+      dayjs: "1.11.13",
+      "es-toolkit": "1.39.8",
+      react: "19.2.7",
+      "some-amd-package": "2.4.0",
+    },
+    target: RUNTIME_CONTRACT_TARGET,
+    toolchain: { vitePlus: "0.3.2" },
+    probeFingerprints: {
+      "@tanstack/react-query": CELL_FINGERPRINT,
+      dayjs: CUSTOMERS_FINGERPRINT,
+      "es-toolkit": CELL_FINGERPRINT,
+      react: CELL_FINGERPRINT,
+      "some-amd-package": BUNDLER_FINGERPRINT,
+    },
+    extensionVersions: { "tanstack-query": "5.90.2" },
+    extensionIdentities: { "tanstack-query": "sha256:9f1c2b7d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091" },
+    ...overrides,
+  };
+}
+
+async function readFixture(): Promise<FgcLockDocument> {
+  return parseFgcLockDocument(await readFile(FIXTURE, "utf8"));
+}
+
+async function emptyProject(): Promise<string> {
+  return mkdtemp(join(tmpdir(), "fgc-lock-"));
+}
+
+const inlineRecord: LockedDependencyDecision = {
+  strategy: "inline",
+  packageName: "dayjs",
+  cellTarget: null,
+  resolvedVersion: "1.11.13",
+  probe: { status: "passed", fingerprint: CELL_FINGERPRINT, versionIndependent: false },
+  target: forguncyTargetIdentity(),
+  probedWith: { vitePlus: "0.3.2" },
+  extension: null,
+  rejectedCandidate: null,
+  rationale: null,
+  evidence: [
+    { kind: "spec-issue", reference: "https://github.com/Mang-X/forguncy-react-workspace/issues/8" },
+    { kind: "probe", reference: "docs/probes/inline-dayjs.md" },
+  ],
+};
+
+describe("fgc.lock.json as a project artifact", () => {
+  it("ships a committed example that is exactly what the serializer produces", async () => {
+    // The strongest form of "deterministic and reviewable in PRs": the committed
+    // file is byte-identical to a fresh serialization of its own parsed content,
+    // so a reviewer reads the real format and drift cannot hide.
+    const text = await readFile(FIXTURE, "utf8");
+
+    expect(serializeFgcLock(parseFgcLockDocument(text))).toBe(text);
+    expect(findMachineSpecificPaths(JSON.parse(text))).toEqual([]);
+  });
+
+  it("resolves every record in the committed example as verified", async () => {
+    const lock = await readFixture();
+    const environment = fixtureEnvironment();
+
+    for (const record of lock.decisions) {
+      const resolution = resolveLockDecision(
+        lock,
+        { packageName: record.packageName, cellTarget: record.cellTarget },
+        environment,
+      );
+
+      expect(resolution.state, record.packageName).toBe("verified");
+    }
+  });
+
+  it("treats a project with no lock file as having no decisions", async () => {
+    const projectRoot = await emptyProject();
+
+    await expect(readFgcLock(projectRoot)).resolves.toEqual({
+      schemaVersion: FGC_LOCK_SCHEMA_VERSION,
+      decisions: [],
+    });
+    expect(fgcLockPath(projectRoot)).toBe(join(projectRoot, "fgc.lock.json"));
+  });
+
+  it("writes canonical bytes and reads them back unchanged", async () => {
+    const projectRoot = await emptyProject();
+    const lock: FgcLockDocument = {
+      schemaVersion: FGC_LOCK_SCHEMA_VERSION,
+      decisions: [{ ...inlineRecord, packageName: "es-toolkit" }, inlineRecord],
+    };
+
+    await writeFgcLock(projectRoot, lock);
+    const written = await readFile(fgcLockPath(projectRoot), "utf8");
+    const reread = await readFgcLock(projectRoot);
+
+    expect(written).toBe(serializeFgcLock(lock));
+    expect(reread).toEqual(canonicalizeFgcLock(lock));
+
+    // Rewriting an unchanged lock must not touch a byte, or every run would
+    // produce a diff nobody made.
+    await writeFgcLock(projectRoot, reread);
+    expect(await readFile(fgcLockPath(projectRoot), "utf8")).toBe(written);
+  });
+
+  it("refuses to write a lock the read path would refuse", async () => {
+    const projectRoot = await emptyProject();
+    const broken = {
+      schemaVersion: FGC_LOCK_SCHEMA_VERSION,
+      decisions: [{ ...inlineRecord, cellTarget: undefined }],
+    };
+
+    await expect(writeFgcLock(projectRoot, broken as never)).rejects.toThrow(FgcLockValidationError);
+    // Nothing was written, so a later run does not inherit a file it cannot read.
+    await expect(readFgcLock(projectRoot)).resolves.toEqual({
+      schemaVersion: FGC_LOCK_SCHEMA_VERSION,
+      decisions: [],
+    });
+  });
+
+  // Canonicalization assumes the shape — `[...lock.decisions]`,
+  // `[...record.evidence]` — so checking it after canonicalizing meant a
+  // malformed value threw a native TypeError from inside the canonicalizer.
+  it("refuses malformed input on the write path without a TypeError", async () => {
+    const projectRoot = await emptyProject();
+    const malformed: readonly unknown[] = [
+      { schemaVersion: FGC_LOCK_SCHEMA_VERSION, decisions: undefined },
+      { schemaVersion: FGC_LOCK_SCHEMA_VERSION, decisions: [{ ...inlineRecord, evidence: undefined }] },
+      { schemaVersion: FGC_LOCK_SCHEMA_VERSION, decisions: [{ ...inlineRecord, evidence: "docs/probes/inline-dayjs.md" }] },
+      { schemaVersion: FGC_LOCK_SCHEMA_VERSION, decisions: [{ ...inlineRecord, probe: undefined }] },
+    ];
+
+    for (const lock of malformed) {
+      await expect(writeFgcLock(projectRoot, lock as never)).rejects.toThrow(FgcLockValidationError);
+    }
+    await expect(readFgcLock(projectRoot)).resolves.toEqual({
+      schemaVersion: FGC_LOCK_SCHEMA_VERSION,
+      decisions: [],
+    });
+  });
+
+  // The model describes `not-validated`, `probe-failed` and `probe-never-run` for
+  // a resolved dependency. A lock file that cannot hold them makes those states
+  // unreachable, so this round-trips them through the real artifact path.
+  it("can persist a decision that makes no runtime claim yet", async () => {
+    const projectRoot = await emptyProject();
+    const locallyProbed: LockedDependencyDecision = { ...inlineRecord, packageName: "locally-probed", target: null };
+    const failed: LockedDependencyDecision = {
+      ...inlineRecord,
+      packageName: "probe-failed",
+      target: null,
+      probe: { status: "failed", fingerprint: CELL_FINGERPRINT, versionIndependent: false },
+    };
+    const notRun: LockedDependencyDecision = {
+      ...inlineRecord,
+      packageName: "probe-not-run",
+      target: null,
+      probedWith: null,
+      probe: { status: "not-run", fingerprint: null, versionIndependent: false },
+    };
+
+    await writeFgcLock(projectRoot, {
+      schemaVersion: FGC_LOCK_SCHEMA_VERSION,
+      decisions: [locallyProbed, failed, notRun],
+    });
+    const read = await readFgcLock(projectRoot);
+    const environment = fixtureEnvironment({
+      resolvedVersions: { "locally-probed": "1.11.13", "probe-failed": "1.11.13", "probe-not-run": "1.11.13" },
+      probeFingerprints: { "locally-probed": CELL_FINGERPRINT, "probe-failed": CELL_FINGERPRINT },
+    });
+
+    expect(resolveLockDecision(read, { packageName: "locally-probed" }, environment).assessment).toMatchObject({
+      freshness: "fresh",
+      stalenessReasons: [],
+      realRuntimeValidation: "not-validated",
+    });
+    expect(resolveLockDecision(read, { packageName: "probe-failed" }, environment).assessment).toMatchObject({
+      freshness: "stale",
+      stalenessReasons: ["probe-failed"],
+    });
+    expect(resolveLockDecision(read, { packageName: "probe-not-run" }, environment).assessment).toMatchObject({
+      stalenessReasons: ["probe-never-run"],
+    });
+  });
+
+  it("refuses to read a lock it does not understand", async () => {
+    const projectRoot = await emptyProject();
+    await writeFile(fgcLockPath(projectRoot), JSON.stringify({ schemaVersion: 99, decisions: [] }), "utf8");
+
+    await expect(readFgcLock(projectRoot)).rejects.toThrow(/unsupported schema version 99/i);
+  });
+
+  it("replaces a decision in place so a strategy change is an ordinary diff", () => {
+    const before: FgcLockDocument = { schemaVersion: FGC_LOCK_SCHEMA_VERSION, decisions: [inlineRecord] };
+
+    const after = upsertLockDecision(before, {
+      ...inlineRecord,
+      strategy: "host",
+      globalName: "dayjs",
+      probe: { status: "not-run", fingerprint: null, versionIndependent: false },
+      target: null,
+      probedWith: null,
+      evidence: [{ kind: "spec-issue", reference: "https://github.com/Mang-X/forguncy-react-workspace/issues/9" }],
+    });
+
+    expect(after.decisions).toHaveLength(1);
+    expect(after.decisions[0]?.strategy).toBe("host");
+  });
+
+  it("keeps decisions ordered when one is added or removed", () => {
+    const lock: FgcLockDocument = { schemaVersion: FGC_LOCK_SCHEMA_VERSION, decisions: [inlineRecord] };
+    const added = upsertLockDecision(lock, { ...inlineRecord, packageName: "@tanstack/react-query" });
+
+    expect(added.decisions.map(record => record.packageName)).toEqual(["@tanstack/react-query", "dayjs"]);
+    expect(removeLockDecision(added, { packageName: "dayjs" }).decisions.map(record => record.packageName)).toEqual([
+      "@tanstack/react-query",
+    ]);
+  });
+});
+
+describe("compiler projection", () => {
+  it("never hands a replace decision to the compiler", async () => {
+    const lock = await readFixture();
+
+    const { dependencies, withheld } = compilationDependencies(lock, fixtureEnvironment(), { cellTarget: "orders-table" });
+
+    expect(dependencies.map(decision => decision.packageName)).toEqual(["@tanstack/react-query", "es-toolkit", "react"]);
+    expect(withheld).toEqual([
+      { packageName: "react-router-dom", strategy: "replace", reason: "replace-cache" },
+      { packageName: "some-amd-package", strategy: "replace", reason: "replace-cache" },
+    ]);
+  });
+
+  // The first draft filtered only `replace`, so a decision the runtime had moved
+  // past was still compiled as though someone had checked it.
+  it("withholds a stale decision instead of compiling it", async () => {
+    const lock = await readFixture();
+
+    const { dependencies, withheld } = compilationDependencies(
+      lock,
+      fixtureEnvironment({ resolvedVersions: { ...fixtureEnvironment().resolvedVersions, "es-toolkit": "1.40.0" } }),
+    );
+
+    expect(dependencies.map(decision => decision.packageName)).not.toContain("es-toolkit");
+    expect(withheld).toContainEqual({
+      packageName: "es-toolkit",
+      strategy: "inline",
+      reason: "not-verified",
+      stalenessReasons: ["package-version-changed"],
+      realRuntimeValidation: "validated",
+    });
+  });
+
+  // A rejection is checked for staleness before it is treated as a cache:
+  // otherwise an expired technical rejection would be reported as a decision that
+  // simply does not compile, and the caller would never learn it needs re-probing.
+  it("reports an expired technical rejection as stale, not as a cache", async () => {
+    const lock = await readFixture();
+
+    const { dependencies, withheld } = compilationDependencies(
+      lock,
+      fixtureEnvironment({ resolvedVersions: { ...fixtureEnvironment().resolvedVersions, "some-amd-package": "2.5.0" } }),
+    );
+
+    expect(dependencies.map(decision => decision.packageName)).not.toContain("some-amd-package");
+    expect(withheld).toContainEqual({
+      packageName: "some-amd-package",
+      strategy: "replace",
+      reason: "not-verified",
+      stalenessReasons: ["rejected-candidate-version-changed"],
+      realRuntimeValidation: "not-required",
+    });
+    // The architectural rejection is not tied to any candidate, so it is still a
+    // cache rather than something to re-probe.
+    expect(withheld).toContainEqual({ packageName: "react-router-dom", strategy: "replace", reason: "replace-cache" });
+  });
+
+  it("withholds a decision whose runtime check never happened", async () => {
+    const locallyProbed: LockedDependencyDecision = { ...inlineRecord, target: null, probe: { status: "passed", fingerprint: CELL_FINGERPRINT, versionIndependent: false } };
+    const lock: FgcLockDocument = { schemaVersion: FGC_LOCK_SCHEMA_VERSION, decisions: [locallyProbed] };
+
+    const { dependencies, withheld } = compilationDependencies(
+      lock,
+      fixtureEnvironment({ probeFingerprints: { dayjs: CELL_FINGERPRINT } }),
+    );
+
+    expect(dependencies).toEqual([]);
+    expect(withheld).toEqual([
+      {
+        packageName: "dayjs",
+        strategy: "inline",
+        reason: "not-verified",
+        stalenessReasons: [],
+        realRuntimeValidation: "not-validated",
+      },
+    ]);
+  });
+
+  it("resolves one decision per package, for the cell being compiled", async () => {
+    const lock = await readFixture();
+
+    const forCustomers = compilationDependencies(lock, fixtureEnvironment(), { cellTarget: "customers-card" });
+    const forOrders = compilationDependencies(lock, fixtureEnvironment(), { cellTarget: "orders-table" });
+
+    expect(forCustomers.dependencies.map(decision => decision.packageName)).toEqual([
+      "@tanstack/react-query",
+      "dayjs",
+      "es-toolkit",
+      "react",
+    ]);
+    // `dayjs` was only decided for the customers card, so another cell gets no
+    // decision for it — reporting an undecided import is the compiler's own
+    // audit, not something the lock can answer.
+    expect(forOrders.dependencies.map(decision => decision.packageName)).toEqual([
+      "@tanstack/react-query",
+      "es-toolkit",
+      "react",
+    ]);
+  });
+
+  it("hands the compiler #4's decision model and nothing from the lock", async () => {
+    const lock = await readFixture();
+
+    const { dependencies } = compilationDependencies(lock, fixtureEnvironment());
+
+    for (const decision of dependencies) {
+      expect(Object.keys(decision)).not.toContain("probe");
+      expect(Object.keys(decision)).not.toContain("evidence");
+      expect(Object.keys(decision)).not.toContain("cellTarget");
+      expect(Object.keys(decision)).not.toContain("resolvedVersion");
+    }
+    expect(dependencies[0]).toEqual({
+      strategy: "extension",
+      packageName: "@tanstack/react-query",
+      libraryId: "tanstack-query",
+      globalName: "TanStackQuery",
+    });
+  });
+
+  it("projects an empty lock to an empty dependency list", () => {
+    const empty: FgcLockDocument = { schemaVersion: FGC_LOCK_SCHEMA_VERSION, decisions: [] };
+
+    expect(compilationDependencies(empty, fixtureEnvironment())).toEqual({ dependencies: [], withheld: [] });
+  });
+});
