@@ -41,6 +41,13 @@
  * Reporting it as an error would make a supported configuration unwritable, so
  * findings carry a severity and this module never throws. Deciding what to do with
  * a finding belongs to the caller that knows the cell.
+ *
+ * Severity turns on one question: is the missing fact about the *cell*, or about the
+ * *verification*? A cell fact is a warning, because the lock is the wrong place
+ * for it. A verification that was never performed is an error, because nothing
+ * downstream can tell that decision apart from one that was checked and passed —
+ * which is the reading the review of the first draft objected to, where an
+ * `extension` record with no catalog produced no complaint at all.
  */
 
 import type { DependencyStrategy, LockedDependencyDecision } from "@forguncy-react-workspace/core";
@@ -73,6 +80,23 @@ export interface HostBridgeMapping {
    * claiming to check it would be worse than saying so.
    */
   readonly identityField?: "hostReactVersion";
+  /**
+   * Whether a *second* copy of this module on the page breaks something the first
+   * copy owns.
+   *
+   * Not every host global has this property, and treating them as though they all
+   * did would refuse a supported configuration. `dayjs` is a pure function library:
+   * one cell reading the preset global while another bundles its own copy is a
+   * per-cell choice with nothing shared to break. React is the opposite — #5
+   * verified `single-react-instance-per-page` and `shared-global-this`, and #9 says
+   * a bundled duplicate "is known to break Hook/Context identity" — so a second copy
+   * anywhere on the page is observable from every cell.
+   *
+   * The flag exists so the rule is a property of the module rather than an
+   * inference over all `host` records. Absent means false: a mapping has to say that
+   * identity is load-bearing.
+   */
+  readonly identitySensitive?: boolean;
 }
 
 export interface HostBridgeManifest {
@@ -110,10 +134,12 @@ export interface ConformanceOptions {
   /**
    * The verified extension catalog.
    *
-   * Omitting it is not the same as an empty one: absent means "this project has no
-   * catalog to check against", which is reported as unverified, while an empty
-   * catalog means "the catalog exists and holds nothing", which makes every
-   * extension decision unverified *and* wrong. Only the absence is a warning.
+   * Omitting it is not the same as an empty one, and both block acceptance, by
+   * different routes: absent means the verification step did not happen
+   * (`extension-catalog-missing`), while an empty catalog means it happened and
+   * verified nothing, which fails per package (`extension-library-not-verified`).
+   * The codes differ so a caller can tell "not checked yet" from "checked, and this
+   * id is not real" — but neither is something a validator may pass.
    */
   readonly extensionCatalog?: ExtensionCatalog;
 }
@@ -121,32 +147,39 @@ export interface ConformanceOptions {
 /**
  * #9's initial host mappings, pending #9's own implementation.
  *
- * The five entries below are the candidates #9 lists. `react-dom/client` and the
- * two JSX runtimes are subpath ids, so they ride on their package's mapping; the
- * JSX runtimes are deliberately *not* mapped to the React object, because #9 says
- * not to — see `host-jsx-runtime-mapped-to-react-object`, which enforces exactly
- * that.
+ * The entries below are the candidates #9 lists. `react-dom/client` is a subpath id,
+ * so it rides on its package's mapping; the two JSX runtime ids are *not* listed at
+ * all, because #9 bridges them with an adapter the compiler generates rather than
+ * with a page global — see `host-jsx-runtime-requires-adapter`, which is why a
+ * `host` record cannot express them.
  *
  * `antd` is here as a mapping and separately reported as preset-provided, which is
  * the honest combination: #9 says the import maps to the host `antd` global, and
  * #5 says that global exists only when the cell's preset chain loads it.
+ *
+ * `identitySensitive` is set from #5 and #9 rather than guessed: React and ReactDOM
+ * are the two modules those Specs say must not be duplicated. `antd` deliberately
+ * does not carry it — its own context does not cross cells
+ * (`context-does-not-cross-cells`), so a cell with its own copy shares nothing that
+ * a second copy could split.
  */
 export const DEFAULT_HOST_BRIDGE_MANIFEST: HostBridgeManifest = {
   mappings: [
-    { packageName: "react", globalName: "React", identityField: "hostReactVersion" },
-    { packageName: "react-dom", globalName: "ReactDOM", moduleIds: ["react-dom/client"] },
+    { packageName: "react", globalName: "React", identityField: "hostReactVersion", identitySensitive: true },
+    { packageName: "react-dom", globalName: "ReactDOM", moduleIds: ["react-dom/client"], identitySensitive: true },
     { packageName: "antd", globalName: "antd" },
   ],
 };
 
 /**
- * The JSX runtime module ids, which #9 requires an explicit adapter for.
+ * The JSX runtime module ids, which #9 bridges with a generated adapter.
  *
- * Bridged by definition rather than by a mapping entry: #9 says these resolve to an
- * adapter that preserves `jsx(type, props, key)` semantics, so there is no page
- * global they name — the adapter is generated. That is why the audit's rule about
- * them is only the prohibition below, and why they are not listed in
- * `DEFAULT_HOST_BRIDGE_MANIFEST` with a global they do not have.
+ * These are not host-mappable at all, which is why they appear in no mapping.
+ * #9 says they resolve to "an explicit adapter preserving JSX runtime semantics",
+ * and that adapter is produced by the compiler — so there is no page global that
+ * *is* the adapter. A `host` decision's entire content is "map the import to this
+ * global", so it cannot express one; the audit refuses the record instead of
+ * accepting a global that happens not to be React.
  */
 export const JSX_RUNTIME_MODULE_IDS: readonly string[] = ["react/jsx-runtime", "react/jsx-dev-runtime"];
 
@@ -172,7 +205,7 @@ export const PRESET_PROVIDED_HOST_GLOBALS: readonly PresetProvidedGlobal[] = CEL
 export const CONFORMANCE_PROBLEM_CODES = [
   "host-global-not-provided",
   "host-mapping-mismatch",
-  "host-jsx-runtime-mapped-to-react-object",
+  "host-jsx-runtime-requires-adapter",
   "host-react-version-is-not-host-identity",
   "host-inline-conflict",
   "host-global-is-preset-provided",
@@ -185,7 +218,22 @@ export const CONFORMANCE_PROBLEM_CODES = [
 ] as const;
 export type ConformanceProblemCode = (typeof CONFORMANCE_PROBLEM_CODES)[number];
 
-/** `error` means the record cannot be right; `warning` means it needs a fact the lock does not hold. */
+/**
+ * Whether a finding blocks the lock from being accepted.
+ *
+ * - `error` — the lock must not be accepted as it stands. Either the record cannot
+ *   be right, or the verification its own strategy requires has not happened:
+ *   #4 marks which strategies owe a verified backing capability
+ *   (`requiresVerifiedHostCapability`, which only `extension` sets), and #12 makes a
+ *   catalog lookup the thing that discharges it. "Nothing checked this" is not a
+ *   milder version of "this is wrong" for such a decision — it is the same answer to
+ *   the question "may I accept it", which is the question a validator is asked.
+ * - `warning` — the record is legal and the lock is acceptable; what is missing is a
+ *   fact about the *cell*, which a lock file cannot hold. A `host` decision on a
+ *   preset-provided global is the case: whether that global is on the page depends on
+ *   the cell's preset chain, so the caller confirms it rather than being told it is
+ *   wrong.
+ */
 export type ConformanceSeverity = "error" | "warning";
 
 export interface ConformanceDiagnostic {
@@ -226,11 +274,6 @@ function presetProvidingGlobal(globalName: string): PresetProvidedGlobal | undef
   return PRESET_PROVIDED_HOST_GLOBALS.find(provided => provided.globalName === globalName);
 }
 
-/** The page global #9 maps `react` to, read from the manifest rather than restated. */
-function reactHostGlobal(manifest: HostBridgeManifest): string | undefined {
-  return hostMappingFor(manifest, "react")?.globalName;
-}
-
 // ---------------------------------------------------------------------------
 // Host (#9)
 // ---------------------------------------------------------------------------
@@ -241,6 +284,24 @@ function auditHostRecord(
 ): readonly ConformanceDiagnostic[] {
   const diagnostics: ConformanceDiagnostic[] = [];
   const { packageName, globalName } = record;
+
+  // Refused before anything else, and for every global rather than only for the React
+  // object. #9's requirement is a generated adapter that preserves
+  // `jsx(type, props, key)`; "some page global other than React" is not that, and the
+  // React object is only the mistake #9 happens to name. Nothing downstream can catch a
+  // substitution: `ReactDOM` is a verified host identity of kind `page-global`, so the
+  // cell compiler's binding check passes it, which makes this the only place the
+  // distinction exists.
+  if (JSX_RUNTIME_MODULE_IDS.includes(packageName)) {
+    return [
+      error(
+        "host-jsx-runtime-requires-adapter",
+        packageName,
+        `"${packageName}" is not host-mappable: #9 bridges it with an adapter the compiler generates to preserve \`jsx(type, props, key)\`, and a \`host\` decision can only record a page global. The React object is the substitution #9 names explicitly — it has no \`jsx\` — but no page global is the adapter, so this has to cite the adapter contract rather than a global.`,
+      ),
+    ];
+  }
+
   const mapping = hostMappingFor(manifest, packageName);
   const preset = presetProvidingGlobal(globalName);
 
@@ -254,11 +315,7 @@ function auditHostRecord(
     );
   }
 
-  // The JSX runtime ids count as bridged even though no entry maps them, because #9
-  // bridges them with a generated adapter. Reporting them as unprovided would flag
-  // the one mapping #9 explicitly specifies.
-  const bridged = mapping !== undefined || JSX_RUNTIME_MODULE_IDS.includes(packageName);
-  if (!bridged && preset === undefined) {
+  if (mapping === undefined && preset === undefined) {
     diagnostics.push(
       error(
         "host-global-not-provided",
@@ -280,17 +337,6 @@ function auditHostRecord(
     );
   }
 
-  const reactGlobal = reactHostGlobal(manifest);
-  if (reactGlobal !== undefined && JSX_RUNTIME_MODULE_IDS.includes(packageName) && globalName === reactGlobal) {
-    diagnostics.push(
-      error(
-        "host-jsx-runtime-mapped-to-react-object",
-        packageName,
-        `"${packageName}" is mapped to the React object, which does not preserve \`jsx(type, props, key)\` semantics — including \`props.children\` and \`key\`. #9 requires an explicit JSX-runtime adapter for this module id, not the React global.`,
-      ),
-    );
-  }
-
   if (mapping?.identityField !== undefined && record.target !== null) {
     const hostVersion = record.target[mapping.identityField];
     if (record.resolvedVersion !== null && record.resolvedVersion !== hostVersion) {
@@ -307,21 +353,46 @@ function auditHostRecord(
   return diagnostics;
 }
 
+/**
+ * A second copy of a module whose identity the page shares.
+ *
+ * Scoped by two things, and the review of the first draft is why both exist.
+ *
+ * **The module, not every `host` decision.** Duplicating a module matters only when
+ * the first copy owns something the second one would split; the manifest says which
+ * mappings those are (`identitySensitive`). Applying the rule to `dayjs` would refuse
+ * a configuration #4 explicitly allows — the lock is keyed per (package, cell
+ * target), and a preset-provided global is captured per cell render instant (#5), so
+ * one cell reading the shared `dayjs` while another bundles its own copy breaks
+ * nothing.
+ *
+ * **Still the whole lock, not one cell target.** Where the module *is*
+ * identity-sensitive, scoping by cell target would be the wrong exemption: the
+ * conflict is that the page then holds two instances, and a cell that bundles its own
+ * copy is not made safe by another cell's decision living under a different key.
+ * `react-dom` and `react-dom/client` fold to one key for the same reason — they are
+ * two entry points into one module, not two modules.
+ */
 function auditHostInlineConflict(
-  strategyByPackage: ReadonlyMap<string, ReadonlySet<DependencyStrategy>>,
+  strategiesByModule: ReadonlyMap<string, { readonly strategies: ReadonlySet<DependencyStrategy>; readonly specifiers: ReadonlySet<string> }>,
+  manifest: HostBridgeManifest,
 ): readonly ConformanceDiagnostic[] {
   const diagnostics: ConformanceDiagnostic[] = [];
 
-  for (const packageName of [...strategyByPackage.keys()].sort()) {
-    const strategies = strategyByPackage.get(packageName);
-    if (strategies === undefined || !strategies.has("host") || !strategies.has("inline")) {
+  for (const moduleId of [...strategiesByModule.keys()].sort()) {
+    const entry = strategiesByModule.get(moduleId);
+    if (entry === undefined || !entry.strategies.has("host") || !entry.strategies.has("inline")) {
       continue;
     }
+    if (hostMappingFor(manifest, moduleId)?.identitySensitive !== true) {
+      continue;
+    }
+
     diagnostics.push(
       error(
         "host-inline-conflict",
-        packageName,
-        `"${packageName}" is decided as \`host\` somewhere in this lock and as \`inline\` somewhere else. A host global is page-wide, so the inlined copy is a second instance of a module the page already has — the duplicate-identity failure #9 forbids, whichever cell each decision was recorded for.`,
+        moduleId,
+        `"${moduleId}" is decided \`host\` for ${[...entry.specifiers].sort().join(", ")} and \`inline\` for the same module elsewhere in this lock. The host global is page-wide, so the bundled copy is a second instance of a module whose identity the page shares — the duplicate-identity failure #9 forbids (hooks, Context and instanceof stop matching). Recording the two decisions under different cell targets does not scope that away.`,
       ),
     );
   }
@@ -339,12 +410,19 @@ function auditExtensionRecord(
 ): readonly ConformanceDiagnostic[] {
   const { packageName, libraryId, globalName } = record;
 
+  // An `error`, not a warning, and the difference is the whole finding. #12 makes the
+  // catalog a *precondition* for accepting an `extension` decision ("must come from
+  // listFrontendLibraries or a verified catalog artifact"), and #4 already marks the
+  // strategies that owe a verified backing capability. So "no catalog was supplied" is
+  // not a fact the cell might resolve — it is the verification step of this decision
+  // not having happened, and a validator that returned no problem here would let a
+  // guessed `libraryId` through as though it had been checked.
   if (catalog === undefined) {
     return [
-      warning(
+      error(
         "extension-catalog-missing",
         packageName,
-        `"${libraryId}" was not checked against a verified catalog. #12 requires the id to come from \`api.app.listFrontendLibraries\` or a verified catalog artifact rather than a display name, so pass an extensionCatalog to check it.`,
+        `"${libraryId}" cannot be accepted: the strategy declares that its backing capability must be verified, and no verified catalog was supplied to check the id against. #12 requires the id to come from \`api.app.listFrontendLibraries\` or a verified catalog artifact rather than a display name, so pass an extensionCatalog before accepting this record.`,
       ),
     ];
   }
@@ -461,16 +539,24 @@ export function auditLockDecisionConformance(
   const decisions = [...lock.decisions].sort(compareLockDecisions);
 
   const diagnostics: ConformanceDiagnostic[] = [];
-  const strategyByPackage = new Map<string, Set<DependencyStrategy>>();
+  const strategiesByModule = new Map<
+    string,
+    { strategies: Set<DependencyStrategy>; specifiers: Set<string> }
+  >();
   const extensionRecords: (LockedDependencyDecision & {
     readonly libraryId: string;
     readonly globalName: string;
   })[] = [];
 
   for (const record of decisions) {
-    const strategies = strategyByPackage.get(record.packageName) ?? new Set<DependencyStrategy>();
-    strategies.add(record.strategy);
-    strategyByPackage.set(record.packageName, strategies);
+    // Folded through the manifest so a subpath id and its package are one module:
+    // `react-dom/client` decided `inline` is a second copy of the same ReactDOM that
+    // `react-dom` decided `host`, and keying on the specifier would hide it.
+    const moduleId = hostMappingFor(manifest, record.packageName)?.packageName ?? record.packageName;
+    const entry = strategiesByModule.get(moduleId) ?? { strategies: new Set<DependencyStrategy>(), specifiers: new Set<string>() };
+    entry.strategies.add(record.strategy);
+    entry.specifiers.add(record.packageName);
+    strategiesByModule.set(moduleId, entry);
 
     if (record.strategy === "host") {
       diagnostics.push(...auditHostRecord(record, manifest));
@@ -481,13 +567,19 @@ export function auditLockDecisionConformance(
     }
   }
 
-  diagnostics.push(...auditHostInlineConflict(strategyByPackage));
+  diagnostics.push(...auditHostInlineConflict(strategiesByModule, manifest));
   diagnostics.push(...auditExtensionMappingConflicts(extensionRecords));
 
   return diagnostics;
 }
 
-/** The findings that make a decision wrong rather than merely incomplete. */
+/**
+ * The findings that block a lock from being accepted.
+ *
+ * Not only the ones that make a decision *wrong*: a decision whose required
+ * verification never ran blocks acceptance too, because the caller cannot tell it
+ * apart from one that was checked and passed. See {@link ConformanceSeverity}.
+ */
 export function conformanceErrors(diagnostics: readonly ConformanceDiagnostic[]): readonly ConformanceDiagnostic[] {
   return diagnostics.filter(diagnostic => diagnostic.severity === "error");
 }
@@ -497,8 +589,14 @@ export function conformanceErrors(diagnostics: readonly ConformanceDiagnostic[])
  * return.
  *
  * Offered so an imperative caller does not have to invent a stringification and
- * lose the code. Errors only: a warning is a fact the lock cannot hold, and
- * turning it into a failure would refuse a supported configuration.
+ * lose the code.
+ *
+ * Errors only, which is the same set `conformanceErrors` returns, and deliberately
+ * *not* "everything except a note". A warning is a fact about the cell that the lock
+ * cannot hold — a preset-provided global is conditional, not wrong — so failing on it
+ * would refuse a supported configuration. A decision that could not be checked is the
+ * opposite case and is an `error` rather than a warning, which is what keeps this
+ * function from answering "no problems" to a lock nobody verified.
  */
 export function validateLockDecisionConformance(
   lock: { readonly decisions: readonly LockedDependencyDecision[] },

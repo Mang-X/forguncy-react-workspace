@@ -15,6 +15,7 @@ import {
   DEFAULT_HOST_BRIDGE_MANIFEST,
   FGC_LOCK_SCHEMA_VERSION,
   forguncyTargetIdentity,
+  JSX_RUNTIME_MODULE_IDS,
   PRESET_PROVIDED_HOST_GLOBALS,
   validateLockDecisionConformance,
 } from "./index";
@@ -141,17 +142,40 @@ describe("host records against #9", () => {
     ]);
   });
 
-  it("refuses mapping a JSX runtime to the React object", () => {
-    const diagnostics = auditLockDecisionConformance(lock(hostRecord("react/jsx-runtime", "React")));
+  // Review regression (#44, finding 2). #9 asks for a generated adapter that preserves
+  // `jsx(type, props, key)`, not merely for "some global other than React". `ReactDOM`
+  // is a verified host identity of kind `page-global`, so the cell compiler's binding
+  // check passes it and no other layer can catch the substitution — which is why the
+  // refusal cannot be narrowed to the React object.
+  it("refuses every page global as the JSX runtime, not just the React object", () => {
+    for (const globalName of ["React", "ReactDOM", "ReactJsxRuntime"]) {
+      const diagnostics = auditLockDecisionConformance(lock(hostRecord("react/jsx-runtime", globalName)));
 
-    expect(codes(diagnostics)).toContain("host-jsx-runtime-mapped-to-react-object");
-    expect(diagnostics[0]?.detail).toContain("jsx(type, props, key)");
+      expect(codes(diagnostics), globalName).toEqual(["host-jsx-runtime-requires-adapter"]);
+      expect(diagnostics[0]?.detail, globalName).toContain("jsx(type, props, key)");
+    }
   });
 
-  it("accepts a JSX runtime mapped to something other than the React object", () => {
-    // #9 requires an explicit adapter, so an adapter global is the correct answer —
-    // the finding is specifically about the React object, not about the module id.
-    expect(codes(auditLockDecisionConformance(lock(hostRecord("react/jsx-runtime", "ReactJsxRuntime"))))).toEqual([]);
+  it("does not claim a JSX runtime global is unprovided on top of the refusal", () => {
+    // The record is refused as a whole rather than also reported as an unprovided
+    // global: these ids have no mapping to satisfy, so a "nothing provides this"
+    // finding would describe a rule they are not subject to.
+    const diagnostics = auditLockDecisionConformance(lock(hostRecord("react/jsx-dev-runtime", "ReactDOM")));
+
+    expect(codes(diagnostics)).toEqual(["host-jsx-runtime-requires-adapter"]);
+  });
+
+  // Review regression (#44, finding 3). Identity-sensitivity belongs to the mapping,
+  // not to every `host` decision: `dayjs` is stateless, the lock is keyed per
+  // (package, cell target), and #5 verified that each cell captures preset globals at
+  // its own render instant.
+  it("does not report a duplicate identity for a host mapping that has none", () => {
+    const presetDayjs = { ...hostRecord("dayjs", "dayjs"), cellTarget: "orders-table" };
+    const ownDayjs = { ...inlineRecord("dayjs"), cellTarget: "customers-card" };
+
+    const diagnostics = auditLockDecisionConformance(lock(presetDayjs, ownDayjs));
+
+    expect(codes(diagnostics)).not.toContain("host-inline-conflict");
   });
 
   it("checks that a host React decision carries the host's React version", () => {
@@ -175,13 +199,40 @@ describe("host records against #9", () => {
     ).toEqual([]);
   });
 
-  it("refuses a second copy of a page-wide host module", () => {
-    // A host global is page-wide, so the inlined copy is a duplicate instance
-    // whichever cell each decision was recorded for.
+  it("refuses a second copy of a module whose identity is page-wide", () => {
+    // Both decisions are under the same cell target here, and the finding is the same
+    // when they are not: the page ends up with two React instances either way, which is
+    // what `single-react-instance-per-page` makes observable from every cell.
     const diagnostics = auditLockDecisionConformance(lock(hostRecord("react", "React"), inlineRecord("react")));
 
     expect(codes(diagnostics)).toEqual(["host-inline-conflict"]);
     expect(diagnostics[0]?.detail).toContain("page-wide");
+  });
+
+  it("refuses a second copy recorded under a different cell target", () => {
+    // A per-cell decision cannot scope away a page-wide duplicate, so the cell target
+    // is not an exemption.
+    const diagnostics = auditLockDecisionConformance(
+      lock(
+        { ...hostRecord("react", "React"), cellTarget: "orders-table" },
+        { ...inlineRecord("react"), cellTarget: "customers-card" },
+      ),
+    );
+
+    expect(codes(diagnostics)).toEqual(["host-inline-conflict"]);
+  });
+
+  it("folds a subpath id onto the module its mapping covers", () => {
+    // `react-dom/client` is an entry point into the ReactDOM that `react-dom` decided
+    // `host`, not a module of its own, so keying the conflict on the specifier would
+    // hide a real second copy.
+    const diagnostics = auditLockDecisionConformance(
+      lock(hostRecord("react-dom", "ReactDOM"), inlineRecord("react-dom/client")),
+    );
+
+    expect(codes(diagnostics)).toEqual(["host-inline-conflict"]);
+    expect(diagnostics[0]?.subject).toBe("react-dom");
+    expect(diagnostics[0]?.detail).toContain("react-dom/client");
   });
 
   it("does not invent a conflict from an extension or replace decision", () => {
@@ -194,13 +245,17 @@ describe("host records against #9", () => {
 });
 
 describe("extension records against #12", () => {
-  it("says when there is no catalog to check against", () => {
+  it("blocks an extension decision that has no catalog to check against", () => {
     const diagnostics = auditLockDecisionConformance(
       lock(extensionRecord("@tanstack/react-query", "tanstack-query", "TanStackQuery")),
     );
 
     expect(codes(diagnostics)).toEqual(["extension-catalog-missing"]);
-    expect(diagnostics[0]?.severity).toBe("warning");
+    // An error rather than a warning: #12 makes the catalog a precondition for
+    // accepting the decision, so "nothing checked this" is not a milder verdict than
+    // "this is wrong".
+    expect(diagnostics[0]?.severity).toBe("error");
+    expect(diagnostics[0]?.detail).toContain("cannot be accepted");
   });
 
   it("accepts a mapping the catalog verifies", () => {
@@ -289,6 +344,16 @@ describe("extension records against #12", () => {
     );
   });
 
+  // Review regression (#44, finding 1). #12 makes a verified catalog a
+  // *precondition* for accepting an `extension` decision — "must come from
+  // listFrontendLibraries or a verified catalog artifact" — so "there was nothing to
+  // check against" and "there is nothing wrong" must not be the same answer.
+  it("cannot validate an extension decision that was never checked against a catalog", () => {
+    const neverChecked = lock(extensionRecord("@tanstack/react-query", "tanstack-query", "TanStackQuery"));
+
+    expect(validateLockDecisionConformance(neverChecked)).not.toEqual([]);
+  });
+
   it("does not treat an absent catalog and an empty one alike", () => {
     // Absent is "nothing to check against"; empty is "checked, and nothing is
     // verified" — which makes the decision wrong rather than merely unchecked.
@@ -297,6 +362,9 @@ describe("extension records against #12", () => {
       extensionCatalog: { mappings: [] },
     });
 
+    // Both block, by different routes, and the codes are what tell them apart:
+    // absent is "the verification did not happen", empty is "it happened and this id
+    // is not real".
     expect(codes(absent)).toEqual(["extension-catalog-missing"]);
     expect(codes(empty)).toEqual(["extension-library-not-verified"]);
   });
@@ -356,5 +424,22 @@ describe("the audit itself", () => {
     expect(DEFAULT_HOST_BRIDGE_MANIFEST.mappings.find(mapping => mapping.packageName === "react")?.identityField).toBe(
       "hostReactVersion",
     );
+    // Only the two modules #5 and #9 say must not be duplicated carry the flag.
+    expect(
+      DEFAULT_HOST_BRIDGE_MANIFEST.mappings.filter(mapping => mapping.identitySensitive === true).map(mapping => mapping.packageName),
+    ).toEqual(["react", "react-dom"]);
+  });
+
+  // The JSX runtime ids are refused as `host` decisions, so a bridge that mapped one
+  // would be describing a mapping the audit never consults.
+  it("ships no host mapping for a JSX runtime module id", () => {
+    const mapped = DEFAULT_HOST_BRIDGE_MANIFEST.mappings.flatMap(mapping => [
+      mapping.packageName,
+      ...(mapping.moduleIds ?? []),
+    ]);
+
+    for (const moduleId of JSX_RUNTIME_MODULE_IDS) {
+      expect(mapped, moduleId).not.toContain(moduleId);
+    }
   });
 });
