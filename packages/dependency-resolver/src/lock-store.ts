@@ -48,7 +48,7 @@ import {
   FGC_LOCK_FILE_NAME,
   LOCK_EVIDENCE_POLICY,
   lockEvidenceProfileOf,
-  parseFgcLockDocument,
+  parseMigratedFgcLockDocument,
   resolveLockDecision,
   serializeFgcLock,
 } from "@forguncy-react-workspace/core";
@@ -59,11 +59,19 @@ export function fgcLockPath(projectRoot: string): string {
 }
 
 /**
- * Reads and validates the project lock.
+ * Reads, migrates and validates the project lock.
  *
- * Returns an empty lock when no file exists. A file that exists but declares an
- * unsupported schema version, or fails validation, throws — a lock that cannot
- * be trusted must not silently become "no decisions".
+ * Returns an empty lock when no file exists. A file that exists fails loudly
+ * rather than becoming "no decisions": an older version is brought forward by a
+ * declared migration step, and a version with no step — including a newer one —
+ * throws.
+ *
+ * The two version directions are deliberately not symmetrical. Refusing a newer
+ * document is the whole point of the schema-version check; refusing an older one
+ * forever would mean the format could never change, so an older document is
+ * migrated instead, and only a version nobody has written a step for is refused.
+ * See `parseMigratedFgcLockDocument`, which also runs the full rules pass, so
+ * migration is never a way past validation.
  */
 export async function readFgcLock(projectRoot: string): Promise<FgcLockDocument> {
   let text: string;
@@ -75,7 +83,7 @@ export async function readFgcLock(projectRoot: string): Promise<FgcLockDocument>
     }
     throw error;
   }
-  return parseFgcLockDocument(text);
+  return parseMigratedFgcLockDocument(text);
 }
 
 /**
@@ -104,6 +112,36 @@ export async function writeFgcLock(projectRoot: string, lock: FgcLockDocument): 
 
 function lockKey(record: Pick<LockedDependencyDecision, "packageName" | "cellTarget">): string {
   return `${record.packageName}\u0000${record.cellTarget ?? ""}`;
+}
+
+/**
+ * The record for exactly this (package, cell target), or null.
+ *
+ * Not `findLockDecision`, and the difference is the point. That one *resolves* a
+ * query — for a cell with no record of its own it falls back to the
+ * target-independent record — which is right for reading a decision and wrong for
+ * writing one: an update for cell target `customers-card` that fell back would
+ * inherit the rationale and evidence recorded for the whole project, and then
+ * write them back as the customers card's own justification. A record to *change*
+ * is identified by its key, not by what it would resolve to.
+ */
+export function findExactLockDecision(
+  lock: { readonly decisions: readonly LockedDependencyDecision[] },
+  query: LockDecisionQuery,
+): LockedDependencyDecision | null {
+  const key = lockKey({ packageName: query.packageName, cellTarget: query.cellTarget ?? null });
+  return lock.decisions.find(record => lockKey(record) === key) ?? null;
+}
+
+/**
+ * Every package the lock records a decision for, in canonical order.
+ *
+ * Exported so a caller can feed the lock straight to a version lookup rather than
+ * re-deriving the set — and so that "which packages does this lock need versions
+ * for" has one answer instead of one per call site.
+ */
+export function recordedPackageNames(lock: { readonly decisions: readonly LockedDependencyDecision[] }): readonly string[] {
+  return [...new Set(lock.decisions.map(record => record.packageName))].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 /**

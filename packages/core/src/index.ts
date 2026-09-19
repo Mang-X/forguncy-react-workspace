@@ -185,6 +185,7 @@ export {
   assertFgcLockDocumentShape,
   assertSupportedFgcLockSchemaVersion,
   canonicalizeFgcLock,
+  compareEvidenceLinks,
   compareLockDecisions,
   createEmptyFgcLock,
   DECISION_EVIDENCE_KINDS,
@@ -234,6 +235,19 @@ export type {
   RejectedCandidateEvidence,
   ToolchainIdentity,
 } from "./lock";
+
+export {
+  FGC_LOCK_MIGRATION_STEPS,
+  findFgcLockMigrationStep,
+  FgcLockMigrationError,
+  FgcLockMigrationStepError,
+  migrateFgcLockDocument,
+  migratableFgcLockSchemaVersions,
+  parseMigratedFgcLockDocument,
+  planFgcLockMigration,
+  validateFgcLockMigrationSteps,
+} from "./lock-migration";
+export type { FgcLockMigrationOptions, FgcLockMigrationResult, FgcLockMigrationStep } from "./lock-migration";
 
 export {
   assessLockDecision,
