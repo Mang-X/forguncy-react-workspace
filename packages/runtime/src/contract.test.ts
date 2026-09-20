@@ -9,7 +9,7 @@ import {
   isApplicationOwned,
 } from "@forguncy-react-workspace/core";
 
-import { RuntimeFacadeContractError } from "./capabilities";
+import { RuntimeFacadeContractError, findRuntimeFacadeCapability } from "./capabilities";
 import type { ForguncyPropMember } from "./capabilities";
 import {
   APPLICATION_OWNED_CONCERNS,
@@ -22,21 +22,24 @@ import {
   RUNTIME_FACADE_FORBIDDEN_PATTERN_IDS,
   RUNTIME_FACADE_PACKAGING_POLICY,
   RUNTIME_FACADE_PORT_CHANNELS,
+  RUNTIME_FACADE_PORT_CHANNEL_MEMBERS,
+  RUNTIME_FACADE_PORT_HOOK_NAME,
   RUNTIME_FACADE_PROVIDER_EXPECTATIONS,
   RUNTIME_FACADE_PROVIDER_KINDS,
   RUNTIME_FACADE_RESOLUTION_MODEL,
   runtimeFacadePortChannelOfBinding,
   runtimeFacadePortChannels,
+  runtimeFacadePortCoversBinding,
 } from "./contract";
 import type {
-  DataSourceBindings,
+  DataSourceBinding,
+  DataSourceQueryOptions,
   DataSourceResult,
   RuntimeFacadeBoundary,
   RuntimeFacadeCellProps,
   RuntimeFacadeHostBindings,
-  RuntimeFacadePortChannel,
   RuntimeFacadeProvider,
-  ServerCommandCall,
+  ServerCommandBindings,
 } from "./contract";
 
 /**
@@ -65,15 +68,26 @@ function mockCellProps(overrides: Partial<RuntimeFacadeCellProps> = {}): Runtime
   };
 }
 
+/**
+ * A mock that declares no data source, answering exactly the way #5 records an
+ * undeclared one: an error state whose message contains the name, not a throw.
+ */
+const noSuchSource: DataSourceBinding = name => ({
+  data: [],
+  totalCount: 0,
+  loading: false,
+  error: `Error: ReactCellType data source was not found: ${name}`,
+});
+
 interface MockBindingsOverrides {
   readonly cellProps?: Partial<RuntimeFacadeCellProps>;
-  readonly dataSources?: DataSourceBindings;
+  readonly useDataSource?: DataSourceBinding;
 }
 
 function mockBindings(overrides: MockBindingsOverrides = {}): RuntimeFacadeHostBindings {
   return {
     cellProps: mockCellProps(overrides.cellProps),
-    dataSources: overrides.dataSources ?? {},
+    useDataSource: overrides.useDataSource ?? noSuchSource,
   };
 }
 
@@ -86,7 +100,7 @@ function providerOf(
 
 // #27's second acceptance criterion is that a server command "can be authored
 // with TypeScript-friendly facade usage instead of raw prop plumbing when
-// feasible". The shape asserted here is #5's, not a convenient invention: the
+// feasible". The shapes asserted here are #5's: the one executed call, the
 // reserved result keys, the named returns beside them, and the `undefined` a name
 // the designer never configured produces.
 describe("the confirmed server-command call shape", () => {
@@ -94,71 +108,46 @@ describe("the confirmed server-command call shape", () => {
     expect([...CELL_SERVER_COMMANDS_CONTRACT.resultKeys].sort()).toEqual(["errorCode", "errorMessage"]);
   });
 
-  it("lets authored source call a configured command and read a named return", async () => {
-    const bindings = mockBindings({
-      cellProps: {
-        ServerCommands: {
-          RefreshOrders: async () => {
-            // `errorCode` beside a command's own named return is exactly the
-            // shape #5 records ("namedReturnsAreExtraKeys").
-            return { errorCode: 0, refreshed: 3 };
-          },
-        },
-      },
-    });
+  // #5's executed call is `await props.ServerCommands.GetSalesData({})`, so the
+  // declaration a project writes for its own command pins one object argument.
+  // The payload stays the declaration's claim, not this contract's.
+  it("lets a declaration pin the one-argument form #5 observed", async () => {
+    type Commands = { GetSalesData: [payload: Readonly<Record<string, unknown>>] };
 
-    const refreshOrders = bindings.cellProps.ServerCommands.RefreshOrders;
-    expect(typeof refreshOrders).toBe("function");
-    if (!refreshOrders) {
-      throw new Error("the configured command should be present on the record");
-    }
-
-    const result = await refreshOrders();
-    expect(result.errorCode).toBe(0);
-    expect(result.refreshed).toBe(3);
-  });
-
-  // #5 records this as the behaviour of a name that was not configured, and it is
-  // a plain TypeError rather than a platform error — so the type has to admit
-  // `undefined` instead of pretending every name resolves.
-  it("keeps an unconfigured command name absent rather than inventing a rejection", () => {
-    const bindings = mockBindings();
-    expect(bindings.cellProps.ServerCommands.NotConfigured).toBeUndefined();
-  });
-
-  // #5 pins what a *result* carries and never exercised a call with arguments, so
-  // the base type admits no argument list. `readonly unknown[]` would read as
-  // "every call form is valid", which is the widening #27's rule refuses.
-  it("does not admit a parameter list #5 never observed", () => {
-    const bindings = mockBindings({
-      cellProps: { ServerCommands: { CreateOrder: async () => ({ errorCode: 0 }) } },
-    });
-    const createOrder = bindings.cellProps.ServerCommands.CreateOrder;
-    if (createOrder) {
-      // @ts-expect-error the base call type takes no parameters, because #5 verified none
-      void createOrder({ orderId: "SO-1" });
-    }
-    expect(typeof createOrder).toBe("function");
-  });
-
-  // The other half of the same rule: narrowing is not forbidden, it just has to
-  // be someone's claim. A project that knows its own command's parameters makes it.
-  it("lets a command-specific declaration supply the parameters it knows", async () => {
-    type CreateOrderParameters = [{ readonly orderId: string }];
-
-    const createOrder: ServerCommandCall<CreateOrderParameters> = async parameters => {
-      return { errorCode: 0, orderId: parameters.orderId };
+    const commands: ServerCommandBindings<Commands> = {
+      GetSalesData: async payload => ({ errorCode: 0, errorMessage: "OK", echo: payload }),
     };
 
-    const result = await createOrder({ orderId: "SO-2026-0001" });
-    expect(result.orderId).toBe("SO-2026-0001");
+    const result = await commands.GetSalesData?.({});
+    expect(result?.errorCode).toBe(0);
+    expect(result?.errorMessage).toBe("OK");
+    // A command's own named return sits beside the reserved keys, exactly as
+    // #5 records ("namedReturnsAreExtraKeys").
+    expect(result?.echo).toEqual({});
+  });
+
+  // The base record is deliberately not callable. `readonly never[]` would have
+  // admitted a zero-argument call the evidence does not contain, and
+  // `readonly unknown[]` every arity; #5 pins what a *result* carries, not what
+  // any given command takes.
+  it("admits no call at all until a declaration supplies parameters", () => {
+    const commands = mockBindings().cellProps.ServerCommands;
+    // @ts-expect-error a command nobody declared has no callable type
+    expect(commands.CreateOrder).toBeUndefined();
+  });
+
+  // The fact the empty default does not encode is recorded where facts live.
+  it("still records that an unconfigured name is undefined at runtime", () => {
+    const note = findRuntimeFacadeCapability("server-command-invocation").note ?? "";
+    expect(note).toMatch(/undefined/);
+    expect(note).toMatch(/plain `TypeError`/);
   });
 });
 
 // #27's fourth acceptance criterion: "Local dev can provide mocks for the same
 // public facade."
 describe("the provider boundary", () => {
-  it("makes the host and the mock the same type, so authored source cannot tell them apart", () => {
+  it("makes the host and the mock the same type, so a consumer cannot tell them apart", () => {
     const host = providerOf("host", { cellProps: { Permissions: [{ key: "Orders.Read" }] } });
     const mock = providerOf("mock");
 
@@ -191,35 +180,86 @@ describe("the provider boundary", () => {
   });
 });
 
-// The gap this suite exists to keep closed. `data-source-binding` is admitted,
-// and its address is a wrapper-local rather than a prop, so a port built only
-// from `props` gave a provider nowhere to supply it — which would have forced
-// #29 either to bypass the provider or to add a second injection path. #22 also
-// requires mock DataSource behaviour to be injectable by the example.
-describe("data-source coverage on the port", () => {
-  const ordersResult: DataSourceResult = {
-    data: [{ id: "A-1" }],
-    totalCount: 1,
-    loading: false,
-    error: null,
-  };
+// The binding is modelled after the three calls #5 actually executed, not as a
+// resolver invented here: the name is the first argument, the options object is
+// optional, and the option fields act server-side.
+describe("the confirmed useDataSource binding", () => {
+  it("takes the name first and the options object second", () => {
+    const binding: DataSourceBinding = (name, options) => ({
+      data: options?.top === 3 ? [{ month: "6月" }, { month: "5月" }, { month: "4月" }] : [],
+      totalCount: 72,
+      loading: false,
+      error: null,
+    });
 
-  it("runs one authored data-source read under both providers", () => {
-    const host = providerOf("host", { dataSources: { Orders: () => ordersResult } });
-    const mock = providerOf("mock", { dataSources: { Orders: () => ordersResult } });
+    const result = binding("Sales", { top: 3 });
+    expect(result.data).toHaveLength(3);
+    // `totalCount` is the server-side count and stays put while `top` limits rows.
+    expect(result.totalCount).toBe(72);
+  });
 
-    /**
-     * Authored once, parameterised only by which provider handed it bindings —
-     * which is what "the same source runs unchanged under `vp dev`" means.
-     */
-    function orderCount(bindings: RuntimeFacadeHostBindings): unknown {
-      const orders = bindings.dataSources.Orders;
-      return orders ? orders().totalCount : undefined;
+  // #5's third executed call passes the name alone, so the options object is
+  // optional rather than required by the type.
+  it("accepts the name on its own, the way #5's unknown-source call did", () => {
+    const seen: string[] = [];
+    const binding: DataSourceBinding = name => {
+      seen.push(name);
+      return noSuchSource(name);
+    };
+
+    const result = binding("NoSuchSource");
+    expect(seen).toEqual(["NoSuchSource"]);
+    expect(result.error).toMatch(/was not found: NoSuchSource/);
+    expect(result.data).toEqual([]);
+    expect(result.totalCount).toBe(0);
+  });
+
+  it("keeps the option fields #5 proved act server-side", () => {
+    const options: DataSourceQueryOptions = {
+      top: 2,
+      offset: 1,
+      orderBySqlParams: [{ ColumnName: "销售额", Order: "DESC" }],
+    };
+    expect(options.top).toBe(2);
+    expect(options.offset).toBe(1);
+    expect(options.orderBySqlParams?.[0]?.ColumnName).toBe("销售额");
+    expect(CELL_DATA_SOURCE_CONTRACT.pageSizeCountsAreServerSide).toBe(true);
+  });
+
+  // Port-level, not façade-level: both providers implement the same confirmed
+  // binding, so a consumer cannot tell which one it holds. That is the provider
+  // substitutability #27 requires; authored façade usage on top of the port is
+  // #29's to build, and this test does not claim to be it.
+  it("lets both providers satisfy the same binding", () => {
+    // Answers by name, the way the real binding does: a declared source returns a
+    // result, anything else returns #5's error state.
+    const sales: DataSourceBinding = name =>
+      name === "Sales" ? { data: [], totalCount: 72, loading: false, error: null } : noSuchSource(name);
+
+    const host = providerOf("host", { useDataSource: sales });
+    const mock = providerOf("mock", { useDataSource: sales });
+
+    /** A port consumer, written once and handed either provider's bindings. */
+    function readSales(bindings: RuntimeFacadeHostBindings): DataSourceResult {
+      return bindings.useDataSource("Sales", { top: 3 });
     }
 
-    expect(orderCount(host.bindings)).toBe(1);
-    expect(orderCount(mock.bindings)).toBe(1);
+    expect(readSales(host.bindings).totalCount).toBe(72);
+    expect(readSales(mock.bindings).totalCount).toBe(72);
+    expect(Object.keys(mock.bindings).sort()).toEqual(Object.keys(host.bindings).sort());
   });
+
+  // #5 records the undeclared case as an error state rather than a throw, so the
+  // port's default mock must answer that way instead of omitting the member.
+  it("answers an undeclared source with an error state rather than a throw", () => {
+    const bindings = mockBindings();
+    expect(() => bindings.useDataSource("NoSuchSource")).not.toThrow();
+    expect(bindings.useDataSource("NoSuchSource").error).toMatch(/was not found/);
+  });
+});
+
+describe("the data-source result", () => {
+  const base: DataSourceResult = { data: [], totalCount: 0, loading: false, error: null };
 
   it("requires exactly the result fields #5 executed against", () => {
     expect([...CELL_DATA_SOURCE_CONTRACT.resultFieldsExecuted].sort()).toEqual([
@@ -229,76 +269,91 @@ describe("data-source coverage on the port", () => {
       "totalCount",
     ]);
 
-    const complete: DataSourceResult = { data: null, totalCount: 0, loading: false, error: null };
-    expect(Object.keys(complete)).toHaveLength(4);
+    expect(Object.keys(base)).toHaveLength(4);
 
     // The interface writes these four out instead of deriving them from `core`,
     // because `resultFieldsExecuted` is a mutable `string[]` rather than a literal
     // tuple. Each one is therefore asserted required by name, so the written-down
     // list cannot rot into optionals.
     // @ts-expect-error `totalCount` is part of the executed result
-    const missingTotalCount: DataSourceResult = { data: null, loading: false, error: null };
+    const missingTotalCount: DataSourceResult = { data: [], loading: false, error: null };
     // @ts-expect-error `data` is part of the executed result
     const missingData: DataSourceResult = { totalCount: 0, loading: false, error: null };
     // @ts-expect-error `loading` is part of the executed result
-    const missingLoading: DataSourceResult = { data: null, totalCount: 0, error: null };
+    const missingLoading: DataSourceResult = { data: [], totalCount: 0, error: null };
     // @ts-expect-error `error` is part of the executed result
-    const missingError: DataSourceResult = { data: null, totalCount: 0, loading: false };
+    const missingError: DataSourceResult = { data: [], totalCount: 0, loading: false };
 
     expect([missingTotalCount, missingData, missingLoading, missingError]).toHaveLength(4);
   });
 
-  // #5 documents `reload` but never observed it on a result, so it is admitted
-  // through the extra-key member rather than required — "the host provides this"
-  // and "the docs mention it" are different claims.
-  it("admits a documented-only field without requiring it", () => {
+  // `reload` is documented but was never observed on a result, so it is optional.
+  // It is declared explicitly rather than through a string index signature: an
+  // index signature would let a misspelling through, and unconfirmed names are
+  // omitted rather than guessed.
+  it("admits the documented-only reload field without requiring it", () => {
     expect([...CELL_DATA_SOURCE_CONTRACT.resultFieldsDocumented]).toContain("reload");
-    const withReload: DataSourceResult = {
-      ...ordersResult,
-      reload: () => undefined,
-    };
-    expect(typeof withReload.reload).toBe("function");
-  });
 
-  // #5 records the undeclared case as an error *state* rather than a throw, so a
-  // missing key on the supply side is input to the façade, not a failure.
-  it("leaves an undeclared data source absent for the façade to turn into a state", () => {
-    expect(mockBindings().dataSources.Orders).toBeUndefined();
-    expect(CELL_DATA_SOURCE_CONTRACT.unknownSourceOutcome).toMatch(/error state/);
+    const withReload: DataSourceResult = { ...base, reload: () => undefined };
+    expect(typeof withReload.reload).toBe("function");
+
+    const withoutReload: DataSourceResult = { ...base };
+    expect(withoutReload.reload).toBeUndefined();
+
+    // @ts-expect-error an unrecorded field name is not admitted
+    const misspelled: DataSourceResult = { ...base, relaod: () => undefined };
+    expect(misspelled).toBeDefined();
   });
 });
 
 describe("port coverage", () => {
   it("provides a channel for every binding the registry admits", () => {
-    expect(runtimeFacadePortChannels()).toEqual(["cell-props", "data-sources"]);
-    expect([...RUNTIME_FACADE_PORT_CHANNELS]).toEqual(["cell-props", "data-sources"]);
+    expect(runtimeFacadePortChannels()).toEqual(["cell-props", "use-data-source"]);
+    expect([...RUNTIME_FACADE_PORT_CHANNELS]).toEqual(["cell-props", "use-data-source"]);
     expect(() => assertRuntimeFacadePortCoversAdmittedCapabilities()).not.toThrow();
   });
 
-  it("routes prop bindings to props and the wrapper-local to data sources", () => {
+  // The channel union is forced exhaustive over the member map by `satisfies`,
+  // and the map's values must be real member names. This pins the runtime half,
+  // so a channel and a member cannot get out of step unnoticed.
+  it("names the port member that carries each channel", () => {
+    expect(Object.values(RUNTIME_FACADE_PORT_CHANNEL_MEMBERS).sort()).toEqual(
+      Object.keys(mockBindings()).sort(),
+    );
+  });
+
+  it("routes prop bindings to props and the confirmed hook to its own channel", () => {
     expect(runtimeFacadePortChannelOfBinding({ kind: "cell-prop", prop: "ServerCommands" })).toBe(
       "cell-props",
     );
     expect(runtimeFacadePortChannelOfBinding({ kind: "forguncy-member", member: "hasPermission" })).toBe(
       "cell-props",
     );
-    expect(runtimeFacadePortChannelOfBinding({ kind: "cell-hook", hook: "useDataSource" })).toBe(
-      "data-sources",
-    );
+    expect(
+      runtimeFacadePortChannelOfBinding({ kind: "cell-hook", hook: RUNTIME_FACADE_PORT_HOOK_NAME }),
+    ).toBe("use-data-source");
   });
 
-  it("refuses a registry that needs a channel the port does not have", () => {
-    const unprovided = "cell-hooks" as unknown as RuntimeFacadePortChannel;
+  // The guarantee the previous round could not make: the mapping is keyed on the
+  // binding's identity, so a *second* wrapper-local is not silently treated as
+  // covered by the useDataSource channel.
+  it("refuses a wrapper-local the port has no member for", () => {
+    const otherHook = { kind: "cell-hook", hook: "someOtherWrapperLocal" } as const;
+
+    expect(runtimeFacadePortChannelOfBinding(otherHook)).toBeUndefined();
+    expect(runtimeFacadePortCoversBinding(otherHook)).toBe(false);
 
     let caught: unknown;
     try {
-      assertRuntimeFacadePortCoversAdmittedCapabilities(["cell-props", unprovided]);
+      assertRuntimeFacadePortCoversAdmittedCapabilities([
+        { ...findRuntimeFacadeCapability("data-source-binding"), hostBindings: [otherHook] },
+      ]);
     } catch (error) {
       caught = error;
     }
 
     expect(caught).toBeInstanceOf(RuntimeFacadeContractError);
-    expect((caught as RuntimeFacadeContractError).message).toMatch(/does not provide/);
+    expect((caught as RuntimeFacadeContractError).message).toMatch(/has no channel for/);
   });
 });
 

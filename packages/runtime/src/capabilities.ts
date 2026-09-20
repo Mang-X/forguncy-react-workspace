@@ -158,16 +158,24 @@ export type RuntimeFacadeHostBinding =
 /**
  * How far #5's evidence actually goes for a capability.
  *
- * - `call-shape`: how it is invoked *and* what it returns were observed.
- * - `result-shape`: what it returns was observed; how it is invoked was not.
- * - `member-presence`: only the name was observed.
+ * - `call-shape`: the capability was *called* during the probe, and what it
+ *   returns was observed. This records that the call was seen, not that its
+ *   signature is complete — what stays unpinned is stated per capability in
+ *   `note`, and in the call types themselves, where `ServerCommandBindings`
+ *   admits no call until a declaration supplies a command's parameters.
+ * - `member-presence`: only the name was observed; nothing was called.
  *
- * There is deliberately no "expected" or "conventional" member. The three levels
- * are the whole reason a reader can tell a typed accessor from a documented
- * passthrough, and collapsing them would make the façade's types look stronger
- * than the evidence behind them.
+ * Two levels, because they are the two #5's evidence currently distinguishes. A
+ * third, "result observed but invocation not", existed while
+ * `data-source-binding` was believed to be in that state; #5's evidence records
+ * three executed `useDataSource` calls, so it is not, and keeping an unused level
+ * would have implied coverage this contract does not have.
+ *
+ * There is deliberately no "expected" or "conventional" member: collapsing the
+ * levels is what would make the façade's types look stronger than the evidence
+ * behind them.
  */
-export type RuntimeFacadeConfirmation = "call-shape" | "result-shape" | "member-presence";
+export type RuntimeFacadeConfirmation = "call-shape" | "member-presence";
 
 /**
  * Which boundary a capability sits on.
@@ -373,10 +381,10 @@ export const RUNTIME_FACADE_CAPABILITIES: readonly RuntimeFacadeCapability[] = [
       basis:
         "#4 records business data sources as Forguncy-owned so that permissions and server-side rules stay authoritative; the confirmed cell-facing binding is the `useDataSource` wrapper-local.",
     },
-    confirmation: "result-shape",
+    confirmation: "call-shape",
     hostBindings: [{ kind: "cell-hook", hook: "useDataSource" }],
     evidenceSources: ["data-source-contract", "user-scope-bindings"],
-    note: "The result fields are pinned; the hook's own arguments are not, so the façade exposes the confirmed half and leaves the call untyped. A name that was never declared is an error state rather than a thrown exception, so a wrapper must not turn it into one. This is also the only admitted capability whose address is a wrapper-local rather than a prop, which is why `RuntimeFacadeHostBindings` carries a second, dedicated channel for it.",
+    note: "The call was observed, not just the result: #5 executed `useDataSource(\"Sales\", { top: 3 })`, `useDataSource(\"Sales\", { top: 2, offset: 1, orderBySqlParams: [...] })` and `useDataSource(\"NoSuchSource\")`, so the name is the first argument and the options object is optional, with `top`/`offset`/`orderBySqlParams` acting server-side. The option set is what was exercised, not a proven-complete list. A name that was never declared is an error state rather than a thrown exception, so a wrapper must not turn it into one. This is also the only admitted capability whose address is a wrapper-local rather than a prop, which is why `RuntimeFacadeHostBindings` carries a second, dedicated channel for it.",
   },
   {
     id: "permission-snapshot",

@@ -223,17 +223,25 @@ describe("omitted candidate families", () => {
 // recorded per capability, so a typed signature has to be paid for with evidence
 // rather than added because it reads well.
 describe("confirmation levels", () => {
-  it("types only the bridge #5 pinned end to end", () => {
+  // Only the two bridges #5 actually called are call-shape; everything else is a
+  // name it verified and never invoked.
+  it("records call-shape only where the probe executed a call", () => {
     expect(
       RUNTIME_FACADE_CAPABILITIES.filter(capability => capability.confirmation === "call-shape").map(
         capability => capability.id,
       ),
-    ).toEqual(["server-command-invocation"]);
+    ).toEqual(["server-command-invocation", "data-source-binding"]);
   });
 
-  it("separates a pinned result from a pinned call", () => {
-    expect(findRuntimeFacadeCapability("data-source-binding").confirmation).toBe("result-shape");
-    expect(findRuntimeFacadeCapability("data-source-binding").note).toMatch(/arguments are not/);
+  // #5 executed three `useDataSource` calls, so the data-source binding is not a
+  // pinned-result-only capability and its note has to say what was called.
+  it("records the calls #5 executed for the data-source binding", () => {
+    const binding = findRuntimeFacadeCapability("data-source-binding");
+    expect(binding.confirmation).toBe("call-shape");
+    expect(binding.note).toMatch(/useDataSource\("Sales", \{ top: 3 \}\)/);
+    expect(binding.note).toMatch(/orderBySqlParams/);
+    expect(binding.note).toMatch(/not a proven-complete list/);
+    expect(binding.note).toMatch(/error state/);
   });
 
   it("leaves every other member at presence-only, where #5 stopped", () => {

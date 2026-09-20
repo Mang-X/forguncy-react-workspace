@@ -87,15 +87,19 @@ export {
   RUNTIME_FACADE_FORBIDDEN_PATTERN_IDS,
   RUNTIME_FACADE_PACKAGING_POLICY,
   RUNTIME_FACADE_PORT_CHANNELS,
+  RUNTIME_FACADE_PORT_CHANNEL_MEMBERS,
+  RUNTIME_FACADE_PORT_HOOK_NAME,
   RUNTIME_FACADE_PROVIDER_EXPECTATIONS,
   RUNTIME_FACADE_PROVIDER_KINDS,
   RUNTIME_FACADE_RESOLUTION_MODEL,
   runtimeFacadePortChannelOfBinding,
   runtimeFacadePortChannels,
+  runtimeFacadePortCoversBinding,
 } from "./contract";
 export type {
   DataSourceBinding,
-  DataSourceBindings,
+  DataSourceOrderByParam,
+  DataSourceQueryOptions,
   DataSourceResult,
   RuntimeFacadeBoundary,
   RuntimeFacadeBoundaryId,
@@ -109,6 +113,7 @@ export type {
   RuntimeFacadeProviderKind,
   ServerCommandBindings,
   ServerCommandCall,
+  ServerCommandParameterMap,
   ServerCommandResult,
   ServerCommandResultKey,
 } from "./contract";
