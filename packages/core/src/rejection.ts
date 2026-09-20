@@ -36,6 +36,32 @@ export type ArchitecturalRejectionCode =
 /**
  * Bundling/runtime failures: the role is fine, the artifact is not. These are
  * the failure modes a bundler or a real Forguncy runtime actually reports.
+ *
+ * `platform-api-unavailable` and `runtime-api-unavailable` are deliberately two
+ * codes rather than one. "The package needs an API that is not there" is true of two
+ * different runtimes, and the difference decides *when* the rejection can be known
+ * and therefore what evidence it needs:
+ *
+ * - `platform-api-unavailable` — the **browser platform** cannot provide it. A Node
+ *   builtin or a native addon is statically absent from any browser, so this is
+ *   decided before deployment, by inspection of the dependency graph, with no
+ *   Forguncy target involved. #17 requires exactly this to be found before a
+ *   deployment is attempted.
+ * - `runtime-api-unavailable` — the **target runtime** does not expose it. That is a
+ *   fact about a specific Forguncy host, so it can only be observed against one; #8
+ *   consequently lists it under `RUNTIME_CONFIRMED_TECHNICAL_REJECTION_CODES` and
+ *   requires the record to name the target it was observed under.
+ *
+ * Collapsing them made one of the two answers unwritable: a statically-known platform
+ * absence could only be recorded under a code whose evidence contract demands a
+ * runtime observation, so the writer either could not persist it or had to invent a
+ * target it never saw.
+ *
+ * `browser-build-unavailable` is a third, separate failure and not a flavour of either:
+ * the package may use no Node-only API at all and simply never publish a browser entry.
+ * The browser is not missing a capability — there is no browser artifact to run. Sharing
+ * a code would put two different failure conditions, with different upgrade diagnoses,
+ * behind one reason.
  */
 export type TechnicalRejectionCode =
   | "host-module-identity-mismatch"
@@ -44,6 +70,8 @@ export type TechnicalRejectionCode =
   | "dynamic-module-loading"
   | "global-namespace-collision"
   | "cell-code-budget-exceeded"
+  | "platform-api-unavailable"
+  | "browser-build-unavailable"
   | "runtime-api-unavailable";
 
 export type DependencyRejectionCode = ArchitecturalRejectionCode | TechnicalRejectionCode;
@@ -157,6 +185,8 @@ export const TECHNICAL_REJECTION_CODES: readonly TechnicalRejectionCode[] = [
   "dynamic-module-loading",
   "global-namespace-collision",
   "cell-code-budget-exceeded",
+  "platform-api-unavailable",
+  "browser-build-unavailable",
   "runtime-api-unavailable",
 ];
 

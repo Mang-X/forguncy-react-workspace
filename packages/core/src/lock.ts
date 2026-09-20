@@ -439,11 +439,24 @@ export function requiresRuntimeValidation(record: LockedDependencyDecision): boo
   return record.strategy === "replace" ? false : requiresRealRuntimeValidation(record.strategy);
 }
 
-export function lockEvidenceProfileOf(record: LockedDependencyDecision): LockEvidenceProfile {
-  if (record.strategy !== "replace") {
+/**
+ * The evidence profile of a decision that has not been recorded yet.
+ *
+ * Extracted from {@link lockEvidenceProfileOf} so a caller holding a #4 decision but
+ * no lock record — the selection audit in `selection-policy.ts` — can ask #8 which
+ * probe outcome the decision owes, instead of keeping a second copy of this mapping.
+ * The two would drift, and the drift would be invisible: a record written under one
+ * answer and evaluated under the other looks like a fresh decision.
+ */
+export function lockEvidenceProfileForDecision(decision: DependencyDecision): LockEvidenceProfile {
+  if (decision.strategy !== "replace") {
     return "resolved-dependency";
   }
-  return record.rejection.kind === "architectural" ? "architectural-rejection" : "technical-rejection";
+  return decision.rejection.kind === "architectural" ? "architectural-rejection" : "technical-rejection";
+}
+
+export function lockEvidenceProfileOf(record: LockedDependencyDecision): LockEvidenceProfile {
+  return lockEvidenceProfileForDecision(record);
 }
 
 export function lockEvidencePolicyFor(record: LockedDependencyDecision): LockEvidencePolicy {

@@ -8,11 +8,17 @@
  * - #5 "establish the ReactCellType target/runtime contract on Forguncy 12.0.100"
  *   — https://github.com/Mang-X/forguncy-react-workspace/issues/5
  *
- * Scope note: this package states *semantics, boundaries, verified target facts
- * and the dependency-decision model*. It intentionally does not resolve
- * dependencies, bundle anything, or maintain a package compatibility database;
- * those are separate Issues. Reading and writing `fgc.lock.json` as a project
- * artifact is `dependency-resolver`'s job.
+ * Spec Issues built on them:
+ * - #8 "reproducible dependency decisions and `fgc.lock.json`"
+ *   — https://github.com/Mang-X/forguncy-react-workspace/issues/8
+ * - #16 "Agent-driven dependency selection and empirical compatibility probe"
+ *   — https://github.com/Mang-X/forguncy-react-workspace/issues/16
+ *
+ * Scope note: this package states *semantics, boundaries, verified target facts,
+ * the dependency-decision model, and the selection/probe policy*. It intentionally
+ * does not resolve dependencies, bundle anything, run a probe, or maintain a
+ * package compatibility database; those are separate Issues. Reading and writing
+ * `fgc.lock.json` as a project artifact is `dependency-resolver`'s job.
  */
 
 export {
@@ -106,6 +112,10 @@ export {
   DEPENDENCY_LOCK_DECISION,
   DEPENDENCY_LOCK_DECISION_QUALIFIED_REFERENCE,
   DEPENDENCY_LOCK_DECISION_REFERENCE,
+  DEPENDENCY_SELECTION_CITATION_PATTERNS,
+  DEPENDENCY_SELECTION_DECISION,
+  DEPENDENCY_SELECTION_DECISION_QUALIFIED_REFERENCE,
+  DEPENDENCY_SELECTION_DECISION_REFERENCE,
   formatDecisionReference,
   formatGoverningSpecReferenceLine,
   GOVERNING_ARCHITECTURE_DECISIONS,
@@ -208,6 +218,7 @@ export {
   LOCK_GOVERNING_SPEC_REFERENCE_LINE,
   LOCK_PROBE_REQUIREMENTS,
   lockEvidencePolicyFor,
+  lockEvidenceProfileForDecision,
   lockEvidenceProfileOf,
   matchesForguncyTargetIdentity,
   parseFgcLockDocument,
@@ -268,3 +279,149 @@ export type {
   LockRealRuntimeValidation,
   LockStalenessReason,
 } from "./lock-freshness";
+
+// #16 — dependency selection: what makes a package a good candidate, what a probe
+// must observe, and in what order the Agent is allowed to decide anything.
+
+export {
+  decideFromSignals,
+  findReplacementSignalRejection,
+  findSelectionSignal,
+  isSelectionSignalFamily,
+  isSelectionSignalId,
+  MACHINE_OBSERVED_SIGNAL_INVARIANT,
+  NON_EVIDENCE_SIGNAL_SOURCES,
+  replacementRejectionFor,
+  REPLACEMENT_SIGNAL_REJECTIONS,
+  SELECTION_SIGNALS,
+  SELECTION_SIGNAL_FAMILIES,
+  SELECTION_SIGNAL_FAMILY_SEMANTICS,
+  SELECTION_SIGNAL_IDS,
+  selectionSignal,
+  selectionSignalFamilyOf,
+  selectionSignalFamilySemantics,
+  selectionSignalsObservedFrom,
+  SIGNAL_OBSERVATION_CHANNELS,
+  signalsInFamily,
+  validateSignalFindings,
+} from "./selection-signals";
+export type {
+  NonEvidenceSignalSource,
+  ReplacementSignalRejection,
+  SelectionSignal,
+  SelectionSignalFamily,
+  SelectionSignalFamilySemantics,
+  SelectionSignalFinding,
+  SelectionSignalId,
+  SignalObservationChannel,
+  SignalVerdict,
+} from "./selection-signals";
+
+export {
+  assessProbeReport,
+  assertProbeReport,
+  assertSupportedProbeReportSchemaVersion,
+  canonicalizeProbeReport,
+  executedProbeSteps,
+  findForbiddenProbeKeys,
+  findProbeStep,
+  FORBIDDEN_PROBE_REPORT_KEYS,
+  hasPassingEvidence,
+  inspectProbeReport,
+  isProbeStepId,
+  isSupportedProbeReportSchemaVersion,
+  parseProbeReport,
+  PROBE_ASSESSMENT_STATUSES,
+  PROBE_DEPLOYMENT_REQUIRED_STEPS,
+  PROBE_ENGINE_NON_RESPONSIBILITIES,
+  PROBE_EVIDENCE_POLICY,
+  PROBE_OUTCOMES,
+  probeRisksOf,
+  PROBE_REPORT_MACHINE_READABILITY,
+  PROBE_REPORT_SCHEMA_VERSION,
+  PROBE_REPORT_SECTIONS,
+  PROBE_STEPS,
+  PROBE_STEPS_OBSERVING_SIGNAL,
+  PROBE_STEP_IDS,
+  ProbeReportSchemaVersionError,
+  ProbeReportValidationError,
+  probeStep,
+  probeStepObservesSignal,
+  probeStepOrder,
+  probeStepsObserving,
+  probeSupportsDeployment,
+  serializeProbeReport,
+  signalObservesForguncyTarget,
+  SUPPORTED_PROBE_REPORT_SCHEMA_VERSIONS,
+  validateProbeReport,
+} from "./probe-protocol";
+export type {
+  ProbeAssessment,
+  ProbeAssessmentStatus,
+  ProbeEngineNonResponsibility,
+  ProbeEngineNonResponsibilityId,
+  ProbeEnvironment,
+  ProbeFact,
+  ProbeOutcome,
+  ProbeRejectionFinding,
+  ProbeReport,
+  ProbeReportSection,
+  ProbeRisk,
+  ProbeStep,
+  ProbeStepId,
+  ProbeValidationEntry,
+} from "./probe-protocol";
+
+export {
+  ARCHITECTURAL_REJECTION_PROBE_STATUS,
+  auditSelectionDecision,
+  branchForOwnership,
+  CONDITIONAL_SELECTION_STAGES,
+  evaluateRepairRecipe,
+  findConditionalSelectionStage,
+  findSelectionBranch,
+  findSelectionStage,
+  isConditionalSelectionStage,
+  isOwnershipGateFirst,
+  isSelectionBranchId,
+  isSelectionDecisionRecordable,
+  isSelectionStageId,
+  lockProbeStatusForAssessment,
+  NO_PACKAGE_ADAPTER_REGISTRY_INVARIANT,
+  OWNERSHIP_GATE_STAGE_ID,
+  probeSupportsStrategy,
+  REPAIR_RECIPE_CONDITIONS,
+  SELECTION_ACCEPTANCE_CRITERIA,
+  SELECTION_AUTHORITIES,
+  SELECTION_BRANCHES,
+  SELECTION_GOVERNING_DECISIONS,
+  SELECTION_GOVERNING_SPEC_REFERENCE_LINE,
+  SELECTION_STAGES,
+  SELECTION_STAGE_IDS,
+  selectionBranch,
+  selectionJustificationRequired,
+  selectionStage,
+  selectionStageOrder,
+  SPEC_PROVING_CASES,
+  stagesBefore,
+  stagesForBranch,
+  stagesForIslandDecision,
+  stagesSkippedOnEarlyExit,
+  stagesWithAuthority,
+} from "./selection-policy";
+export type {
+  ConditionalSelectionStage,
+  RepairRecipeAssessment,
+  RepairRecipeCondition,
+  RepairRecipeConditionId,
+  RepairRecipeInput,
+  SelectionAcceptanceCriterion,
+  SelectionAuditInput,
+  SelectionAuthority,
+  SelectionBranch,
+  SelectionBranchId,
+  SelectionStage,
+  SelectionStageId,
+  SpecProvingCase,
+  StrategyProbeSupport,
+} from "./selection-policy";
