@@ -10,6 +10,7 @@ import {
   DEPENDENCY_LOCK_DECISION,
   DEPENDENCY_SELECTION_DECISION,
 } from "./governance";
+import { assessDependencyRole, isPlatformConflict } from "./platform-conflicts";
 import type { ProbeEnvironment, ProbeReport } from "./probe-protocol";
 import { PROBE_REPORT_SCHEMA_VERSION, PROBE_STEP_IDS } from "./probe-protocol";
 import {
@@ -111,19 +112,26 @@ describe("selection stage order", () => {
     expect(selectionStageOrder("persist-decision")).toBe(SELECTION_STAGE_IDS.length - 1);
   });
 
-  it("keeps deterministic work out of the Agent's stages", () => {
-    // The skill/scripts boundary as data: one stage is measurement, and it is the
-    // only one. Widening it is how judgement becomes a build output.
-    expect(stagesWithAuthority("scripts").map(stage => stage.id)).toEqual(["probe-candidate"]);
+  it("keeps deterministic work on the scripts side of #16's boundary", () => {
+    // #16 puts "package inspection, builds, artifact scan, size calculation,
+    // deterministic browser checks, lock updates" on the scripts side. Probing *and*
+    // persisting are therefore scripts work; judgement stays with the Agent.
+    expect(stagesWithAuthority("scripts").map(stage => stage.id)).toEqual(["probe-candidate", "persist-decision"]);
     expect(stagesWithAuthority("agent").map(stage => stage.id)).toEqual([
       "classify-ownership",
       "research-candidates",
       "rank-candidates",
       "decide-strategy",
       "resolve-replacement",
-      "persist-decision",
     ]);
     expect([...SELECTION_AUTHORITIES]).toEqual(["agent", "scripts"]);
+  });
+
+  it("makes the lock-write stage refuse an unrecordable decision", () => {
+    const stage = selectionStage("persist-decision");
+    expect(stage.authority).toBe("scripts");
+    expect(stage.mustNot.join(" ")).toMatch(/Do not decide the strategy/);
+    expect(stage.mustNot.join(" ")).toMatch(/refuse it and report why/);
   });
 
   it("resolves a stage and rejects an unknown one", () => {
@@ -260,7 +268,7 @@ describe("selection decision audit", () => {
     expect(problems[0]).toMatch(/probe report is about "some-other-package"/);
   });
 
-  it("refuses a probe that recorded no passing step", () => {
+  it("refuses a strategy the probe does not support", () => {
     const failing: ProbeReport = {
       ...probeFor("es-toolkit"),
       validation: PROBE_STEP_IDS.map(step => ({
@@ -272,7 +280,110 @@ describe("selection decision audit", () => {
     };
     const problems = auditSelectionDecision({ decision: INLINE, probe: failing });
     expect(problems).toHaveLength(1);
-    expect(problems[0]).toMatch(/recorded no passing step/);
+    expect(problems[0]).toMatch(/does not support recording "inline"/);
+    expect(problems[0]).toMatch(/claims the candidate works/);
+  });
+
+  it("does not accept a strategy because one unrelated step passed", () => {
+    // `package-identity` passing while `build` fails used to be enough, because the
+    // gate was `hasPassingEvidence`. That report describes a candidate that does not
+    // work, so it must not be recordable as `inline`.
+    const report: ProbeReport = {
+      ...probeFor("es-toolkit"),
+      validation: PROBE_STEP_IDS.map(step => {
+        if (step === "package-identity") {
+          return { step, outcome: "passed" as const, detail: "resolved", diagnostics: [] };
+        }
+        if (step === "build") {
+          return { step, outcome: "failed" as const, detail: "build failed", diagnostics: ["unresolved node:fs"] };
+        }
+        return { step, outcome: "skipped" as const, detail: "no artifact to inspect", diagnostics: [] };
+      }),
+    };
+
+    const problems = auditSelectionDecision({ decision: INLINE, probe: report });
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/does not support recording "inline"/);
+  });
+
+  it("lets a build failure support replace but never a positive strategy", () => {
+    const report: ProbeReport = {
+      ...probeFor("es-toolkit"),
+      validation: PROBE_STEP_IDS.map(step =>
+        step === "build"
+          ? { step, outcome: "failed" as const, detail: "build failed", diagnostics: ["unresolved node:fs"] }
+          : { step, outcome: "passed" as const, detail: "ran", diagnostics: [] },
+      ),
+    };
+
+    expect(auditSelectionDecision({ decision: INLINE, probe: report })).toHaveLength(1);
+    expect(auditSelectionDecision({ decision: REPLACE, probe: report })).toEqual([]);
+  });
+
+  it("refuses to replace a candidate that passed unless a signal disqualifies it", () => {
+    const passing = probeFor("es-toolkit");
+    const problems = auditSelectionDecision({
+      decision: REPLACE,
+      probe: passing,
+      signals: ["browser-first-esm-distribution"],
+    });
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/has to name the replacement signal/);
+
+    expect(
+      auditSelectionDecision({ decision: REPLACE, probe: passing, signals: ["cell-artifact-budget-exceeded"] }),
+    ).toEqual([]);
+  });
+
+  it("refuses a report that fails its own contract", () => {
+    const invalid: ProbeReport = { ...probeFor("es-toolkit"), facts: [] };
+    const problems = auditSelectionDecision({ decision: INLINE, probe: invalid });
+
+    expect(problems.some(problem => problem.includes("fails its own contract"))).toBe(true);
+    expect(problems.some(problem => problem.includes("records no facts"))).toBe(true);
+  });
+
+  it("consumes the #4 ownership decision rather than a signal", () => {
+    const ownership = assessDependencyRole({ packageName: "react-router-dom", role: "application-navigation" });
+
+    const asInline = auditSelectionDecision({ decision: INLINE, probe: probeFor("es-toolkit"), ownership });
+    expect(asInline.some(problem => problem.includes("assessed as Forguncy-owned"))).toBe(true);
+
+    // Recording an ownership conflict as a bundling failure is the reporting bug #4
+    // exists to prevent, so it is refused even in a `replace` decision.
+    const misreported = auditSelectionDecision({ decision: REPLACE, probe: probeFor("es-toolkit"), ownership });
+    expect(misreported.some(problem => problem.includes("but the recorded rejection is technical"))).toBe(true);
+  });
+
+  it("accepts an ownership conflict recorded with the assessment's own rejection", () => {
+    const ownership = assessDependencyRole({ packageName: "react-router-dom", role: "application-navigation" });
+    if (!isPlatformConflict(ownership)) {
+      throw new Error("fixture is expected to be a platform conflict");
+    }
+
+    const decision: DependencyDecision = {
+      strategy: "replace",
+      packageName: "es-toolkit",
+      rejection: ownership.rejection,
+    };
+    expect(auditSelectionDecision({ decision, probe: probeFor("es-toolkit"), ownership })).toEqual([]);
+  });
+
+  it("rejects an architectural rejection that does not match the assessment", () => {
+    const ownership = assessDependencyRole({ packageName: "react-router-dom", role: "application-navigation" });
+    const decision: DependencyDecision = {
+      strategy: "replace",
+      packageName: "es-toolkit",
+      rejection: {
+        kind: "architectural",
+        code: "auth-framework-conflict",
+        summary: "hand-written rejection",
+        remediation: "hand-written",
+      },
+    };
+
+    const problems = auditSelectionDecision({ decision, probe: probeFor("es-toolkit"), ownership });
+    expect(problems.some(problem => problem.includes("record the assessment's rejection"))).toBe(true);
   });
 
   it("refuses a non-replace strategy once a replacement signal was observed", () => {

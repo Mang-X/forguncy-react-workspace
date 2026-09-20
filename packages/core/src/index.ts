@@ -274,6 +274,7 @@ export {
   findSelectionSignal,
   isSelectionSignalFamily,
   isSelectionSignalId,
+  MACHINE_OBSERVED_SIGNAL_INVARIANT,
   NON_EVIDENCE_SIGNAL_SOURCES,
   replacementRejectionFor,
   REPLACEMENT_SIGNAL_REJECTIONS,
@@ -302,6 +303,7 @@ export type {
 } from "./selection-signals";
 
 export {
+  assessProbeReport,
   assertProbeReport,
   assertSupportedProbeReportSchemaVersion,
   canonicalizeProbeReport,
@@ -314,6 +316,8 @@ export {
   isProbeStepId,
   isSupportedProbeReportSchemaVersion,
   parseProbeReport,
+  PROBE_ASSESSMENT_STATUSES,
+  PROBE_DEPLOYMENT_REQUIRED_STEPS,
   PROBE_ENGINE_NON_RESPONSIBILITIES,
   PROBE_EVIDENCE_POLICY,
   PROBE_OUTCOMES,
@@ -327,11 +331,14 @@ export {
   ProbeReportValidationError,
   probeStep,
   probeStepOrder,
+  probeSupportsDeployment,
   serializeProbeReport,
   SUPPORTED_PROBE_REPORT_SCHEMA_VERSIONS,
   validateProbeReport,
 } from "./probe-protocol";
 export type {
+  ProbeAssessment,
+  ProbeAssessmentStatus,
   ProbeEngineNonResponsibility,
   ProbeEngineNonResponsibilityId,
   ProbeEnvironment,
@@ -354,6 +361,7 @@ export {
   isSelectionStageId,
   NO_PACKAGE_ADAPTER_REGISTRY_INVARIANT,
   OWNERSHIP_GATE_STAGE_ID,
+  probeSupportsStrategy,
   REPAIR_RECIPE_CONDITIONS,
   SELECTION_ACCEPTANCE_CRITERIA,
   SELECTION_AUTHORITIES,
@@ -379,4 +387,5 @@ export type {
   SelectionStage,
   SelectionStageId,
   SpecProvingCase,
+  StrategyProbeSupport,
 } from "./selection-policy";

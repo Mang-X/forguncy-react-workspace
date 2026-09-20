@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  assessProbeReport,
   assertProbeReport,
   assertSupportedProbeReportSchemaVersion,
   canonicalizeProbeReport,
@@ -13,6 +14,8 @@ import {
   isProbeStepId,
   isSupportedProbeReportSchemaVersion,
   parseProbeReport,
+  PROBE_ASSESSMENT_STATUSES,
+  PROBE_DEPLOYMENT_REQUIRED_STEPS,
   PROBE_ENGINE_NON_RESPONSIBILITIES,
   PROBE_EVIDENCE_POLICY,
   PROBE_OUTCOMES,
@@ -25,6 +28,7 @@ import {
   ProbeReportValidationError,
   probeStep,
   probeStepOrder,
+  probeSupportsDeployment,
   serializeProbeReport,
   validateProbeReport,
 } from "./probe-protocol";
@@ -305,5 +309,133 @@ describe("probe risk typing", () => {
     // @ts-expect-error a risk must cite a catalogue signal, not arbitrary text
     const arbitrary: ProbeRisk = { signal: "made-up", step: "size", summary: "?", evidence: ["?"] };
     expect(arbitrary.signal).toBe("made-up");
+  });
+});
+
+describe("deployment support", () => {
+  it("requires every deployment-required step to have passed", () => {
+    expect(PROBE_DEPLOYMENT_REQUIRED_STEPS).toHaveLength(8);
+    // #16 asks for a runtime/browser result "where needed", so a static path cannot
+    // be required to have run one.
+    expect(PROBE_DEPLOYMENT_REQUIRED_STEPS).not.toContain("runtime-smoke");
+    expect(probeSupportsDeployment(probeReport())).toBe(true);
+    expect(assessProbeReport(probeReport()).status).toBe("supports-deployment");
+  });
+
+  it("does not call a candidate working because one step passed", () => {
+    // The scenario a "hasPassingEvidence" gate accepts: identity resolved, build
+    // failed, everything else skipped.
+    const validation: readonly ProbeValidationEntry[] = PROBE_STEP_IDS.map(step => {
+      if (step === "package-identity") {
+        return { step, outcome: "passed" as const, detail: "resolved", diagnostics: [] };
+      }
+      if (step === "build") {
+        return {
+          step,
+          outcome: "failed" as const,
+          detail: "the bundle could not be produced",
+          diagnostics: ['Could not resolve "node:fs"'],
+        };
+      }
+      return { step, outcome: "skipped" as const, detail: "no artifact to inspect", diagnostics: [] };
+    });
+    const report = probeReport({ validation });
+
+    expect(hasPassingEvidence(report)).toBe(true);
+    expect(probeSupportsDeployment(report)).toBe(false);
+
+    const assessment = assessProbeReport(report);
+    expect(assessment.status).toBe("supports-rejection-only");
+    expect(assessment.failedSteps).toEqual(["build"]);
+    expect(assessment.blockingSteps).toContain("build");
+    expect(assessment.blockingSteps).toContain("artifact-scan");
+    expect(assessment.reason).toMatch(/cannot support a strategy that claims the candidate works/);
+  });
+
+  it("separates 'could not find out' from 'it does not work'", () => {
+    const validation = PROBE_STEP_IDS.map(step =>
+      step === "artifact-scan" || step === "size"
+        ? { step, outcome: "skipped" as const, detail: "not run in this environment", diagnostics: [] }
+        : { step, outcome: "passed" as const, detail: "ran", diagnostics: [] },
+    );
+    const assessment = assessProbeReport(probeReport({ validation }));
+
+    expect(assessment.status).toBe("inconclusive");
+    expect(assessment.failedSteps).toEqual([]);
+    expect(assessment.blockingSteps).toEqual(["artifact-scan", "size"]);
+    expect(assessment.reason).toMatch(/neither shows the candidate working nor shows why it cannot/);
+  });
+
+  it("weighs risks without letting them block deployment", () => {
+    const assessment = assessProbeReport(probeReport({ risks: [WORKER_RISK] }));
+
+    expect(assessment.status).toBe("supports-deployment");
+    expect(assessment.risksToWeigh.map(risk => risk.signal)).toEqual(["worker"]);
+    expect(assessment.reason).toMatch(/risk finding/);
+  });
+
+  it("keeps the assessment vocabulary closed", () => {
+    expect([...PROBE_ASSESSMENT_STATUSES]).toEqual([
+      "supports-deployment",
+      "supports-rejection-only",
+      "inconclusive",
+    ]);
+  });
+});
+
+describe("canonical ordering is total", () => {
+  it("orders findings that share a key by their content", () => {
+    // Same step and name with different values: a stable sort keeps discovery order
+    // here, which is the one thing canonicalization has to remove.
+    const factA = { step: "asset-inventory" as const, name: "asset", value: "a.css" };
+    const factB = { step: "asset-inventory" as const, name: "asset", value: "b.css" };
+
+    expect(serializeProbeReport(probeReport({ facts: [factA, factB] }))).toBe(
+      serializeProbeReport(probeReport({ facts: [factB, factA] })),
+    );
+    expect(canonicalizeProbeReport(probeReport({ facts: [factB, factA] })).facts.map(fact => fact.value)).toEqual([
+      "a.css",
+      "b.css",
+    ]);
+  });
+
+  it("orders risks that share a signal by their content", () => {
+    const first: ProbeRisk = { signal: "wasm", step: "artifact-scan", summary: "a", evidence: ["a.wasm"] };
+    const second: ProbeRisk = { signal: "wasm", step: "artifact-scan", summary: "b", evidence: ["b.wasm"] };
+
+    expect(serializeProbeReport(probeReport({ risks: [first, second] }))).toBe(
+      serializeProbeReport(probeReport({ risks: [second, first] })),
+    );
+  });
+
+  it("sorts set-like arrays so discovery order cannot leak into the bytes", () => {
+    const report = probeReport({
+      facts: [{ step: "artifact-scan", name: "unresolvedImports", value: ["b.mjs", "a.mjs"] }],
+      risks: [{ ...WORKER_RISK, evidence: ["z.js", "a.js"] }],
+    });
+
+    const serialized = serializeProbeReport(report);
+    expect(serialized.indexOf('"a.mjs"')).toBeLessThan(serialized.indexOf('"b.mjs"'));
+    expect(serialized.indexOf('"a.js"')).toBeLessThan(serialized.indexOf('"z.js"'));
+    expect(serializeProbeReport(parseProbeReport(serialized))).toBe(serialized);
+  });
+
+  it("reaches the same bytes from a shuffled input", () => {
+    const report = probeReport({
+      facts: [
+        { step: "size", name: "bytes", value: 4096 },
+        { step: "artifact-scan", name: "unresolvedImports", value: ["b.mjs", "a.mjs"] },
+        { step: "package-identity", name: "resolvedVersion", value: "1.39.0" },
+      ],
+      risks: [WORKER_RISK, { ...WORKER_RISK, evidence: ["other.worker.js"] }],
+      validation: [...allSteps("passed")].reverse(),
+    });
+    const shuffledAgain = probeReport({
+      facts: [...report.facts].reverse(),
+      risks: [...report.risks].reverse(),
+      validation: [...report.validation].reverse(),
+    });
+
+    expect(serializeProbeReport(report)).toBe(serializeProbeReport(shuffledAgain));
   });
 });

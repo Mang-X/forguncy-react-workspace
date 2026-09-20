@@ -30,18 +30,25 @@
  *   This is the only family that rejects, and it rejects the *artifact for this
  *   target*, never the package in the abstract.
  *
- * Deliberately absent: any signal read from a package's prose. The observation
- * channels below are all machine-checkable, and neither a README nor a
- * documentation site is one of them — see {@link NON_EVIDENCE_SIGNAL_SOURCES}.
- * The rule "never declare compatibility from README inspection alone" is only
- * enforceable if a documentation-derived claim has no channel to be recorded in.
+ * Deliberately absent, in two different senses:
+ *
+ * - **Any signal read from a package's prose.** The observation channels below are
+ *   all machine-checkable, and neither a README nor a documentation site is one of
+ *   them — see {@link NON_EVIDENCE_SIGNAL_SOURCES}. The rule "never declare
+ *   compatibility from README inspection alone" is only enforceable if a
+ *   documentation-derived claim has no channel to be recorded in.
+ * - **Ownership.** No signal here says which side of the #4 boundary a capability
+ *   belongs to. Ownership is a property of the *capability*, not of a package's
+ *   artifact: "this package implements navigation" cannot be read off a manifest,
+ *   and an unknown package filling an application-owned role is exactly as
+ *   conflicting as a well-known one. Modelling it as a signal would put a
+ *   bundling-adjacent observation in the position of an architecture decision and
+ *   would contradict the ownership gate that has to run first. It is obtained from
+ *   `assessDependencyRole` in `platform-conflicts.ts` instead — see
+ *   {@link MACHINE_OBSERVED_SIGNAL_INVARIANT}.
  */
 
-import type {
-  ArchitecturalRejectionCode,
-  DependencyRejection,
-  TechnicalRejectionCode,
-} from "./rejection";
+import type { TechnicalDependencyRejection, TechnicalRejectionCode } from "./rejection";
 
 // ---------------------------------------------------------------------------
 // Families
@@ -152,6 +159,22 @@ export const NON_EVIDENCE_SIGNAL_SOURCES = [
 ] as const;
 export type NonEvidenceSignalSource = (typeof NON_EVIDENCE_SIGNAL_SOURCES)[number];
 
+/**
+ * What a signal is allowed to be a statement about.
+ *
+ * The invariant exists because the tempting mistake is to add a signal like
+ * "does not implement an application-owned concern" or "implements a Forguncy-owned
+ * capability". Both read naturally and both are wrong: they are conclusions of the
+ * #4 capability-ownership decision, not observations of a package artifact, and
+ * nothing in a manifest or a registry entry can establish them. Keeping them out of
+ * this catalogue is what lets `PROBE_ENGINE_NON_RESPONSIBILITIES` and the ownership
+ * gate remain true at the same time — the gate runs first and answers the ownership
+ * question, and this module never offers a machine observation that could be
+ * substituted for it.
+ */
+export const MACHINE_OBSERVED_SIGNAL_INVARIANT =
+  "A selection signal is an observation about a package's artifact. It is never a verdict about which side of the #4 ownership boundary a capability belongs to; that comes from assessDependencyRole in platform-conflicts.ts." as const;
+
 // ---------------------------------------------------------------------------
 // The catalogue
 // ---------------------------------------------------------------------------
@@ -172,7 +195,6 @@ export type SelectionSignalId =
   | "shipped-typescript-declarations"
   | "high-level-react-api"
   | "no-node-builtins"
-  | "no-application-owned-concern"
   | "self-contained-runtime-assets"
   | "maintained-and-licensed"
   // risk
@@ -190,7 +212,6 @@ export type SelectionSignalId =
   | "node-filesystem-process-or-native-addon"
   | "ssr-or-server-only-without-browser-build"
   | "service-worker-or-special-header-requirement"
-  | "application-ownership-conflict"
   | "cell-artifact-budget-exceeded"
   | "runtime-assets-not-embeddable";
 
@@ -238,14 +259,6 @@ export const SELECTION_SIGNALS: readonly SelectionSignal[] = [
     label: "No Node builtin or native dependency",
     summary: "Nothing in the package's resolved dependency graph reaches a Node builtin or a native addon.",
     observedFrom: "dependency-graph",
-  },
-  {
-    id: "no-application-owned-concern",
-    family: "positive",
-    label: "Does not implement an application-owned concern",
-    summary:
-      "The package's public API does not implement navigation, application state, auth or a business data source; confirmed with the role assessment from #4 rather than with the package name.",
-    observedFrom: "package-manifest",
   },
   {
     id: "self-contained-runtime-assets",
@@ -365,14 +378,6 @@ export const SELECTION_SIGNALS: readonly SelectionSignal[] = [
     observedFrom: "runtime-observation",
   },
   {
-    id: "application-ownership-conflict",
-    family: "replacement",
-    label: "Implements a Forguncy-owned capability",
-    summary:
-      "The requested capability is application-owned (#4), so the fix is to route it to the host rather than to find a better package for it.",
-    observedFrom: "registry-metadata",
-  },
-  {
     id: "cell-artifact-budget-exceeded",
     family: "replacement",
     label: "Generated cell artifact exceeds the code budget",
@@ -436,20 +441,24 @@ export function selectionSignalsObservedFrom(channel: SignalObservationChannel):
  * different answers, and turning a signal into a decision is exactly the moment
  * that distinction has to be preserved rather than reinvented.
  */
-export type ReplacementSignalRejection =
-  | {
-      readonly signal: SelectionSignalId;
-      readonly kind: "architectural";
-      readonly code: ArchitecturalRejectionCode;
-      /** What to do instead. A replacement signal is never a dead end. */
-      readonly remediation: string;
-    }
-  | {
-      readonly signal: SelectionSignalId;
-      readonly kind: "technical";
-      readonly code: TechnicalRejectionCode;
-      readonly remediation: string;
-    };
+export interface ReplacementSignalRejection {
+  readonly signal: SelectionSignalId;
+  /**
+   * Always `technical`, and that is a conclusion rather than a simplification.
+   *
+   * An architectural rejection says the capability belongs to Forguncy, which is a
+   * fact about the capability and is established by the role assessment in
+   * `platform-conflicts.ts`. A signal in this catalogue is an observation of a
+   * package artifact, so the strongest thing it can establish is that the artifact
+   * cannot reach the target — a bundling/runtime answer, i.e. a technical one.
+   * Allowing an `architectural` member here would reopen exactly the confusion
+   * {@link MACHINE_OBSERVED_SIGNAL_INVARIANT} closes.
+   */
+  readonly kind: "technical";
+  readonly code: TechnicalRejectionCode;
+  /** What to do instead. A replacement signal is never a dead end. */
+  readonly remediation: string;
+}
 
 export const REPLACEMENT_SIGNAL_REJECTIONS: readonly ReplacementSignalRejection[] = [
   {
@@ -471,13 +480,6 @@ export const REPLACEMENT_SIGNAL_REJECTIONS: readonly ReplacementSignalRejection[
     code: "runtime-api-unavailable",
     remediation:
       "Evaluate a package whose runtime requirements the target deployment can actually satisfy; do not add a deployment-wide header or isolation requirement to host one cell.",
-  },
-  {
-    signal: "application-ownership-conflict",
-    kind: "architectural",
-    code: "ownership-boundary-violation",
-    remediation:
-      "Run the role assessment from #4 for the precise code and concern, and route the capability to the Forguncy host. No replacement package fixes an ownership conflict, because the capability is not a dependency problem.",
   },
   {
     // The one replacement signal whose answer is a measured artifact rather
@@ -514,24 +516,30 @@ export function findReplacementSignalRejection(signal: string): ReplacementSigna
  * inventing a rejection: a `risk` finding is not a reason to reject, and a
  * function that answered anyway would make the two families interchangeable at
  * exactly the call site where the difference matters.
+ *
+ * The result is a *technical* rejection by construction. An architectural
+ * rejection — the capability is Forguncy's — is not reachable from here, because
+ * it is not a fact about an artifact; get it from `assessDependencyRole`.
  */
-export function replacementRejectionFor(signal: string, packageName: string): DependencyRejection | undefined {
+export function replacementRejectionFor(
+  signal: string,
+  packageName: string,
+): TechnicalDependencyRejection | undefined {
   const mapping = findReplacementSignalRejection(signal);
   if (!mapping) {
     return undefined;
   }
   const descriptor = findSelectionSignal(signal);
-  const summary = `"${packageName}" cannot be deployed to a React cell: ${descriptor?.summary ?? mapping.signal}.`;
-  const evidence = [
-    `selection-signal:${mapping.signal}`,
-    ...(descriptor ? [`observed-from:${descriptor.observedFrom}`] : []),
-  ];
-
-  // Discriminated on `kind` rather than assembled field-by-field, so the code
-  // family can never disagree with the kind it is filed under.
-  return mapping.kind === "architectural"
-    ? { kind: "architectural", code: mapping.code, summary, evidence, remediation: mapping.remediation }
-    : { kind: "technical", code: mapping.code, summary, evidence, remediation: mapping.remediation };
+  return {
+    kind: "technical",
+    code: mapping.code,
+    summary: `"${packageName}" cannot be deployed to a React cell: ${descriptor?.summary ?? mapping.signal}.`,
+    evidence: [
+      `selection-signal:${mapping.signal}`,
+      ...(descriptor ? [`observed-from:${descriptor.observedFrom}`] : []),
+    ],
+    remediation: mapping.remediation,
+  };
 }
 
 // ---------------------------------------------------------------------------

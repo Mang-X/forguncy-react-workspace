@@ -374,6 +374,110 @@ export const PROBE_REPORT_MACHINE_READABILITY: readonly string[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Deployment support
+// ---------------------------------------------------------------------------
+
+/**
+ * The steps that must have **passed** before a strategy claiming the candidate
+ * works (`host`, `inline`, `extension`) may be recorded.
+ *
+ * "At least one step passed" is far too weak to gate that claim: a report where
+ * `package-identity` passed and `build` failed is a description of a candidate that
+ * does not work, and it must not support `inline`. The eight steps below are the
+ * ones whose failure means the artifact cannot be deployed at all.
+ *
+ * `runtime-smoke` is deliberately excluded. #16 asks for a runtime/browser result
+ * "where needed", so a report is not incomplete without one, and requiring it would
+ * make the static path unusable in a toolchain with no browser available.
+ */
+export const PROBE_DEPLOYMENT_REQUIRED_STEPS: readonly ProbeStepId[] = [
+  "package-identity",
+  "export-metadata",
+  "node-builtin-scan",
+  "build",
+  "artifact-scan",
+  "asset-inventory",
+  "runtime-pattern-scan",
+  "size",
+];
+
+export const PROBE_ASSESSMENT_STATUSES = ["supports-deployment", "supports-rejection-only", "inconclusive"] as const;
+export type ProbeAssessmentStatus = (typeof PROBE_ASSESSMENT_STATUSES)[number];
+
+export interface ProbeAssessment {
+  /**
+   * - `supports-deployment` — every deployment-required step passed.
+   * - `supports-rejection-only` — something failed, so the report can justify
+   *   refusing the candidate but never accepting it.
+   * - `inconclusive` — required steps were skipped and nothing failed, so the
+   *   report neither shows the candidate working nor shows why it cannot.
+   */
+  readonly status: ProbeAssessmentStatus;
+  /** Deployment-required steps that did not pass, in canonical step order. */
+  readonly blockingSteps: readonly ProbeStepId[];
+  /** Every failed step — the evidence a `replace` decision may rest on. */
+  readonly failedSteps: readonly ProbeStepId[];
+  /** Risk findings a decision has to weigh, in canonical order. */
+  readonly risksToWeigh: readonly ProbeRisk[];
+  readonly reason: string;
+}
+
+/**
+ * What a report is actually able to support.
+ *
+ * This is the predicate the decision layer consumes, so that "the probe passed" is
+ * never again reducible to "some step did not throw". Three outcomes, because the
+ * middle case is the one a boolean loses: a candidate that failed to build is not
+ * unusable *evidence* — it is evidence against deploying and in favour of
+ * `replace`, which is a different conclusion from "we could not find out".
+ */
+export function assessProbeReport(report: ProbeReport): ProbeAssessment {
+  const outcomeOf = (step: ProbeStepId): ProbeOutcome | undefined =>
+    report.validation.find(entry => entry.step === step)?.outcome;
+
+  const failedSteps = PROBE_STEP_IDS.filter(step => outcomeOf(step) === "failed");
+  const blockingSteps = PROBE_DEPLOYMENT_REQUIRED_STEPS.filter(step => outcomeOf(step) !== "passed");
+  const risksToWeigh = canonicalizeProbeReport(report).risks;
+
+  if (blockingSteps.length === 0) {
+    return {
+      status: "supports-deployment",
+      blockingSteps,
+      failedSteps,
+      risksToWeigh,
+      reason: `Every step a deployment depends on passed (${PROBE_DEPLOYMENT_REQUIRED_STEPS.length} steps).${
+        risksToWeigh.length > 0
+          ? ` ${String(risksToWeigh.length)} risk finding(s) still have to be weighed against the alternatives.`
+          : ""
+      }`,
+    };
+  }
+
+  if (failedSteps.length > 0) {
+    return {
+      status: "supports-rejection-only",
+      blockingSteps,
+      failedSteps,
+      risksToWeigh,
+      reason: `"${failedSteps.join(", ")}" failed, so this report cannot support a strategy that claims the candidate works. The failure is legitimate evidence for \`replace\`, not a reason to guess.`,
+    };
+  }
+
+  return {
+    status: "inconclusive",
+    blockingSteps,
+    failedSteps,
+    risksToWeigh,
+    reason: `"${blockingSteps.join(", ")}" were neither passed nor failed, so the report neither shows the candidate working nor shows why it cannot. Run the missing steps before deciding.`,
+  };
+}
+
+/** True only when nothing that blocks deployment is unaccounted for. */
+export function probeSupportsDeployment(report: ProbeReport): boolean {
+  return assessProbeReport(report).status === "supports-deployment";
+}
+
+// ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
 
@@ -764,24 +868,80 @@ function canonicalizeValue(value: unknown): unknown {
 }
 
 /**
- * The canonical report: validation in step order, facts and risks in a stable
- * order derived from their own content.
+ * Set-like arrays are sorted, because an inventory is a set.
  *
- * Sorting by content rather than preserving discovery order matters because an
- * engine that scans files in a different order must not produce a diff — the diff
- * has to mean the candidate changed.
+ * A fact whose value is a list of unresolved module ids, or a risk whose evidence is
+ * a list of chunk names, carries no meaning in its discovery order. Leaving those
+ * arrays as found is what breaks the determinism the canonical form claims: the same
+ * report built by a scanner that walked the same files in a different order would
+ * serialize differently. A list whose order *is* meaningful belongs in separate
+ * facts, where the order is expressed by the fact names.
+ */
+function canonicalizeArrayValues(value: readonly string[]): readonly string[] {
+  return [...value].sort(compareStrings);
+}
+
+function canonicalizeFact(fact: ProbeFact): ProbeFact {
+  return {
+    step: fact.step,
+    name: fact.name,
+    value: Array.isArray(fact.value) ? canonicalizeArrayValues(fact.value as readonly string[]) : fact.value,
+  };
+}
+
+function canonicalizeRisk(risk: ProbeRisk): ProbeRisk {
+  return {
+    signal: risk.signal,
+    step: risk.step,
+    summary: risk.summary,
+    evidence: canonicalizeArrayValues(risk.evidence),
+  };
+}
+
+function compareFacts(a: ProbeFact, b: ProbeFact): number {
+  return (
+    probeStepOrder(a.step) - probeStepOrder(b.step) ||
+    compareStrings(a.name, b.name) ||
+    compareStrings(JSON.stringify(canonicalizeValue(a)), JSON.stringify(canonicalizeValue(b)))
+  );
+}
+
+function compareRisks(a: ProbeRisk, b: ProbeRisk): number {
+  return (
+    compareStrings(a.signal, b.signal) ||
+    probeStepOrder(a.step) - probeStepOrder(b.step) ||
+    compareStrings(JSON.stringify(canonicalizeValue(a)), JSON.stringify(canonicalizeValue(b)))
+  );
+}
+
+function compareValidationEntries(a: ProbeValidationEntry, b: ProbeValidationEntry): number {
+  return probeStepOrder(a.step) - probeStepOrder(b.step) || compareStrings(a.step, b.step);
+}
+
+/**
+ * The canonical report: validation in step order, facts and risks in a *total* order
+ * derived from their own content.
+ *
+ * Two properties are needed, not one:
+ *
+ * - **Content ordering.** A diff has to mean the candidate changed, so discovery
+ *   order must not survive into the document.
+ * - **Totality.** Comparing only the primary key (`step` + `name`, `signal` + `step`)
+ *   leaves ties, and a stable sort resolves ties by keeping discovery order — which
+ *   is the very thing this function exists to remove. Two findings that share a key
+ *   but differ in value or evidence are therefore ordered by their full canonical
+ *   content as well.
+ *
+ * `validation` needs no content tiebreak beyond the step name, because
+ * `validateProbeReport` has already required one entry per step.
  */
 export function canonicalizeProbeReport(report: ProbeReport): ProbeReport {
   return {
     schemaVersion: report.schemaVersion,
     environment: report.environment,
-    facts: [...report.facts].sort(
-      (a, b) => probeStepOrder(a.step) - probeStepOrder(b.step) || compareStrings(a.name, b.name),
-    ),
-    risks: [...report.risks].sort(
-      (a, b) => compareStrings(a.signal, b.signal) || probeStepOrder(a.step) - probeStepOrder(b.step),
-    ),
-    validation: [...report.validation].sort((a, b) => probeStepOrder(a.step) - probeStepOrder(b.step)),
+    facts: report.facts.map(canonicalizeFact).sort(compareFacts),
+    risks: report.risks.map(canonicalizeRisk).sort(compareRisks),
+    validation: [...report.validation].sort(compareValidationEntries),
   };
 }
 
@@ -826,7 +986,15 @@ export function executedProbeSteps(report: ProbeReport): readonly ProbeStepId[] 
   );
 }
 
-/** True when at least one step passed, i.e. the report observed something working. */
+/**
+ * Whether any step passed at all — an informational rollup, **not** a gate.
+ *
+ * Deliberately not the predicate the decision layer uses: "at least one step passed"
+ * is satisfied by a report whose only passing step is `package-identity`, which is a
+ * statement about a package name rather than about whether a candidate works. Gate on
+ * {@link assessProbeReport} instead — that is what `probeSupportsStrategy` in
+ * `selection-policy.ts` consumes.
+ */
 export function hasPassingEvidence(report: ProbeReport): boolean {
   return report.validation.some(entry => entry.outcome === "passed");
 }

@@ -1,15 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import { PLATFORM_CONFLICT_PACKAGE_NAMES } from "./platform-conflicts";
-import { isArchitecturalRejectionCode, isTechnicalRejectionCode } from "./rejection";
+import { assessDependencyRole, isPlatformConflict, PLATFORM_CONFLICT_PACKAGE_NAMES } from "./platform-conflicts";
+import { isTechnicalRejectionCode } from "./rejection";
 import {
   decideFromSignals,
   findReplacementSignalRejection,
   findSelectionSignal,
   isSelectionSignalFamily,
   isSelectionSignalId,
+  MACHINE_OBSERVED_SIGNAL_INVARIANT,
   NON_EVIDENCE_SIGNAL_SOURCES,
   REPLACEMENT_SIGNAL_REJECTIONS,
+  replacementRejectionFor,
   SELECTION_SIGNALS,
   SELECTION_SIGNAL_FAMILIES,
   SELECTION_SIGNAL_FAMILY_SEMANTICS,
@@ -90,12 +92,43 @@ describe("selection signal catalogue", () => {
       "node-filesystem-process-or-native-addon",
       "ssr-or-server-only-without-browser-build",
       "service-worker-or-special-header-requirement",
-      "application-ownership-conflict",
       "cell-artifact-budget-exceeded",
       "runtime-assets-not-embeddable",
     ]) {
       expect(selectionSignalFamilyOf(id as never), id).toBe("replacement");
     }
+  });
+});
+
+describe("ownership is not a machine-observed signal", () => {
+  it("states the invariant", () => {
+    expect(MACHINE_OBSERVED_SIGNAL_INVARIANT).toMatch(/never a verdict about which side of the #4 ownership boundary/);
+  });
+
+  it("keeps no ownership signal in the catalogue", () => {
+    // The tempting entries are "does not implement an application-owned concern"
+    // and "implements a Forguncy-owned capability". Both are conclusions of #4's
+    // capability-ownership decision, and neither is observable in a manifest or a
+    // registry entry, so neither may appear here as a signal.
+    for (const signal of SELECTION_SIGNALS) {
+      expect(signal.id, signal.id).not.toMatch(/ownership|application-owned/);
+      expect(signal.summary, signal.id).not.toMatch(/Forguncy-owned/);
+    }
+  });
+
+  it("routes the ownership question to the #4 role assessment instead", () => {
+    // The answer the catalogue refuses to give is available from the module that
+    // owns it, which is where the flow's first stage has to get it.
+    const assessment = assessDependencyRole({ packageName: "react-router-dom", role: "application-navigation" });
+    expect(isPlatformConflict(assessment)).toBe(true);
+    if (isPlatformConflict(assessment)) {
+      expect(assessment.rejection.kind).toBe("architectural");
+      expect(assessment.rejection.code).toBe("application-router-conflict");
+    }
+
+    // And the same package in a cell-local role is *not* a dependency signal either
+    // way — it is an assessment result with its own status.
+    expect(assessDependencyRole({ packageName: "zustand", role: "cell-local-state" }).status).toBe("allowed");
   });
 });
 
@@ -153,21 +186,24 @@ describe("replacement signals as rejections", () => {
 
     for (const entry of REPLACEMENT_SIGNAL_REJECTIONS) {
       expect(selectionSignalFamilyOf(entry.signal), entry.signal).toBe("replacement");
-      if (entry.kind === "architectural") {
-        expect(isArchitecturalRejectionCode(entry.code), entry.signal).toBe(true);
-      } else {
-        expect(isTechnicalRejectionCode(entry.code), entry.signal).toBe(true);
-      }
+      expect(entry.kind, entry.signal).toBe("technical");
+      expect(isTechnicalRejectionCode(entry.code), entry.signal).toBe(true);
       expect(entry.remediation.length, entry.signal).toBeGreaterThan(0);
     }
   });
 
-  it("classifies an ownership conflict as architectural and the rest as technical", () => {
-    // The split is #4's, not this module's: an ownership conflict is not fixable
-    // by choosing a better package, while a bundling failure is.
-    expect(findReplacementSignalRejection("application-ownership-conflict")?.kind).toBe("architectural");
-    expect(findReplacementSignalRejection("node-filesystem-process-or-native-addon")?.kind).toBe("technical");
-    expect(findReplacementSignalRejection("cell-artifact-budget-exceeded")?.kind).toBe("technical");
+  it("can only ever produce a technical rejection", () => {
+    // An architectural rejection says the *capability* belongs to Forguncy, which is
+    // established by the role assessment, not by looking at an artifact. So nothing
+    // observable here may claim to produce one — otherwise a build log would be
+    // reporting an ownership decision.
+    for (const entry of REPLACEMENT_SIGNAL_REJECTIONS) {
+      expect(entry.kind, entry.signal).toBe("technical");
+    }
+    expect(replacementRejectionFor("node-filesystem-process-or-native-addon", "node-fetch")?.kind).toBe("technical");
+    expect(replacementRejectionFor("cell-artifact-budget-exceeded", "heavy-viewer")?.code).toBe(
+      "cell-code-budget-exceeded",
+    );
   });
 
   it("refuses to build a rejection out of a family that does not reject", () => {
