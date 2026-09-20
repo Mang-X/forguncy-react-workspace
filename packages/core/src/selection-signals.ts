@@ -213,7 +213,11 @@ export type SelectionSignalId =
   | "ssr-or-server-only-without-browser-build"
   | "service-worker-or-special-header-requirement"
   | "cell-artifact-budget-exceeded"
-  | "runtime-assets-not-embeddable";
+  | "runtime-assets-not-embeddable"
+  | "dynamic-module-loading-cannot-be-eliminated"
+  | "amd-umd-branch-observed-in-artifact"
+  | "host-module-identity-mismatch-observed"
+  | "global-namespace-collision-observed";
 
 /**
  * Every signal, grouped by family so a reader can see the three policy buckets at
@@ -392,6 +396,38 @@ export const SELECTION_SIGNALS: readonly SelectionSignal[] = [
       "The package needs assets at runtime that the chosen target path can neither inline nor serve, and no configuration changes that.",
     observedFrom: "artifact-scan",
   },
+  {
+    id: "dynamic-module-loading-cannot-be-eliminated",
+    family: "replacement",
+    label: "A dynamic module load survives bundling",
+    summary:
+      "The build could not eliminate a runtime module load, so the artifact depends on resolving a module while the page runs — which a single-script cell deployment cannot represent.",
+    observedFrom: "build-output",
+  },
+  {
+    id: "amd-umd-branch-observed-in-artifact",
+    family: "replacement",
+    label: "The artifact is a UMD wrapper that takes the AMD branch",
+    summary:
+      "The shipped bundle is a UMD/AMD wrapper, so in a page that defines `define` it takes the AMD branch instead of registering the expected global.",
+    observedFrom: "build-output",
+  },
+  {
+    id: "host-module-identity-mismatch-observed",
+    family: "replacement",
+    label: "The host global's module identity does not match what the cell needs",
+    summary:
+      "The global the host exposes is not the same module instance the cell would share, so imports through it would be a second copy (hooks, Context, `instanceof`).",
+    observedFrom: "runtime-observation",
+  },
+  {
+    id: "global-namespace-collision-observed",
+    family: "replacement",
+    label: "A global the package writes collides with one the host owns",
+    summary:
+      "The package registers a global name the host page already uses, so loading it would overwrite host state.",
+    observedFrom: "runtime-observation",
+  },
 ];
 
 const SIGNAL_BY_ID: ReadonlyMap<SelectionSignalId, SelectionSignal> = new Map(
@@ -460,23 +496,47 @@ export interface ReplacementSignalRejection {
   readonly remediation: string;
 }
 
+/**
+ * Every replacement signal, mapped to the rejection code its evidence establishes.
+ *
+ * Two properties are load-bearing, and both are asserted by tests rather than left to
+ * review:
+ *
+ * - **Complete.** Every `TechnicalRejectionCode` #4 defines has at least one evidence
+ *   path here. Otherwise the audit's code binding — which requires the recorded code to
+ *   be one the observed findings map to — would make a rejection #4 considers legal
+ *   permanently unrepresentable. That is why the terminal signals below exist as their
+ *   own entries instead of the risk signals being promoted: "the build emitted a
+ *   chunk" stays a risk, while "the build could not eliminate the load" is what
+ *   rejects.
+ * - **Aligned with #8's target requirement.** The codes in
+ *   `RUNTIME_CONFIRMED_TECHNICAL_REJECTION_CODES` are exactly those this table produces
+ *   from a `runtime-observation` channel, and no static channel may produce one. A
+ *   runtime-confirmed code means "only a running host can tell", so it needs a target;
+ *   a static code means "no target involved", so claiming one would be theatre.
+ */
 export const REPLACEMENT_SIGNAL_REJECTIONS: readonly ReplacementSignalRejection[] = [
   {
     signal: "node-filesystem-process-or-native-addon",
     kind: "technical",
-    code: "runtime-api-unavailable",
+    // `platform-api-unavailable`, not `runtime-api-unavailable`: a browser platform
+    // cannot provide a Node builtin, so this is decidable statically and owes no
+    // Forguncy target. See the note on `TechnicalRejectionCode`.
+    code: "platform-api-unavailable",
     remediation:
       "The role is right and the runtime is wrong: evaluate a browser-first package for the same capability, and keep the original only if a verified extension can provide it.",
   },
   {
     signal: "ssr-or-server-only-without-browser-build",
     kind: "technical",
-    code: "runtime-api-unavailable",
+    code: "platform-api-unavailable",
     remediation: "Choose a package that ships a browser entry, or move the capability to a Forguncy server command where it belongs.",
   },
   {
     signal: "service-worker-or-special-header-requirement",
     kind: "technical",
+    // A property of the *target deployment*, so it is observed at runtime and #8
+    // requires the record to name the target it was observed under.
     code: "runtime-api-unavailable",
     remediation:
       "Evaluate a package whose runtime requirements the target deployment can actually satisfy; do not add a deployment-wide header or isolation requirement to host one cell.",
@@ -498,6 +558,34 @@ export const REPLACEMENT_SIGNAL_REJECTIONS: readonly ReplacementSignalRejection[
     code: "non-inlineable-asset",
     remediation:
       "Evaluate an alternative whose assets can be inlined or served by the chosen target path, or move the capability to an extension that can ship those assets.",
+  },
+  {
+    signal: "dynamic-module-loading-cannot-be-eliminated",
+    kind: "technical",
+    code: "dynamic-module-loading",
+    remediation:
+      "Prefer an alternative the bundler can reduce to one script, or use a verified extension that can serve the chunk the load needs.",
+  },
+  {
+    signal: "amd-umd-branch-observed-in-artifact",
+    kind: "technical",
+    code: "amd-umd-branch-mismatch",
+    remediation:
+      "Re-bundle from the package's ESM entry as a single IIFE so no UMD wrapper survives, or choose a package that ships ESM.",
+  },
+  {
+    signal: "host-module-identity-mismatch-observed",
+    kind: "technical",
+    code: "host-module-identity-mismatch",
+    remediation:
+      "Map the import to the host's own module through the `host` strategy, or verify a frontend extension that establishes the shared identity.",
+  },
+  {
+    signal: "global-namespace-collision-observed",
+    kind: "technical",
+    code: "global-namespace-collision",
+    remediation:
+      "Prefer a package that does not register a global, or load it inside the extension boundary so it cannot overwrite host state.",
   },
 ];
 
@@ -621,7 +709,7 @@ export function decideFromSignals(signalIds: readonly string[]): SignalVerdict {
     risksToProbe,
     replacementSignals,
     unknownSignals,
-    reason: `${parts.join("; ")}. Neither family accepts the candidate, so a deterministic probe is required before any strategy is chosen.`,
+    reason: `${parts.join("; ")}. Neither family accepts the candidate, so a deterministic probe is required before any deployment strategy is chosen. An ownership conflict is not routed through here at all: ownership is a property of the capability, so it comes from the #4 role assessment instead of a signal.`,
   };
 }
 

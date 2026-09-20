@@ -34,8 +34,8 @@
 
 import type { ForguncyTargetIdentity, ToolchainIdentity } from "./lock";
 import { isEvidenceReference } from "./lock";
-import type { SelectionSignalId } from "./selection-signals";
-import { validateSignalFindings } from "./selection-signals";
+import type { SelectionSignalId, SignalObservationChannel } from "./selection-signals";
+import { findSelectionSignal, validateSignalFindings } from "./selection-signals";
 
 // ---------------------------------------------------------------------------
 // Steps
@@ -140,6 +140,42 @@ export function probeStep(id: ProbeStepId): ProbeStep {
 /** Position in {@link PROBE_STEPS} — the canonical order of a report. */
 export function probeStepOrder(id: ProbeStepId): number {
   return PROBE_STEP_IDS.indexOf(id);
+}
+
+/**
+ * Which steps can actually observe a given channel.
+ *
+ * A finding has to be produced by the step that can *see* what it claims, not merely
+ * by a step that ran. Without this the report is internally consistent and still
+ * false: a `cell-artifact-budget-exceeded` finding attributed to `package-identity`
+ * passes every other check — the signal is in the right family, the evidence is
+ * non-empty, the step did not skip — while asserting something that step never looked
+ * at. The catalogue already states where each signal is observed
+ * (`SelectionSignal.observedFrom`); this table states which step can do the observing,
+ * so the two can be compared instead of assumed.
+ *
+ * `registry-metadata` maps to no step at all, and that is the honest answer: no probe
+ * step reads the registry. A signal whose only channel is registry metadata is a
+ * preference, never a finding, so it has no business in `risks` or
+ * `rejectionFindings`, and this table is what says so.
+ */
+export const PROBE_STEPS_OBSERVING_CHANNEL: Readonly<Record<SignalObservationChannel, readonly ProbeStepId[]>> = {
+  "registry-metadata": [],
+  "package-manifest": ["package-identity", "export-metadata"],
+  "package-files": ["package-identity", "export-metadata", "asset-inventory"],
+  "dependency-graph": ["node-builtin-scan"],
+  "build-output": ["build", "artifact-scan", "size"],
+  "artifact-scan": ["artifact-scan", "asset-inventory", "runtime-pattern-scan"],
+  "runtime-observation": ["runtime-smoke"],
+};
+
+export function probeStepsForChannel(channel: SignalObservationChannel): readonly ProbeStepId[] {
+  return PROBE_STEPS_OBSERVING_CHANNEL[channel];
+}
+
+/** True when `step` is capable of making an observation of `channel`. */
+export function probeStepObservesChannel(step: ProbeStepId, channel: SignalObservationChannel): boolean {
+  return probeStepsForChannel(channel).includes(step);
 }
 
 // ---------------------------------------------------------------------------
@@ -375,15 +411,20 @@ export function findForbiddenProbeKeys(value: unknown): readonly string[] {
 /**
  * What counts as a compatibility claim, stated once.
  *
- * #16 rule 4 rejects README inspection as a basis for a compatibility claim, and
- * the reason is contained here rather than restated per call site: prose describes
- * the intent of a release, while the failure modes that actually break a cell —
- * an AMD branch taken at runtime, a sibling chunk, a WASM asset — are invisible
- * until something is built and executed.
+ * The scope is part of the contract, not a footnote. This policy is about a claim that
+ * a **package artifact works** in a cell, which is a dependency/compatibility decision.
+ * An architectural rejection makes no such claim — it says the *capability* belongs to
+ * Forguncy, and its evidence is the #4 ownership decision, which #8 records as
+ * `probeRequirement: "none"`. So an architectural rejection is not a decision that
+ * "skips" the probe; it is a decision the probe has nothing to say about, and it is
+ * listed here as exempt so a consumer reading this exported data cannot infer an
+ * unconditional probe requirement and rebuild the bug that the audit had to fix.
  */
 export const PROBE_EVIDENCE_POLICY = {
-  /** A strategy may only be chosen on the strength of an executed probe. */
-  requiresExecutedProbe: true,
+  /** A dependency/compatibility claim may only be made on an executed probe. */
+  requiresExecutedProbeForCompatibilityClaims: true,
+  /** Evidence profiles this policy does not apply to, and why. */
+  exemptEvidenceProfiles: ["architectural-rejection"] as const,
   /** Package documentation is a hypothesis source, never evidence. */
   acceptsDocumentationOnlyEvidence: false,
   /** A risk finding blocks nothing by itself; only a replacement signal rejects. */
@@ -829,7 +870,10 @@ function validateProbeReportRules(report: ProbeReport): readonly string[] {
     problems.push(problem);
   }
 
-  const validateFindings = (findings: readonly { signal: string; step: ProbeStepId; evidence: readonly string[] }[], bucket: string): void => {
+  const validateFindings = (
+    findings: readonly { readonly signal: string; readonly step: ProbeStepId; readonly evidence: readonly string[] }[],
+    bucket: "risks" | "rejectionFindings",
+  ): void => {
     findings.forEach((finding, index) => {
       const where = `${bucket}[${index}] ("${finding.signal}")`;
 
@@ -843,6 +887,31 @@ function validateProbeReportRules(report: ProbeReport): readonly string[] {
       if (validation.find(entry => entry.step === finding.step)?.outcome === "skipped") {
         problems.push(
           `${where} is attributed to step "${finding.step}", which the report records as skipped. A finding cannot come from a step that did not run; run the step, or drop the finding.`,
+        );
+      }
+
+      const descriptor = findSelectionSignal(finding.signal);
+      if (!descriptor) {
+        // Already reported by `validateSignalFindings`; the channel is unknowable.
+        return;
+      }
+
+      // …and from a step that can *see* it. Running is not observing.
+      const observingSteps = probeStepsForChannel(descriptor.observedFrom);
+      if (!observingSteps.includes(finding.step)) {
+        problems.push(
+          `${where} claims a "${descriptor.observedFrom}" observation, which step "${finding.step}" cannot make. Steps that observe "${descriptor.observedFrom}": ${
+            observingSteps.length > 0 ? observingSteps.join(", ") : "none"
+          }. A finding has to be produced by the step that can see it, not merely by a step that ran.`,
+        );
+      }
+
+      // A runtime observation names the runtime it was made against. Otherwise the
+      // report asserts host behaviour while leaving out which host, which is not
+      // re-checkable and cannot be invalidated when the target moves.
+      if (descriptor.observedFrom === "runtime-observation" && environment.target === null) {
+        problems.push(
+          `${where} is a runtime observation, but the report names no Forguncy target. Observing runtime behaviour without recording which runtime makes the finding unverifiable; set environment.target, or record the finding against the step that observes it statically.`,
         );
       }
     });

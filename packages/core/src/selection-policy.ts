@@ -165,7 +165,7 @@ export const SELECTION_STAGES: readonly SelectionStage[] = [
     authority: "agent",
     produces: "One strategy per (package, cell target) pair, backed by probe evidence.",
     mustNot: [
-      "Do not choose a strategy the probe did not support, or claim compatibility from inspection alone.",
+      "Do not choose a deployment strategy the probe did not support, or claim compatibility from inspection alone. An architectural rejection is the exception and not a gap: the ownership gate decides it, and #8 gives it no probe.",
       "Do not report a green local build as Forguncy runtime compatibility; only an executed real-runtime check supports that.",
     ],
   },
@@ -191,7 +191,7 @@ export const SELECTION_STAGES: readonly SelectionStage[] = [
     produces: "A lock record that links the probe it rests on and can be invalidated when its inputs move.",
     mustNot: [
       "Do not decide the strategy, invent a rationale, or fill in evidence the Agent did not produce.",
-      "Do not write a record that links no probe evidence, or whose evidence this run replaced with an assumption; refuse it and report why.",
+      "Do not write a record whose evidence does not match #8's profile for the decision: probe evidence for a dependency decision, the ownership decision for an architectural rejection. Refuse it and report why.",
     ],
   },
 ];
@@ -420,7 +420,7 @@ export const SELECTION_ACCEPTANCE_CRITERIA: readonly SelectionAcceptanceCriterio
   {
     id: "lock-integration",
     criterion: "Results integrate with #8 lock invalidation semantics.",
-    enforcedBy: `auditSelectionDecision requiring a probe report before a decision is recorded, and the lock's evidence profiles, which are keyed on the same technical/architectural split this policy produces.`,
+    enforcedBy: `auditSelectionDecision requiring the evidence #8's evidence profile names for the decision — a probe for a dependency decision, the ownership decision for an architectural rejection — and the lock's evidence profiles, which are keyed on the same technical/architectural split this policy produces.`,
   },
   {
     id: "end-to-end-proof",

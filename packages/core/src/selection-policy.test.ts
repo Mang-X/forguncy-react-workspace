@@ -119,7 +119,7 @@ const TECHNICAL_REPLACE: DependencyDecision = {
   packageName: "es-toolkit",
   rejection: {
     kind: "technical",
-    code: "runtime-api-unavailable",
+    code: "platform-api-unavailable",
     summary: "The resolved dependency graph reaches a Node builtin.",
     remediation: "Evaluate a browser-first alternative.",
   },
@@ -181,7 +181,10 @@ describe("selection stage order", () => {
     const stage = selectionStage("persist-decision");
     expect(stage.authority).toBe("scripts");
     expect(stage.mustNot.join(" ")).toMatch(/Do not decide the strategy/);
-    expect(stage.mustNot.join(" ")).toMatch(/refuse it and report why/);
+    expect(stage.mustNot.join(" ")).toMatch(/Refuse it and report why/);
+    // The evidence a record owes follows #8's profile, so an architectural rejection
+    // must not be told to link a probe.
+    expect(stage.mustNot.join(" ")).toMatch(/the ownership decision for an architectural rejection/);
   });
 
   it("resolves a stage and rejects an unknown one", () => {

@@ -27,7 +27,9 @@ import {
   ProbeReportSchemaVersionError,
   ProbeReportValidationError,
   probeStep,
+  probeStepObservesChannel,
   probeStepOrder,
+  probeStepsForChannel,
   probeSupportsDeployment,
   serializeProbeReport,
   validateProbeReport,
@@ -48,6 +50,13 @@ const ENVIRONMENT: ProbeEnvironment = {
   source: "https://github.com/toss/es-toolkit",
   toolchain: { vitePlus: "0.3.2" },
   target: null,
+};
+
+const FORGUNCY_TARGET = {
+  product: "Forguncy",
+  productVersion: "12.0.100",
+  productBuild: "20260101",
+  hostReactVersion: "18.3.1",
 };
 
 function allSteps(outcome: ProbeOutcome): readonly ProbeValidationEntry[] {
@@ -124,8 +133,13 @@ describe("probe engine boundaries", () => {
     expect(PROBE_ENGINE_NON_RESPONSIBILITIES[1]?.answeredBy).toBe("agent");
   });
 
-  it("states that a probe is the only basis for a compatibility claim", () => {
-    expect(PROBE_EVIDENCE_POLICY.requiresExecutedProbe).toBe(true);
+  it("states that a probe is the only basis for a compatibility claim, and scopes it", () => {
+    // The scope is the contract: this is about a claim that a package artifact works.
+    // An architectural rejection makes no such claim — its evidence is the #4 ownership
+    // decision — so reading this policy as "every decision needs a probe" is precisely
+    // the bug the audit had to fix.
+    expect(PROBE_EVIDENCE_POLICY.requiresExecutedProbeForCompatibilityClaims).toBe(true);
+    expect([...PROBE_EVIDENCE_POLICY.exemptEvidenceProfiles]).toEqual(["architectural-rejection"]);
     expect(PROBE_EVIDENCE_POLICY.acceptsDocumentationOnlyEvidence).toBe(false);
     expect(PROBE_EVIDENCE_POLICY.riskFindingsAreRejections).toBe(false);
   });
@@ -382,6 +396,76 @@ describe("probe rejection findings", () => {
   it("keeps the two finding buckets disjoint by family", () => {
     const report = probeReport({ risks: [WORKER_RISK], rejectionFindings: [NODE_BUILTIN_FINDING] });
     expect(validateProbeReport(report)).toEqual([]);
+  });
+});
+
+describe("findings must come from a step that can observe them", () => {
+  it("maps every channel to the steps that can observe it", () => {
+    expect(probeStepsForChannel("dependency-graph")).toEqual(["node-builtin-scan"]);
+    expect(probeStepsForChannel("build-output")).toEqual(["build", "artifact-scan", "size"]);
+    expect(probeStepsForChannel("runtime-observation")).toEqual(["runtime-smoke"]);
+    // No probe step reads the registry, which is why a registry-only signal is a
+    // preference and never a finding.
+    expect(probeStepsForChannel("registry-metadata")).toEqual([]);
+    expect(probeStepObservesChannel("size", "build-output")).toBe(true);
+    expect(probeStepObservesChannel("package-identity", "build-output")).toBe(false);
+  });
+
+  it("refuses a finding attributed to a step that cannot see it", () => {
+    // Self-consistent and still false: the signal is in the right family, the evidence
+    // is non-empty, and the step ran — but `package-identity` never measured a size.
+    const problems = validateProbeReport(
+      probeReport({
+        rejectionFindings: [
+          {
+            signal: "cell-artifact-budget-exceeded",
+            step: "package-identity",
+            summary: "over budget",
+            evidence: ["3.1 MB"],
+          },
+        ],
+      }),
+    );
+
+    expect(problems.some(problem => problem.includes('claims a "build-output" observation'))).toBe(true);
+    expect(problems.some(problem => problem.includes("size"))).toBe(true);
+  });
+
+  it("refuses a risk attributed to a step that cannot see it", () => {
+    const problems = validateProbeReport(
+      probeReport({ risks: [{ ...WORKER_RISK, step: "package-identity" }] }),
+    );
+    expect(problems.some(problem => problem.includes('claims a "artifact-scan" observation'))).toBe(true);
+  });
+
+  it("accepts a finding attributed to a step that can", () => {
+    expect(
+      validateProbeReport(
+        probeReport({
+          risks: [WORKER_RISK],
+          rejectionFindings: [NODE_BUILTIN_FINDING],
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("requires a runtime observation to name the runtime it was made against", () => {
+    const portalFinding: ProbeRejectionFinding = {
+      signal: "global-namespace-collision-observed",
+      step: "runtime-smoke",
+      summary: "The package writes a global the host owns.",
+      evidence: ["window.React overwritten"],
+    };
+
+    // `ENVIRONMENT.target` is null in the fixture.
+    const problems = validateProbeReport(probeReport({ rejectionFindings: [portalFinding] }));
+    expect(problems.some(problem => problem.includes("names no Forguncy target"))).toBe(true);
+
+    const targeted = probeReport({
+      environment: { ...ENVIRONMENT, target: FORGUNCY_TARGET },
+      rejectionFindings: [portalFinding],
+    });
+    expect(validateProbeReport(targeted)).toEqual([]);
   });
 });
 

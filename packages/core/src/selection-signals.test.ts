@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
+import { RUNTIME_CONFIRMED_TECHNICAL_REJECTION_CODES } from "./lock";
 import { assessDependencyRole, isPlatformConflict, PLATFORM_CONFLICT_PACKAGE_NAMES } from "./platform-conflicts";
-import { isTechnicalRejectionCode } from "./rejection";
+import { isTechnicalRejectionCode, TECHNICAL_REJECTION_CODES } from "./rejection";
 import {
   decideFromSignals,
   findReplacementSignalRejection,
@@ -94,6 +95,10 @@ describe("selection signal catalogue", () => {
       "service-worker-or-special-header-requirement",
       "cell-artifact-budget-exceeded",
       "runtime-assets-not-embeddable",
+      "dynamic-module-loading-cannot-be-eliminated",
+      "amd-umd-branch-observed-in-artifact",
+      "host-module-identity-mismatch-observed",
+      "global-namespace-collision-observed",
     ]) {
       expect(selectionSignalFamilyOf(id as never), id).toBe("replacement");
     }
@@ -200,10 +205,36 @@ describe("replacement signals as rejections", () => {
     for (const entry of REPLACEMENT_SIGNAL_REJECTIONS) {
       expect(entry.kind, entry.signal).toBe("technical");
     }
-    expect(replacementRejectionFor("node-filesystem-process-or-native-addon", "node-fetch")?.kind).toBe("technical");
+    expect(replacementRejectionFor("node-filesystem-process-or-native-addon", "node-fetch")?.code).toBe(
+      "platform-api-unavailable",
+    );
     expect(replacementRejectionFor("cell-artifact-budget-exceeded", "heavy-viewer")?.code).toBe(
       "cell-code-budget-exceeded",
     );
+  });
+
+  it("gives every technical rejection code an evidence path", () => {
+    // The audit binds a recorded code to the codes the observed findings map to, so a
+    // code with no signal here would make a rejection #4 treats as legal permanently
+    // unrepresentable.
+    const covered = new Set(REPLACEMENT_SIGNAL_REJECTIONS.map(entry => entry.code));
+    for (const code of TECHNICAL_REJECTION_CODES) {
+      expect(covered.has(code), `${code} has no replacement signal`).toBe(true);
+    }
+  });
+
+  it("agrees with #8 about which codes only a runtime can confirm", () => {
+    // A runtime-confirmed code means "only a running host can tell", so its evidence
+    // has to come from a runtime observation and owes a target; a statically decidable
+    // code must not claim one, or the record would name a target it never saw. The two
+    // contracts are held in step by construction rather than by review.
+    for (const entry of REPLACEMENT_SIGNAL_REJECTIONS) {
+      const channel = selectionSignal(entry.signal).observedFrom;
+      const runtimeConfirmed = RUNTIME_CONFIRMED_TECHNICAL_REJECTION_CODES.includes(entry.code);
+      expect(channel === "runtime-observation", `${entry.signal} -> ${entry.code}`).toBe(runtimeConfirmed);
+    }
+
+    expect(REPLACEMENT_SIGNAL_REJECTIONS.filter(entry => entry.code === "platform-api-unavailable")).toHaveLength(2);
   });
 
   it("refuses to build a rejection out of a family that does not reject", () => {
