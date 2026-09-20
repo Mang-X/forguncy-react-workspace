@@ -58,6 +58,29 @@ export const DEPENDENCY_LOCK_DECISION: ArchitectureDecisionSource = {
   url: "https://github.com/Mang-X/forguncy-react-workspace/issues/8",
 };
 
+/**
+ * The dependency-selection and probe-protocol Spec.
+ *
+ * Declared here beside #4, #5 and #8, for the same reason #8 is: it is a
+ * dependency Spec built on #4 rather than an architecture decision, so adding it
+ * to {@link GOVERNING_ARCHITECTURE_DECISIONS} would relabel it and silently
+ * change what that list means (it would start claiming that an architecture
+ * decision had been made about library selection). A module that also answers to
+ * it composes its own list; see `SELECTION_GOVERNING_DECISIONS`.
+ *
+ * It is separate from {@link DEPENDENCY_LOCK_DECISION} because the two answer
+ * different questions: #8 says how a decision is *persisted and invalidated*,
+ * while #16 says how a decision is *reached and evidenced*. A selection can be
+ * perfectly reproducible and still be unsupported — which is exactly the failure
+ * mode that a probe protocol exists to prevent.
+ */
+export const DEPENDENCY_SELECTION_DECISION: ArchitectureDecisionSource = {
+  repository: "Mang-X/forguncy-react-workspace",
+  issue: 16,
+  title: "Spec: Agent-driven dependency selection and empirical compatibility probe",
+  url: "https://github.com/Mang-X/forguncy-react-workspace/issues/16",
+};
+
 /** Every governing architecture Spec, in the order a document should cite them. */
 export const GOVERNING_ARCHITECTURE_DECISIONS: readonly ArchitectureDecisionSource[] = [
   OWNERSHIP_AND_DEPENDENCY_DECISION,
@@ -90,6 +113,12 @@ export const RUNTIME_CONTRACT_DECISION_QUALIFIED_REFERENCE = qualifiedDecisionRe
 export const DEPENDENCY_LOCK_DECISION_REFERENCE = decisionReference(DEPENDENCY_LOCK_DECISION);
 
 export const DEPENDENCY_LOCK_DECISION_QUALIFIED_REFERENCE = qualifiedDecisionReference(DEPENDENCY_LOCK_DECISION);
+
+export const DEPENDENCY_SELECTION_DECISION_REFERENCE = decisionReference(DEPENDENCY_SELECTION_DECISION);
+
+export const DEPENDENCY_SELECTION_DECISION_QUALIFIED_REFERENCE = qualifiedDecisionReference(
+  DEPENDENCY_SELECTION_DECISION,
+);
 
 /**
  * The line every ownership/dependency Spec, plan and PR is expected to carry.
@@ -164,6 +193,9 @@ export const RUNTIME_CONTRACT_CITATION_PATTERNS: readonly RegExp[] =
   citationPatternsFor(RUNTIME_CONTRACT_DECISION);
 
 export const DEPENDENCY_LOCK_CITATION_PATTERNS: readonly RegExp[] = citationPatternsFor(DEPENDENCY_LOCK_DECISION);
+
+export const DEPENDENCY_SELECTION_CITATION_PATTERNS: readonly RegExp[] =
+  citationPatternsFor(DEPENDENCY_SELECTION_DECISION);
 
 export function citesDecision(
   text: string,
