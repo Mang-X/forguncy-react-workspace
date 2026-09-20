@@ -46,13 +46,15 @@ import {
   formatGoverningSpecReferenceLine,
   GOVERNING_ARCHITECTURE_DECISIONS,
 } from "./governance";
+import type { LockProbeRequirement } from "./lock";
+import { LOCK_EVIDENCE_POLICY, lockEvidenceProfileForDecision } from "./lock";
 import type { PlatformConflictAssessment } from "./platform-conflicts";
 import { isPlatformConflict } from "./platform-conflicts";
 import type { ProbeAssessment, ProbeReport } from "./probe-protocol";
 import { assessProbeReport, PROBE_DEPLOYMENT_REQUIRED_STEPS, validateProbeReport } from "./probe-protocol";
 import { DEPENDENCY_REJECTION_RESPONSE } from "./rejection";
 import type { SelectionSignalId } from "./selection-signals";
-import { decideFromSignals } from "./selection-signals";
+import { findReplacementSignalRejection } from "./selection-signals";
 import type { DependencyDecision, DependencyStrategy } from "./strategy";
 import { strategySemantics, validateDependencyDecisionShape } from "./strategy";
 
@@ -438,47 +440,80 @@ export const SELECTION_ACCEPTANCE_CRITERIA: readonly SelectionAcceptanceCriterio
 
 export interface StrategyProbeSupport {
   readonly supported: boolean;
+  /**
+   * The outcome #8's evidence profile requires of this decision, so a caller can see
+   * *which* contract refused it rather than only that something did.
+   */
+  readonly required: LockProbeRequirement;
   readonly assessment: ProbeAssessment;
   readonly reason: string;
 }
 
 /**
- * Whether a probe report can carry the strategy being recorded.
+ * Whether a probe report satisfies the evidence the decision owes.
  *
- * This exists because "the probe had at least one passing step" is a different claim
- * from "the probe supports this strategy", and conflating them is a live failure
- * mode rather than a pedantic one: a report where `package-identity` passed and
- * `build` failed is a description of a candidate that does not work, so it must not
- * be recordable as `inline`. Gating on "something passed" allows exactly that.
+ * Two questions, kept apart on purpose — the reviewer's framing of this bug was
+ * exactly that they had been conflated:
  *
- * - `host` / `inline` / `extension` claim the candidate *works*, so every
- *   deployment-required step has to have passed.
- * - `replace` claims only that this candidate is not the answer, so it is carried by
- *   any report that reached a conclusion — either something failed, or everything
- *   passed and a disqualifying signal did the work. `inconclusive` carries neither,
- *   because refusing a candidate still requires having actually looked at it.
+ * - **What does this decision owe?** That is #8's call, not this module's:
+ *   `lockEvidenceProfileForDecision` selects `resolved-dependency` /
+ *   `architectural-rejection` / `technical-rejection`, and each profile states a
+ *   `probeRequirement` of `"passed"`, `"none"` or `"not-passed"`. Reading it here
+ *   instead of restating it is what makes the record written by this flow and the
+ *   record evaluated by the lock agree.
+ * - **What does this report provide?** That is the probe protocol's call, via
+ *   `assessProbeReport`.
+ *
+ * The comparison is therefore between two independently-defined answers, and the
+ * earlier bug — `replace` supported by "any outcome that is not `inconclusive`" — was
+ * the result of answering both questions in one step. A failed step shows the
+ * candidate cannot be *accepted*; it does not show *why* it is rejected, so a
+ * rejection now additionally requires a machine-observed rejection finding.
  */
-export function probeSupportsStrategy(report: ProbeReport, strategy: DependencyStrategy): StrategyProbeSupport {
+export function probeSupportsStrategy(report: ProbeReport, decision: DependencyDecision): StrategyProbeSupport {
+  const profile = lockEvidenceProfileForDecision(decision);
+  const required = LOCK_EVIDENCE_POLICY[profile].probeRequirement;
   const assessment = assessProbeReport(report);
 
-  if (strategy === "replace") {
-    const supported = assessment.status !== "inconclusive";
+  if (required === "none") {
     return {
-      supported,
+      supported: false,
+      required,
       assessment,
-      reason: supported
-        ? `A \`replace\` decision rests on refusal evidence. ${assessment.reason}`
-        : `A \`replace\` decision is not supported either. ${assessment.reason}`,
+      reason: `#8 records the evidence of a "${profile}" decision as probeRequirement "${required}", so it owes no probe: its evidence is the ownership decision. A probe report here means the ownership gate was bypassed, not that the rejection is better evidenced.`,
     };
   }
 
-  const supported = assessment.status === "supports-deployment";
+  if (assessment.status === "inconclusive") {
+    return {
+      supported: false,
+      required,
+      assessment,
+      reason: `The report reached no conclusion, so it satisfies neither a "${required}" requirement nor its opposite. ${assessment.reason}`,
+    };
+  }
+
+  if (required === "passed") {
+    const supported = assessment.status === "supports-deployment";
+    return {
+      supported,
+      required,
+      assessment,
+      reason: supported
+        ? assessment.reason
+        : `A "${profile}" decision owes a passing probe, so every deployment-required step (${PROBE_DEPLOYMENT_REQUIRED_STEPS.join(", ")}) has to have passed and nothing may disqualify the candidate. ${assessment.reason}`,
+    };
+  }
+
+  // required === "not-passed": the refusal has to rest on a finding.
+  const supported = assessment.status === "supports-rejection-only" && assessment.rejectionFindings.length > 0;
   return {
     supported,
+    required,
     assessment,
     reason: supported
       ? assessment.reason
-      : `"${strategy}" claims the candidate works, so every deployment-required step (${PROBE_DEPLOYMENT_REQUIRED_STEPS.join(", ")}) has to have passed. ${assessment.reason}`,
+      : `A "${profile}" decision owes a probe that did not succeed, and the refusal has to rest on a rejection finding rather than on the mere absence of success. ${assessment.reason}`,
   };
 }
 
@@ -490,19 +525,19 @@ export interface SelectionAuditInput {
   readonly decision: DependencyDecision;
   /** The probe report the decision rests on, or null when no probe was run. */
   readonly probe: ProbeReport | null;
-  /** Signals observed while researching and ranking, if the caller tracked them. */
-  readonly signals?: readonly string[];
   /** A project-local repair recipe the decision proposes, if any. */
   readonly repairRecipe?: RepairRecipeInput | null;
   /**
    * The #4 role assessment for the capability the dependency is being asked to fill.
    *
-   * Ownership arrives as an *input*, never as an observation. Nothing in a package
-   * artifact can establish which side of the ownership boundary a capability belongs
-   * to, so the answer comes from `assessDependencyRole` in `platform-conflicts.ts`
-   * and is consumed here instead of being reconstructed from a signal.
+   * **Required, not optional.** Ownership arrives as an *input*, never as an
+   * observation: nothing in a package artifact can establish which side of the
+   * ownership boundary a capability belongs to, so the answer comes from
+   * `assessDependencyRole` in `platform-conflicts.ts`. Leaving it optional made
+   * #16 rule 1 optional too — every caller that simply omitted it got an audit that
+   * never ran the gate.
    */
-  readonly ownership?: PlatformConflictAssessment | null;
+  readonly ownership: PlatformConflictAssessment;
 }
 
 /**
@@ -510,14 +545,19 @@ export interface SelectionAuditInput {
  *
  * This is the composition point, and it delegates rather than restates. #4's
  * rules about decision records run through `validateDependencyDecisionShape`, the
- * signal vocabulary's rules run through `decideFromSignals`, the report's own
- * contract runs through `validateProbeReport`, and the ownership answer runs through
- * the `ownership` assessment the caller supplies. What is new here is only what #16
- * adds: a decision cannot exist without an executed probe, the probe has to be about
- * the package being decided *and* to actually support the strategy, a replacement
- * signal cannot coexist with a non-`replace` strategy, a `replace` of a candidate
- * whose probe passed has to name the signal that disqualifies it, and a repair
- * recipe has to pass the three conditions.
+ * report's own contract through `validateProbeReport`, the probe each decision *owes*
+ * through #8's `LOCK_EVIDENCE_POLICY` (via `probeSupportsStrategy`), and the ownership
+ * answer through the `ownership` assessment the caller supplies. What is new here is
+ * only what #16 adds: the ownership gate is mandatory and runs first, a decision cannot
+ * exist without the probe it owes, the probe has to be about the package being decided
+ * and to actually satisfy the evidence policy, a technical refusal has to bind to a
+ * machine-observed finding, and a repair recipe has to pass the three conditions.
+ *
+ * The gate is a branch, not a check. A Forguncy-owned capability stops the flow: it
+ * owes a `replace` with the assessment's own architectural rejection and, per #8's
+ * `architectural-rejection` profile, **no probe at all**. Requiring a probe there — as
+ * an earlier revision did — turned "route this to the host" back into "go and probe a
+ * package first", which is the ownership-first rule inverted.
  *
  * Returning problems instead of throwing keeps it usable as a checklist by the
  * Agent and as an assertion by the script stage that writes the lock — which is
@@ -525,76 +565,26 @@ export interface SelectionAuditInput {
  */
 export function auditSelectionDecision(input: SelectionAuditInput): readonly string[] {
   const problems: string[] = [];
-  const { decision, probe, signals, repairRecipe, ownership } = input;
+  const { decision, probe, repairRecipe, ownership } = input;
 
-  if (probe === null) {
+  const profile = lockEvidenceProfileForDecision(decision);
+  const probeRequirement = LOCK_EVIDENCE_POLICY[profile].probeRequirement;
+
+  // Ownership is assessed per (capability, package) pair, so an assessment for a
+  // different package cannot justify this decision: role "application-navigation"
+  // yields `application-router-conflict` for react-router-dom and the generic
+  // `ownership-boundary-violation` for anything else, and borrowing the specific code
+  // is exactly how a decision gets a precise-looking reason it did not earn.
+  if (ownership.packageName !== decision.packageName) {
     problems.push(
-      `"${decision.packageName}" was decided without a probe report. #16 requires an executed deterministic probe — never inspection of the package's documentation alone — before any strategy is chosen, because the failure modes that break a cell only appear once something is built and executed.`,
+      `The ownership assessment is about "${ownership.packageName}" but the decision is about "${decision.packageName}". Ownership is assessed per (capability, package) pair, so an assessment for another package cannot justify this decision.`,
     );
-  } else {
-    if (probe.environment.packageName !== decision.packageName) {
-      problems.push(
-        `The probe report is about "${probe.environment.packageName}" but the decision is about "${decision.packageName}"; a decision has to cite evidence for the package it decides.`,
-      );
-    }
-
-    // An invalid report must not reach the decision layer. Its problems become this
-    // audit's problems, so a caller cannot record a decision on a report that its own
-    // contract rejects (an unaccounted step, a boolean-only failure, a risk filed
-    // under a non-risk signal).
-    for (const problem of validateProbeReport(probe)) {
-      problems.push(`The probe report for "${decision.packageName}" fails its own contract. ${problem}`);
-    }
-
-    const support = probeSupportsStrategy(probe, decision.strategy);
-    if (!support.supported) {
-      problems.push(
-        `The probe does not support recording "${decision.strategy}" for "${decision.packageName}". ${support.reason}`,
-      );
-    }
-
-    // A fully passing probe plus a *technical* `replace` needs a named disqualifying
-    // signal. Otherwise a candidate that works can be replaced with no recorded
-    // reason, which is the mirror image of choosing a strategy the probe did not
-    // support. An architectural rejection is exempt because its reason is ownership,
-    // which the `ownership` input already carries.
-    if (
-      decision.strategy === "replace" &&
-      decision.rejection.kind === "technical" &&
-      support.assessment.status === "supports-deployment"
-    ) {
-      const replacementSignals = decideFromSignals(signals ?? []).replacementSignals;
-      if (replacementSignals.length === 0) {
-        problems.push(
-          `The probe for "${decision.packageName}" passed every deployment-required step, so a technical \`replace\` has to name the replacement signal that disqualifies the candidate (for example \`cell-artifact-budget-exceeded\`); without one the replacement has no recorded reason.`,
-        );
-      }
-    }
   }
 
-  if (signals !== undefined && signals.length > 0) {
-    const verdict = decideFromSignals(signals);
-    if (verdict.unknownSignals.length > 0) {
-      problems.push(
-        `The selection records unknown signals (${verdict.unknownSignals.join(", ")}); a decision has to rest on signals from the catalogue so its reasoning can be checked.`,
-      );
-    }
-    if (verdict.verdict === "reject-candidate" && decision.strategy !== "replace") {
-      problems.push(
-        `A replacement signal (${verdict.replacementSignals.join(", ")}) was observed, so "${decision.packageName}" cannot be deployed to this target; the decision cannot be "${decision.strategy}". Use \`replace\`, or decide about the alternative candidate instead.`,
-      );
-    }
-  }
-
-  if (repairRecipe !== undefined && repairRecipe !== null) {
-    const assessment = evaluateRepairRecipe(repairRecipe);
-    if (assessment.status === "refused") {
-      problems.push(`A project-local repair recipe for "${decision.packageName}" is refused. ${assessment.reason}`);
-    }
-  }
-
-  // Ownership, consumed as #4's decision rather than inferred from an artifact.
-  if (ownership !== undefined && ownership !== null && isPlatformConflict(ownership)) {
+  if (isPlatformConflict(ownership)) {
+    // #16 rule 1: the gate stops the flow here, and #8 encodes the same answer as
+    // probeRequirement "none" for an architectural rejection. Its evidence is the
+    // ownership decision, not a bundle.
     if (decision.strategy !== "replace") {
       problems.push(
         `The capability was assessed as Forguncy-owned ("${ownership.rejection.code}" for "${ownership.packageName}" in role "${ownership.role}"), so it cannot be recorded as "${decision.strategy}". Route the capability to the host: ${DEPENDENCY_REJECTION_RESPONSE.architectural.resolutionOwner} owns the fix, and no replacement package can resolve an ownership conflict.`,
@@ -607,6 +597,75 @@ export function auditSelectionDecision(input: SelectionAuditInput): readonly str
       problems.push(
         `The recorded architectural rejection is "${decision.rejection.code}" but the #4 role assessment produced "${ownership.rejection.code}"; record the assessment's rejection instead of a hand-written one.`,
       );
+    }
+
+    if (probe !== null) {
+      problems.push(
+        `"${decision.packageName}" carries a probe report, but #8 records the evidence of a "${profile}" decision as probeRequirement "${probeRequirement}". An architectural rejection's evidence is the ownership decision; probing a candidate first is what the ownership-first gate exists to prevent.`,
+      );
+    }
+  } else {
+    // React-island / allowed path: the decision now depends on a probe whose required
+    // outcome #8 states.
+    if (decision.strategy === "replace" && decision.rejection.kind === "architectural") {
+      problems.push(
+        `"${decision.packageName}" records an architectural rejection, but the #4 role assessment for role "${ownership.role}" did not find the capability to be Forguncy-owned. An architectural rejection is an ownership answer, and the ownership answer disagrees.`,
+      );
+    }
+
+    if (probe === null) {
+      problems.push(
+        `"${decision.packageName}" was decided without a probe report, but #8 records the evidence of a "${profile}" decision as probeRequirement "${probeRequirement}". #16 requires the executed deterministic probe this decision owes — never inspection of the package's documentation alone — because the failure modes that break a cell only appear once something is built and executed.`,
+      );
+    } else {
+      if (probe.environment.packageName !== decision.packageName) {
+        problems.push(
+          `The probe report is about "${probe.environment.packageName}" but the decision is about "${decision.packageName}"; a decision has to cite evidence for the package it decides.`,
+        );
+      }
+
+      // An invalid report must not reach the decision layer. Its problems become this
+      // audit's problems, so a caller cannot record a decision on a report that its own
+      // contract rejects (an unaccounted step, a boolean-only failure, a finding filed
+      // under the wrong family).
+      for (const problem of validateProbeReport(probe)) {
+        problems.push(`The probe report for "${decision.packageName}" fails its own contract. ${problem}`);
+      }
+
+      const support = probeSupportsStrategy(probe, decision);
+      if (!support.supported) {
+        problems.push(
+          `The probe does not satisfy the evidence "${decision.packageName}" owes. ${support.reason}`,
+        );
+      }
+
+      // The refusal has to name *this* reason. A failure shows the candidate cannot be
+      // accepted; it does not show that it failed for the reason the decision records,
+      // and an unrelated build error must not be able to certify a size or asset
+      // rejection. `REPLACEMENT_SIGNAL_REJECTIONS` already maps a finding to a code, so
+      // the check is a comparison rather than a judgement.
+      if (decision.strategy === "replace" && decision.rejection.kind === "technical") {
+        const observedCodes = support.assessment.rejectionFindings
+          .map(finding => findReplacementSignalRejection(finding.signal)?.code)
+          .filter((code): code is NonNullable<typeof code> => code !== undefined);
+
+        if (!observedCodes.includes(decision.rejection.code)) {
+          const observed =
+            observedCodes.length > 0
+              ? observedCodes.join(", ")
+              : "none (the report contains no rejection finding)";
+          problems.push(
+            `The recorded technical rejection is "${decision.rejection.code}", but the machine-observed rejection codes are: ${observed}. A failed step shows the candidate cannot be accepted; it does not prove this reason. Record the code the finding maps to, or produce the finding that supports this one.`,
+          );
+        }
+      }
+    }
+  }
+
+  if (repairRecipe !== undefined && repairRecipe !== null) {
+    const assessment = evaluateRepairRecipe(repairRecipe);
+    if (assessment.status === "refused") {
+      problems.push(`A project-local repair recipe for "${decision.packageName}" is refused. ${assessment.reason}`);
     }
   }
 

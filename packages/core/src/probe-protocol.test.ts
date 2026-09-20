@@ -32,7 +32,14 @@ import {
   serializeProbeReport,
   validateProbeReport,
 } from "./probe-protocol";
-import type { ProbeEnvironment, ProbeOutcome, ProbeReport, ProbeRisk, ProbeValidationEntry } from "./probe-protocol";
+import type {
+  ProbeEnvironment,
+  ProbeOutcome,
+  ProbeRejectionFinding,
+  ProbeReport,
+  ProbeRisk,
+  ProbeValidationEntry,
+} from "./probe-protocol";
 
 const ENVIRONMENT: ProbeEnvironment = {
   packageName: "es-toolkit",
@@ -53,6 +60,7 @@ function probeReport(overrides: Partial<ProbeReport> = {}): ProbeReport {
     environment: ENVIRONMENT,
     facts: [{ step: "package-identity", name: "resolvedVersion", value: "1.39.0" }],
     risks: [],
+    rejectionFindings: [],
     validation: allSteps("passed"),
     ...overrides,
   };
@@ -63,6 +71,13 @@ const WORKER_RISK: ProbeRisk = {
   step: "runtime-pattern-scan",
   summary: "The bundle starts a Worker.",
   evidence: ["assets/pdf.worker.js"],
+};
+
+const NODE_BUILTIN_FINDING: ProbeRejectionFinding = {
+  signal: "node-filesystem-process-or-native-addon",
+  step: "node-builtin-scan",
+  summary: "The dependency graph reaches node:fs.",
+  evidence: ["node-fetch -> node:fs"],
 };
 
 describe("probe steps", () => {
@@ -115,8 +130,14 @@ describe("probe engine boundaries", () => {
     expect(PROBE_EVIDENCE_POLICY.riskFindingsAreRejections).toBe(false);
   });
 
-  it("names the four separable report sections and the readability contract", () => {
-    expect([...PROBE_REPORT_SECTIONS]).toEqual(["environment", "facts", "risks", "validation"]);
+  it("names the separable report sections and the readability contract", () => {
+    expect([...PROBE_REPORT_SECTIONS]).toEqual([
+      "environment",
+      "facts",
+      "risks",
+      "rejectionFindings",
+      "validation",
+    ]);
     expect(PROBE_REPORT_MACHINE_READABILITY.length).toBeGreaterThanOrEqual(5);
   });
 
@@ -301,6 +322,66 @@ describe("canonical probe report", () => {
 
   it("keeps the outcome vocabulary closed", () => {
     expect([...PROBE_OUTCOMES]).toEqual(["passed", "failed", "skipped"]);
+  });
+});
+
+describe("probe rejection findings", () => {
+  it("accepts a replacement-family finding that has evidence and a step that ran", () => {
+    expect(validateProbeReport(probeReport({ rejectionFindings: [NODE_BUILTIN_FINDING] }))).toEqual([]);
+  });
+
+  it("refuses a finding that is not from the replacement family", () => {
+    // A warning promoted into a refusal. `risks` is where a Worker notice belongs.
+    const problems = validateProbeReport(
+      probeReport({
+        rejectionFindings: [{ signal: "worker", step: "runtime-pattern-scan", summary: "worker", evidence: ["w.js"] }],
+      }),
+    );
+    expect(problems.some(problem => problem.includes('is a "risk" signal'))).toBe(true);
+  });
+
+  it("refuses a finding with no evidence, or from a step that did not run", () => {
+    const noEvidence = validateProbeReport(
+      probeReport({ rejectionFindings: [{ ...NODE_BUILTIN_FINDING, evidence: [] }] }),
+    );
+    expect(noEvidence.some(problem => problem.includes("records no evidence"))).toBe(true);
+
+    const validation = allSteps("passed").map(entry =>
+      entry.step === "node-builtin-scan" ? { ...entry, outcome: "skipped" as const, detail: "not run" } : entry,
+    );
+    const skipped = validateProbeReport(probeReport({ rejectionFindings: [NODE_BUILTIN_FINDING], validation }));
+    expect(skipped.some(problem => problem.includes("records as skipped"))).toBe(true);
+  });
+
+  it("lets a rejection finding disqualify a report whose steps all passed", () => {
+    // The step that reports a disqualifying property usually succeeds at reporting it:
+    // measuring an artifact over budget is a successful `size` step.
+    const assessment = assessProbeReport(probeReport({ rejectionFindings: [NODE_BUILTIN_FINDING] }));
+
+    expect(assessment.status).toBe("supports-rejection-only");
+    expect(assessment.blockingSteps).toEqual([]);
+    expect(assessment.failedSteps).toEqual([]);
+    expect(assessment.rejectionFindings.map(finding => finding.signal)).toEqual([
+      "node-filesystem-process-or-native-addon",
+    ]);
+    expect(assessment.reason).toMatch(/rejection finding\(s\) were observed/);
+  });
+
+  it("orders rejection findings canonically too", () => {
+    const other: ProbeRejectionFinding = {
+      signal: "cell-artifact-budget-exceeded",
+      step: "size",
+      summary: "over budget",
+      evidence: ["3.1 MB"],
+    };
+    expect(serializeProbeReport(probeReport({ rejectionFindings: [other, NODE_BUILTIN_FINDING] }))).toBe(
+      serializeProbeReport(probeReport({ rejectionFindings: [NODE_BUILTIN_FINDING, other] })),
+    );
+  });
+
+  it("keeps the two finding buckets disjoint by family", () => {
+    const report = probeReport({ risks: [WORKER_RISK], rejectionFindings: [NODE_BUILTIN_FINDING] });
+    expect(validateProbeReport(report)).toEqual([]);
   });
 });
 

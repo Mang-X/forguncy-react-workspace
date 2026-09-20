@@ -10,7 +10,7 @@
  * capability whose owner was already decided), #5 (the target/runtime contract a
  * runtime finding is about), #8 (the lock these findings are persisted into).
  *
- * Boundary with #17: #16 owns the *shape contract* — the steps, the four report
+ * Boundary with #17: #16 owns the *shape contract* — the steps, the report
  * sections, the separation between observation and decision, and the properties
  * that make the output machine-readable. `Implement: deterministic dependency
  * probe engine` (#17) owns the field-level schema and the code that actually runs
@@ -198,16 +198,25 @@ export const PROBE_ENGINE_NON_RESPONSIBILITIES: readonly ProbeEngineNonResponsib
 // ---------------------------------------------------------------------------
 
 /**
- * The four sections, in the order a report reads.
+ * The five sections, in the order a report reads.
  *
  * The separation is the contract #16 asks for: `facts` are deterministic
- * observations, `risks` are derived technical warnings, `validation` is which
- * steps actually ran and how they ended, and `environment` is the identity of
- * everything the other three were observed against. Folding them together would
- * make "what did we measure" and "what does it mean" the same field, which is how
- * a warning becomes a verdict.
+ * observations, `risks` are derived technical warnings, `validation` is which steps
+ * actually ran and how they ended, and `environment` is the identity of everything
+ * the other three were observed against. Folding them together would make "what did
+ * we measure" and "what does it mean" the same field, which is how a warning becomes
+ * a verdict.
+ *
+ * `rejectionFindings` is the one bucket #16's own list does not name, and it exists
+ * because leaving it out is what made a rejection unfalsifiable. A `replace` decision
+ * has to cite a reason, and before this bucket the only channels a reason could come
+ * from were `risks` (which must never reject — that is the whole point of the risk
+ * family) or a caller-supplied list of signal ids outside the report (which a caller
+ * could simply omit). A finding that disqualifies the candidate is neither a warning
+ * nor an optional annotation, so it gets its own section, and the decision layer binds
+ * the recorded rejection code to it.
  */
-export const PROBE_REPORT_SECTIONS = ["environment", "facts", "risks", "validation"] as const;
+export const PROBE_REPORT_SECTIONS = ["environment", "facts", "risks", "rejectionFindings", "validation"] as const;
 export type ProbeReportSection = (typeof PROBE_REPORT_SECTIONS)[number];
 
 export const PROBE_REPORT_SCHEMA_VERSION = 1;
@@ -254,6 +263,24 @@ export interface ProbeRisk {
 }
 
 /**
+ * A machine-observed finding that disqualifies the candidate for this target.
+ *
+ * Distinct from a {@link ProbeRisk} on purpose: a risk raises the cost of a candidate
+ * and is weighed, whereas this says the artifact cannot reach the target and is what a
+ * `replace` decision binds to. The signal must come from the `replacement` family, and
+ * its mapped rejection code — `findReplacementSignalRejection` in
+ * `selection-signals.ts` — is the code the decision has to carry. That mapping is what
+ * turns "the build failed" into "the build failed for *this* reason", which is the
+ * difference between evidence and a coincidence.
+ */
+export interface ProbeRejectionFinding {
+  readonly signal: SelectionSignalId;
+  readonly step: ProbeStepId;
+  readonly summary: string;
+  readonly evidence: readonly string[];
+}
+
+/**
  * The identity every other section was observed against.
  *
  * `target` is nullable because a static probe can run before a Forguncy runtime
@@ -283,6 +310,11 @@ export interface ProbeReport {
   readonly environment: ProbeEnvironment;
   readonly facts: readonly ProbeFact[];
   readonly risks: readonly ProbeRisk[];
+  /**
+   * Findings that disqualify the candidate. Present even when every step passed —
+   * a size over budget is measured by a step that succeeded.
+   */
+  readonly rejectionFindings: readonly ProbeRejectionFinding[];
   readonly validation: readonly ProbeValidationEntry[];
 }
 
@@ -366,7 +398,7 @@ export const PROBE_EVIDENCE_POLICY = {
  */
 export const PROBE_REPORT_MACHINE_READABILITY: readonly string[] = [
   "The document is JSON with a declared `schemaVersion`, so a consumer can refuse a shape it does not understand instead of guessing.",
-  "Observation and interpretation are separable: `facts` never contains a conclusion, `risks` never contains a rejection.",
+  "Observation and interpretation are separable: `facts` never contains a conclusion, `risks` never contains a rejection, and a finding that disqualifies the candidate lives in `rejectionFindings` where a decision can bind to it.",
   "Every step's outcome is recorded exactly once, so `validation` answers \"which steps actually ran\" without inferring absence.",
   "A failure carries `diagnostics`, so a report can be acted on and re-reviewed without re-running the probe.",
   "Findings reference catalogue signal ids rather than free text, so a consumer can map a finding to a policy.",
@@ -406,19 +438,29 @@ export type ProbeAssessmentStatus = (typeof PROBE_ASSESSMENT_STATUSES)[number];
 
 export interface ProbeAssessment {
   /**
-   * - `supports-deployment` — every deployment-required step passed.
-   * - `supports-rejection-only` — something failed, so the report can justify
-   *   refusing the candidate but never accepting it.
+   * - `supports-deployment` — every deployment-required step passed and nothing
+   *   disqualifying was observed.
+   * - `supports-rejection-only` — something failed, or a rejection finding was
+   *   observed, so the report can justify refusing the candidate but never accepting
+   *   it.
    * - `inconclusive` — required steps were skipped and nothing failed, so the
    *   report neither shows the candidate working nor shows why it cannot.
    */
   readonly status: ProbeAssessmentStatus;
   /** Deployment-required steps that did not pass, in canonical step order. */
   readonly blockingSteps: readonly ProbeStepId[];
-  /** Every failed step — the evidence a `replace` decision may rest on. */
+  /** Every failed step — possible rejection evidence, never a reason by itself. */
   readonly failedSteps: readonly ProbeStepId[];
   /** Risk findings a decision has to weigh, in canonical order. */
   readonly risksToWeigh: readonly ProbeRisk[];
+  /**
+   * Machine-observed findings that disqualify the candidate, in canonical order.
+   *
+   * A `replace` decision binds its rejection code to these. `failedSteps` alone is
+   * not enough: a failure says the candidate cannot be accepted, not *why* it is
+   * rejected, and the two are different claims.
+   */
+  readonly rejectionFindings: readonly ProbeRejectionFinding[];
   readonly reason: string;
 }
 
@@ -430,22 +472,29 @@ export interface ProbeAssessment {
  * middle case is the one a boolean loses: a candidate that failed to build is not
  * unusable *evidence* — it is evidence against deploying and in favour of
  * `replace`, which is a different conclusion from "we could not find out".
+ *
+ * A rejection finding counts even when every step passed, because the step that
+ * reports a disqualifying property usually *succeeds* at reporting it: measuring an
+ * artifact over budget is a successful `size` step.
  */
 export function assessProbeReport(report: ProbeReport): ProbeAssessment {
   const outcomeOf = (step: ProbeStepId): ProbeOutcome | undefined =>
     report.validation.find(entry => entry.step === step)?.outcome;
 
+  const canonical = canonicalizeProbeReport(report);
   const failedSteps = PROBE_STEP_IDS.filter(step => outcomeOf(step) === "failed");
   const blockingSteps = PROBE_DEPLOYMENT_REQUIRED_STEPS.filter(step => outcomeOf(step) !== "passed");
-  const risksToWeigh = canonicalizeProbeReport(report).risks;
+  const risksToWeigh = canonical.risks;
+  const rejectionFindings = canonical.rejectionFindings;
 
-  if (blockingSteps.length === 0) {
+  if (blockingSteps.length === 0 && rejectionFindings.length === 0) {
     return {
       status: "supports-deployment",
       blockingSteps,
       failedSteps,
       risksToWeigh,
-      reason: `Every step a deployment depends on passed (${PROBE_DEPLOYMENT_REQUIRED_STEPS.length} steps).${
+      rejectionFindings,
+      reason: `Every step a deployment depends on passed (${PROBE_DEPLOYMENT_REQUIRED_STEPS.length} steps), and no finding disqualifies the candidate.${
         risksToWeigh.length > 0
           ? ` ${String(risksToWeigh.length)} risk finding(s) still have to be weighed against the alternatives.`
           : ""
@@ -453,13 +502,24 @@ export function assessProbeReport(report: ProbeReport): ProbeAssessment {
     };
   }
 
+  const reasons: string[] = [];
   if (failedSteps.length > 0) {
+    reasons.push(`"${failedSteps.join(", ")}" failed`);
+  }
+  if (rejectionFindings.length > 0) {
+    reasons.push(
+      `${rejectionFindings.length} rejection finding(s) were observed (${rejectionFindings.map(finding => finding.signal).join(", ")})`,
+    );
+  }
+
+  if (reasons.length > 0) {
     return {
       status: "supports-rejection-only",
       blockingSteps,
       failedSteps,
       risksToWeigh,
-      reason: `"${failedSteps.join(", ")}" failed, so this report cannot support a strategy that claims the candidate works. The failure is legitimate evidence for \`replace\`, not a reason to guess.`,
+      rejectionFindings,
+      reason: `${reasons.join(", and ")}. This report cannot support a strategy that claims the candidate works; a rejection has to cite the finding that disqualifies it, not merely the absence of success.`,
     };
   }
 
@@ -468,6 +528,7 @@ export function assessProbeReport(report: ProbeReport): ProbeAssessment {
     blockingSteps,
     failedSteps,
     risksToWeigh,
+    rejectionFindings,
     reason: `"${blockingSteps.join(", ")}" were neither passed nor failed, so the report neither shows the candidate working nor shows why it cannot. Run the missing steps before deciding.`,
   };
 }
@@ -567,19 +628,20 @@ function inspectValidationEntry(entry: unknown, where: string): readonly string[
   return problems;
 }
 
-function inspectRisk(risk: unknown, where: string): readonly string[] {
-  if (!isPlainObject(risk)) {
+/** Shared by risks and rejection findings — same shape, different family. */
+function inspectFinding(finding: unknown, where: string): readonly string[] {
+  if (!isPlainObject(finding)) {
     return [`${where} must be an object.`];
   }
   const problems: string[] = [];
-  if (typeof risk.signal !== "string") {
+  if (typeof finding.signal !== "string") {
     problems.push(`${where} must name the selection signal the finding belongs to.`);
   }
-  problems.push(...inspectStep(risk.step, where));
-  if (typeof risk.summary !== "string" || risk.summary.trim().length === 0) {
+  problems.push(...inspectStep(finding.step, where));
+  if (typeof finding.summary !== "string" || finding.summary.trim().length === 0) {
     problems.push(`${where} must summarise the finding.`);
   }
-  if (!Array.isArray(risk.evidence) || risk.evidence.some(item => typeof item !== "string")) {
+  if (!Array.isArray(finding.evidence) || finding.evidence.some(item => typeof item !== "string")) {
     problems.push(`${where} must record \`evidence\` as an array of strings.`);
   }
   return problems;
@@ -644,7 +706,7 @@ export function inspectProbeReport(input: unknown): readonly string[] {
 
   problems.push(...inspectEnvironment(input.environment, "environment"));
 
-  for (const section of ["facts", "risks", "validation"] as const) {
+  for (const section of ["facts", "risks", "rejectionFindings", "validation"] as const) {
     if (!Array.isArray(input[section])) {
       problems.push(`A probe report must declare a \`${section}\` array.`);
     }
@@ -657,7 +719,12 @@ export function inspectProbeReport(input: unknown): readonly string[] {
   }
   if (Array.isArray(input.risks)) {
     input.risks.forEach((risk, index) => {
-      problems.push(...inspectRisk(risk, `risks[${index}]`));
+      problems.push(...inspectFinding(risk, `risks[${index}]`));
+    });
+  }
+  if (Array.isArray(input.rejectionFindings)) {
+    input.rejectionFindings.forEach((finding, index) => {
+      problems.push(...inspectFinding(finding, `rejectionFindings[${index}]`));
     });
   }
   if (Array.isArray(input.validation)) {
@@ -686,7 +753,7 @@ export function validateProbeReport(report: ProbeReport): readonly string[] {
 
 function validateProbeReportRules(report: ProbeReport): readonly string[] {
   const problems: string[] = [];
-  const { environment, facts, risks, validation } = report;
+  const { environment, facts, risks, rejectionFindings, validation } = report;
 
   if (!isSupportedProbeReportSchemaVersion(report.schemaVersion)) {
     problems.push(
@@ -756,22 +823,33 @@ function validateProbeReportRules(report: ProbeReport): readonly string[] {
     problems.push(problem);
   }
 
-  risks.forEach((risk, index) => {
-    const where = `risks[${index}] ("${risk.signal}")`;
-    if (risk.evidence.length === 0) {
-      problems.push(`${where} records no evidence, so the finding is an assertion rather than an observation.`);
-    }
-    // A finding has to come from a step that ran. This is the rule that keeps the
-    // report honest: without it an engine could carry a suspicion it never tested
-    // and present it next to measurements, and a consumer could not tell them
-    // apart.
-    const outcome = validation.find(entry => entry.step === risk.step)?.outcome;
-    if (outcome === "skipped") {
-      problems.push(
-        `${where} is attributed to step "${risk.step}", which the report records as skipped. A finding cannot come from a step that did not run; run the step, or drop the finding.`,
-      );
-    }
-  });
+  // And the mirror image: a `risk`-family signal in the rejection bucket would be a
+  // warning promoted into a refusal.
+  for (const problem of validateSignalFindings(rejectionFindings, "replacement")) {
+    problems.push(problem);
+  }
+
+  const validateFindings = (findings: readonly { signal: string; step: ProbeStepId; evidence: readonly string[] }[], bucket: string): void => {
+    findings.forEach((finding, index) => {
+      const where = `${bucket}[${index}] ("${finding.signal}")`;
+
+      if (finding.evidence.length === 0) {
+        problems.push(`${where} records no evidence, so the finding is an assertion rather than an observation.`);
+      }
+
+      // A finding has to come from a step that ran. This is the rule that keeps the
+      // report honest: without it an engine could carry a suspicion it never tested
+      // and present it next to measurements, and a consumer could not tell them apart.
+      if (validation.find(entry => entry.step === finding.step)?.outcome === "skipped") {
+        problems.push(
+          `${where} is attributed to step "${finding.step}", which the report records as skipped. A finding cannot come from a step that did not run; run the step, or drop the finding.`,
+        );
+      }
+    });
+  };
+
+  validateFindings(risks, "risks");
+  validateFindings(rejectionFindings, "rejectionFindings");
 
   const forbidden = findForbiddenProbeKeys(report);
   if (forbidden.length > 0) {
@@ -898,6 +976,18 @@ function canonicalizeRisk(risk: ProbeRisk): ProbeRisk {
   };
 }
 
+function canonicalizeRejectionFinding(finding: ProbeRejectionFinding): ProbeRejectionFinding {
+  return {
+    signal: finding.signal,
+    step: finding.step,
+    summary: finding.summary,
+    evidence: canonicalizeArrayValues(finding.evidence),
+  };
+}
+
+/** Risks and rejection findings share a shape; only their signal family differs. */
+type AnyFinding = ProbeRisk | ProbeRejectionFinding;
+
 function compareFacts(a: ProbeFact, b: ProbeFact): number {
   return (
     probeStepOrder(a.step) - probeStepOrder(b.step) ||
@@ -906,7 +996,7 @@ function compareFacts(a: ProbeFact, b: ProbeFact): number {
   );
 }
 
-function compareRisks(a: ProbeRisk, b: ProbeRisk): number {
+function compareFindings(a: AnyFinding, b: AnyFinding): number {
   return (
     compareStrings(a.signal, b.signal) ||
     probeStepOrder(a.step) - probeStepOrder(b.step) ||
@@ -940,7 +1030,8 @@ export function canonicalizeProbeReport(report: ProbeReport): ProbeReport {
     schemaVersion: report.schemaVersion,
     environment: report.environment,
     facts: report.facts.map(canonicalizeFact).sort(compareFacts),
-    risks: report.risks.map(canonicalizeRisk).sort(compareRisks),
+    risks: report.risks.map(canonicalizeRisk).sort(compareFindings),
+    rejectionFindings: report.rejectionFindings.map(canonicalizeRejectionFinding).sort(compareFindings),
     validation: [...report.validation].sort(compareValidationEntries),
   };
 }
