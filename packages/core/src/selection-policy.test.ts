@@ -16,9 +16,12 @@ import type { ProbeEnvironment, ProbeRejectionFinding, ProbeReport, ProbeValidat
 import { PROBE_REPORT_SCHEMA_VERSION, PROBE_STEP_IDS } from "./probe-protocol";
 import {
   auditSelectionDecision,
+  branchForOwnership,
   evaluateRepairRecipe,
+  findSelectionBranch,
   findSelectionStage,
   isOwnershipGateFirst,
+  isSelectionBranchId,
   isSelectionDecisionRecordable,
   isSelectionStageId,
   NO_PACKAGE_ADAPTER_REGISTRY_INVARIANT,
@@ -26,15 +29,19 @@ import {
   REPAIR_RECIPE_CONDITIONS,
   SELECTION_ACCEPTANCE_CRITERIA,
   SELECTION_AUTHORITIES,
+  SELECTION_BRANCHES,
   SELECTION_GOVERNING_DECISIONS,
   SELECTION_GOVERNING_SPEC_REFERENCE_LINE,
   SELECTION_STAGES,
   SELECTION_STAGE_IDS,
+  selectionBranch,
   selectionJustificationRequired,
   selectionStage,
   selectionStageOrder,
   SPEC_PROVING_CASES,
   stagesBefore,
+  stagesForBranch,
+  stagesSkippedOnEarlyExit,
   stagesWithAuthority,
 } from "./selection-policy";
 import type { SelectionAuditInput } from "./selection-policy";
@@ -202,6 +209,62 @@ describe("selection stage order", () => {
     }
     expect(selectionStage("resolve-replacement").mustNot.join(" ")).toMatch(/global package compatibility or adapter registry/);
     expect(selectionStage("probe-candidate").mustNot.join(" ")).toMatch(/choose a deployment strategy/);
+    // The exported strings must not describe an unconditional pipeline: an architectural
+    // rejection is decided by the gate and owes no probe.
+    expect(selectionStage("persist-decision").produces).toMatch(/the ownership decision for an architectural rejection/);
+    expect(selectionStage("decide-strategy").produces).toMatch(/evidence #8's profile names/);
+  });
+});
+
+describe("the flow is a branch, not a pipeline", () => {
+  it("gives the two arms the gate can select", () => {
+    expect(SELECTION_BRANCHES.map(branch => branch.id)).toEqual(["forguncy-owned", "react-island-owned"]);
+    for (const branch of SELECTION_BRANCHES) {
+      expect(branch.decidedAt).toBe(OWNERSHIP_GATE_STAGE_ID);
+    }
+    expect(isSelectionBranchId("forguncy-owned")).toBe(true);
+    expect(isSelectionBranchId("pipeline")).toBe(false);
+    expect(findSelectionBranch("pipeline" as never)).toBeUndefined();
+    expect(() => selectionBranch("pipeline" as never)).toThrow(/Unknown dependency-selection branch/);
+  });
+
+  it("exits before any candidate work for a Forguncy-owned capability", () => {
+    const early = selectionBranch("forguncy-owned");
+    expect(early.stages).toEqual(["classify-ownership", "persist-decision"]);
+    expect(early.skipsCandidateWork).toBe(true);
+
+    // The difference a reader most easily misses when treating SELECTION_STAGES as
+    // linear, and the one that decides whether an ownership conflict is answered by
+    // routing it to the host or by researching packages.
+    expect(stagesSkippedOnEarlyExit()).toEqual([
+      "research-candidates",
+      "rank-candidates",
+      "probe-candidate",
+      "decide-strategy",
+      "resolve-replacement",
+    ]);
+  });
+
+  it("runs every stage on the React-island arm", () => {
+    const island = selectionBranch("react-island-owned");
+    expect(island.skipsCandidateWork).toBe(false);
+    expect([...island.stages]).toEqual([...SELECTION_STAGE_IDS]);
+    expect(stagesForBranch("react-island-owned").map(stage => stage.id)).toEqual([...SELECTION_STAGE_IDS]);
+  });
+
+  it("keeps every arm in canonical stage order and inside the vocabulary", () => {
+    for (const branch of SELECTION_BRANCHES) {
+      for (const stageId of branch.stages) {
+        expect(SELECTION_STAGE_IDS, `${branch.id}/${stageId}`).toContain(stageId);
+      }
+      const orders = branch.stages.map(stageId => selectionStageOrder(stageId));
+      expect([...orders].sort((a, b) => a - b), branch.id).toEqual(orders);
+    }
+  });
+
+  it("selects the arm from the ownership assessment rather than from the stage list", () => {
+    expect(branchForOwnership(CONFLICT_OWNERSHIP).id).toBe("forguncy-owned");
+    expect(branchForOwnership(ISLAND_OWNERSHIP).id).toBe("react-island-owned");
   });
 });
 

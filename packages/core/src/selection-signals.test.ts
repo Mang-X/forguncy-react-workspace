@@ -146,10 +146,29 @@ describe("signal observation channels", () => {
       "dependency-graph",
       "build-output",
       "artifact-scan",
-      "runtime-observation",
+      "browser-runtime-observation",
+      "target-runtime-observation",
     ]);
     for (const signal of SELECTION_SIGNALS) {
       expect(SIGNAL_OBSERVATION_CHANNELS, signal.id).toContain(signal.observedFrom);
+    }
+  });
+
+  it("separates a plain browser observation from a target-runtime one", () => {
+    // They have different evidence lifetimes: a Playwright fixture says nothing about
+    // Forguncy, whereas "the host global has the wrong identity" only makes sense
+    // against a named target. Collapsing them forced #17 either to drop real browser
+    // risks or to attach a Forguncy target to a fixture it never ran against.
+    expect(selectionSignalFamilyOf("portal-to-document-body")).toBe("risk");
+    expect(selectionSignal("portal-to-document-body").observedFrom).toBe("browser-runtime-observation");
+    expect(selectionSignal("webgl-canvas-lifecycle").observedFrom).toBe("browser-runtime-observation");
+
+    for (const id of [
+      "host-module-identity-mismatch-observed",
+      "global-namespace-collision-observed",
+      "service-worker-or-special-header-requirement",
+    ]) {
+      expect(selectionSignal(id as never).observedFrom, id).toBe("target-runtime-observation");
     }
   });
 
@@ -164,7 +183,7 @@ describe("signal observation channels", () => {
   });
 
   it("groups signals by the channel that reveals them", () => {
-    expect(selectionSignalsObservedFrom("runtime-observation").map(signal => signal.id)).toContain(
+    expect(selectionSignalsObservedFrom("browser-runtime-observation").map(signal => signal.id)).toContain(
       "portal-to-document-body",
     );
     expect(selectionSignalsObservedFrom("package-manifest")).toHaveLength(
@@ -223,18 +242,25 @@ describe("replacement signals as rejections", () => {
     }
   });
 
-  it("agrees with #8 about which codes only a runtime can confirm", () => {
-    // A runtime-confirmed code means "only a running host can tell", so its evidence
-    // has to come from a runtime observation and owes a target; a statically decidable
-    // code must not claim one, or the record would name a target it never saw. The two
-    // contracts are held in step by construction rather than by review.
+  it("agrees with #8 about which codes only a target runtime can confirm", () => {
+    // A runtime-confirmed code means "only the target host can tell", so its evidence
+    // has to come from a target-runtime observation and owes a target; anything a
+    // browser fixture or a static scan can decide must not claim one, or the record
+    // would name a target it never saw. The two contracts are held in step by
+    // construction rather than by review.
     for (const entry of REPLACEMENT_SIGNAL_REJECTIONS) {
       const channel = selectionSignal(entry.signal).observedFrom;
       const runtimeConfirmed = RUNTIME_CONFIRMED_TECHNICAL_REJECTION_CODES.includes(entry.code);
-      expect(channel === "runtime-observation", `${entry.signal} -> ${entry.code}`).toBe(runtimeConfirmed);
+      expect(channel === "target-runtime-observation", `${entry.signal} -> ${entry.code}`).toBe(runtimeConfirmed);
     }
 
-    expect(REPLACEMENT_SIGNAL_REJECTIONS.filter(entry => entry.code === "platform-api-unavailable")).toHaveLength(2);
+    // And the platform/API and no-browser-build failures are separate reasons, because
+    // their upgrade diagnoses differ.
+    expect(REPLACEMENT_SIGNAL_REJECTIONS.filter(entry => entry.code === "platform-api-unavailable")).toHaveLength(1);
+    expect(REPLACEMENT_SIGNAL_REJECTIONS.filter(entry => entry.code === "browser-build-unavailable")).toHaveLength(1);
+    expect(
+      replacementRejectionFor("ssr-or-server-only-without-browser-build", "some-ssr-lib")?.code,
+    ).toBe("browser-build-unavailable");
   });
 
   it("refuses to build a rejection out of a family that does not reject", () => {

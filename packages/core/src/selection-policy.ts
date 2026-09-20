@@ -123,10 +123,12 @@ export const SELECTION_STAGES: readonly SelectionStage[] = [
     id: "classify-ownership",
     label: "Classify the requested capability against the #4 ownership boundary",
     authority: "agent",
-    produces: "An ownership decision for the capability, or a statement that it is React-island-owned.",
+    produces:
+      "An ownership decision for the capability — and with it the branch to run. A Forguncy-owned capability exits to `persist-decision`; a React-island one continues to candidate selection.",
     mustNot: [
       "Do not research, shortlist or install a package before the capability's owner has been decided.",
       "Do not install a competing application framework for a capability Forguncy already owns; route it to the host instead.",
+      "Do not continue into candidate research, ranking or probing for a Forguncy-owned capability — see SELECTION_BRANCHES.",
     ],
   },
   {
@@ -161,11 +163,12 @@ export const SELECTION_STAGES: readonly SelectionStage[] = [
   },
   {
     id: "decide-strategy",
-    label: "Choose one of host/inline/extension/replace from the probe evidence",
+    label: "Choose one of host/inline/extension/replace for the candidate, on the probe evidence",
     authority: "agent",
-    produces: "One strategy per (package, cell target) pair, backed by probe evidence.",
+    produces:
+      "One strategy per (package, cell target) pair, backed by the evidence #8's profile names for it. An ownership conflict never reaches this stage: it was decided by the gate.",
     mustNot: [
-      "Do not choose a deployment strategy the probe did not support, or claim compatibility from inspection alone. An architectural rejection is the exception and not a gap: the ownership gate decides it, and #8 gives it no probe.",
+      "Do not choose a deployment strategy the probe did not support, or claim compatibility from inspection alone.",
       "Do not report a green local build as Forguncy runtime compatibility; only an executed real-runtime check supports that.",
     ],
   },
@@ -188,7 +191,8 @@ export const SELECTION_STAGES: readonly SelectionStage[] = [
     // deterministic work, and it is the point at which an unrecordable decision has
     // to be refused rather than written.
     authority: "scripts",
-    produces: "A lock record that links the probe it rests on and can be invalidated when its inputs move.",
+    produces:
+      "A lock record linking the evidence #8's profile names for the decision — probe evidence for a dependency decision, the ownership decision for an architectural rejection — and can be invalidated when its inputs move.",
     mustNot: [
       "Do not decide the strategy, invent a rationale, or fill in evidence the Agent did not produce.",
       "Do not write a record whose evidence does not match #8's profile for the decision: probe evidence for a dependency decision, the ownership decision for an architectural rejection. Refuse it and report why.",
@@ -248,6 +252,105 @@ export const OWNERSHIP_GATE_STAGE_ID: SelectionStageId = "classify-ownership";
  */
 export function isOwnershipGateFirst(stages: readonly SelectionStage[] = SELECTION_STAGES): boolean {
   return stages[0]?.id === OWNERSHIP_GATE_STAGE_ID;
+}
+
+// ---------------------------------------------------------------------------
+// Branches
+// ---------------------------------------------------------------------------
+
+export type SelectionBranchId = "forguncy-owned" | "react-island-owned";
+
+/**
+ * One arm of the flow the ownership gate selects.
+ *
+ * `SELECTION_STAGES` is the vocabulary; it is *not* a pipeline to execute item by item,
+ * and an earlier revision of this module left that open to misreading. The gate decides
+ * between two arms, and the Forguncy-owned arm exits before any candidate work: probing
+ * a package to discover that a capability belongs to the host would be the ownership-first
+ * rule running backwards, and #8 gives the resulting architectural rejection no probe.
+ *
+ * Exporting the arms is what makes "the ownership gate is earlier than the probe" a
+ * checkable fact for #18 rather than something it has to notice.
+ */
+export interface SelectionBranch {
+  readonly id: SelectionBranchId;
+  readonly label: string;
+  /** The assessment outcome that selects this arm. */
+  readonly enteredWhen: "ownership-assessment-is-a-platform-conflict" | "ownership-assessment-is-not-a-platform-conflict";
+  /** The stage that decides it. */
+  readonly decidedAt: SelectionStageId;
+  /** The stages this arm runs, in order. */
+  readonly stages: readonly SelectionStageId[];
+  /** True when the arm stops before researching, ranking or probing a candidate. */
+  readonly skipsCandidateWork: boolean;
+}
+
+export const SELECTION_BRANCHES: readonly SelectionBranch[] = [
+  {
+    id: "forguncy-owned",
+    label: "The capability belongs to Forguncy: route it to the host",
+    enteredWhen: "ownership-assessment-is-a-platform-conflict",
+    decidedAt: OWNERSHIP_GATE_STAGE_ID,
+    // Straight from the gate to the lock: no candidate, so nothing to research, rank,
+    // probe or replace, and the recorded evidence is the ownership decision.
+    stages: ["classify-ownership", "persist-decision"],
+    skipsCandidateWork: true,
+  },
+  {
+    id: "react-island-owned",
+    label: "The capability is a React-island concern: select and probe a package",
+    enteredWhen: "ownership-assessment-is-not-a-platform-conflict",
+    decidedAt: OWNERSHIP_GATE_STAGE_ID,
+    stages: SELECTION_STAGE_IDS,
+    skipsCandidateWork: false,
+  },
+];
+
+const BRANCH_BY_ID: ReadonlyMap<SelectionBranchId, SelectionBranch> = new Map(
+  SELECTION_BRANCHES.map(branch => [branch.id, branch]),
+);
+
+export function isSelectionBranchId(value: unknown): value is SelectionBranchId {
+  return typeof value === "string" && BRANCH_BY_ID.has(value as SelectionBranchId);
+}
+
+export function findSelectionBranch(id: SelectionBranchId): SelectionBranch | undefined {
+  return BRANCH_BY_ID.get(id);
+}
+
+/** Throws for an unknown id so a typo cannot silently select no branch. */
+export function selectionBranch(id: SelectionBranchId): SelectionBranch {
+  const branch = BRANCH_BY_ID.get(id);
+  if (!branch) {
+    throw new Error(`Unknown dependency-selection branch "${id}".`);
+  }
+  return branch;
+}
+
+export function stagesForBranch(id: SelectionBranchId): readonly SelectionStage[] {
+  return selectionBranch(id).stages.map(stageId => selectionStage(stageId));
+}
+
+/**
+ * Which arm a #4 ownership assessment selects.
+ *
+ * Consumes the assessment rather than re-deriving the answer, so a caller holding the
+ * gate's output does not decide the branch by inspecting the stage list.
+ */
+export function branchForOwnership(ownership: PlatformConflictAssessment): SelectionBranch {
+  return selectionBranch(isPlatformConflict(ownership) ? "forguncy-owned" : "react-island-owned");
+}
+
+/**
+ * The stages the Forguncy-owned arm skips.
+ *
+ * Named explicitly because this is the difference a reader is most likely to miss when
+ * treating `SELECTION_STAGES` as linear — and the difference that decides whether an
+ * ownership conflict is answered by routing it to the host or by researching packages.
+ */
+export function stagesSkippedOnEarlyExit(): readonly SelectionStageId[] {
+  const early = new Set(stagesForBranch("forguncy-owned").map(stage => stage.id));
+  return SELECTION_STAGE_IDS.filter(stageId => !early.has(stageId));
 }
 
 // ---------------------------------------------------------------------------

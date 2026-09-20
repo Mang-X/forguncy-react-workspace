@@ -34,8 +34,8 @@
 
 import type { ForguncyTargetIdentity, ToolchainIdentity } from "./lock";
 import { isEvidenceReference } from "./lock";
-import type { SelectionSignalId, SignalObservationChannel } from "./selection-signals";
-import { findSelectionSignal, validateSignalFindings } from "./selection-signals";
+import type { SelectionSignalId } from "./selection-signals";
+import { findSelectionSignal, isSelectionSignalId, validateSignalFindings } from "./selection-signals";
 
 // ---------------------------------------------------------------------------
 // Steps
@@ -143,39 +143,74 @@ export function probeStepOrder(id: ProbeStepId): number {
 }
 
 /**
- * Which steps can actually observe a given channel.
+ * Which steps can produce a finding about a given signal.
  *
- * A finding has to be produced by the step that can *see* what it claims, not merely
- * by a step that ran. Without this the report is internally consistent and still
- * false: a `cell-artifact-budget-exceeded` finding attributed to `package-identity`
- * passes every other check — the signal is in the right family, the evidence is
- * non-empty, the step did not skip — while asserting something that step never looked
- * at. The catalogue already states where each signal is observed
- * (`SelectionSignal.observedFrom`); this table states which step can do the observing,
- * so the two can be compared instead of assumed.
+ * Bound per **signal**, not per channel, because a channel is not an evidence
+ * capability. `build-output` covers a build, an artifact scan and a size measurement,
+ * and those see different things: a size measurement cannot discover a surviving
+ * dynamic load or a UMD wrapper, and a build cannot measure a budget. A channel-level
+ * table therefore still let a finding cite a step that never looked at it — merely one
+ * step fewer than before.
  *
- * `registry-metadata` maps to no step at all, and that is the honest answer: no probe
- * step reads the registry. A signal whose only channel is registry metadata is a
- * preference, never a finding, so it has no business in `risks` or
- * `rejectionFindings`, and this table is what says so.
+ * The two notions stay separate because they answer different questions: the
+ * catalogue's `observedFrom` says what *kind* of evidence a signal is (and so whether a
+ * runtime observation owes a target), while this table says *who can collect it*. Both
+ * are asserted by tests — this one exhaustively over `SelectionSignalId`, so a new
+ * signal cannot be added without deciding which step observes it.
  */
-export const PROBE_STEPS_OBSERVING_CHANNEL: Readonly<Record<SignalObservationChannel, readonly ProbeStepId[]>> = {
-  "registry-metadata": [],
-  "package-manifest": ["package-identity", "export-metadata"],
-  "package-files": ["package-identity", "export-metadata", "asset-inventory"],
-  "dependency-graph": ["node-builtin-scan"],
-  "build-output": ["build", "artifact-scan", "size"],
-  "artifact-scan": ["artifact-scan", "asset-inventory", "runtime-pattern-scan"],
-  "runtime-observation": ["runtime-smoke"],
+export const PROBE_STEPS_OBSERVING_SIGNAL: Readonly<Record<SelectionSignalId, readonly ProbeStepId[]>> = {
+  // Preferences. None of these is a finding, but the answer is stated anyway so the
+  // table is total.
+  "browser-first-esm-distribution": ["package-identity", "export-metadata"],
+  "first-class-vite-entry-point": ["package-identity", "export-metadata"],
+  "shipped-typescript-declarations": ["package-identity", "export-metadata"],
+  "high-level-react-api": ["package-identity", "export-metadata"],
+  "no-node-builtins": ["node-builtin-scan"],
+  "self-contained-runtime-assets": ["artifact-scan", "asset-inventory"],
+  // No probe step reads the registry. A registry-only signal is a preference, never a
+  // finding, and the empty list is what says so.
+  "maintained-and-licensed": [],
+
+  worker: ["artifact-scan", "runtime-pattern-scan"],
+  "shared-worker": ["artifact-scan", "runtime-pattern-scan"],
+  wasm: ["artifact-scan", "asset-inventory"],
+  "import-meta-url-asset": ["build", "artifact-scan"],
+  "runtime-fetch-of-package-asset": ["artifact-scan"],
+  "dynamic-import-or-code-splitting": ["build", "artifact-scan"],
+  "css-font-or-image-assets": ["asset-inventory"],
+  "portal-to-document-body": ["runtime-smoke"],
+  "webgl-canvas-lifecycle": ["runtime-smoke"],
+  "global-singleton-assumption": ["runtime-smoke"],
+
+  "node-filesystem-process-or-native-addon": ["node-builtin-scan"],
+  "ssr-or-server-only-without-browser-build": ["package-identity", "export-metadata"],
+  "service-worker-or-special-header-requirement": ["runtime-smoke"],
+  // Only the size measurement can measure a budget.
+  "cell-artifact-budget-exceeded": ["size"],
+  "runtime-assets-not-embeddable": ["artifact-scan", "asset-inventory"],
+  "dynamic-module-loading-cannot-be-eliminated": ["build", "artifact-scan"],
+  "amd-umd-branch-observed-in-artifact": ["artifact-scan", "export-metadata"],
+  "host-module-identity-mismatch-observed": ["runtime-smoke"],
+  "global-namespace-collision-observed": ["runtime-smoke"],
 };
 
-export function probeStepsForChannel(channel: SignalObservationChannel): readonly ProbeStepId[] {
-  return PROBE_STEPS_OBSERVING_CHANNEL[channel];
+export function probeStepsObserving(signal: SelectionSignalId): readonly ProbeStepId[] {
+  return PROBE_STEPS_OBSERVING_SIGNAL[signal];
 }
 
-/** True when `step` is capable of making an observation of `channel`. */
-export function probeStepObservesChannel(step: ProbeStepId, channel: SignalObservationChannel): boolean {
-  return probeStepsForChannel(channel).includes(step);
+/** True when `step` is capable of producing a finding about `signal`. */
+export function probeStepObservesSignal(step: ProbeStepId, signal: SelectionSignalId): boolean {
+  return probeStepsObserving(signal).includes(step);
+}
+
+/**
+ * Whether a signal is evidence about the Forguncy target rather than the browser.
+ *
+ * This is the distinction the target requirement turns on: a `target-runtime-observation`
+ * finding that names no target claims host behaviour without saying which host.
+ */
+export function signalObservesForguncyTarget(signal: SelectionSignalId): boolean {
+  return findSelectionSignal(signal)?.observedFrom === "target-runtime-observation";
 }
 
 // ---------------------------------------------------------------------------
@@ -890,28 +925,33 @@ function validateProbeReportRules(report: ProbeReport): readonly string[] {
         );
       }
 
-      const descriptor = findSelectionSignal(finding.signal);
-      if (!descriptor) {
-        // Already reported by `validateSignalFindings`; the channel is unknowable.
+      // Already reported by `validateSignalFindings` when unknown, and a plain string
+      // cannot be looked up in the catalogue.
+      const signalId = isSelectionSignalId(finding.signal) ? finding.signal : undefined;
+      if (signalId === undefined) {
         return;
       }
 
-      // …and from a step that can *see* it. Running is not observing.
-      const observingSteps = probeStepsForChannel(descriptor.observedFrom);
+      // …and from a step that can *see* it. Running is not observing, and sharing a
+      // channel is not observing either: `size` and `build` are both `build-output`,
+      // but only `size` can measure a budget.
+      const observingSteps = probeStepsObserving(signalId);
       if (!observingSteps.includes(finding.step)) {
         problems.push(
-          `${where} claims a "${descriptor.observedFrom}" observation, which step "${finding.step}" cannot make. Steps that observe "${descriptor.observedFrom}": ${
-            observingSteps.length > 0 ? observingSteps.join(", ") : "none"
-          }. A finding has to be produced by the step that can see it, not merely by a step that ran.`,
+          `${where} is attributed to step "${finding.step}", which cannot produce this observation. Steps that can: ${
+            observingSteps.length > 0 ? observingSteps.join(", ") : "none — no probe step observes this signal, so it is a preference rather than a finding"
+          }.`,
         );
       }
 
-      // A runtime observation names the runtime it was made against. Otherwise the
-      // report asserts host behaviour while leaving out which host, which is not
-      // re-checkable and cannot be invalidated when the target moves.
-      if (descriptor.observedFrom === "runtime-observation" && environment.target === null) {
+      // A target-runtime observation names the runtime it was made against. Otherwise
+      // the report asserts host behaviour while leaving out which host, which is not
+      // re-checkable and cannot be invalidated when the target moves. A plain browser
+      // observation owes nothing: #16 and #17 allow deterministic browser checks, and
+      // those say nothing about Forguncy.
+      if (signalObservesForguncyTarget(signalId) && environment.target === null) {
         problems.push(
-          `${where} is a runtime observation, but the report names no Forguncy target. Observing runtime behaviour without recording which runtime makes the finding unverifiable; set environment.target, or record the finding against the step that observes it statically.`,
+          `${where} is an observation about the Forguncy target, but the report names no target. Observing host behaviour without recording which host makes the finding unverifiable; set environment.target, or record the finding against the step that observes it locally.`,
         );
       }
     });

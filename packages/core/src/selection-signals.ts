@@ -130,6 +130,21 @@ export function selectionSignalFamilySemantics(family: SelectionSignalFamily): S
  * graph, a build output, a bundle, a running page. There is deliberately no
  * `documentation` channel, because a claim that can only be supported by prose
  * is exactly the claim #16 refuses to accept.
+ *
+ * The two runtime channels are separate because their evidence has different
+ * lifetimes, and conflating them forced a bad choice:
+ *
+ * - `browser-runtime-observation` — a deterministic browser fixture (a headless
+ *   page, Playwright, a jsdom smoke). #16 and #17 explicitly allow these, and they
+ *   say nothing about Forguncy, so no target is involved.
+ * - `target-runtime-observation` — a fact about a specific Forguncy host: which
+ *   module identity a global has, whether a global name collides with the host's.
+ *   Observing this without recording the runtime it was observed against is not
+ *   re-checkable, so a report must name `environment.target`.
+ *
+ * Collapsing them left #17 with two bad options: drop genuinely observed browser risks
+ * from the report, or attach a Forguncy target identity to a headless fixture it never
+ * ran against.
  */
 export const SIGNAL_OBSERVATION_CHANNELS = [
   "registry-metadata",
@@ -138,7 +153,8 @@ export const SIGNAL_OBSERVATION_CHANNELS = [
   "dependency-graph",
   "build-output",
   "artifact-scan",
-  "runtime-observation",
+  "browser-runtime-observation",
+  "target-runtime-observation",
 ] as const;
 export type SignalObservationChannel = (typeof SIGNAL_OBSERVATION_CHANNELS)[number];
 
@@ -337,7 +353,7 @@ export const SELECTION_SIGNALS: readonly SelectionSignal[] = [
     family: "risk",
     label: "Portals to `document.body`",
     summary: "The package mounts outside its own React root, which interacts with how the host page owns the document.",
-    observedFrom: "runtime-observation",
+    observedFrom: "browser-runtime-observation",
   },
   {
     id: "webgl-canvas-lifecycle",
@@ -345,7 +361,7 @@ export const SELECTION_SIGNALS: readonly SelectionSignal[] = [
     label: "Owns a WebGL/Canvas lifecycle",
     summary:
       "The package drives GPU or canvas resources whose creation and disposal have to follow the cell's mount/unmount behaviour.",
-    observedFrom: "runtime-observation",
+    observedFrom: "browser-runtime-observation",
   },
   {
     id: "global-singleton-assumption",
@@ -353,7 +369,7 @@ export const SELECTION_SIGNALS: readonly SelectionSignal[] = [
     label: "Assumes a process-wide singleton",
     summary:
       "The package keeps its state on a module-level singleton, so whether it still behaves correctly depends on how the cell's module is instantiated.",
-    observedFrom: "runtime-observation",
+    observedFrom: "browser-runtime-observation",
   },
 
   // --- replacement: the artifact cannot reach this target -------------------
@@ -372,14 +388,15 @@ export const SELECTION_SIGNALS: readonly SelectionSignal[] = [
     summary:
       "The package targets server-side rendering and ships no browser entry, so a client cell has nothing to execute.",
     observedFrom: "package-manifest",
-  },
-  {
+  },  {
     id: "service-worker-or-special-header-requirement",
     family: "replacement",
     label: "Needs a service worker, cross-origin isolation or a special header",
     summary:
       "The package requires a response header or an isolation mode the target deployment cannot guarantee, so it cannot be handed a cell.",
-    observedFrom: "runtime-observation",
+    // A property of the *target deployment*, so it is observed at runtime and #8
+    // requires the record to name the target it was observed under.
+    observedFrom: "target-runtime-observation",
   },
   {
     id: "cell-artifact-budget-exceeded",
@@ -418,7 +435,7 @@ export const SELECTION_SIGNALS: readonly SelectionSignal[] = [
     label: "The host global's module identity does not match what the cell needs",
     summary:
       "The global the host exposes is not the same module instance the cell would share, so imports through it would be a second copy (hooks, Context, `instanceof`).",
-    observedFrom: "runtime-observation",
+    observedFrom: "target-runtime-observation",
   },
   {
     id: "global-namespace-collision-observed",
@@ -426,7 +443,7 @@ export const SELECTION_SIGNALS: readonly SelectionSignal[] = [
     label: "A global the package writes collides with one the host owns",
     summary:
       "The package registers a global name the host page already uses, so loading it would overwrite host state.",
-    observedFrom: "runtime-observation",
+    observedFrom: "target-runtime-observation",
   },
 ];
 
@@ -511,9 +528,10 @@ export interface ReplacementSignalRejection {
  *   rejects.
  * - **Aligned with #8's target requirement.** The codes in
  *   `RUNTIME_CONFIRMED_TECHNICAL_REJECTION_CODES` are exactly those this table produces
- *   from a `runtime-observation` channel, and no static channel may produce one. A
- *   runtime-confirmed code means "only a running host can tell", so it needs a target;
- *   a static code means "no target involved", so claiming one would be theatre.
+ *   from a `target-runtime-observation` channel, and no other channel may produce one.
+ *   A runtime-confirmed code means "only the target host can tell", so it needs a
+ *   target; a statically decidable or plain-browser observation involves no target, and
+ *   claiming one would be theatre.
  */
 export const REPLACEMENT_SIGNAL_REJECTIONS: readonly ReplacementSignalRejection[] = [
   {
@@ -529,7 +547,10 @@ export const REPLACEMENT_SIGNAL_REJECTIONS: readonly ReplacementSignalRejection[
   {
     signal: "ssr-or-server-only-without-browser-build",
     kind: "technical",
-    code: "platform-api-unavailable",
+    // `browser-build-unavailable`, not `platform-api-unavailable`: the browser is not
+    // missing a capability, there is no browser artifact to run. The two have
+    // different upgrade diagnoses, so they are different reasons.
+    code: "browser-build-unavailable",
     remediation: "Choose a package that ships a browser entry, or move the capability to a Forguncy server command where it belongs.",
   },
   {

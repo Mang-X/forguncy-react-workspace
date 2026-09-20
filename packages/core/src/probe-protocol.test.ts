@@ -23,17 +23,19 @@ import {
   PROBE_REPORT_SCHEMA_VERSION,
   PROBE_REPORT_SECTIONS,
   PROBE_STEPS,
+  PROBE_STEPS_OBSERVING_SIGNAL,
   PROBE_STEP_IDS,
   ProbeReportSchemaVersionError,
   ProbeReportValidationError,
   probeStep,
-  probeStepObservesChannel,
+  probeStepObservesSignal,
   probeStepOrder,
-  probeStepsForChannel,
+  probeStepsObserving,
   probeSupportsDeployment,
   serializeProbeReport,
   validateProbeReport,
 } from "./probe-protocol";
+import { SELECTION_SIGNALS } from "./selection-signals";
 import type {
   ProbeEnvironment,
   ProbeOutcome,
@@ -399,58 +401,83 @@ describe("probe rejection findings", () => {
   });
 });
 
-describe("findings must come from a step that can observe them", () => {
-  it("maps every channel to the steps that can observe it", () => {
-    expect(probeStepsForChannel("dependency-graph")).toEqual(["node-builtin-scan"]);
-    expect(probeStepsForChannel("build-output")).toEqual(["build", "artifact-scan", "size"]);
-    expect(probeStepsForChannel("runtime-observation")).toEqual(["runtime-smoke"]);
-    // No probe step reads the registry, which is why a registry-only signal is a
-    // preference and never a finding.
-    expect(probeStepsForChannel("registry-metadata")).toEqual([]);
-    expect(probeStepObservesChannel("size", "build-output")).toBe(true);
-    expect(probeStepObservesChannel("package-identity", "build-output")).toBe(false);
+describe("findings must come from a step that can produce them", () => {
+  it("binds every signal to its observer steps, exhaustively", () => {
+    // Exhaustive over the catalogue, so a new signal cannot be added without deciding
+    // which step observes it.
+    for (const signal of SELECTION_SIGNALS) {
+      expect(Array.isArray(PROBE_STEPS_OBSERVING_SIGNAL[signal.id]), signal.id).toBe(true);
+      for (const step of PROBE_STEPS_OBSERVING_SIGNAL[signal.id]) {
+        expect(PROBE_STEP_IDS, `${signal.id} -> ${step}`).toContain(step);
+      }
+    }
+
+    // A channel is not an evidence capability: these three share `build-output` and
+    // see different things.
+    expect(probeStepsObserving("cell-artifact-budget-exceeded")).toEqual(["size"]);
+    expect(probeStepsObserving("dynamic-module-loading-cannot-be-eliminated")).toEqual(["build", "artifact-scan"]);
+    expect(probeStepObservesSignal("size", "cell-artifact-budget-exceeded")).toBe(true);
+    expect(probeStepObservesSignal("build", "cell-artifact-budget-exceeded")).toBe(false);
+    expect(probeStepObservesSignal("size", "dynamic-module-loading-cannot-be-eliminated")).toBe(false);
+
+    // A registry-only signal has no observer at all, which is what makes it a
+    // preference rather than a finding.
+    expect(probeStepsObserving("maintained-and-licensed")).toEqual([]);
   });
 
-  it("refuses a finding attributed to a step that cannot see it", () => {
-    // Self-consistent and still false: the signal is in the right family, the evidence
-    // is non-empty, and the step ran — but `package-identity` never measured a size.
+  it("refuses a finding attributed to a step that cannot produce it", () => {
+    // Self-consistent and still false: right family, non-empty evidence, the step ran,
+    // and the channel overlaps — but `build` does not measure a budget.
     const problems = validateProbeReport(
       probeReport({
         rejectionFindings: [
-          {
-            signal: "cell-artifact-budget-exceeded",
-            step: "package-identity",
-            summary: "over budget",
-            evidence: ["3.1 MB"],
-          },
+          { signal: "cell-artifact-budget-exceeded", step: "build", summary: "over budget", evidence: ["3.1 MB"] },
         ],
       }),
     );
 
-    expect(problems.some(problem => problem.includes('claims a "build-output" observation'))).toBe(true);
+    expect(problems.some(problem => problem.includes("cannot produce this observation"))).toBe(true);
     expect(problems.some(problem => problem.includes("size"))).toBe(true);
   });
 
-  it("refuses a risk attributed to a step that cannot see it", () => {
+  it("refuses a survivor finding attributed to the size measurement", () => {
     const problems = validateProbeReport(
-      probeReport({ risks: [{ ...WORKER_RISK, step: "package-identity" }] }),
+      probeReport({
+        rejectionFindings: [
+          {
+            signal: "dynamic-module-loading-cannot-be-eliminated",
+            step: "size",
+            summary: "a chunk survived",
+            evidence: ["chunk-a.js"],
+          },
+        ],
+      }),
     );
-    expect(problems.some(problem => problem.includes('claims a "artifact-scan" observation'))).toBe(true);
+    expect(problems.some(problem => problem.includes("cannot produce this observation"))).toBe(true);
   });
 
-  it("accepts a finding attributed to a step that can", () => {
-    expect(
-      validateProbeReport(
-        probeReport({
-          risks: [WORKER_RISK],
-          rejectionFindings: [NODE_BUILTIN_FINDING],
-        }),
-      ),
-    ).toEqual([]);
+  it("refuses a worker risk attributed to the asset inventory", () => {
+    // "A worker file exists" is not "the bundle spawns a Worker".
+    const problems = validateProbeReport(
+      probeReport({ risks: [{ ...WORKER_RISK, step: "asset-inventory" }] }),
+    );
+    expect(problems.some(problem => problem.includes("cannot produce this observation"))).toBe(true);
+    expect(validateProbeReport(probeReport({ risks: [WORKER_RISK] }))).toEqual([]);
   });
 
-  it("requires a runtime observation to name the runtime it was made against", () => {
-    const portalFinding: ProbeRejectionFinding = {
+  it("refuses a finding about a signal nothing observes", () => {
+    const problems = validateProbeReport(
+      probeReport({
+        risks: [{ signal: "maintained-and-licensed", step: "package-identity", summary: "active", evidence: ["2026"] }],
+      }),
+    );
+    // The family check fires too — it is filed as a risk — and the observer check
+    // reports that no step observes it.
+    expect(problems.some(problem => problem.includes("no probe step observes this signal"))).toBe(true);
+  });
+
+  it("requires a target-runtime observation to name the target", () => {
+    const collisionFinding: ProbeRejectionFinding = {
       signal: "global-namespace-collision-observed",
       step: "runtime-smoke",
       summary: "The package writes a global the host owns.",
@@ -458,14 +485,29 @@ describe("findings must come from a step that can observe them", () => {
     };
 
     // `ENVIRONMENT.target` is null in the fixture.
-    const problems = validateProbeReport(probeReport({ rejectionFindings: [portalFinding] }));
-    expect(problems.some(problem => problem.includes("names no Forguncy target"))).toBe(true);
+    const problems = validateProbeReport(probeReport({ rejectionFindings: [collisionFinding] }));
+    expect(problems.some(problem => problem.includes("names no target"))).toBe(true);
 
-    const targeted = probeReport({
-      environment: { ...ENVIRONMENT, target: FORGUNCY_TARGET },
-      rejectionFindings: [portalFinding],
-    });
-    expect(validateProbeReport(targeted)).toEqual([]);
+    expect(
+      validateProbeReport(
+        probeReport({
+          environment: { ...ENVIRONMENT, target: FORGUNCY_TARGET },
+          rejectionFindings: [collisionFinding],
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("does not demand a target for a plain browser observation", () => {
+    // #16 and #17 allow deterministic browser checks, and a headless fixture says
+    // nothing about Forguncy, so `target` stays null.
+    const browserRisk: ProbeRisk = {
+      signal: "portal-to-document-body",
+      step: "runtime-smoke",
+      summary: "The component portals to the body.",
+      evidence: ["document.body child count"],
+    };
+    expect(validateProbeReport(probeReport({ risks: [browserRisk] }))).toEqual([]);
   });
 });
 

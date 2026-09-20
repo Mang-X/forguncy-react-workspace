@@ -56,6 +56,12 @@ export type ArchitecturalRejectionCode =
  * absence could only be recorded under a code whose evidence contract demands a
  * runtime observation, so the writer either could not persist it or had to invent a
  * target it never saw.
+ *
+ * `browser-build-unavailable` is a third, separate failure and not a flavour of either:
+ * the package may use no Node-only API at all and simply never publish a browser entry.
+ * The browser is not missing a capability — there is no browser artifact to run. Sharing
+ * a code would put two different failure conditions, with different upgrade diagnoses,
+ * behind one reason.
  */
 export type TechnicalRejectionCode =
   | "host-module-identity-mismatch"
@@ -65,6 +71,7 @@ export type TechnicalRejectionCode =
   | "global-namespace-collision"
   | "cell-code-budget-exceeded"
   | "platform-api-unavailable"
+  | "browser-build-unavailable"
   | "runtime-api-unavailable";
 
 export type DependencyRejectionCode = ArchitecturalRejectionCode | TechnicalRejectionCode;
@@ -179,6 +186,7 @@ export const TECHNICAL_REJECTION_CODES: readonly TechnicalRejectionCode[] = [
   "global-namespace-collision",
   "cell-code-budget-exceeded",
   "platform-api-unavailable",
+  "browser-build-unavailable",
   "runtime-api-unavailable",
 ];
 
