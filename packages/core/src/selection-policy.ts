@@ -46,7 +46,7 @@ import {
   formatGoverningSpecReferenceLine,
   GOVERNING_ARCHITECTURE_DECISIONS,
 } from "./governance";
-import type { LockProbeRequirement } from "./lock";
+import type { LockProbeRequirement, ProbeStatus } from "./lock";
 import { LOCK_EVIDENCE_POLICY, lockEvidenceProfileForDecision } from "./lock";
 import type { PlatformConflictAssessment } from "./platform-conflicts";
 import { isPlatformConflict } from "./platform-conflicts";
@@ -124,7 +124,7 @@ export const SELECTION_STAGES: readonly SelectionStage[] = [
     label: "Classify the requested capability against the #4 ownership boundary",
     authority: "agent",
     produces:
-      "An ownership decision for the capability — and with it the branch to run. A Forguncy-owned capability exits to `persist-decision`; a React-island one continues to candidate selection.",
+      "An ownership decision for the capability — and with it the branch to run, and on the Forguncy-owned branch the architectural `replace` decision itself (strategy `replace`, the assessment's own rejection). A React-island capability continues to candidate selection instead.",
     mustNot: [
       "Do not research, shortlist or install a package before the capability's owner has been decided.",
       "Do not install a competing application framework for a capability Forguncy already owns; route it to the host instead.",
@@ -283,6 +283,17 @@ export interface SelectionBranch {
   readonly stages: readonly SelectionStageId[];
   /** True when the arm stops before researching, ranking or probing a candidate. */
   readonly skipsCandidateWork: boolean;
+  /**
+   * The stage that forms the decision this arm records.
+   *
+   * The two arms record different things, and saying who forms it closes a gap the
+   * stage list alone leaves open: `persist-decision` is forbidden from deciding the
+   * strategy, so on the early-exit arm the architectural `replace` decision has to be
+   * formed by the gate itself — the ownership assessment is a rejection, not yet a
+   * `{ strategy: "replace", packageName, rejection }` record.
+   */
+  readonly formsDecisionAt: SelectionStageId;
+  readonly decisionKind: "architectural-rejection" | "package-strategy";
 }
 
 export const SELECTION_BRANCHES: readonly SelectionBranch[] = [
@@ -295,6 +306,9 @@ export const SELECTION_BRANCHES: readonly SelectionBranch[] = [
     // probe or replace, and the recorded evidence is the ownership decision.
     stages: ["classify-ownership", "persist-decision"],
     skipsCandidateWork: true,
+    // The gate forms the architectural `replace` from the assessment it just made.
+    formsDecisionAt: OWNERSHIP_GATE_STAGE_ID,
+    decisionKind: "architectural-rejection",
   },
   {
     id: "react-island-owned",
@@ -303,6 +317,8 @@ export const SELECTION_BRANCHES: readonly SelectionBranch[] = [
     decidedAt: OWNERSHIP_GATE_STAGE_ID,
     stages: SELECTION_STAGE_IDS,
     skipsCandidateWork: false,
+    formsDecisionAt: "decide-strategy",
+    decisionKind: "package-strategy",
   },
 ];
 
@@ -351,6 +367,56 @@ export function branchForOwnership(ownership: PlatformConflictAssessment): Selec
 export function stagesSkippedOnEarlyExit(): readonly SelectionStageId[] {
   const early = new Set(stagesForBranch("forguncy-owned").map(stage => stage.id));
   return SELECTION_STAGE_IDS.filter(stageId => !early.has(stageId));
+}
+
+/**
+ * A stage that only runs for some outcomes of the stage before it.
+ *
+ * The React-island arm is not unconditional either. `resolve-replacement` exists to
+ * resolve an awkward candidate by replacing it, so a run that ends in `inline` has
+ * nothing for it to do — and listing it as an obligatory step told a consumer to go and
+ * replace a candidate it had just accepted. The strategy is decided at
+ * {@link SELECTION_STAGE_IDS}'s `decide-strategy`, so the condition belongs to the
+ * transition rather than to the reader.
+ */
+export interface ConditionalSelectionStage {
+  readonly stage: SelectionStageId;
+  readonly enteredWhen: "decision-strategy-is-replace";
+  /** The stage whose outcome selects it. */
+  readonly decidedAt: SelectionStageId;
+  readonly reason: string;
+}
+
+export const CONDITIONAL_SELECTION_STAGES: readonly ConditionalSelectionStage[] = [
+  {
+    stage: "resolve-replacement",
+    enteredWhen: "decision-strategy-is-replace",
+    decidedAt: "decide-strategy",
+    reason:
+      "Only a `replace` decision has an awkward candidate to resolve. `host`, `inline` and `extension` accepted the candidate, so there is nothing to replace and the run goes straight to persisting the record.",
+  },
+];
+
+export function findConditionalSelectionStage(stage: SelectionStageId): ConditionalSelectionStage | undefined {
+  return CONDITIONAL_SELECTION_STAGES.find(entry => entry.stage === stage);
+}
+
+export function isConditionalSelectionStage(stage: SelectionStageId): boolean {
+  return findConditionalSelectionStage(stage) !== undefined;
+}
+
+/**
+ * The stages a React-island run executes for a given decision.
+ *
+ * The answer a consumer actually wants: `decide-strategy` chooses the strategy, and the
+ * stage list follows from it. A `replace` decision runs `resolve-replacement`; any other
+ * strategy does not.
+ */
+export function stagesForIslandDecision(strategy: DependencyStrategy): readonly SelectionStage[] {
+  const conditional = new Set(CONDITIONAL_SELECTION_STAGES.map(entry => entry.stage));
+  return SELECTION_STAGE_IDS.filter(stageId => !conditional.has(stageId) || strategy === "replace").map(stageId =>
+    selectionStage(stageId),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -536,6 +602,47 @@ export const SELECTION_ACCEPTANCE_CRITERIA: readonly SelectionAcceptanceCriterio
     enforcedBy: `Not enforced in this repository yet. SPEC_PROVING_CASES fixes both cases for the evaluation that #17 and #18 produce; this criterion is outstanding.`,
   },
 ];
+
+// ---------------------------------------------------------------------------
+// Recording: report outcome to lock evidence status
+// ---------------------------------------------------------------------------
+
+/**
+ * The probe status an architectural rejection's record must carry.
+ *
+ * `not-run`, and that is the design rather than an omission: #8's
+ * `architectural-rejection` profile has `probeRequirement: "none"`, so a record that
+ * carried a probe status other than `not-run` would be claiming evidence the decision
+ * does not have.
+ */
+export const ARCHITECTURAL_REJECTION_PROBE_STATUS: ProbeStatus = "not-run";
+
+/**
+ * #8's three statuses are about evidence, not about whether a script exited cleanly.
+ *
+ * This is the half of "results integrate with #8" that was still missing: the audit
+ * already reads #8's profile to decide *which* probe a decision owes, but nothing said
+ * what the report's outcome becomes in the record. Without it a writer has no answer
+ * for a report where every step succeeded and the conclusion was still a refusal — the
+ * case `supports-rejection-only` exists to express — and would have to guess between
+ * `passed` and `failed`.
+ *
+ * `failed` is the right answer there, and it reads as one: the candidate failed the
+ * probe. The step that discovered the disqualifying property succeeded at discovering
+ * it; that is a fact about the step, not about the candidate.
+ */
+export function lockProbeStatusForAssessment(assessment: ProbeAssessment): ProbeStatus | null {
+  switch (assessment.status) {
+    case "supports-deployment":
+      return "passed";
+    case "supports-rejection-only":
+      return "failed";
+    case "inconclusive":
+      // Not a status choice: an inconclusive report cannot support any record, which is
+      // why the audit refuses it too.
+      return null;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Strategy support

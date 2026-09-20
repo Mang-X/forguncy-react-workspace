@@ -359,15 +359,20 @@ export type {
 } from "./probe-protocol";
 
 export {
+  ARCHITECTURAL_REJECTION_PROBE_STATUS,
   auditSelectionDecision,
   branchForOwnership,
+  CONDITIONAL_SELECTION_STAGES,
   evaluateRepairRecipe,
+  findConditionalSelectionStage,
   findSelectionBranch,
   findSelectionStage,
+  isConditionalSelectionStage,
   isOwnershipGateFirst,
   isSelectionBranchId,
   isSelectionDecisionRecordable,
   isSelectionStageId,
+  lockProbeStatusForAssessment,
   NO_PACKAGE_ADAPTER_REGISTRY_INVARIANT,
   OWNERSHIP_GATE_STAGE_ID,
   probeSupportsStrategy,
@@ -386,10 +391,12 @@ export {
   SPEC_PROVING_CASES,
   stagesBefore,
   stagesForBranch,
+  stagesForIslandDecision,
   stagesSkippedOnEarlyExit,
   stagesWithAuthority,
 } from "./selection-policy";
 export type {
+  ConditionalSelectionStage,
   RepairRecipeAssessment,
   RepairRecipeCondition,
   RepairRecipeConditionId,

@@ -157,14 +157,23 @@ export function probeStepOrder(id: ProbeStepId): number {
  * runtime observation owes a target), while this table says *who can collect it*. Both
  * are asserted by tests — this one exhaustively over `SelectionSignalId`, so a new
  * signal cannot be added without deciding which step observes it.
+ *
+ * Every entry is additionally bounded by the observing step's own
+ * {@link ProbeStep.records}: a step may only appear here if that declaration covers the
+ * observation. `package-identity` records the name, version, license and source, so it
+ * cannot report which entries a package publishes — that is `export-metadata` — and
+ * `export-metadata` cannot report what survived into the built artifact, which only a
+ * scan of that artifact sees. An entry that outruns its step's declared job re-creates
+ * the same defect one level down: a finding nobody could have made.
  */
 export const PROBE_STEPS_OBSERVING_SIGNAL: Readonly<Record<SelectionSignalId, readonly ProbeStepId[]>> = {
   // Preferences. None of these is a finding, but the answer is stated anyway so the
-  // table is total.
-  "browser-first-esm-distribution": ["package-identity", "export-metadata"],
-  "first-class-vite-entry-point": ["package-identity", "export-metadata"],
-  "shipped-typescript-declarations": ["package-identity", "export-metadata"],
-  "high-level-react-api": ["package-identity", "export-metadata"],
+  // table is total. All four are statements about published entry points, which is
+  // `export-metadata`'s job and not `package-identity`'s.
+  "browser-first-esm-distribution": ["export-metadata"],
+  "first-class-vite-entry-point": ["export-metadata"],
+  "shipped-typescript-declarations": ["export-metadata"],
+  "high-level-react-api": ["export-metadata"],
   "no-node-builtins": ["node-builtin-scan"],
   "self-contained-runtime-assets": ["artifact-scan", "asset-inventory"],
   // No probe step reads the registry. A registry-only signal is a preference, never a
@@ -174,22 +183,29 @@ export const PROBE_STEPS_OBSERVING_SIGNAL: Readonly<Record<SelectionSignalId, re
   worker: ["artifact-scan", "runtime-pattern-scan"],
   "shared-worker": ["artifact-scan", "runtime-pattern-scan"],
   wasm: ["artifact-scan", "asset-inventory"],
-  "import-meta-url-asset": ["build", "artifact-scan"],
-  "runtime-fetch-of-package-asset": ["artifact-scan"],
-  "dynamic-import-or-code-splitting": ["build", "artifact-scan"],
+  // The resolved file path is in the emitted chunk; the pattern itself is what the
+  // runtime-pattern scan looks for. The `build` step only reports whether the build
+  // succeeded, so it cannot observe either.
+  "import-meta-url-asset": ["artifact-scan", "runtime-pattern-scan"],
+  "runtime-fetch-of-package-asset": ["artifact-scan", "runtime-pattern-scan"],
+  "dynamic-import-or-code-splitting": ["artifact-scan"],
   "css-font-or-image-assets": ["asset-inventory"],
   "portal-to-document-body": ["runtime-smoke"],
   "webgl-canvas-lifecycle": ["runtime-smoke"],
   "global-singleton-assumption": ["runtime-smoke"],
 
   "node-filesystem-process-or-native-addon": ["node-builtin-scan"],
-  "ssr-or-server-only-without-browser-build": ["package-identity", "export-metadata"],
+  // Whether a browser entry exists is a fact about the published entries.
+  "ssr-or-server-only-without-browser-build": ["export-metadata"],
   "service-worker-or-special-header-requirement": ["runtime-smoke"],
   // Only the size measurement can measure a budget.
   "cell-artifact-budget-exceeded": ["size"],
   "runtime-assets-not-embeddable": ["artifact-scan", "asset-inventory"],
-  "dynamic-module-loading-cannot-be-eliminated": ["build", "artifact-scan"],
-  "amd-umd-branch-observed-in-artifact": ["artifact-scan", "export-metadata"],
+  // A load that survived bundling is seen in the output, not in whether the build ran.
+  "dynamic-module-loading-cannot-be-eliminated": ["artifact-scan"],
+  // Observed *in the artifact*, so the entry metadata cannot report it: what a package
+  // declares as its entry says nothing about which branch the shipped wrapper takes.
+  "amd-umd-branch-observed-in-artifact": ["artifact-scan"],
   "host-module-identity-mismatch-observed": ["runtime-smoke"],
   "global-namespace-collision-observed": ["runtime-smoke"],
 };

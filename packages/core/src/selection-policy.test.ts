@@ -13,17 +13,22 @@ import {
 import { LOCK_EVIDENCE_POLICY, lockEvidenceProfileForDecision } from "./lock";
 import { assessDependencyRole, isPlatformConflict } from "./platform-conflicts";
 import type { ProbeEnvironment, ProbeRejectionFinding, ProbeReport, ProbeValidationEntry } from "./probe-protocol";
-import { PROBE_REPORT_SCHEMA_VERSION, PROBE_STEP_IDS } from "./probe-protocol";
+import { assessProbeReport, PROBE_REPORT_SCHEMA_VERSION, PROBE_STEP_IDS } from "./probe-protocol";
 import {
+  ARCHITECTURAL_REJECTION_PROBE_STATUS,
   auditSelectionDecision,
   branchForOwnership,
+  CONDITIONAL_SELECTION_STAGES,
   evaluateRepairRecipe,
+  findConditionalSelectionStage,
   findSelectionBranch,
   findSelectionStage,
+  isConditionalSelectionStage,
   isOwnershipGateFirst,
   isSelectionBranchId,
   isSelectionDecisionRecordable,
   isSelectionStageId,
+  lockProbeStatusForAssessment,
   NO_PACKAGE_ADAPTER_REGISTRY_INVARIANT,
   OWNERSHIP_GATE_STAGE_ID,
   REPAIR_RECIPE_CONDITIONS,
@@ -41,6 +46,7 @@ import {
   SPEC_PROVING_CASES,
   stagesBefore,
   stagesForBranch,
+  stagesForIslandDecision,
   stagesSkippedOnEarlyExit,
   stagesWithAuthority,
 } from "./selection-policy";
@@ -265,6 +271,97 @@ describe("the flow is a branch, not a pipeline", () => {
   it("selects the arm from the ownership assessment rather than from the stage list", () => {
     expect(branchForOwnership(CONFLICT_OWNERSHIP).id).toBe("forguncy-owned");
     expect(branchForOwnership(ISLAND_OWNERSHIP).id).toBe("react-island-owned");
+  });
+
+  it("says who forms the decision on each arm", () => {
+    // `persist-decision` may not decide the strategy, so on the early-exit arm the
+    // architectural `replace` has to be formed by the gate; the assessment is a
+    // rejection, not yet a decision record.
+    const early = selectionBranch("forguncy-owned");
+    expect(early.formsDecisionAt).toBe(OWNERSHIP_GATE_STAGE_ID);
+    expect(early.decisionKind).toBe("architectural-rejection");
+
+    const island = selectionBranch("react-island-owned");
+    expect(island.formsDecisionAt).toBe("decide-strategy");
+    expect(island.decisionKind).toBe("package-strategy");
+
+    expect(selectionStage(OWNERSHIP_GATE_STAGE_ID).produces).toMatch(/architectural `replace` decision itself/);
+  });
+});
+
+describe("the island arm is conditional too", () => {
+  it("only resolves a replacement when the decision was `replace`", () => {
+    const conditional = CONDITIONAL_SELECTION_STAGES.map(entry => entry.stage);
+    expect(conditional).toEqual(["resolve-replacement"]);
+    expect(findConditionalSelectionStage("resolve-replacement")?.enteredWhen).toBe("decision-strategy-is-replace");
+    expect(findConditionalSelectionStage("resolve-replacement")?.decidedAt).toBe("decide-strategy");
+    expect(isConditionalSelectionStage("resolve-replacement")).toBe(true);
+    expect(isConditionalSelectionStage("probe-candidate")).toBe(false);
+  });
+
+  it("does not send an accepted candidate through replacement", () => {
+    // The conflict the flat stage list created: probe passes, `decide-strategy` picks
+    // `inline`, and the next obligatorily-listed stage is "replace it".
+    for (const strategy of ["host", "inline", "extension"] as const) {
+      const stages = stagesForIslandDecision(strategy).map(stage => stage.id);
+      expect(stages, strategy).not.toContain("resolve-replacement");
+      expect(stages, strategy).toContain("persist-decision");
+      expect(stages, strategy).toEqual([
+        "classify-ownership",
+        "research-candidates",
+        "rank-candidates",
+        "probe-candidate",
+        "decide-strategy",
+        "persist-decision",
+      ]);
+    }
+  });
+
+  it("runs the replacement stage for a `replace` decision", () => {
+    expect(stagesForIslandDecision("replace").map(stage => stage.id)).toEqual([
+      "classify-ownership",
+      "research-candidates",
+      "rank-candidates",
+      "probe-candidate",
+      "decide-strategy",
+      "resolve-replacement",
+      "persist-decision",
+    ]);
+  });
+});
+
+describe("report outcome to lock evidence status", () => {
+  it("agrees with #8 about what each profile accepts", () => {
+    // The half of "results integrate with #8" that was still missing: the audit reads
+    // #8's profile to decide which probe a decision owes, and this says what the
+    // report's outcome becomes in the record.
+    const deployment = assessProbeReport(probeFor("es-toolkit"));
+    const rejectionOnly = assessProbeReport(probeFor("es-toolkit", { rejectionFindings: [NODE_BUILTIN_FINDING] }));
+    const inconclusive = assessProbeReport(
+      probeFor("es-toolkit", { validation: validationWith({ "artifact-scan": "skipped", size: "skipped" }) }),
+    );
+
+    expect(lockProbeStatusForAssessment(deployment)).toBe("passed");
+    expect(LOCK_EVIDENCE_POLICY["resolved-dependency"].probeRequirement).toBe("passed");
+
+    expect(lockProbeStatusForAssessment(rejectionOnly)).toBe("failed");
+    expect(LOCK_EVIDENCE_POLICY["technical-rejection"].probeRequirement).toBe("not-passed");
+
+    // Not a status choice — an inconclusive report supports no record at all.
+    expect(lockProbeStatusForAssessment(inconclusive)).toBeNull();
+
+    // The architectural case has no report at all, which #8 states as "none".
+    expect(ARCHITECTURAL_REJECTION_PROBE_STATUS).toBe("not-run");
+    expect(LOCK_EVIDENCE_POLICY["architectural-rejection"].probeRequirement).toBe("none");
+  });
+
+  it("reads `failed` as an evidence outcome, not a crashed script", () => {
+    // Every step succeeded and the conclusion was still a refusal: the step that found
+    // the disqualifying property did its job.
+    const assessment = assessProbeReport(probeFor("es-toolkit", { rejectionFindings: [NODE_BUILTIN_FINDING] }));
+    expect(assessment.status).toBe("supports-rejection-only");
+    expect(assessment.failedSteps).toEqual([]);
+    expect(lockProbeStatusForAssessment(assessment)).toBe("failed");
   });
 });
 

@@ -415,14 +415,93 @@ describe("findings must come from a step that can produce them", () => {
     // A channel is not an evidence capability: these three share `build-output` and
     // see different things.
     expect(probeStepsObserving("cell-artifact-budget-exceeded")).toEqual(["size"]);
-    expect(probeStepsObserving("dynamic-module-loading-cannot-be-eliminated")).toEqual(["build", "artifact-scan"]);
+    expect(probeStepsObserving("dynamic-module-loading-cannot-be-eliminated")).toEqual(["artifact-scan"]);
     expect(probeStepObservesSignal("size", "cell-artifact-budget-exceeded")).toBe(true);
     expect(probeStepObservesSignal("build", "cell-artifact-budget-exceeded")).toBe(false);
     expect(probeStepObservesSignal("size", "dynamic-module-loading-cannot-be-eliminated")).toBe(false);
+    // The `build` step reports whether the build succeeded; it does not read the
+    // output, so it cannot report what survived into it.
+    expect(probeStepObservesSignal("build", "dynamic-module-loading-cannot-be-eliminated")).toBe(false);
+    expect(probeStepObservesSignal("build", "import-meta-url-asset")).toBe(false);
+
+    // And a step's entries are bounded by its own declared job: `package-identity`
+    // records the name, version, license and source, so it cannot report which entries
+    // a package publishes; `export-metadata` reports the entries, so it cannot report
+    // what the shipped artifact does with them.
+    expect(probeStepObservesSignal("package-identity", "ssr-or-server-only-without-browser-build")).toBe(false);
+    expect(probeStepObservesSignal("export-metadata", "ssr-or-server-only-without-browser-build")).toBe(true);
+    expect(probeStepObservesSignal("export-metadata", "amd-umd-branch-observed-in-artifact")).toBe(false);
 
     // A registry-only signal has no observer at all, which is what makes it a
     // preference rather than a finding.
     expect(probeStepsObserving("maintained-and-licensed")).toEqual([]);
+  });
+
+  it("refuses an entry-metadata finding about a package's browser entry", () => {
+    // `package-identity` never reads `exports`/`module`/`browser`, so it cannot know
+    // whether a browser entry exists.
+    const problems = validateProbeReport(
+      probeReport({
+        rejectionFindings: [
+          {
+            signal: "ssr-or-server-only-without-browser-build",
+            step: "package-identity",
+            summary: "no browser entry",
+            evidence: ["no browser field"],
+          },
+        ],
+      }),
+    );
+    expect(problems.some(problem => problem.includes("cannot produce this observation"))).toBe(true);
+
+    expect(
+      validateProbeReport(
+        probeReport({
+          rejectionFindings: [
+            {
+              signal: "ssr-or-server-only-without-browser-build",
+              step: "export-metadata",
+              summary: "no browser entry",
+              evidence: ["no browser field"],
+            },
+          ],
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("refuses an in-artifact finding attributed to entry metadata", () => {
+    // What a package declares as its entry says nothing about which branch the shipped
+    // wrapper takes.
+    const problems = validateProbeReport(
+      probeReport({
+        rejectionFindings: [
+          {
+            signal: "amd-umd-branch-observed-in-artifact",
+            step: "export-metadata",
+            summary: "UMD wrapper present",
+            evidence: ["define.amd"],
+          },
+        ],
+      }),
+    );
+    expect(problems.some(problem => problem.includes("cannot produce this observation"))).toBe(true);
+  });
+
+  it("refuses a survivor finding attributed to the build step", () => {
+    const problems = validateProbeReport(
+      probeReport({
+        rejectionFindings: [
+          {
+            signal: "dynamic-module-loading-cannot-be-eliminated",
+            step: "build",
+            summary: "a chunk survived",
+            evidence: ["chunk-a.js"],
+          },
+        ],
+      }),
+    );
+    expect(problems.some(problem => problem.includes("cannot produce this observation"))).toBe(true);
   });
 
   it("refuses a finding attributed to a step that cannot produce it", () => {
