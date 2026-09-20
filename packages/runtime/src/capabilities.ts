@@ -376,7 +376,7 @@ export const RUNTIME_FACADE_CAPABILITIES: readonly RuntimeFacadeCapability[] = [
     confirmation: "result-shape",
     hostBindings: [{ kind: "cell-hook", hook: "useDataSource" }],
     evidenceSources: ["data-source-contract", "user-scope-bindings"],
-    note: "The result fields are pinned; the hook's own arguments are not, so the façade exposes the confirmed half and leaves the call untyped. A name that was never declared is an error state rather than a thrown exception, so a wrapper must not turn it into one.",
+    note: "The result fields are pinned; the hook's own arguments are not, so the façade exposes the confirmed half and leaves the call untyped. A name that was never declared is an error state rather than a thrown exception, so a wrapper must not turn it into one. This is also the only admitted capability whose address is a wrapper-local rather than a prop, which is why `RuntimeFacadeHostBindings` carries a second, dedicated channel for it.",
   },
   {
     id: "permission-snapshot",

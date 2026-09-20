@@ -33,8 +33,8 @@
 import { CELL_SERVER_COMMANDS_CONTRACT, concernsOwnedBy, isApplicationOwned } from "@forguncy-react-workspace/core";
 import type { OwnershipConcernId } from "@forguncy-react-workspace/core";
 
-import { RuntimeFacadeContractError } from "./capabilities";
-import type { CellPropKey, ForguncyPropMember } from "./capabilities";
+import { RUNTIME_FACADE_CAPABILITIES, RuntimeFacadeContractError } from "./capabilities";
+import type { CellPropKey, ForguncyPropMember, RuntimeFacadeHostBinding } from "./capabilities";
 
 // ---------------------------------------------------------------------------
 // The confirmed call shapes
@@ -60,12 +60,26 @@ export type ServerCommandResult = {
 /**
  * One configured server command.
  *
- * `#5` pins "a record of command name to async function". The parameters are
- * `unknown[]` because a command's parameter list belongs to the Forguncy
- * project, not to this workspace — the façade can type the *envelope* and the
- * caller narrows the payload, or a generated declaration supplies it later.
+ * #5 pins the *envelope*: "a record of command name to async function", the
+ * reserved result keys, and that a name the designer never configured is
+ * `undefined`. It pins **no parameter list** — no probe exercised a call with
+ * arguments — so this type takes its parameters from whoever actually knows
+ * them, a generated command-specific declaration, instead of asserting one here.
+ *
+ * The default is the least a callable can claim. `readonly unknown[]` would read
+ * as "any call form is valid", which is precisely the invented API #27's rule
+ * refuses: an arity nobody observed would become legal at the base type. A
+ * project that knows its own command's parameters instantiates
+ * `ServerCommandCall<[...]>`, and the façade must not do that for every command
+ * at once.
+ *
+ * A provider may still supply a command that takes parameters — a function with
+ * more parameters is assignable to this one — so narrowing is available where
+ * the knowledge exists and absent where it does not.
  */
-export type ServerCommandCall = (...parameters: readonly unknown[]) => Promise<ServerCommandResult>;
+export type ServerCommandCall<Parameters extends readonly unknown[] = readonly never[]> = (
+  ...parameters: Parameters
+) => Promise<ServerCommandResult>;
 
 /**
  * The `ServerCommands` base prop.
@@ -101,6 +115,53 @@ export const RUNTIME_FACADE_PROVIDER_KINDS = ["host", "mock"] as const;
 export type RuntimeFacadeProviderKind = (typeof RUNTIME_FACADE_PROVIDER_KINDS)[number];
 
 /**
+ * A data source's result, as #5 pins it.
+ *
+ * The four required fields are `resultFieldsExecuted` — the ones a probe actually
+ * read — written out rather than derived, because `core` records them in a
+ * mutable array while it declares `CELL_SERVER_COMMANDS_CONTRACT.resultKeys` as a
+ * literal tuple. `(typeof …)[number]` there yields `"errorCode" | "errorMessage"`
+ * and is worth deriving; here it would yield `string` and require nothing, which
+ * is worse than writing the four names down. A test compares these names against
+ * the `core` list so the two cannot quietly diverge.
+ *
+ * #5 documents a fifth field, `reload`, but never observed it on a result, so it
+ * is admitted through the extra-key member rather than required. Preserving that
+ * distinction is the difference between "the host provides this" and "the docs
+ * mention it", and #27's whole point is that the two are not the same claim.
+ */
+export interface DataSourceResult {
+  readonly data: unknown;
+  readonly totalCount: unknown;
+  readonly loading: unknown;
+  readonly error: unknown;
+  /** Documented-but-unexecuted fields, `reload` among them. */
+  readonly [documentedField: string]: unknown;
+}
+
+/**
+ * One declared data source, as the provider supplies it.
+ *
+ * The port maps the data source's **name** to a callable yielding the pinned
+ * result, and stops there. The name is the identity because #5 records it: a
+ * source that was never declared produces an error state "whose message contains
+ * the data source name". `useDataSource`'s own argument list was not observed, so
+ * the port describes none — the cell-facing call form is #29's to settle against
+ * the real hook, which is also where its render-time semantics live.
+ */
+export type DataSourceBinding = () => DataSourceResult;
+
+/**
+ * The data sources a provider supplies.
+ *
+ * `Partial` because this is the *supply* side: a provider offers the sources the
+ * page declared. Absence is therefore not the error case — #5 records an
+ * undeclared source as an error *state* rather than a throw, so the façade has to
+ * turn a missing name into that state instead of an exception.
+ */
+export type DataSourceBindings = Readonly<Partial<Record<string, DataSourceBinding>>>;
+
+/**
  * What a provider resolves.
  *
  * Both provider kinds satisfy this one type, which is how #27's "mock/provider
@@ -108,10 +169,71 @@ export type RuntimeFacadeProviderKind = (typeof RUNTIME_FACADE_PROVIDER_KINDS)[n
  * covers less than the host does not compile, and authored source that reaches a
  * capability the host has cannot be running against a mock that lacks it.
  *
+ * **Every channel an admitted capability binds to has a member here.** That is
+ * not decoration: an admitted capability whose address no provider can supply
+ * forces the implementation either to bypass the provider or to invent a second
+ * injection path, and both break the single-surface claim this interface exists
+ * to make. `runtimeFacadePortChannels()` derives the channels the registry
+ * actually uses so the two cannot drift apart unnoticed.
+ *
  * Declared, not implemented — see the module header. #29 implements both sides.
  */
 export interface RuntimeFacadeHostBindings {
   readonly cellProps: RuntimeFacadeCellProps;
+  /**
+   * The second channel, and the one whose absence is easiest to miss: the
+   * data-source binding is a wrapper-local rather than a prop, so a port built
+   * only from `props` cannot carry it.
+   */
+  readonly dataSources: DataSourceBindings;
+}
+
+/** A channel of {@link RuntimeFacadeHostBindings} a binding can be supplied through. */
+export type RuntimeFacadePortChannel = "cell-props" | "data-sources";
+
+/** The channels the port actually provides. */
+export const RUNTIME_FACADE_PORT_CHANNELS = ["cell-props", "data-sources"] as const satisfies readonly RuntimeFacadePortChannel[];
+
+/**
+ * Which port member carries a binding.
+ *
+ * Expressed as a function so a test can assert that every binding kind the
+ * registry admits lands on a channel the port has, rather than leaving that to a
+ * reviewer to notice.
+ */
+export function runtimeFacadePortChannelOfBinding(binding: RuntimeFacadeHostBinding): RuntimeFacadePortChannel {
+  return binding.kind === "cell-hook" ? "data-sources" : "cell-props";
+}
+
+/** Every channel the admitted capabilities need, derived from the registry. */
+export function runtimeFacadePortChannels(): readonly RuntimeFacadePortChannel[] {
+  return [
+    ...new Set(
+      RUNTIME_FACADE_CAPABILITIES.flatMap(capability =>
+        capability.hostBindings.map(runtimeFacadePortChannelOfBinding),
+      ),
+    ),
+  ];
+}
+
+/**
+ * Refuse a contract whose registry needs a channel the port does not provide.
+ *
+ * This is the check that would have caught admitting `data-source-binding`
+ * against a props-only port, so it runs over the registry rather than over a
+ * hand-written list.
+ */
+export function assertRuntimeFacadePortCoversAdmittedCapabilities(
+  channels: readonly RuntimeFacadePortChannel[] = runtimeFacadePortChannels(),
+): void {
+  for (const channel of channels) {
+    if (!RUNTIME_FACADE_PORT_CHANNELS.includes(channel)) {
+      throw new RuntimeFacadeContractError(
+        "capability-not-admissible",
+        `An admitted façade capability needs port channel "${channel}", which RuntimeFacadeHostBindings does not provide.`,
+      );
+    }
+  }
 }
 
 export interface RuntimeFacadeProvider {
@@ -140,17 +262,18 @@ export const RUNTIME_FACADE_PROVIDER_EXPECTATIONS: Readonly<
 > = {
   host: {
     kind: "host",
-    supplies: "The base `props` the ReactCellType runtime injects, read at the moment the cell renders.",
+    supplies:
+      "Both `RuntimeFacadeHostBindings` channels, read at the moment the cell renders: the base `props` the ReactCellType runtime injects, and the declared data sources behind the cell's `useDataSource` wrapper-local.",
     missingCapabilityOutcome:
-      "The runtime injects every base prop key on every cell, so a missing base prop is a broken page rather than a supported state; #5 records empty `Permissions` as an open question, which stays an open question here.",
+      "The runtime injects every base prop key on every cell, so a missing base prop is a broken page rather than a supported state; #5 records empty `Permissions` and an undeclared data source as open/error states rather than exceptions, and both stay that way here.",
     realRuntimeRequired: true,
   },
   mock: {
     kind: "mock",
     supplies:
-      "The same `RuntimeFacadeHostBindings` surface with project/example-provided values, so authored source runs unchanged under `vp dev`.",
+      "The same `RuntimeFacadeHostBindings` surface with project/example-provided values on both channels, so authored source runs unchanged under `vp dev` — including data-source behaviour, which #22 requires to be injectable by the example.",
     missingCapabilityOutcome:
-      "A capability the project did not configure resolves to the absence #5 records for it — an unconfigured server-command name is `undefined`, not a thrown error — so a cell meets the same shape locally as it will in Forguncy.",
+      "A capability the project did not configure resolves to the absence #5 records for it — an unconfigured server-command name is `undefined`, and an undeclared data source is an error state rather than a throw — so a cell meets the same shape locally as it will in Forguncy.",
     realRuntimeRequired: false,
   },
 };
