@@ -3,6 +3,9 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "dependencies": {
+    "@forguncy-react-workspace/core": "workspace:*"
+  },
   "exports": {
     ".": "./src/index.ts"
   }
