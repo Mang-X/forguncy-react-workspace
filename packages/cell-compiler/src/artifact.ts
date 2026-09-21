@@ -194,15 +194,24 @@ export function packageNameOfSpecifier(specifier: string): string {
 }
 
 /**
- * True when a specifier names a file rather than a package.
+ * True when a specifier names a file rather than a module id.
+ *
+ * Exported because two layers have to give the same answer: this one decides between
+ * "a leftover import" and "an unresolved decision" with it, and the workspace
+ * contract (#14) decides between "workspace source" and "a published dependency"
+ * with the same test. Restating it in the second place would be two answers to one
+ * question, which is the shape #9's fourth review round found in `findDecision`.
  *
  * Exact for relative and absolute paths, which is the whole claim: a *named*
  * workspace package (`@scope/ui`) is indistinguishable here from a published one,
- * because the artifact layer has no workspace manifest. That limit is recorded in
- * the workspace guarantee's caveat rather than papered over with a scope
- * allowlist that would be wrong for any other monorepo.
+ * because the artifact layer has no workspace manifest — #14's workspace contract
+ * asks that question with `workspacePackageFor` instead, which is what holding a
+ * manifest buys. A specifier the bundler resolves through an alias (`#internal`, a
+ * `resolve.alias` target) is outside this test in either direction: it is not a
+ * path, so both layers treat it as a module id, which is why a graph that carries
+ * one has to carry the id the bundler actually resolves rather than the alias.
  */
-function isSourceSpecifier(specifier: string): boolean {
+export function isSourceSpecifier(specifier: string): boolean {
   return specifier.startsWith(".") || specifier.startsWith("/");
 }
 

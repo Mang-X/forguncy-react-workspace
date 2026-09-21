@@ -15,6 +15,7 @@ import {
 } from "./provenance";
 import {
   auditWorkspaceSource,
+  classifyWorkspaceModule,
   findWorkspaceSourceGuarantee,
   findWorkspaceSourceReuseClass,
   formatWorkspaceSourceAudit,
@@ -126,6 +127,26 @@ describe("the workspace graph index", () => {
     expect(reversed).toEqual(forward);
   });
 
+  it("classifies a specifier as workspace source, a file, or a published dependency", () => {
+    const { index } = indexWorkspaceGraph(workspace());
+
+    expect(classifyWorkspaceModule(index, "@app/ui")).toBe("workspace-package");
+    expect(classifyWorkspaceModule(index, "@app/ui/theme.css")).toBe("workspace-package");
+
+    // Files inside a package. Nothing resolves these as a dependency, so nothing may
+    // ask for a decision about them.
+    expect(classifyWorkspaceModule(index, "./Button")).toBe("source-file");
+    expect(classifyWorkspaceModule(index, "../shared/utils")).toBe("source-file");
+    expect(classifyWorkspaceModule(index, "./styles.css")).toBe("source-file");
+    expect(classifyWorkspaceModule(index, "/abs/polyfill.ts")).toBe("source-file");
+
+    expect(classifyWorkspaceModule(index, "es-toolkit")).toBe("external-package");
+    expect(classifyWorkspaceModule(index, "es-toolkit/compat")).toBe("external-package");
+    // A Node builtin is not a npm package, and it is still a dependency question: #4
+    // records `platform-api-unavailable` for exactly this case.
+    expect(classifyWorkspaceModule(index, "node:fs")).toBe("external-package");
+  });
+
   it("reports a duplicated name and resolves it the same way in either input order", () => {
     const first: WorkspacePackageRecord = { name: "@app/ui", directory: "packages/ui" };
     const second: WorkspacePackageRecord = { name: "@app/ui", directory: "packages/ui-copy" };
@@ -143,6 +164,55 @@ describe("the workspace graph index", () => {
     // collision must not be resolved by whichever entry happened to come first.
     expect(forward.index.byName.get("@app/ui")?.directory).toBe("packages/ui");
     expect(backward.index.byName.get("@app/ui")?.directory).toBe("packages/ui");
+  });
+
+  // The review's third finding. A comparator that returns 0 for two records leaves the
+  // winner to JavaScript's stable sort — that is, to the caller's array order — and two
+  // records can share a name *and* a directory while disagreeing about their edges or
+  // their identity.
+  it("resolves records that share a name and a directory by content, not by input order", () => {
+    const react: WorkspacePackageRecord = {
+      name: "@app/ui",
+      directory: "packages/ui",
+      imports: ["react"],
+    };
+    const esToolkit: WorkspacePackageRecord = {
+      name: "@app/ui",
+      directory: "packages/ui",
+      imports: ["es-toolkit"],
+    };
+
+    const forward = indexWorkspaceGraph({ packages: [react, esToolkit] });
+    const backward = indexWorkspaceGraph({ packages: [esToolkit, react] });
+
+    expect(forward.index.byName.get("@app/ui")?.imports).toEqual(["es-toolkit"]);
+    expect(backward.index.byName.get("@app/ui")?.imports).toEqual(["es-toolkit"]);
+    expect(forward.diagnostics).toEqual(backward.diagnostics);
+    expect(forward.diagnostics[0]?.message).toContain("declare this package differently");
+
+    // And the answer the rest of the audit is built on agrees, not just the index.
+    expect(traceWorkspaceSourceClosure(forward.index, ["@app/ui"])).toEqual(
+      traceWorkspaceSourceClosure(backward.index, ["@app/ui"]),
+    );
+  });
+
+  it("says a duplicate that declares the same thing is equivalent rather than ambiguous", () => {
+    const record: WorkspacePackageRecord = {
+      name: "@app/ui",
+      directory: "packages/ui",
+      imports: ["react", "react"],
+    };
+
+    for (const packages of [
+      [record, { ...record, imports: ["react"] }],
+      [{ ...record, imports: ["react"] }, record],
+    ]) {
+      const { index, diagnostics } = indexWorkspaceGraph({ packages });
+      const conflict = withCode(diagnostics, "workspace-graph-conflict")[0];
+      expect(conflict?.message).toContain("identically");
+      expect(conflict?.message).toContain("nothing downstream changes");
+      expect(index.byName.get("@app/ui")).toBeDefined();
+    }
   });
 
   it("refuses a record whose name source cannot import", () => {
@@ -198,6 +268,44 @@ describe("the workspace graph index", () => {
 
 describe("the workspace source closure", () => {
   const { index } = indexWorkspaceGraph(workspace());
+
+  // The review's first finding, as the case that made it visible: a graph derived from
+  // *source* imports — which the record type explicitly allows — carries ordinary
+  // relative imports, and classifying "not in the graph" as "a published dependency"
+  // made the audit demand a decision for a component file.
+  it("does not demand a decision for a package's own source files", () => {
+    const sourceDerived: WorkspaceGraph = {
+      packages: [
+        {
+          name: "@app/ui",
+          directory: "packages/ui",
+          imports: ["./Button", "../shared/utils", "./styles.css", "/abs/polyfill.ts", "react"],
+        },
+        { name: "@app/shared", directory: "packages/shared", imports: ["./internal"] },
+      ],
+    };
+    const { index: sourceIndex } = indexWorkspaceGraph(sourceDerived);
+
+    expect(traceWorkspaceSourceClosure(sourceIndex, ["@app/ui"]).externalModules.map(entry => entry.moduleId)).toEqual([
+      "react",
+    ]);
+
+    // With no decisions at all, exactly one diagnostic: the real dependency. Not four.
+    const missing = auditWorkspaceSource({
+      workspace: sourceDerived,
+      dependencies: [],
+      entryModuleIds: ["@app/ui"],
+    });
+    expect(subjectsOf(missing.diagnostics)).toEqual(["react"]);
+
+    expect(
+      auditWorkspaceSource({
+        workspace: sourceDerived,
+        dependencies: [inlineDecision("react")],
+        entryModuleIds: ["@app/ui"],
+      }).diagnostics,
+    ).toEqual([]);
+  });
 
   it("collects the workspace source the entry reaches, transitively", () => {
     const closure = traceWorkspaceSourceClosure(index, ["@app/ui"]);
@@ -518,6 +626,138 @@ describe("the workspace source audit", () => {
       const audit = auditWorkspaceSource({ workspace: delegating, dependencies: [decision] });
       expect(audit.diagnostics, decision.strategy).toEqual([]);
     }
+  });
+
+  // The review's second finding. `import React from "react"` plus a package-local
+  // `React.createContext(null)` passes every check this contract can make — the module
+  // is provided by the page and the package reaches it — while each inlined Cell still
+  // declares its own Context. So a clean audit must not be readable as "your state is
+  // shared", and the assessment is where that is stated instead of implied.
+  it("reports a backed delegation as backed without claiming the state is shared", () => {
+    const delegating: WorkspaceGraph = {
+      packages: [
+        {
+          name: "@app/state",
+          directory: "packages/state",
+          imports: ["react"],
+          moduleIdentity: { kind: "delegated", via: "react" },
+        },
+      ],
+    };
+    const audit = auditWorkspaceSource({
+      workspace: delegating,
+      dependencies: [{ strategy: "host", packageName: "react", globalName: "React" }],
+    });
+
+    expect(audit.diagnostics).toEqual([]);
+    expect(audit.delegations).toEqual([
+      { package: "@app/state", via: "react", status: "backed", stateSharingEstablished: false },
+    ]);
+
+    // The report says it too, so the one line a reader skims cannot be read as a
+    // verification of sharing.
+    const report = formatWorkspaceSourceAudit(audit);
+    expect(report).toContain("@app/state → react (backed");
+    expect(report).toContain("state sharing NOT established");
+
+    // And the promise is split the same way: the local guarantee is about the
+    // declaration, the sharing half is the real-runtime one.
+    const declaration = findWorkspaceSourceGuarantee("workspace-module-identity-is-delegated");
+    expect(declaration.level).toBe("local");
+    expect(declaration.caveat).toMatch(/declared and backed/);
+    expect(declaration.caveat).toMatch(/never that the package's state actually lives in/);
+  });
+
+  it("lists every delegation, including the ones that failed a check", () => {
+    const delegating: WorkspaceGraph = {
+      packages: [
+        {
+          name: "@app/state",
+          directory: "packages/state",
+          imports: ["react"],
+          moduleIdentity: { kind: "delegated", via: "react" },
+        },
+        {
+          name: "@app/cache",
+          directory: "packages/cache",
+          imports: ["es-toolkit"],
+          moduleIdentity: { kind: "delegated", via: "es-toolkit" },
+        },
+      ],
+    };
+    const audit = auditWorkspaceSource({
+      workspace: delegating,
+      dependencies: [
+        { strategy: "host", packageName: "react", globalName: "React" },
+        inlineDecision("es-toolkit"),
+      ],
+    });
+
+    expect(audit.delegations).toEqual([
+      { package: "@app/cache", via: "es-toolkit", status: "unbacked", stateSharingEstablished: false },
+      { package: "@app/state", via: "react", status: "backed", stateSharingEstablished: false },
+    ]);
+    expect(subjectsOf(withCode(audit.diagnostics, "undelegated-workspace-module-identity"))).toEqual(["@app/cache"]);
+  });
+
+  it("marks a delegation undetermined when no decision list was supplied", () => {
+    const delegating: WorkspaceGraph = {
+      packages: [
+        {
+          name: "@app/state",
+          directory: "packages/state",
+          imports: ["react"],
+          moduleIdentity: { kind: "delegated", via: "react" },
+        },
+      ],
+    };
+
+    // Neither `backed` (nobody checked) nor `unbacked` (nothing failed) — and not
+    // missing either, because an empty list would read as "no declarations".
+    const audit = auditWorkspaceSource({ workspace: delegating });
+    expect(audit.diagnostics).toEqual([]);
+    expect(audit.delegations).toEqual([
+      { package: "@app/state", via: "react", status: "undetermined", stateSharingEstablished: false },
+    ]);
+    expect(formatWorkspaceSourceAudit(audit)).toContain("(undetermined;");
+  });
+
+  it("answers the same way when two decisions name one module, in either order", () => {
+    const delegating: WorkspaceGraph = {
+      packages: [
+        {
+          name: "@app/state",
+          directory: "packages/state",
+          imports: ["react"],
+          moduleIdentity: { kind: "delegated", via: "react" },
+        },
+      ],
+    };
+    const host: DependencyDecision = { strategy: "host", packageName: "react", globalName: "React" };
+    const inline = inlineDecision("react");
+
+    const forward = auditWorkspaceSource({ workspace: delegating, dependencies: [host, inline] });
+    const backward = auditWorkspaceSource({ workspace: delegating, dependencies: [inline, host] });
+
+    // `findDependencyDecision` answers with the first record that matches, so the list
+    // is canonicalised before it is read: `host` sorts before `inline` either way.
+    expect(forward.diagnostics).toEqual(backward.diagnostics);
+    expect(forward.delegations).toEqual(backward.delegations);
+    expect(forward.delegations[0]?.status).toBe("backed");
+  });
+
+  it("names every strategy when several decisions name one workspace package", () => {
+    const audit = auditWorkspaceSource({
+      workspace: workspace(),
+      dependencies: [
+        inlineDecision("@app/ui"),
+        { strategy: "host", packageName: "@app/ui", globalName: "React" },
+      ],
+    });
+
+    const reported = withCode(audit.diagnostics, "workspace-package-decided-as-dependency");
+    expect(reported).toHaveLength(1);
+    expect(reported[0]?.message).toContain('2 decisions name it (`host`, `inline`)');
   });
 
   it("refuses a delegation backed by inline, replace, or nothing at all", () => {
