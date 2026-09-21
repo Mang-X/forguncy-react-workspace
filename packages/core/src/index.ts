@@ -13,6 +13,10 @@
  *   — https://github.com/Mang-X/forguncy-react-workspace/issues/8
  * - #16 "Agent-driven dependency selection and empirical compatibility probe"
  *   — https://github.com/Mang-X/forguncy-react-workspace/issues/16
+ * - #9 "host module bridge for React, ReactDOM, antd and built-in globals"
+ *   — https://github.com/Mang-X/forguncy-react-workspace/issues/9
+ * - #12 "`extension` dependencies as external modules + `frontendLibraries` metadata"
+ *   — https://github.com/Mang-X/forguncy-react-workspace/issues/12
  *
  * Scope note: this package states *semantics, boundaries, verified target facts,
  * the dependency-decision model, and the selection/probe policy*. It intentionally
@@ -116,6 +120,10 @@ export {
   DEPENDENCY_SELECTION_DECISION,
   DEPENDENCY_SELECTION_DECISION_QUALIFIED_REFERENCE,
   DEPENDENCY_SELECTION_DECISION_REFERENCE,
+  EXTENSION_EXTERNALS_CITATION_PATTERNS,
+  EXTENSION_EXTERNALS_DECISION,
+  EXTENSION_EXTERNALS_DECISION_QUALIFIED_REFERENCE,
+  EXTENSION_EXTERNALS_DECISION_REFERENCE,
   formatDecisionReference,
   formatGoverningSpecReferenceLine,
   GOVERNING_ARCHITECTURE_DECISIONS,
@@ -261,6 +269,66 @@ export type {
   JsxRuntimeAdapterRule,
   JsxRuntimeAdapterRuleId,
 } from "./host-bridge";
+
+// #12 — the `extension` external mapping: which npm import a verified Forguncy
+// Frontend Extension stands in for, what keeps the compiled module independent of
+// library load order, and the diagnostics the build and the sync report under.
+
+export {
+  assertExtensionExternalContract,
+  assertExtensionExternalMappingIsAdmissible,
+  assertExtensionExternalMappingsAreUnambiguous,
+  auditExtensionLibraryMetadata,
+  createExtensionExternalDiagnostic,
+  extensionExternalDiagnosticCanBeReported,
+  extensionExternalDiagnosticRule,
+  extensionGlobalClaimReason,
+  extensionInterceptedModuleIds,
+  extensionMappingForPackage,
+  extensionMappingGlobals,
+  extensionMappingsForLibrary,
+  extensionModuleIds,
+  extensionVerificationBasis,
+  EXTENSION_EXTERNAL_DIAGNOSTIC_CODES,
+  EXTENSION_EXTERNAL_DIAGNOSTIC_MOMENTS,
+  EXTENSION_EXTERNAL_DIAGNOSTIC_RULES,
+  EXTENSION_EXTERNALS_GOVERNING_DECISIONS,
+  EXTENSION_EXTERNALS_GOVERNING_SPEC_REFERENCE_LINE,
+  EXTENSION_EXTERNAL_INTERCEPTION_POINT,
+  EXTENSION_EXTERNAL_INTEROP_BEHAVIOUR,
+  EXTENSION_EXTERNAL_MAPPINGS,
+  EXTENSION_EXTERNAL_MECHANISM,
+  EXTENSION_EXTERNAL_NON_GOALS,
+  EXTENSION_GLOBAL_NAME_PATTERN,
+  EXTENSION_GLOBAL_READ_TIMING,
+  EXTENSION_LIBRARY_ID_PATTERN,
+  EXTENSION_LIBRARY_REFERENCE_FIELD_NAME,
+  EXTENSION_LOAD_ORDER_RULES,
+  EXTENSION_METADATA_SOURCES,
+  EXTENSION_RESERVED_GLOBAL_NAMES,
+  EXTENSION_RESERVED_LIBRARY_ID_SEGMENTS,
+  EXTENSION_RESERVED_LIBRARY_IDS,
+  ExtensionExternalContractError,
+  findExtensionExternalMapping,
+  formatExtensionExternalDiagnostic,
+  formatExtensionExternalDiagnostics,
+  isExtensionGlobalName,
+  isExtensionLibraryId,
+} from "./extension-externals";
+export type {
+  AuditExtensionLibraryMetadataOptions,
+  ExtensionExternalContractOptions,
+  ExtensionExternalDiagnostic,
+  ExtensionExternalDiagnosticCode,
+  ExtensionExternalDiagnosticMoment,
+  ExtensionExternalDiagnosticRule,
+  ExtensionExternalFixOwner,
+  ExtensionExternalMapping,
+  ExtensionLibraryListing,
+  ExtensionLoadOrderRule,
+  ExtensionMetadataSource,
+  ExtensionVerificationBasis,
+} from "./extension-externals";
 
 export {
   assertFgcLockDocument,

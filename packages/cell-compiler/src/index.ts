@@ -20,6 +20,14 @@
  * the dependency resolver audits locks against the same table and may not depend
  * on this package — so what lives here is the generated source and the guard.
  *
+ * A fourth Spec is projected here: #12 "`extension` dependencies as external modules
+ * + `frontendLibraries` metadata"
+ * (https://github.com/Mang-X/forguncy-react-workspace/issues/12), which decides what
+ * an `extension` dependency compiles *to*. The same division holds — the mapping table
+ * and the load-order rules are `core`'s, because the dependency resolver audits locks
+ * against the same identity while being unable to depend on this package — so what
+ * lives here is the generated module and the externals plan.
+ *
  * Scope note: this package states the *artifact* contract, the boundary that
  * produces one, and the rules that make local workspace packages source rather than
  * runtime modules. It does not resolve dependencies (#8), bundle a project with a
@@ -154,6 +162,24 @@ export type {
   PlanHostBridgeOptions,
   RenderHostBridgeGuardOptions,
 } from "./host-bridge";
+
+// The extension externals (#12): the interposed modules that answer an authored
+// import from a verified frontend extension's page global, and the plan a resolver
+// hook and the artifact's `frontendLibraries` metadata are derived from.
+export {
+  extensionExternalModuleIds,
+  formatExtensionExternalsPlan,
+  interceptedExtensionExternalModuleIds,
+  planExtensionExternals,
+  renderExtensionExternalModule,
+  EXTENSION_EXTERNAL_GENERATED_BANNER,
+} from "./extension-externals";
+export type {
+  ExtensionExternalInterception,
+  ExtensionExternalsActivation,
+  ExtensionExternalsPlan,
+  PlanExtensionExternalsOptions,
+} from "./extension-externals";
 
 // The workspace-source contract (#14): workspace packages are source, not runtime modules
 export {
