@@ -150,6 +150,7 @@ export {
   assembleCellArtifact,
   CELL_ARTIFACT_BANNER,
   compileCell,
+  findDependencyDecision,
   formatCompileCellOutcome,
   packageNameOfSpecifier,
   serializeCompileCellResult,

@@ -410,7 +410,16 @@ function auditHostGlobalClaims(dependencies: readonly DependencyDecision[]): rea
 // Bundler report audit
 // ---------------------------------------------------------------------------
 
-function findDecision(
+/**
+ * The decision that governs a specifier: the exact one, or its package's.
+ *
+ * The rule for how a decision covers a subpath, exported so the engine has exactly
+ * one of them. `react-dom/client` is governed by a `react-dom` decision, and the
+ * bridge's activation calculation has to agree with this or the two disagree about
+ * what an artifact contains — the host-bridge module imports it rather than
+ * restating it.
+ */
+export function findDependencyDecision(
   dependencies: readonly DependencyDecision[],
   specifier: string,
 ): DependencyDecision | undefined {
@@ -433,7 +442,7 @@ function auditExternalImports(
   const diagnostics: CellArtifactDiagnostic[] = [];
 
   for (const specifier of externalImports) {
-    const decision = findDecision(dependencies, specifier);
+    const decision = findDependencyDecision(dependencies, specifier);
 
     if (decision === undefined) {
       // A file path left external is not a missing decision; it is workspace
@@ -511,7 +520,7 @@ function auditInlinedPackages(
   const diagnostics: CellArtifactDiagnostic[] = [];
 
   for (const packageName of inlinedPackages) {
-    const decision = findDecision(dependencies, packageName);
+    const decision = findDependencyDecision(dependencies, packageName);
     if (decision === undefined) continue;
 
     switch (decision.strategy) {

@@ -72,6 +72,8 @@ import type {
   JSX_RUNTIME_ADAPTER_EXPORTS,
 } from "@forguncy-react-workspace/core";
 
+import { findDependencyDecision } from "./artifact";
+
 // ---------------------------------------------------------------------------
 // The generated-module banner
 // ---------------------------------------------------------------------------
@@ -323,6 +325,10 @@ function renderHostBridgeVerifiedMemberView(mapping: HostBridgeGlobalMapping, mo
  * `react/jsx-dev-runtime` rather than the row's first id.
  */
 export function renderHostBridgeAdapterModule(mapping: HostBridgeAdapterMapping, moduleId: string): string {
+  // The adapter id decides which host member is the delegate. `jsx-runtime` means the
+  // host React object's `createElement` — a second adapter id would need its own
+  // delegate here, which is why the delegate is not a mapping field: a mapping says
+  // which members are *required*, and the adapter knows what to do with them.
   const globalName = "React";
   const createElement = mapping.requiredHostMembers.includes("createElement") ? "createElement" : undefined;
 
@@ -687,13 +693,33 @@ export function planHostBridge(options: PlanHostBridgeOptions = {}): HostBridgeP
     for (const moduleId of hostBridgeModuleIds(mapping)) {
       const shape = hostBridgeShapeFor(mapping, moduleId);
       if (shape === undefined) continue;
+
+      // Rendering is the other half of "a dry run returns a plan, not an exception".
+      // The contract guard above catches a malformed row, but some malformed rows are
+      // also unrenderable — an adapter with no delegate throws while generating, not
+      // while validating — so a failure here is a diagnostic and a skipped entry
+      // rather than an exception that discards the rest of the audit.
+      let source: string;
+      try {
+        source = renderHostBridgeModule(mapping, moduleId);
+      } catch (error) {
+        diagnostics.push(
+          createHostBridgeDiagnostic(
+            "host-mapping-conflict",
+            moduleId,
+            `The mapping for this module id cannot be rendered: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        );
+        continue;
+      }
+
       catalog.push({
         specifier: mapping.specifier,
         moduleId,
         kind: mapping.kind,
         shape,
         mapping,
-        source: renderHostBridgeModule(mapping, moduleId),
+        source,
         bundledForbidden: true,
       });
     }
@@ -719,7 +745,7 @@ export function planHostBridge(options: PlanHostBridgeOptions = {}): HostBridgeP
   }
 
   const decisions = options.decisions ?? [];
-  const usage = hostBridgeUsage(decisions, options.referencedSpecifiers);
+  const usage = hostBridgeUsage(decisions, options.referencedSpecifiers, mappings);
   const interceptions = catalog.filter(interception => usage.activated.has(interception.moduleId));
 
   diagnostics.push(...auditHostBridgeDecisions(decisions, mappings));
@@ -759,16 +785,22 @@ export interface HostBridgeUsage {
  *
  * `unstated` when neither input was supplied: the answer is unknown, and the caller is
  * told so rather than handed an empty activation that reads like a decision.
+ *
+ * Takes the mapping table for the same reason the catalog does. A project-supplied row
+ * has to participate in activation and in the preset audit, not merely appear in the
+ * catalog — a caller that extends the table and then finds its row invisible to every
+ * reference would be looking at a capability the bridge refuses to use.
  */
 function hostBridgeUsage(
   decisions: readonly DependencyDecision[],
   referencedSpecifiers: readonly string[] | undefined,
+  mappings: readonly HostBridgeMapping[],
 ): HostBridgeUsage {
   if (referencedSpecifiers === undefined && decisions.length === 0) {
     return { state: "unstated", activated: new Set(), presetDependent: new Set() };
   }
 
-  const adapterModuleIds = new Set(hostBridgeAdapterMappings().flatMap(hostBridgeModuleIds));
+  const adapterModuleIds = new Set(hostBridgeAdapterMappings(mappings).flatMap(hostBridgeModuleIds));
   const activated = new Set<string>();
   const presetDependent = new Set<string>();
 
@@ -785,18 +817,35 @@ function hostBridgeUsage(
     }
   }
 
-  const decided = new Set(decisions.map(decision => decision.packageName));
   for (const specifier of referencedSpecifiers ?? []) {
     if (adapterModuleIds.has(specifier)) {
       activated.add(specifier);
       continue;
     }
-    // A reference alone never activates a host-global mapping: without a `host`
-    // decision nothing says the page provides the module, and wiring a hook would
-    // override whatever the decision layer is going to say about it.
-    if (findHostBridgeModuleMapping(specifier) === undefined) continue;
-    if (decided.has(specifier)) continue;
-    presetDependent.add(specifier);
+
+    if (findHostBridgeModuleMapping(specifier, mappings) === undefined) continue;
+
+    // The governing decision is found the way the compile boundary finds it: a
+    // `react-dom` decision governs an import of `react-dom/client`. Using an exact
+    // comparison here would leave the very module id the source imports
+    // unactivated — the subpath would be in the catalog and never wired.
+    const governing = findDependencyDecision(decisions, specifier);
+
+    if (governing === undefined) {
+      // A reference alone never activates a host-global mapping: without a `host`
+      // decision nothing says the page provides the module, and wiring a hook would
+      // override whatever the decision layer is going to say about it. It is still a
+      // real preset question, because the artifact imports it either way.
+      presetDependent.add(specifier);
+      continue;
+    }
+
+    if (governing.strategy === "host") {
+      activated.add(specifier);
+      presetDependent.add(specifier);
+    }
+    // Any other governing strategy carries its own copy, its own global, or its own
+    // alternative: neither activated nor dependent on a host global.
   }
 
   return { state: "stated", activated, presetDependent };

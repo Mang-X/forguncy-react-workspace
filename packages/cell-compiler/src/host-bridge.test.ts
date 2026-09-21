@@ -635,6 +635,121 @@ describe("the plan activates only what the decisions select", () => {
     const plan = planHostBridge({ decisions: [inlineDecision("antd")] });
     expect(plan.catalog.map(entry => entry.moduleId)).toEqual(interceptedHostBridgeModuleIds());
   });
+
+  // The compile boundary's own rule: a `react-dom` decision governs an import of
+  // `react-dom/client`, which is exactly why `artifact.findDependencyDecision` accepts
+  // either the exact specifier or its package name. An exact-string activation check
+  // here would leave the narrowed view — the module id the source actually imports —
+  // unactivated while activating the package id it does not import.
+  it("activates the referenced subpath when a package-level host decision governs it", () => {
+    const plan = planHostBridge({
+      decisions: [hostDecision("react-dom", "ReactDOM")],
+      referencedSpecifiers: ["react-dom", "react-dom/client"],
+    });
+
+    expect(plan.interceptions.map(entry => entry.moduleId)).toEqual(["react-dom", "react-dom/client"]);
+    expect(plan.interceptions.map(entry => entry.shape)).toEqual(["host-identity", "verified-member-view"]);
+  });
+
+  it("does not activate a subpath the artifact does not reference", () => {
+    const plan = planHostBridge({ decisions: [hostDecision("react-dom", "ReactDOM")] });
+    expect(plan.interceptions.map(entry => entry.moduleId)).toEqual(["react-dom"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A caller-supplied table participates everywhere — the review's third-round findings
+// ---------------------------------------------------------------------------
+
+describe("the plan uses the table it was given, not the shipped default", () => {
+  const dayjs: HostBridgeGlobalMapping = {
+    kind: "host-global",
+    specifier: "dayjs",
+    globalName: "dayjs",
+    binds: [{ moduleId: "dayjs", shape: "host-identity" }],
+    identityRule: "A project-supplied row; #9 defers the shipped one until its version semantics are recorded.",
+    verifiedMembers: [],
+    evidence: ["product-runtime-source"],
+  };
+
+  const customAdapter = {
+    kind: "jsx-runtime-adapter",
+    specifier: "custom/jsx-runtime",
+    adapter: "jsx-runtime",
+    requiredHostMembers: ["createElement"],
+    guardedMembers: [],
+    verifiedMembers: [],
+    evidence: ["product-runtime-source"],
+  } as const;
+
+  // Before this, `hostBridgeUsage` consulted the shipped table, so an added row appeared
+  // in the catalog and was invisible to every reference-driven decision — a capability
+  // the bridge could render and refused to use.
+  it("lets an added host mapping participate in the preset audit", () => {
+    const plan = planHostBridge({
+      mappings: [...HOST_BRIDGE_MAPPINGS, dayjs],
+      referencedSpecifiers: ["dayjs"],
+      cellPreset: "None",
+    });
+
+    const diagnostic = plan.diagnostics.find(candidate => candidate.code === "host-global-missing");
+    expect(diagnostic?.specifier).toBe("dayjs");
+    // `dayjs` is gated by the AntDesign preset per #5, so `AntDesign` makes it clean.
+    expect(
+      planHostBridge({ mappings: [...HOST_BRIDGE_MAPPINGS, dayjs], referencedSpecifiers: ["dayjs"], cellPreset: "AntDesign" })
+        .diagnostics,
+    ).toEqual([]);
+  });
+
+  it("lets an added host mapping be activated by a host decision", () => {
+    const plan = planHostBridge({
+      mappings: [...HOST_BRIDGE_MAPPINGS, dayjs],
+      decisions: [hostDecision("dayjs", "dayjs")],
+    });
+    expect(plan.interceptions.map(entry => entry.moduleId)).toEqual(["dayjs"]);
+  });
+
+  it("lets an added adapter be activated by a reference", () => {
+    const plan = planHostBridge({
+      mappings: [...HOST_BRIDGE_MAPPINGS, customAdapter],
+      referencedSpecifiers: ["custom/jsx-runtime"],
+    });
+    expect(plan.interceptions.map(entry => [entry.moduleId, entry.shape])).toEqual([
+      ["custom/jsx-runtime", "jsx-runtime-adapter"],
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A dry run survives a malformed row — the review's third-round finding
+// ---------------------------------------------------------------------------
+
+describe("planHostBridge reports a malformed table instead of throwing", () => {
+  it("does not throw on an adapter that names no delegate, and still reports it", () => {
+    // The contract guard catches this one, but the renderer would throw a second time
+    // while generating the catalog — which is what turned a promised dry run into an
+    // exception. The entry is skipped and a diagnostic explains why.
+    const broken = {
+      kind: "jsx-runtime-adapter",
+      specifier: "broken/jsx-runtime",
+      adapter: "jsx-runtime",
+      requiredHostMembers: [],
+      verifiedMembers: [],
+      evidence: ["product-runtime-source"],
+    } as const;
+
+    let plan: ReturnType<typeof planHostBridge> | undefined;
+    expect(() => {
+      plan = planHostBridge({ mappings: [...HOST_BRIDGE_MAPPINGS, broken] });
+    }).not.toThrow();
+
+    expect(plan?.catalog.map(entry => entry.moduleId)).not.toContain("broken/jsx-runtime");
+    const conflicts = plan?.diagnostics.filter(diagnostic => diagnostic.code === "host-mapping-conflict") ?? [];
+    expect(conflicts.length).toBeGreaterThanOrEqual(1);
+    expect(conflicts.some(diagnostic => /cannot be rendered|names no host member/.test(diagnostic.detail))).toBe(true);
+    // The rest of the table is still projected, so a caller can act on the good rows.
+    expect(plan?.catalog.map(entry => entry.moduleId)).toContain("react");
+  });
 });
 
 // ---------------------------------------------------------------------------
