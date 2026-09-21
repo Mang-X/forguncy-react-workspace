@@ -19,6 +19,8 @@ Every non-workspace dependency used by generated cell code must resolve to one o
 - `extension`: provided by a Forguncy frontend extension when shared module identity, cross-cell singleton semantics, or deliberate reuse is required.
 - `replace`: the selected package is unsuitable; prefer a modern browser-first/ESM alternative instead of building a permanent adapter.
 
+**Local workspace packages are source, not runtime modules.** A cell may import a shared workspace package such as `@app/ui` by name; the compiler flattens that source into each consuming cell artifact like any other source file. Development-stage source sharing does not imply deployed module sharing. Two cells importing the same package each carry their own copy, a React Context declared there is local to each cell, and module-scope state is per cell. Cross-cell state has to be delegated to a module the page or an extension provides, and workspace packages never receive a dependency decision and never appear in `frontendLibraries`.
+
 Do not introduce application routers, a second application-wide state system, authentication frameworks, or a second business-data source of truth inside React cells.
 
 A rejected dependency is reported either as an **architectural rejection** (the capability belongs to Forguncy, so no replacement package can fix it) or as a **technical bundling failure** (the right role, the wrong artifact). These are different answers and must not be reported as one another. React Router `BrowserRouter` and application-wide duplicate business stores are platform conflicts, not packages to adapt.
