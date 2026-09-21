@@ -211,8 +211,13 @@ describe("the workspace graph index", () => {
     const forward = indexWorkspaceGraph({ packages: [verbose, terse] });
     const backward = indexWorkspaceGraph({ packages: [terse, verbose] });
 
-    expect(forward.index.byName.get("@app/ui")?.imports).toEqual(["react"]);
-    expect(backward.index.byName.get("@app/ui")?.imports).toEqual(["react"]);
+    // The invariant: whichever record wins, it is the same one in both directions. Which
+    // one that is comes from raw text order and carries no preference, since the two are
+    // interchangeable for every check here — asserted so a change to the key has to mean it.
+    expect(forward.index.byName.get("@app/ui")?.imports).toEqual(
+      backward.index.byName.get("@app/ui")?.imports,
+    );
+    expect(forward.index.byName.get("@app/ui")?.imports).toEqual(["react", "react"]);
     expect(forward.diagnostics).toEqual(backward.diagnostics);
     // Equivalent, so the report says the duplicate changed nothing — while the retained
     // record is still chosen by content rather than by position.
@@ -232,6 +237,35 @@ describe("the workspace graph index", () => {
       // must not tie, and the same one has to win in both orders.
       expect(index.byName.get("@app/ui")?.imports).toEqual([]);
     }
+  });
+
+  // The third review's finding, and the last fold that was left in the selection key: an
+  // absent `moduleIdentity` and an explicit `{ kind: "cell-local" }` mean the same thing —
+  // and stay folded in the *meaning* comparison — but they are not the same record, so the
+  // key has to keep them apart or the exported index retains whichever came first.
+  it("does not fold an explicit cell-local identity into an absent one when ordering records", () => {
+    const implicit: WorkspacePackageRecord = { name: "@app/ui", directory: "packages/ui" };
+    const explicit: WorkspacePackageRecord = {
+      name: "@app/ui",
+      directory: "packages/ui",
+      moduleIdentity: { kind: "cell-local" },
+    };
+
+    const forward = indexWorkspaceGraph({ packages: [implicit, explicit] });
+    const backward = indexWorkspaceGraph({ packages: [explicit, implicit] });
+
+    // The contract: the retained record is the same one in both directions.
+    expect(forward.index.byName.get("@app/ui")?.moduleIdentity).toEqual(
+      backward.index.byName.get("@app/ui")?.moduleIdentity,
+    );
+    // And which one that is, so a later change to the key has to mean it deliberately. The
+    // choice is by raw text order and carries no preference — `null` sorts before
+    // `{"kind":"cell-local"}` — because the two are interchangeable for every check here.
+    expect(forward.index.byName.get("@app/ui")?.moduleIdentity).toBeUndefined();
+
+    // Still reported as equivalent: the duplicate changed nothing downstream.
+    expect(forward.diagnostics[0]?.message).toContain("equivalently");
+    expect(forward.diagnostics).toEqual(backward.diagnostics);
   });
 
   it("says a duplicate that declares the same thing is equivalent rather than ambiguous", () => {

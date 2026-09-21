@@ -546,53 +546,59 @@ export function indexWorkspaceGraph(graph: WorkspaceGraph): WorkspaceGraphIndexR
 /**
  * The whole of a record, raw, as a sort key.
  *
- * Raw rather than normalised, so that two records a caller wrote differently are
- * ordered by what they wrote and never tie. A tie then means the two records are the
- * same text, which is the only case where keeping either can change nothing: see
+ * Raw rather than normalised, so that two records a caller wrote differently are ordered
+ * by what they wrote and never tie. A tie then means the two records are the same text,
+ * which is the only case where keeping either can change nothing: see
  * {@link recordsAreEquivalent} for the weaker question the diagnostic asks.
  *
- * `undefined` and `[]` are distinguished on purpose. They are not the same declaration —
- * one says "these are the imports", the other says "nobody said" — and the delegation
- * check answers differently for them, so they must not compare equal.
+ * `JSON.stringify` of the fields rather than a hand-rolled separator, because the point of
+ * the key is that two *different* records cannot collide: a separator can be spelled inside
+ * a value, and the two distinctions that matter both have to survive it — `undefined`
+ * against `[]` for `imports`, and an absent `moduleIdentity` against an explicit
+ * `{ kind: "cell-local" }`. Both optional fields are written as `null` when absent, so
+ * presence is part of the key. Those pairs mean the same thing to every check here, but
+ * they are not the same record, and only the key keeps them apart.
+ *
+ * Which of two records that differ only in this key's tail wins is decided by text order,
+ * and carries no preference: records that tie on their meaning are interchangeable, and the
+ * duplicate is reported either way.
  */
 function recordSelectionKey(record: WorkspacePackageRecord): string {
-  const imports = record.imports === undefined ? "\u0002unstated" : record.imports.join("\u0001");
-  return [record.name, record.directory, imports, identityKey(record)].join("\u0000");
+  return JSON.stringify([
+    record.name,
+    record.directory,
+    record.imports ?? null,
+    record.moduleIdentity ?? null,
+  ]);
 }
 
 /**
- * A record's identity declaration, with `cell-local` and an absent field folded together.
+ * A record's meaning, normalised: the weaker comparison the duplicate diagnostic asks.
  *
- * They are the same declaration by the type's own definition, so nothing may distinguish
- * them — not the sort key, and not the equivalence the duplicate diagnostic reports.
+ * Two records that list the same imports in a different order, list one twice, or spell
+ * `cell-local` explicitly rather than leaving the field out are equivalent — the graph
+ * computes edges through a set, the reachability check is a membership test, and an absent
+ * identity already means `cell-local` by the type's own definition. The distinction matters
+ * for the report, not for the resolution: a reader of "two records declare this package"
+ * needs to know whether the duplicate changed anything.
+ *
+ * `undefined` and `[]` for `imports` stay different, for the reason
+ * {@link recordSelectionKey} gives: "nobody said" is not "there are none", and the
+ * reachability check answers differently for them.
  */
-function identityKey(record: WorkspacePackageRecord): string {
-  return record.moduleIdentity === undefined || record.moduleIdentity.kind === "cell-local"
-    ? "cell-local"
-    : `delegated\u0001${record.moduleIdentity.via}`;
+function recordMeaning(record: WorkspacePackageRecord): string {
+  const imports =
+    record.imports === undefined ? null : [...new Set(record.imports)].sort(compareStrings);
+  const identity =
+    record.moduleIdentity === undefined || record.moduleIdentity.kind === "cell-local"
+      ? "cell-local"
+      : `delegated:${record.moduleIdentity.via}`;
+  return JSON.stringify([record.name, record.directory, imports, identity]);
 }
 
-/**
- * Whether two records say the same thing about a package, once spelling differences are
- * set aside.
- *
- * The question the duplicate diagnostic asks, and a deliberately weaker one than the
- * sort key: two records that list the same imports in a different order, or list one
- * twice, are equivalent — the graph computes edges through a set and the reachability
- * check is a membership test, so every answer this contract gives is the same. The
- * distinction matters for the report, not for the resolution: a reader of "two records
- * declare this package" needs to know whether the duplicate changed anything.
- *
- * `undefined` and `[]` are still different, for the reason {@link recordSelectionKey}
- * gives.
- */
+/** Whether two records say the same thing about a package, once spelling differences are set aside. */
 function recordsAreEquivalent(a: WorkspacePackageRecord, b: WorkspacePackageRecord): boolean {
-  if (a.directory !== b.directory) return false;
-  if ((a.imports === undefined) !== (b.imports === undefined)) return false;
-
-  const normalized = (imports: readonly string[]): string =>
-    [...new Set(imports)].sort(compareStrings).join("\u0001");
-  return normalized(a.imports ?? []) === normalized(b.imports ?? []) && identityKey(a) === identityKey(b);
+  return recordMeaning(a) === recordMeaning(b);
 }
 
 /**
