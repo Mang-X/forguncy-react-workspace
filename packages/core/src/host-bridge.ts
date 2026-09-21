@@ -123,6 +123,52 @@ export const HOST_BRIDGE_IDENTITY_FIELDS = ["hostReactVersion"] as const;
 
 export type HostBridgeIdentityField = (typeof HOST_BRIDGE_IDENTITY_FIELDS)[number];
 
+/**
+ * How a *bridged module id* relates to the host object it was mapped to.
+ *
+ * The distinction the mapping table needs, and the one it initially lacked: a
+ * row can name a global, but two module ids in one row need not promise the same
+ * surface. `react-dom` is the package id #9 maps to the host `ReactDOM`, so the
+ * module *is* that object; `react-dom/client` is #9's "host-compatible ReactDOM
+ * surface established by runtime evidence", which is a smaller claim — the
+ * members #5 read off `window.ReactDOM`, not the union of everything the
+ * published module happens to export.
+ *
+ * - `host-identity` — the interposed module *is* the host object. Used where the
+ *   claim being made is object identity, and only there: wrapping such a module
+ *   would break the identity check two cells compare.
+ * - `verified-member-view` — the interposed module is a view over the host object
+ *   that forwards exactly the observed members and refuses every other one. Used
+ *   where the claim is a *surface* rather than an identity.
+ */
+export const HOST_BRIDGE_BINDING_SHAPES = ["host-identity", "verified-member-view"] as const;
+
+export type HostBridgeBindingShape = (typeof HOST_BRIDGE_BINDING_SHAPES)[number];
+
+/**
+ * What one intercepted module id binds to.
+ *
+ * Declared per module id rather than inferred from the row, because "this row's
+ * global exists" and "this import's surface is known" are different statements.
+ * Without this, `verifiedMembers` was descriptive only: the generated module for
+ * a subpath returned the whole host object, so an unobserved export was either
+ * exposed or silently `undefined` — the exact behaviour #9's adapter rules treat
+ * as a defect elsewhere.
+ */
+export interface HostBridgeModuleIdBinding {
+  readonly moduleId: string;
+  readonly shape: HostBridgeBindingShape;
+  /**
+   * The members a `verified-member-view` forwards, in the order they are declared.
+   *
+   * Required for a view and refused for an identity binding. Every entry must also
+   * appear in the row's {@link HostBridgeMappingBase.verifiedMembers}: the view may
+   * only forward what was observed, which is what makes the guard below able to
+   * reject a view that quietly widens the surface.
+   */
+  readonly members?: readonly string[];
+}
+
 interface HostBridgeMappingBase {
   readonly kind: HostBridgeMappingKind;
   /**
@@ -147,8 +193,10 @@ interface HostBridgeMappingBase {
    * Kept per mapping rather than as one global list because the evidence is
    * per-observation: #5 read `React.version` off the injected object and
    * `ReactDOM.createRoot` off the page global. A name that is not here is *not*
-   * thereby absent; it is unobserved, which is why {@link guardedMembers} exists
-   * and why an empty list is a legitimate value.
+   * thereby absent; it is unobserved, which is why
+   * {@link HostBridgeMappingBase.guardedMembers} exists, why a
+   * `verified-member-view` may only forward members from this list, and why an
+   * empty list is a legitimate value.
    */
   readonly verifiedMembers: readonly string[];
   /**
@@ -189,6 +237,16 @@ export interface HostBridgeGlobalMapping extends HostBridgeMappingBase {
   readonly identitySensitive?: boolean;
   /** What keeps this mapping's identity true. Required, even without a field. */
   readonly identityRule: string;
+  /**
+   * What each module id this row intercepts actually binds to.
+   *
+   * Required, and required to cover every id in
+   * {@link hostBridgeModuleIds} exactly once: the row's `globalName` says which
+   * page object exists, while this says what each *import* is promised, and a
+   * row that does not state the second is a row whose surface claim cannot be
+   * checked.
+   */
+  readonly binds: readonly HostBridgeModuleIdBinding[];
 }
 
 export interface HostBridgeAdapterMapping extends HostBridgeMappingBase {
@@ -227,6 +285,7 @@ export const HOST_BRIDGE_MAPPINGS: readonly HostBridgeMapping[] = [
     globalName: "React",
     identityField: "hostReactVersion",
     identitySensitive: true,
+    binds: [{ moduleId: "react", shape: "host-identity" }],
     identityRule:
       "#5 measured `React.version === \"19.2.7\"` on the injected object and verified `single-react-instance-per-page`, so the recording `ForguncyTargetIdentity.hostReactVersion` is a real check: the bridge compares the page's `React.version` against it and refuses on a mismatch. The version check is the *second* line of defence; the first is that nothing else in the artifact may carry a React implementation at all.",
     verifiedMembers: ["version", "createElement", "useState", "useEffect", "useMemo", "useRef", "useCallback"],
@@ -240,17 +299,27 @@ export const HOST_BRIDGE_MAPPINGS: readonly HostBridgeMapping[] = [
     globalName: "ReactDOM",
     moduleIds: ["react-dom/client"],
     identitySensitive: true,
+    binds: [
+      // The package id is the object #9 maps to the host global, so the module is
+      // that object. Narrowing it here would refuse a legitimate `react-dom`
+      // surface on the strength of an inventory #5 never attempted.
+      { moduleId: "react-dom", shape: "host-identity" },
+      // The subpath is a *surface* claim rather than an identity claim, so it gets
+      // a view over the observed members and refuses everything else.
+      { moduleId: "react-dom/client", shape: "verified-member-view", members: ["version", "createRoot"] },
+    ],
     identityRule:
-      "No recorded field can check this one: #8's `ForguncyTargetIdentity` holds a host React version and no ReactDOM version, so comparing anything here would mean inventing a number to compare against. What keeps it honest is therefore structural — the mapping is identity-sensitive, so a bundled ReactDOM duplicate is a diagnostic, and the surface the subpath may use is limited to the members #5 actually observed.",
+      "No recorded field can check this one: #8's `ForguncyTargetIdentity` holds a host React version and no ReactDOM version, so comparing anything here would mean inventing a number to compare against. What keeps it honest instead is that the mapping is identity-sensitive, so a bundled ReactDOM duplicate is a diagnostic, and that the surface a subpath consumer gets is limited to the members #5 actually observed.",
     verifiedMembers: ["version", "createRoot"],
     evidence: ["product-runtime-source", "generated-runtime-browser"],
     note:
-      "`react-dom/client` rides on this row because the page has one ReactDOM global, and that global is where `createRoot` was observed. The observed surface is deliberately short: `createRoot` and `version` were read off `window.ReactDOM` in a real page, and nothing else was. A subpath consumer therefore gets a *host-compatible* surface — the members #5 established — not the published `react-dom/client` module, whose other exports (`hydrateRoot` among them) are unobserved and must be reported rather than silently resolved to `undefined`.",
+      "`react-dom/client` rides on this row because the page has one ReactDOM global, and that global is where `createRoot` was observed. The published module declares three exports in 19.2.7 (`createRoot`, `hydrateRoot`, `version`), and only two of them were read off `window.ReactDOM` in a real page. The client view therefore forwards `version` and `createRoot`, and a request for anything else — `hydrateRoot` included — is refused with `host-member-not-verified` rather than forwarded or resolved to `undefined`. The bare `react-dom` id is deliberately **not** narrowed: #9's candidate list maps that package id to the host global, whereas only the subpath is described as \"host-compatible ReactDOM surface established by runtime evidence\".",
   },
   {
     kind: "host-global",
     specifier: "antd",
     globalName: "antd",
+    binds: [{ moduleId: "antd", shape: "host-identity" }],
     identityRule:
       "No field can check it, and none should: the resolver's lock audit already recorded why — antd's own context does not cross cells (#5's `context-does-not-cross-cells`), so a cell with its own copy shares nothing a second copy could split. What this mapping needs instead is a truthful availability statement, which it gets from #5 rather than from a rule written here.",
     verifiedMembers: [],
@@ -350,8 +419,7 @@ export function hostBridgeMappingsForPackage(packageName: string): readonly Host
   return HOST_BRIDGE_MAPPINGS.filter(mapping => packageNameOfModuleId(mapping.specifier) === packageName);
 }
 
-/**
- * The npm package a module id belongs to.
+/** The npm package a module id belongs to.
  *
  * Only used to answer package-shaped questions (which package's identity is
  * being checked); interception itself never keys on it.
@@ -359,6 +427,37 @@ export function hostBridgeMappingsForPackage(packageName: string): readonly Host
 export function packageNameOfModuleId(specifier: string): string {
   const segments = specifier.split("/");
   return specifier.startsWith("@") ? segments.slice(0, 2).join("/") : (segments[0] ?? specifier);
+}
+
+/**
+ * The binding a mapping declares for one of its module ids.
+ *
+ * `undefined` means the mapping does not intercept that id at all — which is how
+ * `react-dom/server` stays unbridged while `react-dom` does not — so this is the
+ * lookup a caller uses to decide whether a specifier is intercepted, not only how.
+ */
+export function hostBridgeBindingFor(
+  mapping: HostBridgeMapping,
+  moduleId: string,
+): HostBridgeModuleIdBinding | undefined {
+  if (mapping.kind !== "host-global") return undefined;
+  return mapping.binds.find(binding => binding.moduleId === moduleId);
+}
+
+/**
+ * What a bridged module id is, as one value.
+ *
+ * Collapses the two mapping kinds into the single answer the compilation path
+ * needs: an adapter row's ids are `jsx-runtime-adapter`, and a host-global row's
+ * ids are whichever binding shape the row declares.
+ */
+export type HostBridgeModuleShape = HostBridgeBindingShape | "jsx-runtime-adapter";
+
+export function hostBridgeShapeFor(mapping: HostBridgeMapping, moduleId: string): HostBridgeModuleShape | undefined {
+  if (mapping.kind === "jsx-runtime-adapter") {
+    return hostBridgeModuleIds(mapping).includes(moduleId) ? "jsx-runtime-adapter" : undefined;
+  }
+  return hostBridgeBindingFor(mapping, moduleId)?.shape;
 }
 
 /** The host-global rows only — the projection the lock's conformance audit reads. */
@@ -686,6 +785,7 @@ export const HOST_BRIDGE_DIAGNOSTIC_CODES = [
   "host-mapping-missing",
   "host-global-missing",
   "host-global-incompatible",
+  "host-member-not-verified",
   "host-module-duplicated",
   "host-adapter-not-used",
   "host-mapping-conflict",
@@ -745,6 +845,17 @@ export const HOST_BRIDGE_DIAGNOSTIC_RULES: Readonly<Record<HostBridgeDiagnosticC
     states: "The global exists but failed the mapping's identity rule.",
     remediation:
       "Compare the recorded `ForguncyTargetIdentity` against what the page actually has. A mismatch means the lock was written against a different Forguncy build, so the decision it carries is no longer evidence for this target; re-probe rather than adjusting the check. A guarded member missing on an otherwise correct host means #5's observed surface is smaller than the module needs.",
+    fixOwner: "dependency-decision",
+    fixableByMapping: false,
+  },
+  "host-member-not-verified": {
+    code: "host-member-not-verified",
+    moment: "runtime",
+    label: "Bridged module member was never observed on the host object",
+    states:
+      "A member of a narrowed bridged module was requested and it is not one of the members #5 observed on the host object.",
+    remediation:
+      "Do not widen the view: an unobserved member is not a known-good member, and forwarding it would either expose an implementation nobody verified or move the failure to the call site as `undefined`. Establish the member by re-probing the target (#5), or import the id whose whole surface the mapping binds. Adding the name to the view without new evidence is the one fix this code exists to prevent.",
     fixOwner: "dependency-decision",
     fixableByMapping: false,
   },
@@ -836,7 +947,13 @@ export class HostBridgeContractError extends Error {
  * 4. a mapping with no evidence channel, which is a claim with no observation
  *    behind it;
  * 5. an identity-sensitive mapping with neither a checkable field nor a rule
- *    saying what keeps it true.
+ *    saying what keeps it true;
+ * 6. an intercepted module id with no declared binding shape — the state in which
+ *    "this import is the host object" and "this import is a view over it" are
+ *    indistinguishable, and the surface claim stops being checkable;
+ * 7. a `verified-member-view` that forwards a member #5 never observed, which is
+ *    the one edit that would silently turn an evidence-based narrowing back into a
+ *    guess.
  */
 export function assertHostBridgeMappingIsAdmissible(mapping: HostBridgeMapping): void {
   if (mapping.evidence.length === 0) {
@@ -882,13 +999,67 @@ export function assertHostBridgeMappingIsAdmissible(mapping: HostBridgeMapping):
       `Host bridge mapping "${mapping.specifier}" states no identity rule, so nothing says what keeps its binding the same module across cells.`,
     );
   }
+
+  // Every intercepted id has to say what it binds to, and a narrowed view may only
+  // forward members the row recorded as observed. Both halves are what turn
+  // `verifiedMembers` from a description into something the generated module can be
+  // held to: without the first, a module id silently inherits the whole host object;
+  // without the second, a view could widen the surface while the row still looked
+  // conservative.
+  const declaredIds = hostBridgeModuleIds(mapping);
+  for (const moduleId of declaredIds) {
+    if (hostBridgeBindingFor(mapping, moduleId) === undefined) {
+      throw new HostBridgeContractError(
+        `Host bridge mapping "${mapping.specifier}" intercepts "${moduleId}" but declares no binding for it, so nothing says whether the import is the host object or a view over it.`,
+      );
+    }
+  }
+
+  for (const declared of mapping.binds) {
+    if (!declaredIds.includes(declared.moduleId)) {
+      throw new HostBridgeContractError(
+        `Host bridge mapping "${mapping.specifier}" declares a binding for "${declared.moduleId}", which the row does not intercept.`,
+      );
+    }
+
+    if (declared.shape === "host-identity") {
+      if (declared.members !== undefined) {
+        throw new HostBridgeContractError(
+          `Host bridge mapping "${mapping.specifier}" binds "${declared.moduleId}" as the host identity and must not list members: the module is the page object, so there is no surface to narrow.`,
+        );
+      }
+      continue;
+    }
+
+    if (declared.members === undefined || declared.members.length === 0) {
+      throw new HostBridgeContractError(
+        `Host bridge mapping "${mapping.specifier}" narrows "${declared.moduleId}" to a verified-member view and names no member, so the view would forward nothing.`,
+      );
+    }
+
+    for (const member of declared.members) {
+      if (!mapping.verifiedMembers.includes(member)) {
+        throw new HostBridgeContractError(
+          `Host bridge mapping "${mapping.specifier}" forwards "${member}" through the "${declared.moduleId}" view, but #5 never observed it on "${mapping.globalName}". A view may only forward observed members; widening it needs new evidence, not a table edit.`,
+        );
+      }
+    }
+  }
 }
 
 /**
  * Refuse a table in which one module id or one host identity is claimed twice.
  *
  * A cross-row check, which is why it is separate: each row is admissible on its
- * own, and the problem only exists between them.
+ * own, and the problem only exists between them. Both halves are checked because
+ * the diagnostic promises both — and the second half is the one that is not
+ * implied by the first: two different specifiers can name the same `globalName`
+ * while every module id in the table stays unique, and the result would be two
+ * modules that are not the same module passing an identity check.
+ *
+ * Module ids listed as `moduleIds` on one row are *not* a collision: one host
+ * object serving the ids that were deliberately grouped under it is exactly what a
+ * row means.
  */
 export function assertHostBridgeMappingsAreUnambiguous(
   mappings: readonly HostBridgeMapping[] = HOST_BRIDGE_MAPPINGS,
@@ -904,6 +1075,17 @@ export function assertHostBridgeMappingsAreUnambiguous(
       }
       owners.set(moduleId, mapping.specifier);
     }
+  }
+
+  const identityOwners = new Map<string, string>();
+  for (const mapping of hostBridgeGlobalMappings(mappings)) {
+    const existing = identityOwners.get(mapping.globalName);
+    if (existing !== undefined) {
+      throw new HostBridgeContractError(
+        `Host global "${mapping.globalName}" is claimed by both "${existing}" and "${mapping.specifier}", so two module ids that are not the same module would resolve to one page object.`,
+      );
+    }
+    identityOwners.set(mapping.globalName, mapping.specifier);
   }
 }
 

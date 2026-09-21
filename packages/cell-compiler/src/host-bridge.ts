@@ -50,10 +50,12 @@ import {
   CELL_PRESET_LIBRARIES,
   findHostBridgeModuleMapping,
   hostBridgeAdapterMappings,
+  hostBridgeBindingFor,
   hostBridgeGlobalIsAlwaysAvailable,
   hostBridgeGlobalMappings,
   hostBridgeInterceptedModuleIds,
   hostBridgeModuleIds,
+  hostBridgeShapeFor,
   HOST_BRIDGE_DIAGNOSTIC_RULES,
   HOST_BRIDGE_MAPPINGS,
   HostBridgeContractError,
@@ -66,6 +68,7 @@ import type {
   HostBridgeGlobalMapping,
   HostBridgeMapping,
   HostBridgeMappingKind,
+  HostBridgeModuleShape,
   JSX_RUNTIME_ADAPTER_EXPORTS,
 } from "@forguncy-react-workspace/core";
 
@@ -88,23 +91,41 @@ export const HOST_BRIDGE_GENERATED_BANNER =
 // ---------------------------------------------------------------------------
 
 /**
- * The error the generated bridge throws.
+ * The three conditions a generated module can report at runtime.
  *
- * Structured the way an Agent needs it — a stable `code`, the specifier that
- * needed the global, the global's name, and the member when the global exists but
- * the member does not — because #9's third acceptance criterion is a *useful*
- * diagnostic, and a message string is not branchable.
- *
- * The remediation sentence is baked in from `core`'s rule table rather than
- * reworded here, so a runtime failure and its build-time counterpart give the same
- * guidance. That is the point of the shared code vocabulary.
+ * Only these: `host-mapping-missing`, `host-module-duplicated`,
+ * `host-adapter-not-used` and `host-mapping-conflict` are build-time findings, and a
+ * generated module that could throw one of those would be reporting a table problem
+ * from inside the page.
  */
-function renderErrorFactory(code: HostBridgeDiagnosticCode): string {
+const RUNTIME_ERROR_FUNCTIONS = {
+  "host-global-missing": "__fgcHostBridgeErrorMissing",
+  "host-global-incompatible": "__fgcHostBridgeErrorIncompatible",
+  "host-member-not-verified": "__fgcHostBridgeErrorUnverified",
+} as const satisfies Partial<Record<HostBridgeDiagnosticCode, string>>;
+
+type RuntimeErrorCode = keyof typeof RUNTIME_ERROR_FUNCTIONS;
+
+/**
+ * One structured-error factory, generated from `core`'s rule table.
+ *
+ * Structured the way an Agent needs it — a stable `code`, the specifier that needed
+ * the global, the global's name, and the member when the global exists but the member
+ * is the problem — because #9's third acceptance criterion is a *useful* diagnostic
+ * and a message string is not branchable.
+ *
+ * The message's wording comes from the rule table rather than from a sentence written
+ * here, so a runtime failure and its build-time counterpart cannot drift. Emitted
+ * per code rather than as one always-on dispatcher so a module that can only fail one
+ * way does not carry the strings for the other two — #21 measures this budget.
+ */
+function renderErrorFactory(code: RuntimeErrorCode): string {
   const rule = HOST_BRIDGE_DIAGNOSTIC_RULES[code];
+  const name = RUNTIME_ERROR_FUNCTIONS[code];
   return [
-    `function __fgcHostBridgeError(specifier, globalName, member) {`,
+    `function ${name}(specifier, globalName, member) {`,
     `  var target = member === undefined ? globalName : globalName + "." + member;`,
-    `  var error = new Error("[host-bridge] ${code}: " + specifier + " is bridged to " + target + ", which is not available. ${rule.remediation}");`,
+    `  var error = new Error("[host-bridge] ${code}: " + specifier + " is bridged to " + target + ". ${rule.states} ${rule.remediation}");`,
     `  error.name = "HostBridgeError";`,
     `  error.code = ${JSON.stringify(code)};`,
     `  error.specifier = specifier;`,
@@ -116,6 +137,11 @@ function renderErrorFactory(code: HostBridgeDiagnosticCode): string {
   ].join("\n");
 }
 
+/** The factories a generated unit needs, in the order they are declared. */
+function renderErrorFactories(codes: readonly RuntimeErrorCode[]): string {
+  return codes.map(renderErrorFactory).join("\n");
+}
+
 // ---------------------------------------------------------------------------
 // Host-global modules
 // ---------------------------------------------------------------------------
@@ -123,34 +149,52 @@ function renderErrorFactory(code: HostBridgeDiagnosticCode): string {
 /**
  * The module the bundler loads in place of a `host`-decided dependency.
  *
- * Two shapes, chosen by #5's availability record rather than by anything written
- * here:
+ * Keyed on the module id, not only on the mapping, because a row can promise two
+ * different things: `react-dom`'s row binds the package id to the host object and
+ * narrows its subpath. Rendering from the mapping alone would make
+ * `react-dom/client` an alias for the whole `ReactDOM` object, which is the
+ * failure this signature exists to make impossible.
  *
- * - `always` — the global is checked and the module refuses without it. The check
- *   is at module scope on purpose: it is the earliest moment the bridge can tell
- *   that the artifact is not on the target it was compiled for, and the later
- *   alternative is a `TypeError` naming whichever property the cell happened to
- *   touch first.
- * - `after-the-declared-preset-resolves` — the module is the global, whatever it
- *   is. A throw here would make a legal cell illegal: #5 records the same global
- *   as present in one cell and absent in another on one page, because each cell
- *   binds its preset globals at its own render instant.
+ * Three shapes, each chosen by data rather than by a decision here:
  *
- * The exported value is the global *itself*, never a wrapper. That is #9's first
- * acceptance criterion expressed in generated code: an interposed module that
- * re-exported through a proxy object would satisfy every functional test and still
- * fail the identity check that matters, since two cells comparing their React
- * objects would no longer see the same one.
+ * - **`host-identity`** — the module *is* the page object. The exported value is
+ *   the global itself, never a wrapper: an interposed module that re-exported
+ *   through a proxy would satisfy every functional test and still fail the identity
+ *   check that matters, since two cells comparing their React objects would no
+ *   longer see the same one. Two refusal behaviours inside this shape, both from
+ *   #5's availability record:
+ *   - `always` (React, ReactDOM) is checked and refuses without the global, because
+ *     its absence means the artifact is not on the target it was compiled for — the
+ *     later alternative is a `TypeError` naming whichever property the cell happened
+ *     to touch first;
+ *   - `after-the-declared-preset-resolves` (`antd`) is bound as-is, because #5
+ *     measured a legal cell in which the same global is absent, so a throw here
+ *     would make a legal cell illegal.
+ * - **`verified-member-view`** — the module is a view over the page object that
+ *   forwards exactly the members #5 observed and refuses every other name. Used
+ *   where #9 makes a *surface* claim rather than an identity claim
+ *   (`react-dom/client`), never where it makes an identity claim.
  */
-export function renderHostBridgeGlobalModule(mapping: HostBridgeGlobalMapping): string {
+export function renderHostBridgeGlobalModule(mapping: HostBridgeGlobalMapping, moduleId: string): string {
+  const shape = hostBridgeShapeFor(mapping, moduleId);
+  if (shape === undefined) {
+    throw new HostBridgeContractError(
+      `Host bridge mapping "${mapping.specifier}" does not intercept "${moduleId}", so there is no module to render for it.`,
+    );
+  }
+
+  if (shape === "verified-member-view") {
+    return renderHostBridgeVerifiedMemberView(mapping, moduleId);
+  }
+
   const lines = [HOST_BRIDGE_GENERATED_BANNER];
 
   if (hostBridgeGlobalIsAlwaysAvailable(mapping)) {
     lines.push(
-      renderErrorFactory("host-global-missing"),
+      renderErrorFactories(["host-global-missing"]),
       `var __fgcHostBridgeValue = globalThis[${JSON.stringify(mapping.globalName)}];`,
       `if (__fgcHostBridgeValue === undefined) {`,
-      `  throw __fgcHostBridgeError(${JSON.stringify(mapping.specifier)}, ${JSON.stringify(mapping.globalName)}, undefined);`,
+      `  throw __fgcHostBridgeErrorMissing(${JSON.stringify(moduleId)}, ${JSON.stringify(mapping.globalName)}, undefined);`,
       `}`,
       `module.exports = __fgcHostBridgeValue;`,
     );
@@ -163,6 +207,87 @@ export function renderHostBridgeGlobalModule(mapping: HostBridgeGlobalMapping): 
   }
 
   return `${lines.join("\n")}\n`;
+}
+
+/**
+ * The narrowed view a subpath gets when #9 promises a surface rather than an object.
+ *
+ * `verifiedMembers` is the load-bearing input: the view forwards exactly the
+ * members the row recorded as observed and refuses every other name with
+ * `host-member-not-verified`. Refusing rather than forwarding matters because the
+ * two available alternatives are both wrong in the same quiet way — the host object
+ * may simply not carry an unobserved member (so the import becomes `undefined` and
+ * fails wherever it is called), or it may carry something nobody has verified (so
+ * the cell silently depends on an unmeasured surface).
+ *
+ * A `Proxy` rather than a plain object, because a plain object *is* the `undefined`
+ * answer: `client.hydrateRoot` would be `undefined` with no explanation. The trap
+ * is deliberately narrow in the other direction too — the names a CommonJS consumer
+ * asks a module for before it asks for any real member (`__esModule`, `default`,
+ * `then`) are answered without consulting the host object, because otherwise a
+ * bundler's interop helper would trip the refusal before the cell's own code ran.
+ */
+function renderHostBridgeVerifiedMemberView(mapping: HostBridgeGlobalMapping, moduleId: string): string {
+  const binding = hostBridgeBindingFor(mapping, moduleId);
+  if (binding?.members === undefined) {
+    throw new HostBridgeContractError(
+      `Host bridge mapping "${mapping.specifier}" declares no verified-member surface for "${moduleId}".`,
+    );
+  }
+
+  const members = JSON.stringify([...binding.members]);
+  const specifier = JSON.stringify(moduleId);
+  const globalName = JSON.stringify(mapping.globalName);
+
+  return `${[
+    HOST_BRIDGE_GENERATED_BANNER,
+    `// A view over the host object, not the host object: #9 promises the surface that`,
+    `// runtime evidence established for this module id, so a member outside it is`,
+    `// refused rather than forwarded or resolved to \`undefined\`.`,
+    renderErrorFactories(["host-global-missing", "host-global-incompatible", "host-member-not-verified"]),
+    `var __fgcHostBridgeHost = globalThis[${globalName}];`,
+    `if (__fgcHostBridgeHost === undefined) {`,
+    `  throw __fgcHostBridgeErrorMissing(${specifier}, ${globalName}, undefined);`,
+    `}`,
+    ``,
+    `// The members #5 observed on the host object, in declaration order.`,
+    `var __fgcHostBridgeMembers = ${members};`,
+    `var __fgcHostBridgeTarget = {};`,
+    `for (var __fgcHostBridgeIndex = 0; __fgcHostBridgeIndex < __fgcHostBridgeMembers.length; __fgcHostBridgeIndex++) {`,
+    `  (function (member) {`,
+    `    Object.defineProperty(__fgcHostBridgeTarget, member, {`,
+    `      enumerable: true,`,
+    `      configurable: true,`,
+    `      get: function () {`,
+    `        var value = __fgcHostBridgeHost[member];`,
+    `        if (value === undefined) {`,
+    `          throw __fgcHostBridgeErrorIncompatible(${specifier}, ${globalName}, member);`,
+    `        }`,
+    `        return value;`,
+    `      },`,
+    `    });`,
+    `  })(__fgcHostBridgeMembers[__fgcHostBridgeIndex]);`,
+    `}`,
+    ``,
+    `// The default export answers with this guarded view rather than the raw target, so`,
+    `// the interop protocol is not a way to reach the underlying object without the trap.`,
+    `var __fgcHostBridgeView = new Proxy(__fgcHostBridgeTarget, {`,
+    `  get: function (target, property) {`,
+    `    if (typeof property !== "string") return undefined;`,
+    `    if (Object.prototype.hasOwnProperty.call(target, property)) return target[property];`,
+    `    // Interop protocol names a CommonJS consumer asks for before any real member.`,
+    `    // Answered without consulting the host object, so a loader's helper cannot`,
+    `    // trip the refusal below before the cell's own code runs.`,
+    `    if (property === "__esModule" || property === "then") return undefined;`,
+    `    if (property === "default") return __fgcHostBridgeView;`,
+    `    throw __fgcHostBridgeErrorUnverified(${specifier}, ${globalName}, property);`,
+    `  },`,
+    `  has: function (target, property) {`,
+    `    return Object.prototype.hasOwnProperty.call(target, property);`,
+    `  },`,
+    `});`,
+    `module.exports = __fgcHostBridgeView;`,
+  ].join("\n")}\n`;
 }
 
 // ---------------------------------------------------------------------------
@@ -192,15 +317,24 @@ export function renderHostBridgeGlobalModule(mapping: HostBridgeGlobalMapping): 
  * `jsxs` and `jsxDEV` share the implementation. The dev-only arguments are accepted
  * and ignored: they carry debugging metadata, and reproducing it would mean
  * reimplementing a React-internal surface.
+ *
+ * `moduleId` is the id the source actually imported. Both runtime ids share this
+ * adapter, so it is what makes a failure from a dev build name
+ * `react/jsx-dev-runtime` rather than the row's first id.
  */
-export function renderHostBridgeAdapterModule(mapping: HostBridgeAdapterMapping): string {
-  const specifier = mapping.specifier;
+export function renderHostBridgeAdapterModule(mapping: HostBridgeAdapterMapping, moduleId: string): string {
   const globalName = "React";
   const createElement = mapping.requiredHostMembers.includes("createElement") ? "createElement" : undefined;
 
+  if (!hostBridgeModuleIds(mapping).includes(moduleId)) {
+    throw new HostBridgeContractError(
+      `Host bridge adapter "${mapping.specifier}" does not intercept "${moduleId}", so there is no module to render for it.`,
+    );
+  }
+
   if (createElement === undefined) {
     throw new HostBridgeContractError(
-      `Host bridge adapter "${specifier}" declares no "createElement" among its required host members, so the generated adapter would have nothing to delegate to.`,
+      `Host bridge adapter "${mapping.specifier}" declares no "createElement" among its required host members, so the generated adapter would have nothing to delegate to.`,
     );
   }
 
@@ -208,12 +342,12 @@ export function renderHostBridgeAdapterModule(mapping: HostBridgeAdapterMapping)
 
   const lines = [
     HOST_BRIDGE_GENERATED_BANNER,
-    renderRuntimeErrorDispatcher(),
+    renderErrorFactories(["host-global-missing", "host-global-incompatible"]),
     ``,
     `function __fgcHostBridgeReact() {`,
     `  var value = globalThis[${JSON.stringify(globalName)}];`,
     `  if (value === undefined) {`,
-    `    throw __fgcHostBridgeErrorMissing(${JSON.stringify(specifier)}, ${JSON.stringify(globalName)}, undefined);`,
+    `    throw __fgcHostBridgeErrorMissing(${JSON.stringify(moduleId)}, ${JSON.stringify(globalName)}, undefined);`,
     `  }`,
     `  return value;`,
     `}`,
@@ -248,7 +382,7 @@ export function renderHostBridgeAdapterModule(mapping: HostBridgeAdapterMapping)
       `  get: function () {`,
       `    var React = __fgcHostBridgeReact();`,
       `    if (React.Fragment === undefined) {`,
-      `      throw __fgcHostBridgeErrorIncompatible(${JSON.stringify(specifier)}, ${JSON.stringify(globalName)}, "Fragment");`,
+      `      throw __fgcHostBridgeErrorIncompatible(${JSON.stringify(moduleId)}, ${JSON.stringify(globalName)}, "Fragment");`,
       `    }`,
       `    return React.Fragment;`,
       `  },`,
@@ -265,52 +399,24 @@ export function renderHostBridgeAdapterModule(mapping: HostBridgeAdapterMapping)
  * Dispatch is on `kind`, which is the mapping's declaration of whether a page
  * object has the module's shape. Nothing inspects the specifier to decide.
  */
-export function renderHostBridgeModule(mapping: HostBridgeMapping): string {
-  return mapping.kind === "host-global"
-    ? renderHostBridgeGlobalModule(mapping)
-    : renderHostBridgeAdapterModule(mapping);
+/**
+ * The interposed module for one intercepted module id.
+ *
+ * Dispatch is on the module id's declared shape, which is the mapping's own
+ * statement of whether the import is the host object, a view over it, or generated
+ * code. Nothing inspects the specifier to decide, and a module id the table does not
+ * intercept is refused rather than rendered.
+ */
+export function renderHostBridgeModule(mapping: HostBridgeMapping, moduleId: string): string {
+  if (mapping.kind === "jsx-runtime-adapter") {
+    return renderHostBridgeAdapterModule(mapping, moduleId);
+  }
+  return renderHostBridgeGlobalModule(mapping, moduleId);
 }
 
 // ---------------------------------------------------------------------------
 // The artifact guard
 // ---------------------------------------------------------------------------
-
-/**
- * A structured error factory whose code is chosen by name.
- *
- * The guard and the adapter throw from different functions and must not carry two
- * copies of the same string, so they share one dispatcher. Kept separate from
- * {@link renderErrorFactory} because the guard needs both runtime codes available
- * in one scope, while each generated module only ever throws one of them.
- */
-function renderRuntimeErrorDispatcher(): string {
-  const missing = HOST_BRIDGE_DIAGNOSTIC_RULES["host-global-missing"];
-  const incompatible = HOST_BRIDGE_DIAGNOSTIC_RULES["host-global-incompatible"];
-  return [
-    `function __fgcHostBridgeErrorMissing(specifier, globalName, member) {`,
-    `  var target = member === undefined ? globalName : globalName + "." + member;`,
-    `  var error = new Error("[host-bridge] host-global-missing: " + specifier + " is bridged to " + target + ", which is not available. ${missing.remediation}");`,
-    `  error.name = "HostBridgeError";`,
-    `  error.code = "host-global-missing";`,
-    `  error.specifier = specifier;`,
-    `  error.globalName = globalName;`,
-    `  error.member = member === undefined ? null : member;`,
-    `  error.fixOwner = ${JSON.stringify(missing.fixOwner)};`,
-    `  return error;`,
-    `}`,
-    `function __fgcHostBridgeErrorIncompatible(specifier, globalName, member) {`,
-    `  var target = member === undefined ? globalName : globalName + "." + member;`,
-    `  var error = new Error("[host-bridge] host-global-incompatible: " + specifier + " is bridged to " + target + ", which is present but not the recorded identity. ${incompatible.remediation}");`,
-    `  error.name = "HostBridgeError";`,
-    `  error.code = "host-global-incompatible";`,
-    `  error.specifier = specifier;`,
-    `  error.globalName = globalName;`,
-    `  error.member = member === undefined ? null : member;`,
-    `  error.fixOwner = ${JSON.stringify(incompatible.fixOwner)};`,
-    `  return error;`,
-    `}`,
-  ].join("\n");
-}
 
 export interface RenderHostBridgeGuardOptions {
   readonly mappings?: readonly HostBridgeMapping[];
@@ -361,7 +467,7 @@ export function renderHostBridgeGuard(options: RenderHostBridgeGuardOptions): st
     HOST_BRIDGE_GENERATED_BANNER,
     `// Emitted once per artifact, at cell entry. Required globals fail here; globals`,
     `// whose absence #5 records as a supported state are reported at build time.`,
-    renderRuntimeErrorDispatcher(),
+    renderErrorFactories(["host-global-missing", "host-global-incompatible"]),
     `(function __fgcHostBridgeGuard() {`,
   ];
 
@@ -454,9 +560,19 @@ export function formatHostBridgeDiagnostics(diagnostics: readonly HostBridgeDiag
 // ---------------------------------------------------------------------------
 
 export interface HostBridgeInterception {
+  /** The mapping row the interception came from. */
   readonly specifier: string;
-  readonly moduleIds: readonly string[];
+  /** The exact module id intercepted. One interception covers one id. */
+  readonly moduleId: string;
   readonly kind: HostBridgeMappingKind;
+  /**
+   * What the interposed module promises for this id.
+   *
+   * A row can promise different things per id — `react-dom` binds the host object,
+   * its subpath gets a narrowed view — so this is the shape the source was generated
+   * for, and it is what a reviewer checks against #9's mapping bullets.
+   */
+  readonly shape: HostBridgeModuleShape;
   readonly mapping: HostBridgeMapping;
   /** The source the bundler loads in place of the dependency. */
   readonly source: string;
@@ -484,18 +600,27 @@ export interface PlanHostBridgeOptions {
   /**
    * The decisions the artifact is compiled against.
    *
-   * Optional because a plan of the table alone is a legitimate question ("what
-   * would be intercepted"), and the diagnostics that need a decision simply do not
-   * appear when there is none.
+   * Used for two things, and both need it: which bridged modules the artifact
+   * actually contains, and which of them a bare `host` claim has no mapping for.
    */
   readonly decisions?: readonly DependencyDecision[];
+  /**
+   * Specifiers the artifact references, when the caller knows them.
+   *
+   * The second half of "which bridged modules this cell actually uses". A bare
+   * import can reach the bridge without a decision row, and a diagnostic about a
+   * module an artifact never mentions is a false positive a caller then has to
+   * explain away.
+   */
+  readonly referencedSpecifiers?: readonly string[];
   /**
    * The preset the cell declares, when known.
    *
    * The input that turns a preset-conditional mapping's absence into a *build*
-   * diagnostic instead of a runtime surprise. Omitting it is not the same as
-   * declaring `None`: it means the caller did not tell the bridge what the cell
-   * declares, and the bridge then reports nothing rather than guessing.
+   * diagnostic instead of a runtime surprise — for the imports the cell actually
+   * uses. Omitting it is not the same as declaring `None`: it means the caller did
+   * not tell the bridge what the cell declares, and the bridge then reports nothing
+   * rather than guessing.
    */
   readonly cellPreset?: CellPresetLibrary["name"];
 }
@@ -503,10 +628,10 @@ export interface PlanHostBridgeOptions {
 /**
  * What the compilation path does with the bridge, plus what is wrong with it.
  *
- * Built by walking the mapping table, which is #9's fifth acceptance criterion
- * rendered as an implementation rather than as a claim: adding a row adds an
- * interception and its forbidden-bundle flag, and there is no second list to keep
- * in step.
+ * Built by walking the mapping table — and then each row's declared module ids,
+ * because that is the granularity #9 writes its mapping list at. Adding a row adds
+ * one interception per id it intercepts, each carrying the source generated for its
+ * own shape; there is no second list to keep in step.
  */
 export function planHostBridge(options: PlanHostBridgeOptions = {}): HostBridgePlan {
   const mappings = options.mappings ?? HOST_BRIDGE_MAPPINGS;
@@ -528,16 +653,22 @@ export function planHostBridge(options: PlanHostBridgeOptions = {}): HostBridgeP
     );
   }
 
-  const interceptions: HostBridgeInterception[] = mappings.map(mapping => ({
-    specifier: mapping.specifier,
-    moduleIds: hostBridgeModuleIds(mapping),
-    kind: mapping.kind,
-    mapping,
-    // Exactly one generated source per interceptions, so a reader cannot be shown
-    // a plan whose source disagrees with the mapping it came from.
-    source: renderHostBridgeModule(mapping),
-    bundledForbidden: true,
-  }));
+  const interceptions: HostBridgeInterception[] = [];
+  for (const mapping of mappings) {
+    for (const moduleId of hostBridgeModuleIds(mapping)) {
+      const shape = hostBridgeShapeFor(mapping, moduleId);
+      if (shape === undefined) continue;
+      interceptions.push({
+        specifier: mapping.specifier,
+        moduleId,
+        kind: mapping.kind,
+        shape,
+        mapping,
+        source: renderHostBridgeModule(mapping, moduleId),
+        bundledForbidden: true,
+      });
+    }
+  }
 
   // A duplicated claim would make the plan's interception order decide the result,
   // which is the same failure `host-mapping-conflict` reports for the table; the
@@ -545,25 +676,46 @@ export function planHostBridge(options: PlanHostBridgeOptions = {}): HostBridgeP
   // caller passes a table it built itself.
   const seen = new Map<string, string>();
   for (const interception of interceptions) {
-    for (const moduleId of interception.moduleIds) {
-      const owner = seen.get(moduleId);
-      if (owner !== undefined && owner !== interception.specifier) {
-        diagnostics.push(
-          createHostBridgeDiagnostic(
-            "host-mapping-conflict",
-            moduleId,
-            `Both "${owner}" and "${interception.specifier}" intercept this module id, so which source is used would depend on table order.`,
-          ),
-        );
-      }
-      seen.set(moduleId, interception.specifier);
+    const owner = seen.get(interception.moduleId);
+    if (owner !== undefined && owner !== interception.specifier) {
+      diagnostics.push(
+        createHostBridgeDiagnostic(
+          "host-mapping-conflict",
+          interception.moduleId,
+          `Both "${owner}" and "${interception.specifier}" intercept this module id, so which source is used would depend on table order.`,
+        ),
+      );
     }
+    seen.set(interception.moduleId, interception.specifier);
   }
 
-  diagnostics.push(...auditHostBridgeDecisions(options.decisions ?? [], mappings));
-  diagnostics.push(...auditHostBridgePresetReadiness(mappings, options.cellPreset));
+  const decisions = options.decisions ?? [];
+  const usedModuleIds = hostBridgeModulesInUse(decisions, options.referencedSpecifiers);
+
+  diagnostics.push(...auditHostBridgeDecisions(decisions, mappings));
+  diagnostics.push(...auditHostBridgePresetReadiness(mappings, options.cellPreset, usedModuleIds));
 
   return { interceptions, diagnostics };
+}
+
+/**
+ * Which bridged module ids the artifact actually contains.
+ *
+ * Derived from the two things that can put one there: a dependency decision, and a
+ * specifier the caller observed being referenced. `undefined` means "the caller did
+ * not say", which is different from an empty set — the former makes an
+ * usage-dependent audit abstain, the latter makes it report nothing because there is
+ * nothing to report.
+ */
+function hostBridgeModulesInUse(
+  decisions: readonly DependencyDecision[],
+  referencedSpecifiers: readonly string[] | undefined,
+): ReadonlySet<string> | undefined {
+  if (referencedSpecifiers === undefined && decisions.length === 0) return undefined;
+
+  const used = new Set<string>(referencedSpecifiers ?? []);
+  for (const decision of decisions) used.add(decision.packageName);
+  return used;
 }
 
 /**
@@ -625,16 +777,21 @@ function auditHostBridgeDecisions(
     }
 
     if (decision.strategy === "inline" && mapping !== undefined && mapping.kind === "host-global") {
-      const identitySensitive = mapping.identitySensitive === true;
-      diagnostics.push(
-        createHostBridgeDiagnostic(
-          "host-module-duplicated",
-          packageName,
-          identitySensitive
-            ? `The artifact would carry its own copy of a module decided \`host\` and mapped to "${mapping.globalName}". For an identity-sensitive module this is not a size decision: #5 verified one React object per page whose identity hooks and context dispatch through, so a second copy is observable from every cell.`
-            : `The artifact would carry its own copy of a module the bridge binds to "${mapping.globalName}", so the cell would use one implementation while the rest of the page uses another.`,
-        ),
-      );
+      // Scoped to identity-sensitive rows, which is the same line the resolver's
+      // `auditHostInlineConflict` draws and for the same reason: a mapping says how a
+      // `host` decision compiles, never that the package must be `host`. For a module
+      // whose identity is not load-bearing there is nothing shared to split, so a
+      // cell-local copy is a legitimate choice — reporting it would turn the presence
+      // of a table row into a policy.
+      if (mapping.identitySensitive === true) {
+        diagnostics.push(
+          createHostBridgeDiagnostic(
+            "host-module-duplicated",
+            packageName,
+            `The artifact would carry its own copy of a module decided \`host\` and mapped to "${mapping.globalName}". For an identity-sensitive module this is not a size decision: #5 verified one React object per page whose identity hooks and context dispatch through, so a second copy is observable from every cell.`,
+          ),
+        );
+      }
     }
   }
 
@@ -642,21 +799,30 @@ function auditHostBridgeDecisions(
 }
 
 /**
- * Whether the cell's declared preset makes the globals its bridged imports need.
+ * Whether the cell's declared preset makes the globals the cell's bridged imports need.
  *
- * Only the preset-conditional mappings, and only when the caller said which preset
- * the cell declares. A mapping whose global the preset does not provide is
- * reported as `host-global-missing` at build time — which is the moment the fact is
- * available — rather than being left to appear as `undefined` at the point of use.
+ * Two conditions, and both are needed to keep this from becoming a false positive:
+ *
+ * - the caller said which preset the cell declares (otherwise the bridge abstains
+ *   rather than guessing), and
+ * - the cell actually uses that mapping's module id (otherwise a table row for a
+ *   package the artifact never mentions would fail a cell that never imported it).
+ *
+ * Only the preset-conditional rows. A global recorded as `always` is the guard's
+ * business, and its absence is not a per-cell configuration fact.
  */
 function auditHostBridgePresetReadiness(
   mappings: readonly HostBridgeMapping[],
   cellPreset: CellPresetLibrary["name"] | undefined,
+  usedModuleIds: ReadonlySet<string> | undefined,
 ): readonly HostBridgeDiagnostic[] {
   if (cellPreset === undefined) return [];
 
   const preset = CELL_PRESET_LIBRARIES.find(candidate => candidate.name === cellPreset);
   if (preset === undefined) {
+    // A preset name the runtime contract does not record is a configuration error
+    // about the cell, not about an import, so it is reported whether or not the
+    // caller said what the artifact uses.
     return [
       createHostBridgeDiagnostic(
         "host-mapping-missing",
@@ -666,15 +832,21 @@ function auditHostBridgePresetReadiness(
     ];
   }
 
+  // "The caller did not say what this cell uses" is not "this cell uses nothing":
+  // the first abstains, the second is an empty set that reports nothing because
+  // there is nothing to report.
+  if (usedModuleIds === undefined) return [];
+
   const diagnostics: HostBridgeDiagnostic[] = [];
   for (const mapping of hostBridgeGlobalMappings(mappings)) {
     if (hostBridgeGlobalIsAlwaysAvailable(mapping)) continue;
+    if (!hostBridgeModuleIds(mapping).some(moduleId => usedModuleIds.has(moduleId))) continue;
     if (preset.providesGlobals.includes(mapping.globalName)) continue;
     diagnostics.push(
       createHostBridgeDiagnostic(
         "host-global-missing",
         mapping.specifier,
-        `The cell declares preset "${preset.name}", which does not install "${mapping.globalName}". #5 records this global's absence as a supported state rather than a broken page, so the generated module binds it as-is and the cell meets an undefined value at the point of use.`,
+        `The cell declares preset "${preset.name}", which does not install "${mapping.globalName}", and the artifact references "${mapping.specifier}". #5 records this global's absence as a supported state rather than a broken page, so the generated module binds it as-is and the cell meets an undefined value at the point of use.`,
       ),
     );
   }
@@ -683,10 +855,10 @@ function auditHostBridgePresetReadiness(
 
 /** A report block for a CI log or a PR body. */
 export function formatHostBridgePlan(plan: HostBridgePlan): string {
-  const intercepted = plan.interceptions.flatMap(interception => interception.moduleIds);
+  const intercepted = plan.interceptions.map(interception => interception.moduleId);
   return [
     `Host bridge intercepts ${intercepted.length} module id(s): ${intercepted.join(", ")}`,
-    `Mappings: ${plan.interceptions.map(interception => `${interception.specifier} (${interception.kind})`).join(", ")}`,
+    `Mappings: ${plan.interceptions.map(interception => `${interception.moduleId} (${interception.shape})`).join(", ")}`,
     plan.diagnostics.length === 0
       ? "No bridge diagnostics."
       : `${plan.diagnostics.length} bridge diagnostic(s):\n${formatHostBridgeDiagnostics(plan.diagnostics)}`,

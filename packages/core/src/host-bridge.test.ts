@@ -9,6 +9,7 @@ import {
   findHostBridgeModuleMapping,
   hostBridgeAdapterMappings,
   hostBridgeAvailabilityOf,
+  hostBridgeBindingFor,
   hostBridgeBindingOf,
   hostBridgeDiagnosticIsBuildTime,
   hostBridgeDiagnosticIsRuntime,
@@ -20,6 +21,7 @@ import {
   hostBridgeMappingsForPackage,
   hostBridgeModuleIds,
   hostBridgePresetConditionalGlobals,
+  hostBridgeShapeFor,
   HOST_BRIDGE_DEFERRED_MODULES,
   HOST_BRIDGE_DIAGNOSTIC_CODES,
   HOST_BRIDGE_DIAGNOSTIC_RULES,
@@ -28,6 +30,7 @@ import {
   HOST_BRIDGE_IDENTITY_FIELDS,
   HOST_BRIDGE_INTERCEPTION_POINT,
   HOST_BRIDGE_MAPPINGS,
+  HOST_BRIDGE_BINDING_SHAPES,
   HOST_BRIDGE_MAPPING_KINDS,
   HOST_BRIDGE_MECHANISM,
   HOST_BRIDGE_NON_GOALS,
@@ -39,8 +42,16 @@ import {
   packageNameOfModuleId,
   sharedHostBridgeDiagnosticCodes,
 } from "./host-bridge";
-import type { HostBridgeGlobalMapping, HostBridgeMapping } from "./host-bridge";
+import type { HostBridgeAdapterMapping, HostBridgeGlobalMapping, HostBridgeMapping } from "./host-bridge";
 import { CELL_PRESET_LIBRARIES, cellUserScopeBinding } from "./runtime-contract";
+
+function adapterMapping(specifier: string): HostBridgeAdapterMapping {
+  const mapping = findHostBridgeModuleMapping(specifier);
+  if (mapping === undefined || mapping.kind !== "jsx-runtime-adapter") {
+    throw new Error(`"${specifier}" is not a JSX runtime adapter mapping`);
+  }
+  return mapping;
+}
 
 function globalMapping(specifier: string): HostBridgeGlobalMapping {
   const mapping = findHostBridgeModuleMapping(specifier);
@@ -139,6 +150,7 @@ describe("host module bridge mapping table", () => {
     const mapping: HostBridgeMapping = {
       kind: "host-global",
       specifier: "lodash",
+      binds: [{ moduleId: "lodash", shape: "host-identity" }],
       globalName: "_",
       identityRule: "none needed",
       verifiedMembers: [],
@@ -155,6 +167,7 @@ describe("host module bridge mapping table", () => {
     const mapping: HostBridgeMapping = {
       kind: "host-global",
       specifier: "some-lib",
+      binds: [{ moduleId: "some-lib", shape: "host-identity" }],
       globalName: "useDataSource",
       identityRule: "none needed",
       verifiedMembers: [],
@@ -168,6 +181,7 @@ describe("host module bridge mapping table", () => {
       assertHostBridgeMappingIsAdmissible({
         kind: "host-global",
         specifier: "react",
+        binds: [{ moduleId: "react", shape: "host-identity" }],
         globalName: "React",
         identityRule: "a rule",
         verifiedMembers: [],
@@ -179,6 +193,7 @@ describe("host module bridge mapping table", () => {
       assertHostBridgeMappingIsAdmissible({
         kind: "host-global",
         specifier: "react",
+        binds: [{ moduleId: "react", shape: "host-identity" }],
         globalName: "React",
         identityRule: "   ",
         verifiedMembers: [],
@@ -219,6 +234,7 @@ describe("host module bridge mapping table", () => {
         {
           kind: "host-global",
           specifier: "antd",
+          binds: [{ moduleId: "antd", shape: "host-identity" }],
           globalName: "antd",
           identityRule: "duplicate row",
           verifiedMembers: [],
@@ -228,6 +244,135 @@ describe("host module bridge mapping table", () => {
     ).toThrow(/claimed by both/);
   });
 
+  // The other half of the same promise, and the half that is not implied by the
+  // first: two rows with distinct module ids can still name one global, which would
+  // let two modules that are not the same module pass an identity check.
+  it("refuses two rows claiming one host identity", () => {
+    expect(() =>
+      assertHostBridgeMappingsAreUnambiguous([
+        ...HOST_BRIDGE_MAPPINGS,
+        {
+          kind: "host-global",
+          specifier: "react-again",
+          binds: [{ moduleId: "react-again", shape: "host-identity" }],
+          globalName: "React",
+          identityRule: "a second module claiming the same page object",
+          verifiedMembers: [],
+          evidence: ["product-runtime-source"],
+        },
+      ]),
+    ).toThrow(/Host global "React" is claimed by both/);
+  });
+
+  // The guard that makes `verifiedMembers` load-bearing: an intercepted id with no
+  // declared shape is the state in which "the module is the host object" and "the
+  // module is a view over it" are indistinguishable, and the surface claim stops
+  // being checkable.
+  it("refuses an intercepted module id with no declared binding", () => {
+    expect(() =>
+      assertHostBridgeMappingIsAdmissible({
+        kind: "host-global",
+        specifier: "react",
+        binds: [],
+        globalName: "React",
+        identityRule: "a rule",
+        verifiedMembers: [],
+        evidence: ["product-runtime-source"],
+      }),
+    ).toThrow(/declares no binding for it/);
+
+    expect(() =>
+      assertHostBridgeMappingIsAdmissible({
+        kind: "host-global",
+        specifier: "react",
+        binds: [
+          { moduleId: "react", shape: "host-identity" },
+          { moduleId: "react/other", shape: "host-identity" },
+        ],
+        globalName: "React",
+        identityRule: "a rule",
+        verifiedMembers: [],
+        evidence: ["product-runtime-source"],
+      }),
+    ).toThrow(/which the row does not intercept/);
+  });
+
+  it("refuses a view that forwards a member #5 never observed", () => {
+    // The one edit that would silently turn an evidence-based narrowing back into a
+    // guess, which is why it is a guard rather than a review note.
+    expect(() =>
+      assertHostBridgeMappingIsAdmissible({
+        kind: "host-global",
+        specifier: "react-dom",
+        moduleIds: ["react-dom/client"],
+        binds: [
+          { moduleId: "react-dom", shape: "host-identity" },
+          { moduleId: "react-dom/client", shape: "verified-member-view", members: ["createRoot", "hydrateRoot"] },
+        ],
+        globalName: "ReactDOM",
+        identityRule: "a rule",
+        verifiedMembers: ["version", "createRoot"],
+        evidence: ["product-runtime-source"],
+      }),
+    ).toThrow(/never observed it on "ReactDOM"/);
+  });
+
+  it("refuses a view with no members, and an identity binding that lists some", () => {
+    expect(() =>
+      assertHostBridgeMappingIsAdmissible({
+        kind: "host-global",
+        specifier: "react-dom",
+        moduleIds: ["react-dom/client"],
+        binds: [
+          { moduleId: "react-dom", shape: "host-identity" },
+          { moduleId: "react-dom/client", shape: "verified-member-view" },
+        ],
+        globalName: "ReactDOM",
+        identityRule: "a rule",
+        verifiedMembers: ["createRoot"],
+        evidence: ["product-runtime-source"],
+      }),
+    ).toThrow(/names no member/);
+
+    expect(() =>
+      assertHostBridgeMappingIsAdmissible({
+        kind: "host-global",
+        specifier: "react",
+        binds: [{ moduleId: "react", shape: "host-identity", members: ["version"] }],
+        globalName: "React",
+        identityRule: "a rule",
+        verifiedMembers: ["version"],
+        evidence: ["product-runtime-source"],
+      }),
+    ).toThrow(/must not list members/);
+  });
+
+  // The declaration the compiler renders from: the row's own id is the host object
+  // and its subpath is a view, so a reviewer can read the promise off the table
+  // rather than off the generator.
+  it("declares a per-module-id binding, and resolves it by shape", () => {
+    // The vocabulary the compiler renders from, recorded so a new shape is a
+    // deliberate addition rather than a value that appears in one row.
+    expect(HOST_BRIDGE_BINDING_SHAPES).toEqual(["host-identity", "verified-member-view"]);
+
+    expect(hostBridgeBindingFor(globalMapping("react"), "react")?.shape).toBe("host-identity");
+    expect(hostBridgeBindingFor(globalMapping("react"), "react-dom")).toBeUndefined();
+
+    const reactDom = globalMapping("react-dom");
+    expect(hostBridgeBindingFor(reactDom, "react-dom")?.shape).toBe("host-identity");
+    expect(hostBridgeBindingFor(reactDom, "react-dom/client")).toEqual({
+      moduleId: "react-dom/client",
+      shape: "verified-member-view",
+      members: ["version", "createRoot"],
+    });
+
+    expect(hostBridgeShapeFor(reactDom, "react-dom")).toBe("host-identity");
+    expect(hostBridgeShapeFor(reactDom, "react-dom/client")).toBe("verified-member-view");
+    expect(hostBridgeShapeFor(globalMapping("react"), "react")).toBe("host-identity");
+    expect(hostBridgeShapeFor(adapterMapping("react/jsx-runtime"), "react/jsx-dev-runtime")).toBe("jsx-runtime-adapter");
+    expect(hostBridgeShapeFor(reactDom, "react-dom/server")).toBeUndefined();
+  });
+
   // #9's second non-goal: a bridge row is not a way to make an ownership conflict
   // compile.
   it("refuses to map a package that has no legitimate in-cell role", () => {
@@ -235,6 +380,7 @@ describe("host module bridge mapping table", () => {
       assertHostBridgeMappingIsNotAnOwnershipConflict({
         kind: "host-global",
         specifier: "react-router",
+        binds: [{ moduleId: "react-router", shape: "host-identity" }],
         globalName: "React",
         identityRule: "irrelevant",
         verifiedMembers: [],
@@ -248,6 +394,7 @@ describe("host module bridge mapping table", () => {
       assertHostBridgeMappingIsNotAnOwnershipConflict({
         kind: "host-global",
         specifier: "zustand",
+        binds: [{ moduleId: "zustand", shape: "host-identity" }],
         globalName: "React",
         identityRule: "irrelevant",
         verifiedMembers: [],
@@ -344,7 +491,7 @@ describe("the JSX runtime adapter contract", () => {
 
 describe("host bridge diagnostics", () => {
   it("gives every code a rule, a fix owner and a remediation", () => {
-    expect(HOST_BRIDGE_DIAGNOSTIC_CODES).toHaveLength(6);
+    expect(HOST_BRIDGE_DIAGNOSTIC_CODES).toHaveLength(7);
     for (const code of HOST_BRIDGE_DIAGNOSTIC_CODES) {
       const rule = HOST_BRIDGE_DIAGNOSTIC_RULES[code];
       expect(rule.code, code).toBe(code);
