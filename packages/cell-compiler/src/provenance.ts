@@ -1,11 +1,9 @@
 /**
- * Decision provenance for the generated-artifact contract and for the
- * workspace-source contract built on it.
+ * Decision provenance for the generated-artifact contract.
  *
- * Decision sources: GitHub Issues #6 — "Spec: generated ReactCellType artifact and
- * compiler boundary" (https://github.com/Mang-X/forguncy-react-workspace/issues/6)
- * — and #14 — "Spec: local workspace packages are source dependencies and inline by
- * default" (https://github.com/Mang-X/forguncy-react-workspace/issues/14).
+ * Decision source: GitHub Issue #6 — "Spec: generated ReactCellType artifact and
+ * compiler boundary"
+ * (https://github.com/Mang-X/forguncy-react-workspace/issues/6).
  *
  * Repository rules put Specs in Issues and forbid a duplicated `specs/` tree, so
  * this package has no document to cite. It does not therefore get to *not* cite
@@ -15,21 +13,12 @@
  * decision it is downstream of is the failure mode this module prevents.
  *
  * The upstream records are re-exported from `core` rather than re-typed here, so
- * a second copy of "#4" cannot drift away from the first. Only the Specs this
- * package is the executable projection of are declared in this file, and they are
- * declared here rather than added to `core` on purpose: `core` holds the
- * architecture decisions *every* package must obey and keeps
- * `GOVERNING_ARCHITECTURE_DECISIONS` to the architecture Specs. #6 and #14 are
- * downstream artifact Specs, so adding either to that list would relabel it as an
+ * a second copy of "#4" cannot drift away from the first. Only #6 is declared in
+ * this file, and it is declared here rather than added to `core` on purpose:
+ * `core` holds the architecture decisions *every* package must obey and keeps
+ * `GOVERNING_ARCHITECTURE_DECISIONS` to the architecture Specs. #6 is a
+ * downstream artifact Spec, so adding it to that list would relabel it as an
  * architecture decision and silently change what the list means.
- *
- * #14 is declared beside #6 rather than in a package of its own because it is a
- * refinement of the same artifact boundary: it exists to lift #6's own recorded
- * caveat ("the artifact contract has no workspace manifest"), and the only
- * consumer of the workspace graph is the compiler. #9 is the counter-example that
- * shows what would change this — it was declared in `core` because the resolver
- * and the compiler both had to agree on the mapping table. If a second package
- * ever needs the workspace decision, that is the move to make, not a second copy.
  */
 
 import {
@@ -81,43 +70,3 @@ export const COMPILER_GOVERNING_SPEC_REFERENCE_LINE = formatGoverningSpecReferen
 /** Patterns a document must match to count as citing the artifact contract. */
 export const ARTIFACT_CONTRACT_CITATION_PATTERNS: readonly RegExp[] =
   citationPatternsFor(ARTIFACT_CONTRACT_DECISION);
-
-/** The workspace-source Spec: local workspace packages are source, and source is flattened. */
-export const WORKSPACE_SOURCE_DECISION: ArchitectureDecisionSource = {
-  repository: "Mang-X/forguncy-react-workspace",
-  issue: 14,
-  title: "Spec: local workspace packages are source dependencies and inline by default",
-  url: "https://github.com/Mang-X/forguncy-react-workspace/issues/14",
-};
-
-/** Short form, e.g. `#14`. */
-export const WORKSPACE_SOURCE_DECISION_REFERENCE = decisionReference(WORKSPACE_SOURCE_DECISION);
-
-/** Repo-qualified short form, for a reference that travels outside this repository. */
-export const WORKSPACE_SOURCE_DECISION_QUALIFIED_REFERENCE =
-  `${WORKSPACE_SOURCE_DECISION.repository}${WORKSPACE_SOURCE_DECISION_REFERENCE}`;
-
-/**
- * Every Spec a change to the workspace-source contract has to cite.
- *
- * The architecture decisions first, then the artifact Spec #14 refines, then #14
- * itself — so a report built from this list reads in the order the decisions were
- * taken. #5 is included even though #14's own Dependencies section names only #4
- * and #6, because the compiler is bound by the runtime contract either way and
- * this package's other reference lines already carry it; dropping it here would
- * make one list in one package quietly weaker than the rest.
- */
-export const WORKSPACE_SOURCE_GOVERNING_DECISIONS: readonly ArchitectureDecisionSource[] = [
-  ...GOVERNING_ARCHITECTURE_DECISIONS,
-  ARTIFACT_CONTRACT_DECISION,
-  WORKSPACE_SOURCE_DECISION,
-];
-
-/** The line a PR body, plan or report describing the workspace-source contract carries. */
-export const WORKSPACE_SOURCE_GOVERNING_SPEC_REFERENCE_LINE = formatGoverningSpecReferenceLine(
-  WORKSPACE_SOURCE_GOVERNING_DECISIONS,
-);
-
-/** Patterns a document must match to count as citing the workspace-source contract. */
-export const WORKSPACE_SOURCE_CITATION_PATTERNS: readonly RegExp[] =
-  citationPatternsFor(WORKSPACE_SOURCE_DECISION);
