@@ -5,6 +5,7 @@ import type { CellEntryKind, DependencyDecision } from "@forguncy-react-workspac
 import {
   CELL_ARTIFACT_BANNER,
   compileCell,
+  findDependencyDecision,
   formatCompileCellOutcome,
   packageNameOfSpecifier,
   serializeCompileCellResult,
@@ -591,5 +592,31 @@ describe("specifier helpers", () => {
     expect(packageNameOfSpecifier("@scope/ui")).toBe("@scope/ui");
     expect(packageNameOfSpecifier("./local")).toBe("./local");
     expect(packageNameOfSpecifier("/absolute")).toBe("/absolute");
+  });
+});
+
+describe("which decision governs a specifier", () => {
+  const packageDecision: DependencyDecision = { strategy: "host", packageName: "react-dom", globalName: "ReactDOM" };
+  const subpathDecision: DependencyDecision = { strategy: "inline", packageName: "react-dom/client" };
+
+  // A package id and one of its subpath ids are separate records that can carry
+  // different strategies, so the documented precedence has to be structural. With a
+  // single pass matching "either", the lock's canonical order (package before subpath)
+  // would pick the package record and silently ignore the subpath's own decision.
+  it("prefers the exact decision over the package decision, in either array order", () => {
+    expect(findDependencyDecision([packageDecision, subpathDecision], "react-dom/client")).toBe(subpathDecision);
+    expect(findDependencyDecision([subpathDecision, packageDecision], "react-dom/client")).toBe(subpathDecision);
+  });
+
+  it("falls back to the package decision when the subpath has none of its own", () => {
+    expect(findDependencyDecision([packageDecision], "react-dom/client")).toBe(packageDecision);
+    expect(findDependencyDecision([packageDecision], "react-dom")).toBe(packageDecision);
+  });
+
+  it("matches a bare package name exactly once, and a source path not at all", () => {
+    const packageOnly: DependencyDecision[] = [{ strategy: "inline", packageName: "@scope/ui" }];
+    expect(findDependencyDecision(packageOnly, "@scope/ui")).toBe(packageOnly[0]);
+    expect(findDependencyDecision(packageOnly, "./local")).toBeUndefined();
+    expect(findDependencyDecision([], "react")).toBeUndefined();
   });
 });

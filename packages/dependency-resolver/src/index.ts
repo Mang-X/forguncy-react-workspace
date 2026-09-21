@@ -33,8 +33,10 @@
  * Agent-driven library selection that decides a strategy in the first place
  * (`Implement: Forguncy React dependency-selection Agent Skill` #18). Neither is
  * a non-goal of #8; both are downstream of it. Composing a probe fingerprint is
- * #17's, which is why this package only compares the values it is given, and #9's
- * real host-bridge table replaces `DEFAULT_HOST_BRIDGE_MANIFEST` once #9 lands.
+ * #17's, which is why this package only compares the values it is given. The
+ * host-bridge table this package audits `host` records against is #9's, and #9
+ * delivers it in `core`; `DEFAULT_HOST_BRIDGE_MANIFEST` is now a projection of it
+ * rather than the placeholder it used to be.
  */
 
 import type { DependencyDecision } from "@forguncy-react-workspace/core";

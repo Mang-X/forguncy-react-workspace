@@ -11,6 +11,13 @@
  * - #5 "establish the ReactCellType target/runtime contract on Forguncy 12.0.100"
  *   — https://github.com/Mang-X/forguncy-react-workspace/issues/5
  *
+ * A second Spec is projected here: #9 "host module bridge for React, ReactDOM,
+ * antd and built-in globals"
+ * (https://github.com/Mang-X/forguncy-react-workspace/issues/9), which decides
+ * what a `host` dependency compiles *to*. The mapping table itself is `core`'s —
+ * the dependency resolver audits locks against the same table and may not depend
+ * on this package — so what lives here is the generated source and the guard.
+ *
  * Scope note: this package states the *artifact* contract and the boundary that
  * produces one. It does not resolve dependencies (#8), bundle a project with a
  * concrete bundler (#7), package Forguncy frontend extensions, or measure the
@@ -112,11 +119,38 @@ export type {
   CellSourceScanOmission,
 } from "./source-guard";
 
+// The host module bridge (#9): the interposed modules and the artifact guard
+export {
+  createHostBridgeDiagnostic,
+  formatHostBridgeDiagnostic,
+  formatHostBridgeDiagnostics,
+  formatHostBridgePlan,
+  hostBridgeDiagnosticRule,
+  interceptedHostBridgeModuleIds,
+  HOST_BRIDGE_GENERATED_BANNER,
+  planHostBridge,
+  renderHostBridgeAdapterModule,
+  renderHostBridgeGlobalModule,
+  renderHostBridgeGuard,
+  renderHostBridgeModule,
+} from "./host-bridge";
+export type {
+  HostBridgeActivation,
+  HostBridgeAdapterExportName,
+  HostBridgeDiagnostic,
+  HostBridgeInterception,
+  HostBridgePlan,
+  HostBridgeUsage,
+  PlanHostBridgeOptions,
+  RenderHostBridgeGuardOptions,
+} from "./host-bridge";
+
 // The boundary
 export {
   assembleCellArtifact,
   CELL_ARTIFACT_BANNER,
   compileCell,
+  findDependencyDecision,
   formatCompileCellOutcome,
   packageNameOfSpecifier,
   serializeCompileCellResult,

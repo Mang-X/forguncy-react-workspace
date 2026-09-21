@@ -410,12 +410,35 @@ function auditHostGlobalClaims(dependencies: readonly DependencyDecision[]): rea
 // Bundler report audit
 // ---------------------------------------------------------------------------
 
-function findDecision(
+/**
+ * The decision that governs a specifier: the exact one, then its package's.
+ *
+ * The rule for how a decision covers a subpath, exported so the engine has exactly
+ * one of them. `react-dom/client` is governed by a `react-dom` decision, and the
+ * bridge's activation calculation has to agree with this or the two disagree about
+ * what an artifact contains — the host-bridge module imports it rather than
+ * restating it.
+ *
+ * The precedence is structural, not positional. A package id and one of its subpath ids
+ * are distinct records that can both be present with *different* strategies, and the
+ * lock's canonical order puts the package first — so a single pass matching "either"
+ * would let canonical ordering select the package record and silently ignore an explicit
+ * subpath decision. Exact first, then the package fallback, never "whichever comes
+ * first".
+ */
+export function findDependencyDecision(
   dependencies: readonly DependencyDecision[],
   specifier: string,
 ): DependencyDecision | undefined {
+  const exact = dependencies.find(decision => decision.packageName === specifier);
+  if (exact !== undefined) return exact;
+
   const packageName = packageNameOfSpecifier(specifier);
-  return dependencies.find(decision => decision.packageName === specifier || decision.packageName === packageName);
+  // A bare package name or a source path is its own package name, so there is no
+  // fallback record left to look for.
+  if (packageName === specifier) return undefined;
+
+  return dependencies.find(decision => decision.packageName === packageName);
 }
 
 /**
@@ -433,7 +456,7 @@ function auditExternalImports(
   const diagnostics: CellArtifactDiagnostic[] = [];
 
   for (const specifier of externalImports) {
-    const decision = findDecision(dependencies, specifier);
+    const decision = findDependencyDecision(dependencies, specifier);
 
     if (decision === undefined) {
       // A file path left external is not a missing decision; it is workspace
@@ -511,7 +534,7 @@ function auditInlinedPackages(
   const diagnostics: CellArtifactDiagnostic[] = [];
 
   for (const packageName of inlinedPackages) {
-    const decision = findDecision(dependencies, packageName);
+    const decision = findDependencyDecision(dependencies, packageName);
     if (decision === undefined) continue;
 
     switch (decision.strategy) {

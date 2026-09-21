@@ -7,6 +7,18 @@
     "@babel/parser": "7.29.8",
     "@forguncy-react-workspace/core": "workspace:*"
   },
+  "//devDependencies": [
+    "Test-only, and pinned to the host versions #5 measured on Forguncy 12.0.100",
+    "(React 19.2.7). The host-bridge regression evaluates the generated JSX runtime",
+    "adapter against the same React the host injects, so the adapter's key/children",
+    "semantics are asserted against real React rather than a stub. Nothing in",
+    "`src/` may import React: mapping `react` to the host global is the entire point",
+    "of #9."
+  ],
+  "devDependencies": {
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
+  },
   "exports": {
     ".": "./src/index.ts"
   }

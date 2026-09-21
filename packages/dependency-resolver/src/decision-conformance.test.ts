@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { hostBridgeGlobalMappings, HOST_BRIDGE_MAPPINGS } from "@forguncy-react-workspace/core";
+
 import type {
   ConformanceDiagnostic,
   ConformanceProblemCode,
@@ -495,17 +497,28 @@ describe("the audit itself", () => {
     expect(problems[0]).toContain("lodash: [host-global-not-provided]");
   });
 
-  it("ships a default host bridge that is the one #9's table replaces", () => {
-    // Asserted so replacing the table with #9's real one is a visible change to a
-    // test rather than a silent edit to a constant.
-    expect(DEFAULT_HOST_BRIDGE_MANIFEST.mappings.map(mapping => mapping.packageName)).toEqual([
-      "react",
-      "react-dom",
-      "antd",
-    ]);
-    expect(DEFAULT_HOST_BRIDGE_MANIFEST.mappings.find(mapping => mapping.packageName === "react")?.identityField).toBe(
-      "hostReactVersion",
+  it("projects #9's host bridge table instead of shipping a table of its own", () => {
+    // The constant used to hold #9's stated candidates with a comment promising
+    // that "the real host-bridge table replaces this once #9 lands". #9 landed it
+    // in `core`, so the assertion is no longer "these are the three packages" but
+    // "this is `core`'s table, projected" — a lock audit that disagreed with the
+    // compiler about which global a package maps to would be checking a target
+    // nobody compiles against.
+    expect(DEFAULT_HOST_BRIDGE_MANIFEST.mappings.map(mapping => mapping.packageName)).toEqual(
+      hostBridgeGlobalMappings().map(mapping => mapping.specifier),
     );
+
+    for (const derived of DEFAULT_HOST_BRIDGE_MANIFEST.mappings) {
+      const source = HOST_BRIDGE_MAPPINGS.find(mapping => mapping.specifier === derived.packageName);
+      expect(source, derived.packageName).toBeDefined();
+      expect(source?.kind).toBe("host-global");
+      if (source?.kind !== "host-global") continue;
+      expect(derived.globalName, derived.packageName).toBe(source.globalName);
+      expect(derived.moduleIds, derived.packageName).toEqual(source.moduleIds);
+      expect(derived.identityField, derived.packageName).toBe(source.identityField);
+      expect(derived.identitySensitive, derived.packageName).toBe(source.identitySensitive);
+    }
+
     // Only the two modules #5 and #9 say must not be duplicated carry the flag.
     expect(
       DEFAULT_HOST_BRIDGE_MANIFEST.mappings.filter(mapping => mapping.identitySensitive === true).map(mapping => mapping.packageName),
