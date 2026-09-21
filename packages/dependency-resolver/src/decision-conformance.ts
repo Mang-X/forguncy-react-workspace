@@ -23,12 +23,12 @@
  *   `dayjs`" has one definition, and a preset that gains a global gains it here
  *   too.
  * - **A host bridge manifest** for which global a host-provided import maps to.
- *   That table is #9's decision, and #9 is not implemented yet, so
- *   {@link DEFAULT_HOST_BRIDGE_MANIFEST} carries #9's stated initial candidates
- *   with the attribution written down. A caller that has #9's real table passes it
- *   and this module stops guessing. Only the *mapping* is supplied this way; the
- *   question of whether the mapped global is on the page at all still comes from
- *   #5.
+ *   That table is #9's decision, and #9 delivers it in `core`, so
+ *   {@link DEFAULT_HOST_BRIDGE_MANIFEST} is now a projection of it rather than the
+ *   placeholder it used to be: the mapping list, and only the mapping list, comes
+ *   from there. Only the *mapping* is supplied this way; the question of whether the
+ *   mapped global is on the page at all still comes from #5, which is why
+ *   `host-global-not-provided` is a separate finding from a mapping conflict.
  * - **An extension catalog** for which `libraryId` is real. #12 is explicit that
  *   the id must come from `api.app.listFrontendLibraries` or a verified catalog
  *   artifact and must never be inferred from a display name — which is a
@@ -51,7 +51,14 @@
  */
 
 import type { DependencyStrategy, LockedDependencyDecision } from "@forguncy-react-workspace/core";
-import { CELL_PRESET_LIBRARIES, compareLockDecisions, DEPENDENCY_STRATEGIES } from "@forguncy-react-workspace/core";
+import {
+  CELL_PRESET_LIBRARIES,
+  compareLockDecisions,
+  DEPENDENCY_STRATEGIES,
+  hostBridgeAdapterMappings,
+  hostBridgeGlobalMappings,
+  hostBridgeModuleIds,
+} from "@forguncy-react-workspace/core";
 
 // ---------------------------------------------------------------------------
 // Inputs
@@ -131,6 +138,7 @@ export interface ExtensionCatalog {
 export interface ConformanceOptions {
   /** #9's mapping table. Defaults to {@link DEFAULT_HOST_BRIDGE_MANIFEST}. */
   readonly hostBridge?: HostBridgeManifest;
+
   /**
    * The verified extension catalog.
    *
@@ -145,30 +153,38 @@ export interface ConformanceOptions {
 }
 
 /**
- * #9's initial host mappings, pending #9's own implementation.
+ * #9's host mappings, projected onto the shape this audit reads.
  *
- * The entries below are the candidates #9 lists. `react-dom/client` is a subpath id,
- * so it rides on its package's mapping; the two JSX runtime ids are *not* listed at
- * all, because #9 bridges them with an adapter the compiler generates rather than
- * with a page global — see `jsx-runtime-requires-adapter`, which refuses them under
- * every strategy that would claim they are provided.
+ * Derived from `core`'s {@link HOST_BRIDGE_MAPPINGS} rather than restated, which
+ * is what the previous version of this constant asked for in its own comment: the
+ * placeholder it used to hold said "the real host-bridge table replaces
+ * `DEFAULT_HOST_BRIDGE_MANIFEST` once #9 lands", and #9 landed it in `core`
+ * precisely so that this package — which may not depend on the compiler — can read
+ * it.
  *
- * `antd` is here as a mapping and separately reported as preset-provided, which is
- * the honest combination: #9 says the import maps to the host `antd` global, and
- * #5 says that global exists only when the cell's preset chain loads it.
+ * Two projections happen here, and both are deliberate:
  *
- * `identitySensitive` is set from #5 and #9 rather than guessed: React and ReactDOM
- * are the two modules those Specs say must not be duplicated. `antd` deliberately
- * does not carry it — its own context does not cross cells
- * (`context-does-not-cross-cells`), so a cell with its own copy shares nothing that
- * a second copy could split.
+ * - **Only `host-global` rows.** A JSX runtime adapter has no page global, and
+ *   this manifest exists to answer "which global does a `host` record name". An
+ *   adapter row carried into it would produce an entry whose `globalName` is
+ *   missing, which is exactly the shape `hostRecord` audits against.
+ * - **`kind` and the evidence trail are dropped.** The manifest is a lookup, not a
+ *   record of why a mapping exists; keeping the evidence here would be a second
+ *   copy of `core`'s, and the lock's own evidence rules already require the
+ *   *decision* to cite its probe.
+ *
+ * The JSX runtime ids stay out of the result for the same reason, and
+ * `JSX_RUNTIME_MODULE_IDS` is still derived from `core`'s table so the two cannot
+ * disagree about which ids they are.
  */
 export const DEFAULT_HOST_BRIDGE_MANIFEST: HostBridgeManifest = {
-  mappings: [
-    { packageName: "react", globalName: "React", identityField: "hostReactVersion", identitySensitive: true },
-    { packageName: "react-dom", globalName: "ReactDOM", moduleIds: ["react-dom/client"], identitySensitive: true },
-    { packageName: "antd", globalName: "antd" },
-  ],
+  mappings: hostBridgeGlobalMappings().map(mapping => ({
+    packageName: mapping.specifier,
+    globalName: mapping.globalName,
+    ...(mapping.moduleIds === undefined ? {} : { moduleIds: mapping.moduleIds }),
+    ...(mapping.identityField === undefined ? {} : { identityField: mapping.identityField }),
+    ...(mapping.identitySensitive === undefined ? {} : { identitySensitive: mapping.identitySensitive }),
+  })),
 };
 
 /**
@@ -180,8 +196,13 @@ export const DEFAULT_HOST_BRIDGE_MANIFEST: HostBridgeManifest = {
  * the published implementation (`inline`), and not a library global (`extension`).
  * Any of those three claims the module is provided; the audit refuses all three and
  * leaves `replace`, which claims the opposite.
+ *
+ * Read from `core`'s adapter rows rather than listed here, so adding a third JSX
+ * runtime id to the bridge adds it to the audit in the same change.
  */
-export const JSX_RUNTIME_MODULE_IDS: readonly string[] = ["react/jsx-runtime", "react/jsx-dev-runtime"];
+export const JSX_RUNTIME_MODULE_IDS: readonly string[] = hostBridgeAdapterMappings().flatMap(
+  hostBridgeModuleIds,
+);
 
 /** A page global provided by a preset library chain, and the preset that loads it. */
 export interface PresetProvidedGlobal {

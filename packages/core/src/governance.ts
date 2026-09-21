@@ -81,6 +81,32 @@ export const DEPENDENCY_SELECTION_DECISION: ArchitectureDecisionSource = {
   url: "https://github.com/Mang-X/forguncy-react-workspace/issues/16",
 };
 
+/**
+ * The host module bridge Spec.
+ *
+ * Declared here beside #4, #5, #8 and #16, for the same reason those two are: it
+ * is a dependency Spec built on #4 rather than an architecture decision, so adding
+ * it to {@link GOVERNING_ARCHITECTURE_DECISIONS} would relabel it and silently
+ * change what that list means.
+ *
+ * It is declared in `core` rather than in the package that generates bridge code
+ * because two packages have to agree on it and only one of them can own it. The
+ * compiler renders the bridge; the dependency resolver audits a lock's `host`
+ * records against the same mapping table, and the resolver may not depend on the
+ * compiler — the compiler's input is the resolver's output. `core` is the package
+ * both already depend on, and it already holds the facts the table is checked
+ * against (#5's user-scope bindings and preset chains). The
+ * `@forguncy-react-workspace/dependency-resolver` package shipped a placeholder
+ * table whose own comment says exactly this ("the real host-bridge table replaces
+ * `DEFAULT_HOST_BRIDGE_MANIFEST` once #9 lands"); #9 lands it here.
+ */
+export const HOST_BRIDGE_DECISION: ArchitectureDecisionSource = {
+  repository: "Mang-X/forguncy-react-workspace",
+  issue: 9,
+  title: "Spec: host module bridge for React, ReactDOM, antd and built-in globals",
+  url: "https://github.com/Mang-X/forguncy-react-workspace/issues/9",
+};
+
 /** Every governing architecture Spec, in the order a document should cite them. */
 export const GOVERNING_ARCHITECTURE_DECISIONS: readonly ArchitectureDecisionSource[] = [
   OWNERSHIP_AND_DEPENDENCY_DECISION,
@@ -119,6 +145,10 @@ export const DEPENDENCY_SELECTION_DECISION_REFERENCE = decisionReference(DEPENDE
 export const DEPENDENCY_SELECTION_DECISION_QUALIFIED_REFERENCE = qualifiedDecisionReference(
   DEPENDENCY_SELECTION_DECISION,
 );
+
+export const HOST_BRIDGE_DECISION_REFERENCE = decisionReference(HOST_BRIDGE_DECISION);
+
+export const HOST_BRIDGE_DECISION_QUALIFIED_REFERENCE = qualifiedDecisionReference(HOST_BRIDGE_DECISION);
 
 /**
  * The line every ownership/dependency Spec, plan and PR is expected to carry.
@@ -196,6 +226,8 @@ export const DEPENDENCY_LOCK_CITATION_PATTERNS: readonly RegExp[] = citationPatt
 
 export const DEPENDENCY_SELECTION_CITATION_PATTERNS: readonly RegExp[] =
   citationPatternsFor(DEPENDENCY_SELECTION_DECISION);
+
+export const HOST_BRIDGE_CITATION_PATTERNS: readonly RegExp[] = citationPatternsFor(HOST_BRIDGE_DECISION);
 
 export function citesDecision(
   text: string,
