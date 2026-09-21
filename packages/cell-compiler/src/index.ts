@@ -186,6 +186,8 @@ export {
 } from "./workspace-source";
 export type {
   WorkspaceDelegationAssessment,
+  WorkspaceDelegationGap,
+  WorkspaceDelegationStatus,
   WorkspaceExternalModule,
   WorkspaceGraph,
   WorkspaceGraphIndex,
@@ -207,6 +209,7 @@ export type {
   WorkspaceSourceReuseClass,
   WorkspaceSourceReuseClassId,
   WorkspaceSourceReuseSafety,
+  WorkspaceStateSharingEstablished,
   WorkspaceUsageState,
 } from "./workspace-source";
 
@@ -215,6 +218,7 @@ export {
   assembleCellArtifact,
   CELL_ARTIFACT_BANNER,
   compileCell,
+  dependencyDecisionsFor,
   findDependencyDecision,
   formatCompileCellOutcome,
   isSourceSpecifier,

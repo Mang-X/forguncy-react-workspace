@@ -420,13 +420,15 @@ function auditHostGlobalClaims(dependencies: readonly DependencyDecision[]): rea
 // ---------------------------------------------------------------------------
 
 /**
- * The decision that governs a specifier: the exact one, then its package's.
+ * Every decision at the level that governs a specifier: the exact records, else the
+ * package's.
  *
- * The rule for how a decision covers a subpath, exported so the engine has exactly
- * one of them. `react-dom/client` is governed by a `react-dom` decision, and the
- * bridge's activation calculation has to agree with this or the two disagree about
- * what an artifact contains — the host-bridge module imports it rather than
- * restating it.
+ * The whole point of returning a list rather than one record: a lock can hold more
+ * than one record for one module, and a caller that needs to know whether there is a
+ * *single* provider has to be able to see the conflict instead of being handed
+ * whichever record came first. `auditDependencyDecisions` above already refuses such a
+ * list as `unresolved-dependency-decision`; this is how a downstream audit asks the
+ * same question without restating the precedence.
  *
  * The precedence is structural, not positional. A package id and one of its subpath ids
  * are distinct records that can both be present with *different* strategies, and the
@@ -435,19 +437,35 @@ function auditHostGlobalClaims(dependencies: readonly DependencyDecision[]): rea
  * subpath decision. Exact first, then the package fallback, never "whichever comes
  * first".
  */
-export function findDependencyDecision(
+export function dependencyDecisionsFor(
   dependencies: readonly DependencyDecision[],
   specifier: string,
-): DependencyDecision | undefined {
-  const exact = dependencies.find(decision => decision.packageName === specifier);
-  if (exact !== undefined) return exact;
+): readonly DependencyDecision[] {
+  const exact = dependencies.filter(decision => decision.packageName === specifier);
+  if (exact.length > 0) return exact;
 
   const packageName = packageNameOfSpecifier(specifier);
   // A bare package name or a source path is its own package name, so there is no
   // fallback record left to look for.
-  if (packageName === specifier) return undefined;
+  if (packageName === specifier) return [];
 
-  return dependencies.find(decision => decision.packageName === packageName);
+  return dependencies.filter(decision => decision.packageName === packageName);
+}
+
+/**
+ * The decision that governs a specifier: the first of the exact ones, else the first of
+ * the package's.
+ *
+ * Defined through {@link dependencyDecisionsFor} so there is one implementation of the
+ * precedence. For a caller that only needs the record, and for a caller auditing a lock
+ * whose records are known to be unique; a caller that has to be sure there is *one*
+ * provider uses the list.
+ */
+export function findDependencyDecision(
+  dependencies: readonly DependencyDecision[],
+  specifier: string,
+): DependencyDecision | undefined {
+  return dependencyDecisionsFor(dependencies, specifier)[0];
 }
 
 /**
