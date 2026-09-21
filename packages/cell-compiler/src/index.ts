@@ -184,6 +184,7 @@ export type {
 // The workspace-source contract (#14): workspace packages are source, not runtime modules
 export {
   auditWorkspaceSource,
+  classifyWorkspaceModule,
   createWorkspaceSourceDiagnostic,
   findWorkspaceSourceGuarantee,
   findWorkspaceSourceReuseClass,
@@ -198,6 +199,7 @@ export {
   realRuntimeWorkspaceSourceGuarantees,
   traceWorkspaceSourceClosure,
   WORKSPACE_CONTEXT_SEMANTICS,
+  WORKSPACE_MODULE_KINDS,
   workspacePackageFor,
   workspaceReuseClassesRequiringDelegation,
   WORKSPACE_SOURCE_DIAGNOSTIC_CODES,
@@ -209,6 +211,9 @@ export {
   WORKSPACE_SOURCE_SHARING_INVARIANT,
 } from "./workspace-source";
 export type {
+  WorkspaceDelegationAssessment,
+  WorkspaceDelegationGap,
+  WorkspaceDelegationStatus,
   WorkspaceExternalModule,
   WorkspaceGraph,
   WorkspaceGraphIndex,
@@ -216,6 +221,7 @@ export type {
   WorkspaceGraphState,
   WorkspaceImportCycle,
   WorkspaceModuleIdentity,
+  WorkspaceModuleKind,
   WorkspacePackageRecord,
   WorkspaceSourceAudit,
   WorkspaceSourceAuditInput,
@@ -229,6 +235,7 @@ export type {
   WorkspaceSourceReuseClass,
   WorkspaceSourceReuseClassId,
   WorkspaceSourceReuseSafety,
+  WorkspaceStateSharingEstablished,
   WorkspaceUsageState,
 } from "./workspace-source";
 
@@ -237,8 +244,10 @@ export {
   assembleCellArtifact,
   CELL_ARTIFACT_BANNER,
   compileCell,
+  dependencyDecisionsFor,
   findDependencyDecision,
   formatCompileCellOutcome,
+  isSourceSpecifier,
   packageNameOfSpecifier,
   serializeCompileCellResult,
   verifyCellArtifact,

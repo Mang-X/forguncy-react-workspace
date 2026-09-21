@@ -28,7 +28,8 @@
  * missing input. With a manifest, the three questions #6 could only answer for
  * relative paths become exact:
  *
- * 1. is this specifier workspace source or a published dependency?
+ * 1. is this specifier workspace source, a file inside a package, or a published
+ *    dependency?
  * 2. did workspace source leak into the artifact as something the page would have
  *    to load (a surviving import) or as a library the page would have to install
  *    (a `frontendLibraries` entry)?
@@ -49,6 +50,41 @@
  * how the two vocabularies compose in one report, and asserting a workspace
  * diagnostic through `CellArtifactDiagnostic` first would decide it by accident.
  *
+ * ## Three kinds of module id, and why the walk must tell them apart
+ *
+ * A record's `imports` may be derived from source, so it contains file paths as well
+ * as module ids. `./Button`, `../utils` and `./styles.css` are files inside some
+ * package: they resolve to nothing the dependency pipeline could decide, and asking
+ * for a decision about one would make a correct source-derived graph fail. So
+ * {@link classifyWorkspaceModule} answers the question once, in three parts —
+ * `workspace-package`, `source-file`, `external-package` — and every check that walks
+ * imports branches on it instead of on "is this in the graph". The path test itself is
+ * `artifact.isSourceSpecifier`, imported rather than restated, so the artifact layer
+ * and this one cannot drift into two definitions of "this is a file".
+ *
+ * The limit that remains is the same one #6 records, one step further along: a
+ * specifier a bundler resolves through an alias (`#internal`, a `resolve.alias`
+ * target) is not a path and not in the graph, so it is classified
+ * `external-package` and a decision is required for it. Carrying the id the bundler
+ * resolves, rather than the alias, is what makes a graph accurate — and choosing
+ * that id is the project-configuration work (#26, #28), not something a module-id
+ * graph can recover on its own.
+ *
+ * ## What this contract cannot prove, and says so
+ *
+ * `moduleIdentity: { kind: "delegated", via }` is checkable only as far as *declared
+ * and backed*: `via` is not workspace source, it is imported by the package, and it
+ * is provided by the page (`host`) or an extension (`extension`). It is **not**
+ * evidence that the package's state actually lives in `via`. A package can import
+ * the host's React and still run `React.createContext(null)` itself, or keep its own
+ * module-scope cache, and each inlined Cell then holds a private instance while every
+ * check here passes. Nothing in a module-id graph distinguishes declaring a value
+ * from importing one, so the audit reports each delegation with
+ * {@link WorkspaceDelegationAssessment.stateSharingEstablished} — literally `false`,
+ * as a type-level fact rather than a sentence in a comment — and the guarantee that
+ * the sharing really happens is the real-runtime one, not this one. An "everything
+ * passed" audit therefore never reads as "your state is shared".
+ *
  * ## What the caller states, and what this audit therefore refuses to guess
  *
  * Every check below needs an input, and an input that is absent is *not* the same
@@ -58,12 +94,23 @@
  * | absent | means | and therefore |
  * | --- | --- | --- |
  * | `workspace` | the caller did not state a workspace graph | every workspace check abstains, and `graphActivation` is `"unstated"` — which is the #6 behaviour, not a claim that no workspace package is involved |
- * | `dependencies` | the decision list is not available here | the decision-dependent checks abstain; an **empty** array means "there are no decisions", and every dependency reached through workspace source is then reported |
+ * | `dependencies` | the decision list is not available here | the decision-dependent checks abstain; an **empty** array means "there are no decisions", and every dependency reached through workspace source is then reported. A delegation that needs those checks is reported as `undetermined` with `decision-list-absent`, rather than dropped or called `backed` |
  * | `entryModuleIds` | the caller did not say what the cell imports | no closure is traced and `usage` is `"unstated"`; cycles and transitive dependencies are not claimed to be absent |
- * | a package's `imports` | that package's outgoing edges are unknown | the walk does not invent an edge, and the delegation check does not require the package to import what it delegates to |
+ * | a package's `imports` | that package's outgoing edges are unknown | the walk does not invent an edge, and a delegation on that package is `undetermined` with `package-imports-absent` — the reachability check never ran, so `backed` would claim something nobody verified |
  *
  * A guarantee that only exists in a comment cannot be asserted, so each of these
  * four rows has a regression test in `workspace-source.test.ts`.
+ *
+ * ## Determinism is a property of the answer, not of the walk
+ *
+ * Every input that can repeat itself is ordered before it is used: the graph by raw
+ * content, so no two records a caller wrote differently can tie; the closure, its
+ * modules and its cycles; and diagnostics by (code, subject) after collapsing. Ordering
+ * is not resolution, though — where two inputs *disagree* rather than merely repeat, the
+ * audit says so instead of picking one: a graph that declares one package twice is
+ * `workspace-graph-conflict`, and a decision list with two records for the delegated
+ * module is `conflicting-module-identity-decisions` rather than "the first record wins".
+ * A reversal of any input array is a regression test.
  */
 
 import type {
@@ -72,7 +119,7 @@ import type {
   FrontendLibraryReference,
 } from "@forguncy-react-workspace/core";
 
-import { findDependencyDecision, packageNameOfSpecifier } from "./artifact";
+import { dependencyDecisionsFor, findDependencyDecision, isSourceSpecifier, packageNameOfSpecifier } from "./artifact";
 import type { CellArtifactFixOwner } from "./diagnostics";
 
 // ---------------------------------------------------------------------------
@@ -99,11 +146,16 @@ export const WORKSPACE_SOURCE_SHARING_INVARIANT =
  * Kept as a separate statement rather than folded into the invariant because it is
  * the one case where the invariant is *counter-intuitive*: two cells importing the
  * same `ThemeContext` are two declarations of it, so a provider in one cell is
- * invisible to the other. The spec's words: Context "is local to the Cell React
- * tree unless backed by a shared external module identity".
+ * invisible to the other.
+ *
+ * The second sentence is the sharp half, and it is the one a reader is most likely to
+ * get wrong: bringing the host's React into the package is not enough. The declaration
+ * still happens inside each inlined copy, so `React.createContext(null)` at module
+ * scope in a workspace package produces one Context object *per cell* — the object
+ * itself has to come from a module the page loads once.
  */
 export const WORKSPACE_CONTEXT_SEMANTICS =
-  "A React Context declared in a workspace package is local to the Cell's React tree: each cell that inlines the package declares its own Context object, so a provider mounted in one cell is invisible to another. Cross-cell Context requires a shared external module identity, which means the Context has to be declared in a module the page provides (`host`) or an extension provides (`extension`).";
+  "A React Context declared in a workspace package is local to the Cell's React tree: each cell that inlines the package evaluates that module separately, so a Context created there is a different object per cell, and a provider mounted in one cell is invisible to another. Sharing a Context across cells requires the Context object itself to come from a module the page loads once (a `host` module) or an extension loads once (an `extension` module). Importing React from the host does not do it: the declaration still runs inside each cell.";
 
 export const WORKSPACE_SOURCE_REUSE_CLASS_IDS = [
   "types",
@@ -182,7 +234,7 @@ export const WORKSPACE_SOURCE_REUSE_CLASSES: readonly WorkspaceSourceReuseClass[
     label: "Module-scope mutable state (caches, registries, counters, subscriptions)",
     safety: "delegated-required",
     statement:
-      "Each cell that inlines the package evaluates the module separately, so the state is per cell — #14 requires that source not rely on cross-Cell module singleton identity unless that state is intentionally delegated to a host/extension strategy. Declare the delegation with `moduleIdentity` (`{ kind: \"delegated\", via }`) and import that module, or accept per-cell state.",
+      "Each cell that inlines the package evaluates the module separately, so the state is per cell — #14's 'must not rely on cross-Cell module singleton identity unless that state is intentionally delegated to a host/extension strategy'. Delegating means the state itself lives in a module the page or an extension loads once, and the package says so with `moduleIdentity: { kind: \"delegated\", via }`; importing that module and then keeping your own copy is not a delegation, and nothing local can tell the two apart.",
   },
   {
     id: "module-initialisation-side-effects",
@@ -241,6 +293,91 @@ export function workspaceReuseClassesRequiringDelegation(): readonly WorkspaceSo
 export type WorkspaceModuleIdentity =
   | { readonly kind: "cell-local" }
   | { readonly kind: "delegated"; readonly via: string };
+
+/**
+ * How far the local checks got with one declared delegation.
+ *
+ * - `backed` — every check ran and passed. Still says nothing about where the state
+ *   lives; see {@link WorkspaceDelegationAssessment}.
+ * - `unbacked` — a check ran and refused the declaration;
+ *   `undelegated-workspace-module-identity` says which.
+ * - `undetermined` — not every check ran, or the input contradicts itself, so nothing
+ *   was refused and nothing was confirmed. Carries the {@link WorkspaceDelegationGap}s
+ *   behind it, because "undetermined" without a reason is as unhelpful as "backed"
+ *   without a check.
+ */
+export type WorkspaceDelegationStatus = "backed" | "unbacked" | "undetermined";
+
+/**
+ * Why a delegation's checks could not reach a verdict.
+ *
+ * Two of these are abstentions — the caller did not state an input — and the third is
+ * the input contradicting itself. All three are the audit refusing to guess; none of
+ * them is a finding about the declaration, which is why they travel as gaps in an
+ * `undetermined` assessment rather than as diagnostics.
+ */
+export type WorkspaceDelegationGap =
+  /** No decision list was supplied, so nothing could say whether the page provides `via`. */
+  | "decision-list-absent"
+  /** The package's `imports` were not stated, so reachability was never checked. */
+  | "package-imports-absent"
+  /**
+   * More than one decision governs `via`, so there is no single provider.
+   *
+   * The decision list contradicts itself, which is not this declaration's fault: #6's
+   * artifact audit calls the same list `unresolved-dependency-decision` ("so there is
+   * no single strategy to compile against"). Reporting the delegation as `backed` on
+   * the strength of one arbitrarily chosen record would have this audit announcing a
+   * provider for an artifact that cannot be compiled.
+   */
+  | "decision-list-conflicted";
+
+/**
+ * Whether this audit established that the package's shared state actually lives in
+ * `via`. Always `false`, and the literal type is the point — it cannot become `true`
+ * without a type change.
+ *
+ * A module-id graph records which modules a package imports, never where a value is
+ * declared, so `import React from "react"` beside a package-local
+ * `React.createContext(null)` or `new Map()` satisfies every check this contract can
+ * make while each inlined Cell keeps its own copy. Anything stronger would be a
+ * declaration with no guard behind it, which is the shape this repository's reviews
+ * keep rejecting; the sharing half is
+ * `cells-do-not-share-workspace-module-state`, which only a real page with two cells
+ * can establish.
+ */
+export type WorkspaceStateSharingEstablished = false;
+
+/**
+ * What the audit established about one declared delegation.
+ *
+ * `status` is everything the local checks can decide, and
+ * {@link WorkspaceStateSharingEstablished} is the part they cannot. Reported on every
+ * delegation the audit examined — including the ones with nothing wrong — so a report
+ * with no diagnostics cannot be read as "your state is shared".
+ */
+export type WorkspaceDelegationAssessment =
+  | {
+      readonly package: string;
+      /** The module the package says its shared identity comes from, as declared. */
+      readonly via: string;
+      readonly status: "backed";
+      readonly stateSharingEstablished: WorkspaceStateSharingEstablished;
+    }
+  | {
+      readonly package: string;
+      readonly via: string;
+      readonly status: "unbacked";
+      readonly stateSharingEstablished: WorkspaceStateSharingEstablished;
+    }
+  | {
+      readonly package: string;
+      readonly via: string;
+      readonly status: "undetermined";
+      /** Present and non-empty by construction: an undetermined verdict owes a reason. */
+      readonly gaps: readonly WorkspaceDelegationGap[];
+      readonly stateSharingEstablished: WorkspaceStateSharingEstablished;
+    };
 
 /**
  * One package in the pnpm/Vite+ workspace graph.
@@ -369,19 +506,26 @@ export function indexWorkspaceGraph(graph: WorkspaceGraph): WorkspaceGraphIndexR
     candidates.push(record);
   }
 
-  // Canonical order first, so which of two records sharing a name wins is decided by
-  // the graph's content rather than by the order the caller's array happened to be in.
-  const ordered = [...candidates].sort(
-    (a, b) => compareStrings(a.name, b.name) || compareStrings(a.directory, b.directory),
-  );
+  // Canonical order over the record's *raw* content, because two records can share a
+  // name and a directory and still disagree about `imports` or `moduleIdentity`. A
+  // comparator that returned 0 for them would leave the winner to JavaScript's stable
+  // sort — that is, to the caller's array order — and the index would then retain a
+  // different record depending on it. Normalising the imports would be the other way to
+  // avoid the tie, and it is the wrong one here: it would make `["react", "react"]` and
+  // `["react"]` the same key, so the retained record would again depend on which came
+  // first, while the diagnostic below still has to tell them apart.
+  const ordered = [...candidates].sort((a, b) => compareStrings(recordSelectionKey(a), recordSelectionKey(b)));
 
   const byName = new Map<string, WorkspacePackageRecord>();
   for (const record of ordered) {
     const existing = byName.get(record.name);
     if (existing !== undefined) {
+      const equivalent = recordsAreEquivalent(existing, record);
       diagnostics.push(
         createWorkspaceSourceDiagnostic("workspace-graph-conflict", record.name, {
-          detail: `Two workspace packages share this name ("${existing.directory}" and "${record.directory}"), so which one an import of "${record.name}" reaches is ambiguous. The graph is resolved as the first in canonical order, but the name collision is a project declaration problem.`,
+          detail: equivalent
+            ? `Two records declare this package equivalently ("${existing.directory}" and "${record.directory}"), so the graph is resolved to one of them by content order and nothing downstream changes. The duplicate declaration is still a project declaration problem.`
+            : `Two records declare this package differently ("${existing.directory}" and "${record.directory}"), so which one an import of "${record.name}" reaches changes the answer: a name is resolved by content order, but the collision means the graph does not describe one package.`,
         }),
       );
       continue;
@@ -397,6 +541,64 @@ export function indexWorkspaceGraph(graph: WorkspaceGraph): WorkspaceGraphIndexR
     index: { packages: [...byName.values()], byName },
     diagnostics: orderWorkspaceSourceDiagnostics(diagnostics),
   };
+}
+
+/**
+ * The whole of a record, raw, as a sort key.
+ *
+ * Raw rather than normalised, so that two records a caller wrote differently are ordered
+ * by what they wrote and never tie. A tie then means the two records are the same text,
+ * which is the only case where keeping either can change nothing: see
+ * {@link recordsAreEquivalent} for the weaker question the diagnostic asks.
+ *
+ * `JSON.stringify` of the fields rather than a hand-rolled separator, because the point of
+ * the key is that two *different* records cannot collide: a separator can be spelled inside
+ * a value, and the two distinctions that matter both have to survive it — `undefined`
+ * against `[]` for `imports`, and an absent `moduleIdentity` against an explicit
+ * `{ kind: "cell-local" }`. Both optional fields are written as `null` when absent, so
+ * presence is part of the key. Those pairs mean the same thing to every check here, but
+ * they are not the same record, and only the key keeps them apart.
+ *
+ * Which of two records that differ only in this key's tail wins is decided by text order,
+ * and carries no preference: records that tie on their meaning are interchangeable, and the
+ * duplicate is reported either way.
+ */
+function recordSelectionKey(record: WorkspacePackageRecord): string {
+  return JSON.stringify([
+    record.name,
+    record.directory,
+    record.imports ?? null,
+    record.moduleIdentity ?? null,
+  ]);
+}
+
+/**
+ * A record's meaning, normalised: the weaker comparison the duplicate diagnostic asks.
+ *
+ * Two records that list the same imports in a different order, list one twice, or spell
+ * `cell-local` explicitly rather than leaving the field out are equivalent — the graph
+ * computes edges through a set, the reachability check is a membership test, and an absent
+ * identity already means `cell-local` by the type's own definition. The distinction matters
+ * for the report, not for the resolution: a reader of "two records declare this package"
+ * needs to know whether the duplicate changed anything.
+ *
+ * `undefined` and `[]` for `imports` stay different, for the reason
+ * {@link recordSelectionKey} gives: "nobody said" is not "there are none", and the
+ * reachability check answers differently for them.
+ */
+function recordMeaning(record: WorkspacePackageRecord): string {
+  const imports =
+    record.imports === undefined ? null : [...new Set(record.imports)].sort(compareStrings);
+  const identity =
+    record.moduleIdentity === undefined || record.moduleIdentity.kind === "cell-local"
+      ? "cell-local"
+      : `delegated:${record.moduleIdentity.via}`;
+  return JSON.stringify([record.name, record.directory, imports, identity]);
+}
+
+/** Whether two records say the same thing about a package, once spelling differences are set aside. */
+function recordsAreEquivalent(a: WorkspacePackageRecord, b: WorkspacePackageRecord): boolean {
+  return recordMeaning(a) === recordMeaning(b);
 }
 
 /**
@@ -428,11 +630,49 @@ export function isWorkspaceSourceSpecifier(index: WorkspaceGraphIndex, specifier
   return workspacePackageFor(index, specifier) !== undefined;
 }
 
+export const WORKSPACE_MODULE_KINDS = ["workspace-package", "source-file", "external-package"] as const;
+
+export type WorkspaceModuleKind = (typeof WORKSPACE_MODULE_KINDS)[number];
+
+/**
+ * What a module id is, as far as a workspace graph can tell.
+ *
+ * Three answers rather than two, because the walk needs them: a
+ * `workspace-package` is an edge to follow and gets inlined, a `source-file` is
+ * neither an edge nor a dependency to decide (it is a file inside one of the
+ * packages, and whether it is internal to *this* package or another one is not a
+ * question the dependency pipeline can act on), and an `external-package` is a
+ * published dependency that needs a decision.
+ *
+ * Two answers would make a source-derived graph unusable: `./Button` is not in the
+ * graph, so "not a workspace package" would silently mean "a published dependency",
+ * and the audit would demand a dependency decision for a component file next to it.
+ *
+ * The path test is `artifact.isSourceSpecifier`, the same function the artifact
+ * boundary uses to tell a leftover import from an unresolved decision, so the two
+ * layers cannot end up with two definitions of "this is a file".
+ */
+export function classifyWorkspaceModule(
+  index: WorkspaceGraphIndex,
+  specifier: string,
+): WorkspaceModuleKind {
+  if (workspacePackageFor(index, specifier) !== undefined) return "workspace-package";
+  return isSourceSpecifier(specifier) ? "source-file" : "external-package";
+}
+
 // ---------------------------------------------------------------------------
 // The source closure
 // ---------------------------------------------------------------------------
 
-/** A published module id reached through workspace source, and who pulls it in. */
+/**
+ * A published module id reached through workspace source, and who pulls it in.
+ *
+ * Published module ids only. A file inside a package (`./Button`, `../utils`,
+ * `./styles.css`) is not one — it resolves to nothing the dependency pipeline could
+ * decide — and neither is a workspace package, which is source rather than a
+ * dependency. Collecting either would make the audit demand a decision for something
+ * that must never have one.
+ */
 export interface WorkspaceExternalModule {
   readonly moduleId: string;
   /** The workspace packages importing it, canonical order. This is the import chain for a diagnostic. */
@@ -461,6 +701,12 @@ export interface WorkspaceSourceClosure {
 
 /**
  * The workspace packages a package's stated imports reach, deduped and canonical.
+ *
+ * `workspacePackageFor` rather than `classifyWorkspaceModule`, because this asks the
+ * narrower question: which of these imports is an edge to follow. The three-way
+ * classification is for the walk, which has to decide about the other two kinds as
+ * well — and for a file path both functions agree, since neither treats one as a
+ * package.
  *
  * A name with no record has no known edges, rather than a fabricated empty package:
  * this only happens for a node the caller's edge list mentions and the graph does
@@ -499,6 +745,12 @@ function declaresImport(imports: readonly string[], moduleId: string): boolean {
  * Three answers, and #14 asks for all three: which workspace packages a cell pulls
  * in, which published dependencies come with them (acceptance criterion 3), and
  * whether the import graph has a cycle (acceptance criterion 4).
+ *
+ * The walk branches on {@link classifyWorkspaceModule}, never on "is this in the
+ * graph": a `source-file` import is neither an edge to follow nor a dependency to
+ * decide, and treating "not a workspace package" as "a published dependency" would
+ * demand a decision for `./Button` in any graph derived from source rather than from
+ * a manifest.
  *
  * The walk is over the edges the caller stated. A package whose `imports` is
  * absent contributes no outgoing edges and is still reached, so an incomplete
@@ -539,18 +791,27 @@ export function traceWorkspaceSourceClosure(
     if (record === undefined) continue;
 
     for (const moduleId of record.imports ?? []) {
-      const target = workspacePackageFor(index, moduleId);
-      if (target !== undefined) {
-        if (!reached.has(target.name)) {
-          reached.add(target.name);
-          pending.push(target.name);
+      switch (classifyWorkspaceModule(index, moduleId)) {
+        case "workspace-package": {
+          const target = workspacePackageFor(index, moduleId);
+          if (target === undefined) break;
+          if (!reached.has(target.name)) {
+            reached.add(target.name);
+            pending.push(target.name);
+          }
+          break;
         }
-        continue;
+        case "source-file":
+          // A file inside some package: not an edge to follow and not a dependency
+          // to decide. The bundler flattens it as ordinary source.
+          break;
+        case "external-package": {
+          const importers = externalImports.get(moduleId);
+          if (importers === undefined) externalImports.set(moduleId, new Set([name]));
+          else importers.add(name);
+          break;
+        }
       }
-
-      const importers = externalImports.get(moduleId);
-      if (importers === undefined) externalImports.set(moduleId, new Set([name]));
-      else importers.add(name);
     }
   }
 
@@ -710,9 +971,9 @@ export const WORKSPACE_SOURCE_GUARANTEES: readonly WorkspaceSourceGuarantee[] = 
       "Workspace packages may import npm dependencies, and each of those transitive dependencies is fed into the normal dependency decision pipeline.",
     level: "local",
     howToCheck:
-      "Trace the workspace source reachable from the entry, collect every non-workspace module id it imports, and assert each one has a decision covering it.",
+      "Trace the workspace source reachable from the entry, collect every published module id it imports, and assert each one has a decision covering it. A file inside a package (`./Button`, `../utils`, `./styles.css`) is collected by neither side: it is not an edge to follow and not a dependency to decide.",
     caveat:
-      "Complete only as far as the graph is: a package whose `imports` the caller did not state contributes no edges, and a manifest-derived graph can miss imports that only exist between files.",
+      "Complete only as far as the graph is: a package whose `imports` the caller did not state contributes no edges, a manifest-derived graph can miss imports that only exist between files, and a specifier the bundler resolves through an alias (`#internal`, a `resolve.alias` target) is indistinguishable here from a published package — the graph has to carry the id the bundler resolves.",
   },
   {
     id: "workspace-import-graph-is-acyclic",
@@ -726,12 +987,12 @@ export const WORKSPACE_SOURCE_GUARANTEES: readonly WorkspaceSourceGuarantee[] = 
   {
     id: "workspace-module-identity-is-delegated",
     statement:
-      "Workspace package source does not rely on cross-Cell module singleton identity unless that state is intentionally delegated to a host/extension strategy.",
+      "Every workspace package that declares a cross-Cell module identity names one module the page or an extension provides, and reaches it.",
     level: "local",
     howToCheck:
-      "For every package declaring `moduleIdentity: { kind: \"delegated\", via }`: assert `via` is not workspace source, that it is imported by the package, and that a `host` or `extension` decision provides it.",
+      "For every package declaring `moduleIdentity: { kind: \"delegated\", via }`: assert `via` is not workspace source, that exactly one decision governs it and that decision is `host` or `extension`, and that the package's stated imports reach it. Any check whose input the caller did not state leaves the delegation `undetermined` with the reason rather than passing it.",
     caveat:
-      "An undeclared reliance is invisible. The contract cannot tell that a module-scope cache is *meant* to be page-wide; it can only refuse to imply sharing and require the delegation to be declared, which is why absence reads as `cell-local`.",
+      "Deliberately narrower than #14's sentence, and the narrowing is the honest half: this establishes that the delegation is *declared and backed*, never that the package's state actually lives in `via`. A package can import the host's React and still create its own Context or module-scope cache, and each inlined Cell then keeps a private copy while every check here passes. `WorkspaceDelegationAssessment.stateSharingEstablished` is `false` for every delegation the audit returns, and an undeclared reliance is invisible to begin with — so the sharing itself is `cells-do-not-share-workspace-module-state`, which only a page with two cells can establish.",
   },
   {
     id: "tree-shaking-not-defeated-by-the-toolchain",
@@ -791,6 +1052,7 @@ export const WORKSPACE_SOURCE_DIAGNOSTIC_CODES = [
   "workspace-source-left-external",
   "workspace-package-in-frontend-libraries",
   "unresolved-workspace-transitive-dependency",
+  "conflicting-module-identity-decisions",
   "undelegated-workspace-module-identity",
   "circular-workspace-dependency",
 ] as const;
@@ -879,13 +1141,23 @@ export const WORKSPACE_SOURCE_DIAGNOSTIC_RULES: Readonly<
     fixOwner: "dependency-decision",
     breaksGuarantees: ["transitive-third-party-dependencies-decided"],
   },
+  "conflicting-module-identity-decisions": {
+    code: "conflicting-module-identity-decisions",
+    label: "Conflicting decisions for a delegated module identity",
+    states:
+      "More than one decision covers the module a workspace package delegates its shared identity to, so there is no single provider for it.",
+    remediation:
+      "Resolve the conflict in the decision list: leave exactly one decision for the module, or split it so the record the package delegates to is the only one that covers it. This is the same list the artifact audit refuses as an unresolved dependency decision, and until it is resolved nothing can say which module provides the identity — so the delegation is neither backed nor refused.",
+    fixOwner: "dependency-decision",
+    breaksGuarantees: ["workspace-module-identity-is-delegated"],
+  },
   "undelegated-workspace-module-identity": {
     code: "undelegated-workspace-module-identity",
     label: "Undelegated cross-cell module identity",
     states:
-      "A workspace package declares that it relies on cross-cell module identity, without the state being delegated to a module the page or an extension provides.",
+      "A workspace package declares that it relies on cross-cell module identity, and the module it names cannot provide that identity.",
     remediation:
-      "Delegate the state: declare `moduleIdentity: { kind: \"delegated\", via: \"<module id>\" }`, import that module from the package, and give it a `host` or `extension` decision. An `inline` decision cannot back it — an inlined copy is exactly the second instance the declaration assumes does not exist.",
+      "Delegate the state: declare `moduleIdentity: { kind: \"delegated\", via: \"<module id>\" }`, import that module from the package, and give it a `host` or `extension` decision. An `inline` decision cannot back it — an inlined copy is exactly the second instance the declaration assumes does not exist. The state itself has to live in that module: importing it and then creating your own Context or cache inside the package is not a delegation, and that half is a review or runtime question rather than something a module-id graph can see.",
     fixOwner: "workspace-graph",
     breaksGuarantees: ["workspace-module-identity-is-delegated"],
   },
@@ -1027,25 +1299,45 @@ export interface WorkspaceSourceAudit {
    * be an empty answer that reads like "this cell pulls in nothing".
    */
   readonly closure?: WorkspaceSourceClosure;
+  /**
+   * Every declared delegation the graph contains, with what this audit did and did
+   * not establish about it.
+   *
+   * Its own section rather than a diagnostic, because the interesting half is not a
+   * failure: a delegation can pass every check here and still not be one, and that
+   * has to be visible in an audit that reports nothing rather than inferred from the
+   * absence of findings.
+   */
+  readonly delegations: readonly WorkspaceDelegationAssessment[];
   readonly diagnostics: readonly WorkspaceSourceDiagnostic[];
 }
 
 /**
  * Everything #14 says about one cell's workspace source, and nothing it cannot know.
  *
- * The checks run in a fixed order and the result is ordered by the code table, so
- * the same input always produces the same report regardless of the order the
- * caller's arrays happen to be in.
+ * The checks run in a fixed order and the result is ordered by the code table, so the
+ * same input always produces the same report regardless of the order the caller's
+ * arrays happen to be in. Where two records could disagree — a graph that declares one
+ * package twice, a decision list with two records for one module — the answer is not
+ * "the first one wins": the graph is ordered by raw content, and the decision list is
+ * refused rather than read past.
  */
 export function auditWorkspaceSource(input: WorkspaceSourceAuditInput): WorkspaceSourceAudit {
   if (input.workspace === undefined) {
-    return { graphActivation: "unstated", usage: "unstated", packages: [], diagnostics: [] };
+    return {
+      graphActivation: "unstated",
+      usage: "unstated",
+      packages: [],
+      delegations: [],
+      diagnostics: [],
+    };
   }
 
   const { index, diagnostics: graphDiagnostics } = indexWorkspaceGraph(input.workspace);
   const diagnostics: WorkspaceSourceDiagnostic[] = [...graphDiagnostics];
+  const decisions = input.dependencies;
 
-  diagnostics.push(...auditDecisions(index, input.dependencies));
+  diagnostics.push(...auditDecisions(index, decisions));
   diagnostics.push(...auditFrontendLibraries(index, input.frontendLibraries));
   diagnostics.push(...auditExternalImports(index, input.externalImports));
 
@@ -1056,27 +1348,35 @@ export function auditWorkspaceSource(input: WorkspaceSourceAuditInput): Workspac
       : traceWorkspaceSourceClosure(index, input.entryModuleIds);
 
   if (closure !== undefined) {
-    diagnostics.push(...auditTransitiveDependencies(closure, input.dependencies));
+    diagnostics.push(...auditTransitiveDependencies(closure, decisions));
     diagnostics.push(...auditCycles(closure));
   }
-  diagnostics.push(...auditModuleIdentity(index, input.dependencies));
+
+  const delegation = assessDelegations(index, decisions);
+  diagnostics.push(...delegation.diagnostics);
 
   return {
     graphActivation: "stated",
     usage,
     packages: index.packages.map(entry => entry.name),
     ...(closure === undefined ? {} : { closure }),
+    delegations: delegation.delegations,
     diagnostics: orderWorkspaceSourceDiagnostics(diagnostics),
   };
 }
 
 /**
- * A decision that names workspace source.
+ * Decisions that name workspace source.
  *
  * Every strategy is refused, including `replace`: the problem is not which strategy
  * was chosen but that a workspace package was treated as a dependency at all. #4's
  * rule is about "every *non-workspace* dependency", so a decision record for one is
  * outside its scope by construction.
+ *
+ * Grouped by the package the decision resolves to rather than reported per record, so
+ * two records naming one workspace package produce one diagnostic whose message names
+ * every strategy involved — the same shape #6's decision audit uses, and the reason
+ * the message does not depend on which record was read first.
  */
 function auditDecisions(
   index: WorkspaceGraphIndex,
@@ -1084,13 +1384,27 @@ function auditDecisions(
 ): readonly WorkspaceSourceDiagnostic[] {
   if (dependencies === undefined) return [];
 
-  const diagnostics: WorkspaceSourceDiagnostic[] = [];
+  const strategiesByName = new Map<string, { record: WorkspacePackageRecord; strategies: Set<string> }>();
   for (const decision of dependencies) {
     const record = workspacePackageFor(index, decision.packageName);
     if (record === undefined) continue;
+    const entry = strategiesByName.get(record.name);
+    if (entry === undefined) strategiesByName.set(record.name, { record, strategies: new Set([decision.strategy]) });
+    else entry.strategies.add(decision.strategy);
+  }
+
+  const diagnostics: WorkspaceSourceDiagnostic[] = [];
+  for (const name of [...strategiesByName.keys()].sort(compareStrings)) {
+    const entry = strategiesByName.get(name);
+    if (entry === undefined) continue;
+    const strategies = [...entry.strategies].sort(compareStrings);
+    const lead =
+      strategies.length === 1
+        ? `The decision is \`${strategies[0] ?? ""}\``
+        : `${strategies.length} decisions name it (${strategies.map(strategy => `\`${strategy}\``).join(", ")})`;
     diagnostics.push(
-      createWorkspaceSourceDiagnostic("workspace-package-decided-as-dependency", decision.packageName, {
-        detail: `The decision is \`${decision.strategy}\`, but "${record.name}" (${record.directory}) is workspace source: it is flattened into every cell that imports it, so there is no runtime module for a strategy to describe.`,
+      createWorkspaceSourceDiagnostic("workspace-package-decided-as-dependency", name, {
+        detail: `${lead}, but "${entry.record.name}" (${entry.record.directory}) is workspace source: it is flattened into every cell that imports it, so there is no runtime module for a strategy to describe.`,
       }),
     );
   }
@@ -1213,86 +1527,139 @@ function auditCycles(closure: WorkspaceSourceClosure): readonly WorkspaceSourceD
   );
 }
 
+interface DelegationAssessment {
+  readonly diagnostics: readonly WorkspaceSourceDiagnostic[];
+  readonly delegations: readonly WorkspaceDelegationAssessment[];
+}
+
 /**
- * The packages claiming cross-cell identity, against what actually provides it.
+ * What a delegation to a module the page shares, or does not.
  *
- * Three ways a delegation can fail to be one, and each is a different fix:
+ * Four ways a declaration can be refused, and each is a different fix:
  *
- * - the module it delegates to is workspace source, which cannot provide an
- *   identity — the cell would inline a second definition of the very thing;
+ * - the module it delegates to is workspace source, which cannot provide an identity —
+ *   the cell would inline a second definition of the very thing;
  * - no decision covers it, so nothing says the page provides it;
- * - the decision is `inline` (a private copy) or `replace` (a refusal), neither of
- *   which is a shared identity.
+ * - several decisions cover it, so *which* provides it is unresolved — #6's artifact
+ *   audit refuses the same list as `unresolved-dependency-decision`, and a delegation
+ *   may not be called backed on the strength of one arbitrarily chosen record;
+ * - the decision is `inline` (a private copy) or `replace` (a refusal), neither of which
+ *   is a shared identity.
  *
- * The fourth check is separate because it depends on the graph stating the
+ * The reachability check is separate because it depends on the graph stating the
  * package's imports, and it is the one that catches a *decorative* declaration: a
- * delegation to a module the package never imports shares nothing.
+ * delegation to a module the package never imports shares nothing. It is a necessary
+ * condition and not a sufficient one, and the wording says so — see the module note on
+ * what this contract cannot prove.
  *
- * The first check needs no decision list at all — workspace source cannot provide a
- * module identity whether or not the caller stated any decisions — so an absent
- * `dependencies` abstains from the decision half only. Keeping that split here
- * rather than at the call site is what stops the second abstention from swallowing
- * the first check as well.
+ * Only the first check needs no decision list, and only the first two and the last need
+ * no `imports`; the rest are skipped when their input is absent and recorded as
+ * {@link WorkspaceDelegationGap}s. That is why this walks every check it *can* run
+ * instead of returning at the first missing input: a decorative declaration whose
+ * decision list was not supplied is still decorative, and an early return would have
+ * called it undetermined instead.
  *
  * Checked for every package in the graph rather than only for the ones the entry
  * reaches, unlike the closure checks. A delegation is a property of the declaration,
- * not of one cell's imports: a workspace package whose delegation is unbacked is
- * wrong for whichever cell reaches it first, and reporting it only once some cell
- * imports it would report it at the least useful moment.
+ * not of one cell's imports: a workspace package whose delegation is unbacked is wrong
+ * for whichever cell reaches it first, and reporting it only once some cell imports it
+ * would report it at the least useful moment.
+ *
+ * Every delegation it examines produces an assessment, including the ones with nothing
+ * wrong — a report that lists only the failures would read as "the others are fine",
+ * which is exactly the reading the module note forbids.
  */
-function auditModuleIdentity(
+function assessDelegations(
   index: WorkspaceGraphIndex,
   dependencies: readonly DependencyDecision[] | undefined,
-): readonly WorkspaceSourceDiagnostic[] {
+): DelegationAssessment {
   const diagnostics: WorkspaceSourceDiagnostic[] = [];
+  const delegations: WorkspaceDelegationAssessment[] = [];
 
   for (const record of index.packages) {
     const identity = record.moduleIdentity;
     if (identity === undefined || identity.kind !== "delegated") continue;
     const via = identity.via;
 
+    const gaps: WorkspaceDelegationGap[] = [];
+    const failed = (detail: string): void => {
+      diagnostics.push(
+        createWorkspaceSourceDiagnostic("undelegated-workspace-module-identity", record.name, { detail }),
+      );
+    };
+
     const delegate = workspacePackageFor(index, via);
     if (delegate !== undefined) {
-      diagnostics.push(
-        createWorkspaceSourceDiagnostic("undelegated-workspace-module-identity", record.name, {
-          detail: `It delegates to "${via}", which is workspace source (${delegate.directory}) as well — each cell inlines its own copy, so the identity it claims to share is the one thing inlining cannot provide. Delegate to a module the page provides (\`host\`) or an extension provides (\`extension\`).`,
-        }),
+      // Workspace source cannot provide an identity, so nothing else is worth asking:
+      // decisions *about* a workspace package are themselves an error, and the fix is a
+      // different module rather than a better decision.
+      failed(
+        `It delegates to "${via}", which is workspace source (${delegate.directory}) as well — each cell inlines its own copy, so the identity it claims to share is the one thing inlining cannot provide. Delegate to a module the page provides (\`host\`) or an extension provides (\`extension\`).`,
       );
+      delegations.push({ package: record.name, via, status: "unbacked", stateSharingEstablished: false });
       continue;
     }
 
-    if (dependencies === undefined) continue;
+    let refused = false;
 
-    const decision = findDependencyDecision(dependencies, via);
-    if (decision === undefined) {
-      diagnostics.push(
-        createWorkspaceSourceDiagnostic("undelegated-workspace-module-identity", record.name, {
-          detail: `It delegates to "${via}", and no decision covers that module, so nothing says the page provides it.`,
-        }),
-      );
-      continue;
-    }
-
-    if (decision.strategy !== "host" && decision.strategy !== "extension") {
-      diagnostics.push(
-        createWorkspaceSourceDiagnostic("undelegated-workspace-module-identity", record.name, {
-          detail: `It delegates to "${via}", which is decided "${decision.strategy}": ${whyStrategyCannotProvideSharedIdentity(decision.strategy)} Only a "host" or "extension" decision carries a module identity the page shares.`,
-        }),
-      );
-      continue;
+    if (dependencies === undefined) {
+      gaps.push("decision-list-absent");
+    } else {
+      const governing = dependencyDecisionsFor(dependencies, via);
+      if (governing.length === 0) {
+        refused = true;
+        failed(`It delegates to "${via}", and no decision covers that module, so nothing says the page provides it.`);
+      } else if (governing.length > 1) {
+        // Not "the first one wins": the list has no single answer, and #6 refuses it for
+        // the same reason. Recorded as a gap *and* reported, because a caller reading
+        // only diagnostics must not go silent about a declaration that cannot be backed.
+        gaps.push("decision-list-conflicted");
+        diagnostics.push(
+          createWorkspaceSourceDiagnostic("conflicting-module-identity-decisions", via, {
+            detail: `${governing.length} decisions cover it (${[...new Set(governing.map(entry => entry.strategy))]
+              .sort(compareStrings)
+              .map(strategy => `\`${strategy}\``)
+              .join(", ")}), so which one provides the identity "${record.name}" delegates to is unresolved. The artifact audit (#6) refuses the same list as an unresolved dependency decision.`,
+          }),
+        );
+      } else {
+        const decision = governing[0];
+        if (decision !== undefined && decision.strategy !== "host" && decision.strategy !== "extension") {
+          refused = true;
+          failed(
+            `It delegates to "${via}", which is decided \`${decision.strategy}\`: ${whyStrategyCannotProvideSharedIdentity(decision.strategy)} Only \`host\` and \`extension\` carry a module identity the page shares.`,
+          );
+        }
+      }
     }
 
     const imports = record.imports;
-    if (imports !== undefined && !declaresImport(imports, via)) {
-      diagnostics.push(
-        createWorkspaceSourceDiagnostic("undelegated-workspace-module-identity", record.name, {
-          detail: `It declares that its state is delegated to "${via}", but its stated imports do not reach that module, so the declaration delegates nothing.`,
-        }),
+    if (imports === undefined) {
+      gaps.push("package-imports-absent");
+    } else if (!declaresImport(imports, via)) {
+      refused = true;
+      failed(
+        `It declares that its state is delegated to "${via}", but its stated imports do not reach that module, so the declaration delegates nothing.`,
       );
     }
+
+    if (refused) {
+      delegations.push({ package: record.name, via, status: "unbacked", stateSharingEstablished: false });
+      continue;
+    }
+
+    delegations.push(
+      gaps.length > 0
+        ? { package: record.name, via, status: "undetermined", gaps, stateSharingEstablished: false }
+        : // Backed, and that is all that can be said: the module is provided by the page,
+          // the package reaches it, and there is one decision rather than several. Whether
+          // the package's state is *in* it is not a question a module-id graph answers,
+          // which is what the assessment carries.
+          { package: record.name, via, status: "backed", stateSharingEstablished: false },
+    );
   }
 
-  return diagnostics;
+  return { diagnostics, delegations };
 }
 
 /** A report block for a CI log or a PR body. */
@@ -1307,6 +1674,20 @@ export function formatWorkspaceSourceAudit(audit: WorkspaceSourceAudit): string 
       `Workspace source in the closure: ${audit.closure.packages.join(", ") || "(none)"}`,
       `Published dependencies reached through it: ${audit.closure.externalModules.map(entry => entry.moduleId).join(", ") || "(none)"}`,
       `Cycles: ${audit.closure.cycles.map(cycle => cycle.chain.join(" → ")).join("; ") || "(none)"}`,
+    );
+  }
+
+  if (audit.delegations.length > 0) {
+    // Printed even when it is empty of findings, so "no diagnostics" cannot be read as
+    // "the declared sharing was verified".
+    lines.push(
+      `Delegated identity: ${audit.delegations
+        .map(delegation => {
+          const qualifier =
+            delegation.status === "undetermined" ? ` (undetermined: ${delegation.gaps.join(", ")})` : ` (${delegation.status})`;
+          return `${delegation.package} → ${delegation.via}${qualifier}; state sharing ${delegation.stateSharingEstablished ? "established" : "NOT established by this audit and not locally checkable"}`;
+        })
+        .join("; ")}`,
     );
   }
 

@@ -194,15 +194,24 @@ export function packageNameOfSpecifier(specifier: string): string {
 }
 
 /**
- * True when a specifier names a file rather than a package.
+ * True when a specifier names a file rather than a module id.
+ *
+ * Exported because two layers have to give the same answer: this one decides between
+ * "a leftover import" and "an unresolved decision" with it, and the workspace
+ * contract (#14) decides between "workspace source" and "a published dependency"
+ * with the same test. Restating it in the second place would be two answers to one
+ * question, which is the shape #9's fourth review round found in `findDecision`.
  *
  * Exact for relative and absolute paths, which is the whole claim: a *named*
  * workspace package (`@scope/ui`) is indistinguishable here from a published one,
- * because the artifact layer has no workspace manifest. That limit is recorded in
- * the workspace guarantee's caveat rather than papered over with a scope
- * allowlist that would be wrong for any other monorepo.
+ * because the artifact layer has no workspace manifest — #14's workspace contract
+ * asks that question with `workspacePackageFor` instead, which is what holding a
+ * manifest buys. A specifier the bundler resolves through an alias (`#internal`, a
+ * `resolve.alias` target) is outside this test in either direction: it is not a
+ * path, so both layers treat it as a module id, which is why a graph that carries
+ * one has to carry the id the bundler actually resolves rather than the alias.
  */
-function isSourceSpecifier(specifier: string): boolean {
+export function isSourceSpecifier(specifier: string): boolean {
   return specifier.startsWith(".") || specifier.startsWith("/");
 }
 
@@ -411,13 +420,15 @@ function auditHostGlobalClaims(dependencies: readonly DependencyDecision[]): rea
 // ---------------------------------------------------------------------------
 
 /**
- * The decision that governs a specifier: the exact one, then its package's.
+ * Every decision at the level that governs a specifier: the exact records, else the
+ * package's.
  *
- * The rule for how a decision covers a subpath, exported so the engine has exactly
- * one of them. `react-dom/client` is governed by a `react-dom` decision, and the
- * bridge's activation calculation has to agree with this or the two disagree about
- * what an artifact contains — the host-bridge module imports it rather than
- * restating it.
+ * The whole point of returning a list rather than one record: a lock can hold more
+ * than one record for one module, and a caller that needs to know whether there is a
+ * *single* provider has to be able to see the conflict instead of being handed
+ * whichever record came first. `auditDependencyDecisions` above already refuses such a
+ * list as `unresolved-dependency-decision`; this is how a downstream audit asks the
+ * same question without restating the precedence.
  *
  * The precedence is structural, not positional. A package id and one of its subpath ids
  * are distinct records that can both be present with *different* strategies, and the
@@ -426,19 +437,35 @@ function auditHostGlobalClaims(dependencies: readonly DependencyDecision[]): rea
  * subpath decision. Exact first, then the package fallback, never "whichever comes
  * first".
  */
-export function findDependencyDecision(
+export function dependencyDecisionsFor(
   dependencies: readonly DependencyDecision[],
   specifier: string,
-): DependencyDecision | undefined {
-  const exact = dependencies.find(decision => decision.packageName === specifier);
-  if (exact !== undefined) return exact;
+): readonly DependencyDecision[] {
+  const exact = dependencies.filter(decision => decision.packageName === specifier);
+  if (exact.length > 0) return exact;
 
   const packageName = packageNameOfSpecifier(specifier);
   // A bare package name or a source path is its own package name, so there is no
   // fallback record left to look for.
-  if (packageName === specifier) return undefined;
+  if (packageName === specifier) return [];
 
-  return dependencies.find(decision => decision.packageName === packageName);
+  return dependencies.filter(decision => decision.packageName === packageName);
+}
+
+/**
+ * The decision that governs a specifier: the first of the exact ones, else the first of
+ * the package's.
+ *
+ * Defined through {@link dependencyDecisionsFor} so there is one implementation of the
+ * precedence. For a caller that only needs the record, and for a caller auditing a lock
+ * whose records are known to be unique; a caller that has to be sure there is *one*
+ * provider uses the list.
+ */
+export function findDependencyDecision(
+  dependencies: readonly DependencyDecision[],
+  specifier: string,
+): DependencyDecision | undefined {
+  return dependencyDecisionsFor(dependencies, specifier)[0];
 }
 
 /**

@@ -5,6 +5,7 @@ import type { CellEntryKind, DependencyDecision } from "@forguncy-react-workspac
 import {
   CELL_ARTIFACT_BANNER,
   compileCell,
+  dependencyDecisionsFor,
   findDependencyDecision,
   formatCompileCellOutcome,
   packageNameOfSpecifier,
@@ -618,5 +619,34 @@ describe("which decision governs a specifier", () => {
     expect(findDependencyDecision(packageOnly, "@scope/ui")).toBe(packageOnly[0]);
     expect(findDependencyDecision(packageOnly, "./local")).toBeUndefined();
     expect(findDependencyDecision([], "react")).toBeUndefined();
+  });
+
+  // The list, not the first record. A caller that has to know whether there is *a single*
+  // provider cannot ask `findDependencyDecision`, because it answers with one of them —
+  // which is how a conflicted lock came to look like a backed delegation.
+  it("returns every record at the level that governs, and stops at that level", () => {
+    const secondPackageLevel: DependencyDecision = { strategy: "inline", packageName: "react-dom" };
+
+    expect(dependencyDecisionsFor([packageDecision, subpathDecision], "react-dom/client")).toEqual([subpathDecision]);
+    expect(dependencyDecisionsFor([packageDecision, secondPackageLevel], "react-dom/client")).toEqual([
+      packageDecision,
+      secondPackageLevel,
+    ]);
+    expect(dependencyDecisionsFor([subpathDecision], "react-dom")).toEqual([]);
+    expect(dependencyDecisionsFor([], "react")).toEqual([]);
+  });
+
+  // The relationship between the two, stated as a test so a later rewrite cannot make the
+  // single-record helper stop being the list's first element.
+  it("keeps findDependencyDecision as the first record of that list", () => {
+    const second: DependencyDecision = { strategy: "inline", packageName: "react-dom" };
+
+    for (const dependencies of [
+      [packageDecision, second],
+      [second, packageDecision],
+    ]) {
+      expect(dependencyDecisionsFor(dependencies, "react-dom")).toHaveLength(2);
+      expect(findDependencyDecision(dependencies, "react-dom")).toBe(dependencies[0]);
+    }
   });
 });
