@@ -655,6 +655,23 @@ describe("the plan activates only what the decisions select", () => {
     const plan = planHostBridge({ decisions: [hostDecision("react-dom", "ReactDOM")] });
     expect(plan.interceptions.map(entry => entry.moduleId)).toEqual(["react-dom"]);
   });
+
+  // The consequence of the governing rule, and the reason its precedence has to be
+  // structural: a package-level `host` record and an explicit subpath record can both be
+  // present with different strategies, and canonical lock order puts the package first.
+  // Picking by position would host-intercept a subpath the lock decided to bundle.
+  it("lets an explicit subpath decision override the package decision, in either array order", () => {
+    const packageDecision = hostDecision("react-dom", "ReactDOM");
+    const subpathDecision = inlineDecision("react-dom/client");
+
+    for (const decisions of [
+      [packageDecision, subpathDecision],
+      [subpathDecision, packageDecision],
+    ]) {
+      const plan = planHostBridge({ decisions, referencedSpecifiers: ["react-dom/client"] });
+      expect(plan.interceptions.map(entry => entry.moduleId)).toEqual(["react-dom"]);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
