@@ -455,37 +455,44 @@ describe("the artifact guard", () => {
 });
 
 describe("planning the bridge", () => {
-  it("derives one interception per intercepted module id, from the table alone", () => {
+  // The catalog is the table projected: what the bridge *could* intercept. It is a
+  // capability list, never an instruction — see the activation block below for what a
+  // caller may actually wire.
+  it("projects the table into a per-module-id catalog", () => {
     const plan = planHostBridge();
-    expect(plan.interceptions.map(interception => interception.moduleId)).toEqual(interceptedHostBridgeModuleIds());
+    expect(plan.catalog.map(entry => entry.moduleId)).toEqual(interceptedHostBridgeModuleIds());
     expect(plan.diagnostics).toEqual([]);
-    for (const interception of plan.interceptions) {
-      expect(interception.source.startsWith(HOST_BRIDGE_GENERATED_BANNER)).toBe(true);
-      expect(interception.bundledForbidden).toBe(true);
+    for (const entry of plan.catalog) {
+      expect(entry.source.startsWith(HOST_BRIDGE_GENERATED_BANNER)).toBe(true);
+      expect(entry.bundledForbidden).toBe(true);
     }
+
+    // No decisions and no references: the answer to "what does this artifact
+    // activate" is unknown, and the plan says so rather than handing back the whole
+    // catalog as if it had been decided.
+    expect(plan.activation).toBe("unstated");
+    expect(plan.interceptions).toEqual([]);
   });
 
   it("gives each module id the source its own shape needs", () => {
-    const plan = planHostBridge();
-    const shapes = new Map(plan.interceptions.map(interception => [interception.moduleId, interception.shape]));
-    expect(shapes.get("react")).toBe("host-identity");
-    expect(shapes.get("react-dom")).toBe("host-identity");
-    expect(shapes.get("react-dom/client")).toBe("verified-member-view");
-    expect(shapes.get("antd")).toBe("host-identity");
-    expect(shapes.get("react/jsx-runtime")).toBe("jsx-runtime-adapter");
-    expect(shapes.get("react/jsx-dev-runtime")).toBe("jsx-runtime-adapter");
+    const byId = new Map(planHostBridge().catalog.map(entry => [entry.moduleId, entry]));
+    expect(byId.get("react")?.shape).toBe("host-identity");
+    expect(byId.get("react-dom")?.shape).toBe("host-identity");
+    expect(byId.get("react-dom/client")?.shape).toBe("verified-member-view");
+    expect(byId.get("antd")?.shape).toBe("host-identity");
+    expect(byId.get("react/jsx-runtime")?.shape).toBe("jsx-runtime-adapter");
+    expect(byId.get("react/jsx-dev-runtime")?.shape).toBe("jsx-runtime-adapter");
 
-    const byId = new Map(plan.interceptions.map(interception => [interception.moduleId, interception.source]));
-    expect(byId.get("react-dom/client")).not.toBe(byId.get("react-dom"));
-    expect(byId.get("react-dom/client")).toContain("Proxy");
-    expect(byId.get("react-dom")).toContain("globalThis[\"ReactDOM\"]");
-    expect(byId.get("react-dom")).not.toContain("Proxy");
+    expect(byId.get("react-dom/client")?.source).not.toBe(byId.get("react-dom")?.source);
+    expect(byId.get("react-dom/client")?.source).toContain("Proxy");
+    expect(byId.get("react-dom")?.source).toContain('globalThis["ReactDOM"]');
+    expect(byId.get("react-dom")?.source).not.toContain("Proxy");
   });
 
   // #9's fifth acceptance criterion. A synthetic row is added to the table the way a
-  // project would add one, and the plan grows without a line of code changing — which
-  // is what "no hardcoded package-specific AST rewrites" has to mean in practice.
-  it("extends the interception set from the table, with no code change", () => {
+  // project would add one, and the catalog grows without a line of code changing —
+  // which is what "no hardcoded package-specific AST rewrites" has to mean in practice.
+  it("extends the catalog from the table, with no code change", () => {
     const dayjs: HostBridgeGlobalMapping = {
       kind: "host-global",
       specifier: "dayjs",
@@ -498,8 +505,8 @@ describe("planning the bridge", () => {
 
     const plan = planHostBridge({ mappings: [...HOST_BRIDGE_MAPPINGS, dayjs] });
     expect(plan.diagnostics).toEqual([]);
-    expect(plan.interceptions.map(interception => interception.moduleId)).toContain("dayjs");
-    expect(plan.interceptions.at(-1)?.source).toContain('globalThis["dayjs"]');
+    expect(plan.catalog.map(entry => entry.moduleId)).toContain("dayjs");
+    expect(plan.catalog.at(-1)?.source).toContain('globalThis["dayjs"]');
   });
 
   // The structural half of the same criterion: a generator whose only inputs are a
@@ -518,10 +525,10 @@ describe("planning the bridge", () => {
     expect(plan.diagnostics[0]?.specifier).toBe("lodash");
   });
 
-  // The review's second finding. `antd` is not identity-sensitive, so a cell-local
-  // inline copy shares nothing that a second copy could split — reporting it would
-  // turn a table row into a policy, and the resolver's own duplicate audit draws the
-  // same line.
+  // The review's second finding from round one. `antd` is not identity-sensitive, so a
+  // cell-local inline copy shares nothing that a second copy could split — reporting it
+  // would turn a table row into a policy, and the resolver's own duplicate audit draws
+  // the same line.
   it("reports a bundled duplicate only for an identity-sensitive mapping", () => {
     const react = planHostBridge({ decisions: [inlineDecision("react")] });
     const diagnostic = react.diagnostics.find(candidate => candidate.code === "host-module-duplicated");
@@ -559,9 +566,10 @@ describe("planning the bridge", () => {
     expect(plan.diagnostics.map(diagnostic => diagnostic.code)).toContain("host-mapping-conflict");
   });
 
-  it("formats a plan with the fix owner on every line", () => {
+  it("formats a plan, separating the catalog from the activations", () => {
     const report = formatHostBridgePlan(planHostBridge({ decisions: [hostDecision("lodash", "_")] }));
-    expect(report).toContain("Host bridge intercepts 6 module id(s)");
+    expect(report).toContain("Host bridge catalog: 6 module id(s)");
+    expect(report).toContain("Activations: stated");
     expect(report).toContain("[host-mapping-missing]");
     expect(report).toContain("fix owner: dependency-decision");
   });
@@ -574,34 +582,106 @@ describe("planning the bridge", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Preset readiness — the review's third finding
+// Activation — the review's second finding of round two
 // ---------------------------------------------------------------------------
 
-describe("preset readiness is audited for the imports the cell uses", () => {
+describe("the plan activates only what the decisions select", () => {
+  const activeIds = (options: Parameters<typeof planHostBridge>[0]) =>
+    planHostBridge(options).interceptions.map(entry => entry.moduleId);
+
+  it("activates a host decision, and its source is the catalog's", () => {
+    const plan = planHostBridge({ decisions: [hostDecision("react", "React")] });
+    expect(plan.activation).toBe("stated");
+    expect(plan.interceptions.map(entry => entry.moduleId)).toEqual(["react"]);
+    expect(plan.interceptions[0]?.source).toBe(plan.catalog.find(entry => entry.moduleId === "react")?.source);
+  });
+
+  // The finding: before this, the plan carried an `antd -> globalThis.antd` interception
+  // for an artifact that deliberately bundles its own copy, so wiring the plan into a
+  // resolver would have made the mapping table a mandatory-host policy.
+  it("does not activate a mapping the artifact decided to bundle", () => {
+    expect(activeIds({ decisions: [inlineDecision("antd")] })).toEqual([]);
+    expect(activeIds({ decisions: [inlineDecision("react")] })).toEqual([]);
+    expect(activeIds({ decisions: [{ strategy: "extension", packageName: "antd", libraryId: "x", globalName: "antd" }] })).toEqual([]);
+    expect(activeIds({ decisions: [{ strategy: "replace", packageName: "antd", rejection: { kind: "technical", code: "runtime-api-unavailable", summary: "the bundled copy needs an API the target does not expose", remediation: "use something else" } }] })).toEqual([]);
+  });
+
+  it("activates the JSX runtime adapter from a reference, because it is not a `host` strategy", () => {
+    expect(activeIds({ referencedSpecifiers: ["react/jsx-runtime"] })).toEqual(["react/jsx-runtime"]);
+    // The resolver requires `replace` for these ids, so a decision naming one still
+    // activates the adapter: it is what a compiler would otherwise act on.
+    expect(
+      activeIds({
+        decisions: [
+          {
+            strategy: "replace",
+            packageName: "react/jsx-runtime",
+            rejection: { kind: "technical", code: "runtime-api-unavailable", summary: "the published module carries its own React", remediation: "bind the generated adapter" },
+          },
+        ],
+      }),
+    ).toEqual(["react/jsx-runtime"]);
+  });
+
+  // A bare reference is not a statement that the page provides the module, so it must
+  // not produce an interception — the unresolved import belongs to the decision layer.
+  it("does not activate a host-global mapping from a reference alone", () => {
+    const plan = planHostBridge({ referencedSpecifiers: ["antd", "react-dom/client"] });
+    expect(plan.activation).toBe("stated");
+    expect(plan.interceptions).toEqual([]);
+  });
+
+  it("keeps the catalog available for a caller that wants the full capability list", () => {
+    const plan = planHostBridge({ decisions: [inlineDecision("antd")] });
+    expect(plan.catalog.map(entry => entry.moduleId)).toEqual(interceptedHostBridgeModuleIds());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Preset readiness — the review's third finding of round one and first of round two
+// ---------------------------------------------------------------------------
+
+describe("preset readiness is audited for the imports the cell relies on", () => {
   const antdMissing = (options: Parameters<typeof planHostBridge>[0]) =>
     planHostBridge(options).diagnostics.filter(diagnostic => diagnostic.code === "host-global-missing");
 
   it("reports nothing for an unused conditional mapping", () => {
-    // Before the fix this reported `antd` for a cell whose preset is `None` even
-    // when the artifact never mentions `antd`.
+    // Before the fix this reported `antd` for a cell whose preset is `None` even when
+    // the artifact never mentions `antd`.
     expect(antdMissing({ cellPreset: "None" })).toEqual([]);
     expect(antdMissing({ cellPreset: "None", decisions: [hostDecision("react", "React")] })).toEqual([]);
     expect(antdMissing({ cellPreset: "ECharts", referencedSpecifiers: ["react", "react-dom"] })).toEqual([]);
   });
 
-  it("reports a conditional mapping the cell does use", () => {
+  it("reports a conditional mapping the cell relies on through a host decision", () => {
     const fromDecision = antdMissing({ cellPreset: "None", decisions: [hostDecision("antd", "antd")] });
     expect(fromDecision).toHaveLength(1);
     expect(fromDecision[0]?.specifier).toBe("antd");
     expect(fromDecision[0]?.detail).toContain("supported state");
+  });
 
+  it("reports a conditional mapping the cell imports with no decision either way", () => {
     const fromReference = antdMissing({ cellPreset: "None", referencedSpecifiers: ["antd"] });
     expect(fromReference).toHaveLength(1);
     expect(fromReference[0]?.specifier).toBe("antd");
   });
 
+  // The round-two finding: a decision that bundles its own copy does not need the host
+  // preset, so requiring one would contradict the same change that made it legal.
+  it("reports nothing for a conditional mapping another decision bundles", () => {
+    expect(antdMissing({ cellPreset: "None", decisions: [inlineDecision("antd")] })).toEqual([]);
+    expect(
+      antdMissing({
+        cellPreset: "None",
+        decisions: [{ strategy: "extension", packageName: "antd", libraryId: "x", globalName: "antd" }],
+      }),
+    ).toEqual([]);
+    expect(antdMissing({ cellPreset: "None", referencedSpecifiers: ["antd"], decisions: [inlineDecision("antd")] })).toEqual([]);
+  });
+
   it("reports nothing when the declared preset does install the global", () => {
     expect(antdMissing({ cellPreset: "AntDesign", referencedSpecifiers: ["antd"] })).toEqual([]);
+    expect(antdMissing({ cellPreset: "AntDesign", decisions: [hostDecision("antd", "antd")] })).toEqual([]);
   });
 
   it("abstains when the caller did not say what the cell uses", () => {

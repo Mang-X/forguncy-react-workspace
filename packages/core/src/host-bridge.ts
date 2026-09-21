@@ -950,7 +950,9 @@ export class HostBridgeContractError extends Error {
  *    saying what keeps it true;
  * 6. an intercepted module id with no declared binding shape — the state in which
  *    "this import is the host object" and "this import is a view over it" are
- *    indistinguishable, and the surface claim stops being checkable;
+ *    indistinguishable, and the surface claim stops being checkable — or *two*
+ *    binding shapes for one id, which makes the generated shape depend on
+ *    declaration order instead;
  * 7. a `verified-member-view` that forwards a member #5 never observed, which is
  *    the one edit that would silently turn an evidence-based narrowing back into a
  *    guess.
@@ -1015,12 +1017,24 @@ export function assertHostBridgeMappingIsAdmissible(mapping: HostBridgeMapping):
     }
   }
 
+  // "Exactly once", not "at least once": a second binding for one id would make
+  // `hostBridgeBindingFor`'s first-match lookup decide the answer, so the
+  // generated shape — the host object or a narrowed view — would depend on array
+  // order rather than on the row's statement.
+  const boundIds = new Set<string>();
   for (const declared of mapping.binds) {
     if (!declaredIds.includes(declared.moduleId)) {
       throw new HostBridgeContractError(
         `Host bridge mapping "${mapping.specifier}" declares a binding for "${declared.moduleId}", which the row does not intercept.`,
       );
     }
+
+    if (boundIds.has(declared.moduleId)) {
+      throw new HostBridgeContractError(
+        `Host bridge mapping "${mapping.specifier}" declares more than one binding for "${declared.moduleId}", so which shape is generated would depend on declaration order.`,
+      );
+    }
+    boundIds.add(declared.moduleId);
 
     if (declared.shape === "host-identity") {
       if (declared.members !== undefined) {

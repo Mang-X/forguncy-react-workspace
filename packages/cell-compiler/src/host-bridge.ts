@@ -591,9 +591,38 @@ export interface HostBridgeInterception {
 }
 
 export interface HostBridgePlan {
+  /**
+   * Every module id the bridge *could* intercept, with the source for its shape.
+   *
+   * The table, projected. A catalog entry is a capability, not a decision: it says
+   * what the bridge would generate if the artifact asked for that module through
+   * the host. Consult it to answer "what does the bridge know how to do".
+   */
+  readonly catalog: readonly HostBridgeInterception[];
+  /**
+   * The catalog entries this artifact actually activates — what a resolver hook may
+   * be wired from.
+   *
+   * Separate from {@link catalog} because a mapping says *how* a `host` decision
+   * compiles, never that a package must be `host`. Wiring the catalog in wholesale
+   * would make the presence of a row override an `inline`/`extension`/`replace`
+   * decision and intercept a module the artifact deliberately carries its own copy
+   * of, which is the policy this contract exists to avoid.
+   */
   readonly interceptions: readonly HostBridgeInterception[];
+  /**
+   * Whether the caller supplied enough input to know what this artifact activates.
+   *
+   * `unstated` means neither `decisions` nor `referencedSpecifiers` was given, so
+   * `interceptions` is empty because the answer is unknown — not because the
+   * artifact activates nothing. A caller may not wire resolver hooks from an
+   * `unstated` plan.
+   */
+  readonly activation: HostBridgeActivation;
   readonly diagnostics: readonly HostBridgeDiagnostic[];
 }
+
+export type HostBridgeActivation = "stated" | "unstated";
 
 export interface PlanHostBridgeOptions {
   readonly mappings?: readonly HostBridgeMapping[];
@@ -653,12 +682,12 @@ export function planHostBridge(options: PlanHostBridgeOptions = {}): HostBridgeP
     );
   }
 
-  const interceptions: HostBridgeInterception[] = [];
+  const catalog: HostBridgeInterception[] = [];
   for (const mapping of mappings) {
     for (const moduleId of hostBridgeModuleIds(mapping)) {
       const shape = hostBridgeShapeFor(mapping, moduleId);
       if (shape === undefined) continue;
-      interceptions.push({
+      catalog.push({
         specifier: mapping.specifier,
         moduleId,
         kind: mapping.kind,
@@ -675,7 +704,7 @@ export function planHostBridge(options: PlanHostBridgeOptions = {}): HostBridgeP
   // guard above already covers it, and this keeps the check meaningful when a
   // caller passes a table it built itself.
   const seen = new Map<string, string>();
-  for (const interception of interceptions) {
+  for (const interception of catalog) {
     const owner = seen.get(interception.moduleId);
     if (owner !== undefined && owner !== interception.specifier) {
       diagnostics.push(
@@ -690,32 +719,87 @@ export function planHostBridge(options: PlanHostBridgeOptions = {}): HostBridgeP
   }
 
   const decisions = options.decisions ?? [];
-  const usedModuleIds = hostBridgeModulesInUse(decisions, options.referencedSpecifiers);
+  const usage = hostBridgeUsage(decisions, options.referencedSpecifiers);
+  const interceptions = catalog.filter(interception => usage.activated.has(interception.moduleId));
 
   diagnostics.push(...auditHostBridgeDecisions(decisions, mappings));
-  diagnostics.push(...auditHostBridgePresetReadiness(mappings, options.cellPreset, usedModuleIds));
+  diagnostics.push(...auditHostBridgePresetReadiness(mappings, options.cellPreset, usage));
 
-  return { interceptions, diagnostics };
+  return { catalog, interceptions, activation: usage.state, diagnostics };
+}
+
+export interface HostBridgeUsage {
+  readonly state: HostBridgeActivation;
+  /**
+   * The module ids the bridge is asked to intercept, and the only ones a resolver
+   * hook may be wired from.
+   */
+  readonly activated: ReadonlySet<string>;
+  /**
+   * The module ids whose *host global* the artifact relies on.
+   *
+   * A superset of {@link activated}, and not the same question — conflating the two
+   * is what made the first version of the preset audit wrong in both directions:
+   *
+   * - a `host` decision activates the bridge *and* depends on the page providing the
+   *   global;
+   * - a reference to a gated module with **no** decision does not activate anything
+   *   (nothing has said the page provides it, so a hook would be overriding an
+   *   unresolved import) but it *is* a real preset question, because the artifact uses
+   *   the import either way;
+   * - a reference **overridden** by a non-`host` decision depends on nothing: the
+   *   artifact carries its own copy, its own extension global, or its own alternative,
+   *   and must not be told to declare a preset it deliberately does not use.
+   */
+  readonly presetDependent: ReadonlySet<string>;
 }
 
 /**
- * Which bridged module ids the artifact actually contains.
+ * What this artifact asks of the bridge, and of the host's preset chains.
  *
- * Derived from the two things that can put one there: a dependency decision, and a
- * specifier the caller observed being referenced. `undefined` means "the caller did
- * not say", which is different from an empty set — the former makes an
- * usage-dependent audit abstain, the latter makes it report nothing because there is
- * nothing to report.
+ * `unstated` when neither input was supplied: the answer is unknown, and the caller is
+ * told so rather than handed an empty activation that reads like a decision.
  */
-function hostBridgeModulesInUse(
+function hostBridgeUsage(
   decisions: readonly DependencyDecision[],
   referencedSpecifiers: readonly string[] | undefined,
-): ReadonlySet<string> | undefined {
-  if (referencedSpecifiers === undefined && decisions.length === 0) return undefined;
+): HostBridgeUsage {
+  if (referencedSpecifiers === undefined && decisions.length === 0) {
+    return { state: "unstated", activated: new Set(), presetDependent: new Set() };
+  }
 
-  const used = new Set<string>(referencedSpecifiers ?? []);
-  for (const decision of decisions) used.add(decision.packageName);
-  return used;
+  const adapterModuleIds = new Set(hostBridgeAdapterMappings().flatMap(hostBridgeModuleIds));
+  const activated = new Set<string>();
+  const presetDependent = new Set<string>();
+
+  for (const decision of decisions) {
+    // A JSX runtime id is not a `host` strategy — the resolver requires `replace`
+    // for it, because the published module would carry its own React — so the adapter
+    // is activated by the id being reached, and a decision naming one is what a
+    // compiler would otherwise act on.
+    if (decision.strategy === "host") {
+      activated.add(decision.packageName);
+      presetDependent.add(decision.packageName);
+    } else if (adapterModuleIds.has(decision.packageName)) {
+      activated.add(decision.packageName);
+    }
+  }
+
+  const decided = new Set(decisions.map(decision => decision.packageName));
+  for (const specifier of referencedSpecifiers ?? []) {
+    if (adapterModuleIds.has(specifier)) {
+      activated.add(specifier);
+      continue;
+    }
+    // A reference alone never activates a host-global mapping: without a `host`
+    // decision nothing says the page provides the module, and wiring a hook would
+    // override whatever the decision layer is going to say about it.
+    if (findHostBridgeModuleMapping(specifier) === undefined) continue;
+    if (decided.has(specifier)) continue;
+    presetDependent.add(specifier);
+  }
+
+  return { state: "stated", activated, presetDependent };
 }
 
 /**
@@ -805,8 +889,9 @@ function auditHostBridgeDecisions(
  *
  * - the caller said which preset the cell declares (otherwise the bridge abstains
  *   rather than guessing), and
- * - the cell actually uses that mapping's module id (otherwise a table row for a
- *   package the artifact never mentions would fail a cell that never imported it).
+ * - the artifact actually relies on that mapping's global, as
+ *   {@link HostBridgeUsage.presetDependent} defines it — which excludes, in
+ *   particular, a module some other decision deliberately bundles.
  *
  * Only the preset-conditional rows. A global recorded as `always` is the guard's
  * business, and its absence is not a per-cell configuration fact.
@@ -814,7 +899,7 @@ function auditHostBridgeDecisions(
 function auditHostBridgePresetReadiness(
   mappings: readonly HostBridgeMapping[],
   cellPreset: CellPresetLibrary["name"] | undefined,
-  usedModuleIds: ReadonlySet<string> | undefined,
+  usage: HostBridgeUsage,
 ): readonly HostBridgeDiagnostic[] {
   if (cellPreset === undefined) return [];
 
@@ -832,21 +917,19 @@ function auditHostBridgePresetReadiness(
     ];
   }
 
-  // "The caller did not say what this cell uses" is not "this cell uses nothing":
-  // the first abstains, the second is an empty set that reports nothing because
-  // there is nothing to report.
-  if (usedModuleIds === undefined) return [];
+  // "The caller did not say what this cell uses" is not "this cell uses nothing".
+  if (usage.state === "unstated") return [];
 
   const diagnostics: HostBridgeDiagnostic[] = [];
   for (const mapping of hostBridgeGlobalMappings(mappings)) {
     if (hostBridgeGlobalIsAlwaysAvailable(mapping)) continue;
-    if (!hostBridgeModuleIds(mapping).some(moduleId => usedModuleIds.has(moduleId))) continue;
+    if (!hostBridgeModuleIds(mapping).some(moduleId => usage.presetDependent.has(moduleId))) continue;
     if (preset.providesGlobals.includes(mapping.globalName)) continue;
     diagnostics.push(
       createHostBridgeDiagnostic(
         "host-global-missing",
         mapping.specifier,
-        `The cell declares preset "${preset.name}", which does not install "${mapping.globalName}", and the artifact references "${mapping.specifier}". #5 records this global's absence as a supported state rather than a broken page, so the generated module binds it as-is and the cell meets an undefined value at the point of use.`,
+        `The cell declares preset "${preset.name}", which does not install "${mapping.globalName}", and the artifact relies on it. #5 records this global's absence as a supported state rather than a broken page, so the generated module binds it as-is and the cell meets an undefined value at the point of use.`,
       ),
     );
   }
@@ -855,10 +938,10 @@ function auditHostBridgePresetReadiness(
 
 /** A report block for a CI log or a PR body. */
 export function formatHostBridgePlan(plan: HostBridgePlan): string {
-  const intercepted = plan.interceptions.map(interception => interception.moduleId);
   return [
-    `Host bridge intercepts ${intercepted.length} module id(s): ${intercepted.join(", ")}`,
-    `Mappings: ${plan.interceptions.map(interception => `${interception.moduleId} (${interception.shape})`).join(", ")}`,
+    `Host bridge catalog: ${plan.catalog.length} module id(s): ${plan.catalog.map(entry => entry.moduleId).join(", ")}`,
+    `Activations: ${plan.activation}${plan.activation === "unstated" ? " (no decisions or references supplied, so nothing may be wired)" : ""}`,
+    `Active interceptions: ${plan.interceptions.map(entry => `${entry.moduleId} (${entry.shape})`).join(", ") || "(none)"}`,
     plan.diagnostics.length === 0
       ? "No bridge diagnostics."
       : `${plan.diagnostics.length} bridge diagnostic(s):\n${formatHostBridgeDiagnostics(plan.diagnostics)}`,

@@ -135,10 +135,12 @@ export {
   renderHostBridgeModule,
 } from "./host-bridge";
 export type {
+  HostBridgeActivation,
   HostBridgeAdapterExportName,
   HostBridgeDiagnostic,
   HostBridgeInterception,
   HostBridgePlan,
+  HostBridgeUsage,
   PlanHostBridgeOptions,
   RenderHostBridgeGuardOptions,
 } from "./host-bridge";

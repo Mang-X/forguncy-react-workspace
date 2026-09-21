@@ -347,6 +347,30 @@ describe("host module bridge mapping table", () => {
     ).toThrow(/must not list members/);
   });
 
+  // "Exactly once", not "at least once". Two valid-but-conflicting bindings for one id
+  // both pass the coverage check, and `hostBridgeBindingFor`'s first-match lookup would
+  // then let declaration order decide whether the generated module is the host object or
+  // a narrowed view — the one thing the per-id binding exists to make unanswerable by
+  // accident.
+  it("refuses two bindings for one module id", () => {
+    expect(() =>
+      assertHostBridgeMappingIsAdmissible({
+        kind: "host-global",
+        specifier: "react-dom",
+        moduleIds: ["react-dom/client"],
+        binds: [
+          { moduleId: "react-dom", shape: "host-identity" },
+          { moduleId: "react-dom/client", shape: "host-identity" },
+          { moduleId: "react-dom/client", shape: "verified-member-view", members: ["createRoot"] },
+        ],
+        globalName: "ReactDOM",
+        identityRule: "a rule",
+        verifiedMembers: ["createRoot"],
+        evidence: ["product-runtime-source"],
+      }),
+    ).toThrow(/more than one binding for "react-dom\/client"/);
+  });
+
   // The declaration the compiler renders from: the row's own id is the host object
   // and its subpath is a view, so a reviewer can read the promise off the table
   // rather than off the generator.
