@@ -107,6 +107,30 @@ export const HOST_BRIDGE_DECISION: ArchitectureDecisionSource = {
   url: "https://github.com/Mang-X/forguncy-react-workspace/issues/9",
 };
 
+/**
+ * The `extension` externals Spec.
+ *
+ * Declared here beside #4, #5, #8, #16 and #9, for the same reason those are: it is
+ * a dependency Spec built on #4 rather than an architecture decision, so adding it
+ * to {@link GOVERNING_ARCHITECTURE_DECISIONS} would relabel it and silently change
+ * what that list means.
+ *
+ * It is declared in `core` rather than in the package that generates the interposed
+ * modules because the mapping table is read by more than that package — the
+ * `extension` decision's own shape lives in `core` (#8), the `frontendLibraries`
+ * metadata shape lives in `core` (#5), and #24's conformance audit answers to the
+ * same three fields while being unable to depend on the compiler. `core` is the
+ * package they all already depend on and the place the facts the table is checked
+ * against (#5's user-scope bindings and preset chains, #9's host globals) already
+ * live.
+ */
+export const EXTENSION_EXTERNALS_DECISION: ArchitectureDecisionSource = {
+  repository: "Mang-X/forguncy-react-workspace",
+  issue: 12,
+  title: "Spec: `extension` dependencies as external modules + `frontendLibraries` metadata",
+  url: "https://github.com/Mang-X/forguncy-react-workspace/issues/12",
+};
+
 /** Every governing architecture Spec, in the order a document should cite them. */
 export const GOVERNING_ARCHITECTURE_DECISIONS: readonly ArchitectureDecisionSource[] = [
   OWNERSHIP_AND_DEPENDENCY_DECISION,
@@ -149,6 +173,11 @@ export const DEPENDENCY_SELECTION_DECISION_QUALIFIED_REFERENCE = qualifiedDecisi
 export const HOST_BRIDGE_DECISION_REFERENCE = decisionReference(HOST_BRIDGE_DECISION);
 
 export const HOST_BRIDGE_DECISION_QUALIFIED_REFERENCE = qualifiedDecisionReference(HOST_BRIDGE_DECISION);
+
+export const EXTENSION_EXTERNALS_DECISION_REFERENCE = decisionReference(EXTENSION_EXTERNALS_DECISION);
+
+export const EXTENSION_EXTERNALS_DECISION_QUALIFIED_REFERENCE =
+  qualifiedDecisionReference(EXTENSION_EXTERNALS_DECISION);
 
 /**
  * The line every ownership/dependency Spec, plan and PR is expected to carry.
@@ -228,6 +257,9 @@ export const DEPENDENCY_SELECTION_CITATION_PATTERNS: readonly RegExp[] =
   citationPatternsFor(DEPENDENCY_SELECTION_DECISION);
 
 export const HOST_BRIDGE_CITATION_PATTERNS: readonly RegExp[] = citationPatternsFor(HOST_BRIDGE_DECISION);
+
+export const EXTENSION_EXTERNALS_CITATION_PATTERNS: readonly RegExp[] =
+  citationPatternsFor(EXTENSION_EXTERNALS_DECISION);
 
 export function citesDecision(
   text: string,

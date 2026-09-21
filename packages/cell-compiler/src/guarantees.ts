@@ -101,9 +101,9 @@ export const CELL_ARTIFACT_GUARANTEES: readonly CellArtifactGuarantee[] = [
       "`extension` dependencies reference the corresponding extension global and add the stable `libraryId` to `frontendLibraries`.",
     level: "local",
     howToCheck:
-      "Assert every extension decision contributes exactly one `libraryId` to the artifact metadata, and that the package is neither inlined as a copy nor left as a source import.",
+      "Plan the externals (#12) and compare the three halves against each other: every `extension` decision must be intercepted by an id in `core`'s mapping table (else `extension-mapping-missing`), every mapped module the artifact reaches must have its `libraryId` in the metadata `collectFrontendLibraries` derives (else `extension-not-declared`), and every generated module must export the page object itself — resolved while its own body runs — and read no global but its own. The last point is the one that cannot be argued from first principles: a consumer's namespace import is built by enumerating the module once, so the module has to expose the real member names at that moment. The compiler's regression runs that shape through the bundler rather than through a stand-in.",
     caveat:
-      "The `libraryId` must be the stable id from `api.app.listFrontendLibraries`, not a display name; only a real project can confirm a given id resolves.",
+      "The `libraryId` must be the stable id from `api.app.listFrontendLibraries`, not a display name; only a real project can confirm that an id resolves, and `auditExtensionLibraryMetadata` is the check that does it once a listing is available. Two halves stay outside any local check: that the extension the id names is present on the page, and that the global it publishes really carries the members the vendor module exports. A green local build establishes neither.",
   },
   {
     id: "workspace-packages-inline-like-source",

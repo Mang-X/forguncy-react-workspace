@@ -8,16 +8,27 @@
     "@forguncy-react-workspace/core": "workspace:*"
   },
   "//devDependencies": [
-    "Test-only, and pinned to the host versions #5 measured on Forguncy 12.0.100",
+    "Test-only, and pinned to versions measured in this repository rather than to",
+    "whatever a range resolves to.",
+    "",
+    "`react` / `react-dom` are the host versions #5 measured on Forguncy 12.0.100",
     "(React 19.2.7). The host-bridge regression evaluates the generated JSX runtime",
     "adapter against the same React the host injects, so the adapter's key/children",
-    "semantics are asserted against real React rather than a stub. Nothing in",
-    "`src/` may import React: mapping `react` to the host global is the entire point",
-    "of #9."
+    "semantics are asserted against real React rather than a stub. Nothing in `src/`",
+    "may import React: mapping `react` to the host global is the entire point of #9.",
+    "",
+    "`rolldown` is the bundler this toolchain actually installs (`vite-plus@0.3.2`).",
+    "#12's generated module is only correct with respect to the CommonJS-to-ESM interop",
+    "a bundler applies to it, and that interop is not visible in the module's own source:",
+    "the shapes that work and the shapes that fail silently differ only once a consumer's",
+    "namespace import enumerates the module. The regression builds through this bundler",
+    "rather than through a hand-written copy of its runtime helper, so an interop change",
+    "fails a test instead of breaking cells. Nothing in `src/` may import it."
   ],
   "devDependencies": {
     "react": "19.2.7",
-    "react-dom": "19.2.7"
+    "react-dom": "19.2.7",
+    "rolldown": "1.2.9"
   },
   "exports": {
     ".": "./src/index.ts"
