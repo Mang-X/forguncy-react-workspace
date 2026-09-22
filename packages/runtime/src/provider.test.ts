@@ -323,6 +323,19 @@ describe("the absence taxonomy", () => {
     },
     {
       code: "provider-binding-missing",
+      addressKind: "forguncy-member",
+      address: "Forguncy",
+      note: "a handle that is present but is not the handle the runtime injects — the other half of this row's claim, which is about the shape as much as about presence",
+      produce: async () => {
+        installRuntimeFacadeProvider({
+          kind: "mock",
+          bindings: { cellProps: { Forguncy: "not-the-handle" }, useDataSource: noSuchSource } as never,
+        });
+        return runtimeFacade().hasPermission("ProbePermission");
+      },
+    },
+    {
+      code: "provider-binding-missing",
       addressKind: "cell-hook",
       address: "useDataSource",
       note: "a provider carrying no data-source hook, which is the wrapper-local binding",
@@ -356,6 +369,24 @@ describe("the absence taxonomy", () => {
             // the whole point of the fixture is to answer something that type does
             // not describe.
             serverCommands: { GetSalesData: (async () => undefined) as never },
+          }),
+        );
+        return runtimeFacade<{ GetSalesData: [] }>().invokeServerCommand("GetSalesData");
+      },
+    },
+    {
+      code: "capability-not-supplied",
+      addressKind: "server-command-name",
+      address: "GetSalesData",
+      note: "a command declared on the record whose entry is not callable — present, so nothing is missing, and unusable, so not a right answer either",
+      produce: async () => {
+        installRuntimeFacadeProvider(
+          createMockRuntimeFacadeProvider<{ GetSalesData: [] }>({
+            // A string where a command function belongs. The record carries the key,
+            // which is exactly what separates this from `server-command-not-configured`
+            // — and what review caught this site being wrongly classified as
+            // `provider-binding-missing` for.
+            serverCommands: { GetSalesData: "declared, but not callable" as never },
           }),
         );
         return runtimeFacade<{ GetSalesData: [] }>().invokeServerCommand("GetSalesData");
@@ -411,28 +442,33 @@ describe("the absence taxonomy", () => {
       // The address, not just the code: a producer that fails somewhere else would
       // otherwise still look like a producer for the family it claims.
       expect(error.address, entry.note).toBe(entry.address);
+      // And the family is asked of the *observed* error, not of the entry's own
+      // declaration. Both sides of that comparison are hand-written, so comparing them
+      // to each other only proves they agree with each other: the run is what has to
+      // support the annotation. A site that throws an existing code about a family its
+      // row does not list fails here — which is the drift review found, and it is this
+      // assertion rather than the set comparison below that catches it.
+      expect(
+        findRuntimeFacadeAbsenceMode(error.code).addressKinds,
+        `${entry.note} — ${error.code} must list the family it was raised about`,
+      ).toContain(entry.addressKind);
     }
   });
 
   /**
-   * The families a row claims and the families that are produced have to be the same
-   * set — checked in both directions.
+   * The other direction: a family a row lists has to be a family something produces.
    *
-   * The first direction is the correctness one: a code thrown from a family its row
-   * does not name is a row that lies. The second is the discipline one, and it is the
-   * half that keeps a plural field from becoming a place to list families "just in
-   * case": a family nothing produces fails too, so every entry stays earned.
+   * Soundness — a produced family the row omits — is checked in the driving test above,
+   * against the observed error rather than against this table. This one checks the
+   * remaining half, and it is the half that keeps a plural field from becoming a place
+   * to list families "just in case": a listed family nothing produces fails too.
    */
-  it("records exactly the address families each code is raised about", () => {
+  it("lists no address family that nothing produces", () => {
     for (const mode of RUNTIME_FACADE_ABSENCE_MODES) {
-      const claimed = new Set(mode.addressKinds);
       const produced = new Set(
         producers.filter(entry => entry.code === mode.id).map(entry => entry.addressKind),
       );
-      for (const kind of produced) {
-        expect(claimed, `${mode.id} is raised about ${kind} but does not list it`).toContain(kind);
-      }
-      for (const kind of claimed) {
+      for (const kind of mode.addressKinds) {
         expect(produced, `${mode.id} lists ${kind} but nothing produces it`).toContain(kind);
       }
     }

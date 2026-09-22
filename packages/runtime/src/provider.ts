@@ -227,18 +227,18 @@ export const RUNTIME_FACADE_ABSENCE_MODES: readonly RuntimeFacadeAbsenceMode[] =
     shape: "throws",
     addressKinds: ["provider", "cell-prop", "forguncy-member", "cell-hook"],
     cause:
-      "The installed provider does not carry the address at all — whether the missing thing is the provider's own bindings record, a base prop, a handle member, or the `useDataSource` hook. The ReactCellType runtime injects every base prop key and the whole handle on every Cell, so this is a wiring fault rather than a state a page can be in.",
+      "The installed provider does not carry the address, or carries something that is not the shape the ReactCellType runtime injects there — the bindings record itself, a base prop, the handle, a handle member, or the `useDataSource` hook. Every one of those is injected on every Cell, so either way the provider was not built from the Cell's own props, and this is a wiring fault rather than a state a page can be in.",
     remediation:
-      "Build the provider through `createHostRuntimeFacadeProvider()` from the cell's own `props`, or through `createMockRuntimeFacadeProvider()` in local development. Both fill the addresses the runtime always injects.",
+      "Build the provider through `createHostRuntimeFacadeProvider()` from the cell's own `props`, or through `createMockRuntimeFacadeProvider()` in local development. Both fill the addresses the runtime always injects, in the shapes it injects them.",
   },
   {
     id: "capability-not-supplied",
     shape: "throws",
     addressKinds: ["forguncy-member", "server-command-name"],
     cause:
-      "The address exists on the provider but what is behind it contradicts #5's record: a member #5 *called* is not callable, or such a member answered a shape #5 did not record, or a server command resolved to something other than the result record. Callability is asked only of the two members whose call shape #5 recorded — a `member-presence` address is handed over as the handle holds it, because #5 read its name from the key list and never its `typeof` — so a non-function at one of those addresses is a shape the evidence permits, not this code. The wrong-answer cases are the worse ones, because a wrong answer reported as the declared type is indistinguishable from a right one.",
+      "The address exists on the provider but what is behind it contradicts #5's record: a member #5 *called* is not callable, or such a member answered a shape #5 did not record, or a server command entry is not callable, or a command resolved to something other than the result record. Callability is asked only of addresses whose call shape #5 recorded — a `member-presence` member is handed over as the handle holds it, because #5 read its name from the key list and never its `typeof` — so a non-function at one of those is a shape the evidence permits, not this code. The wrong-answer cases are the worse ones, because a wrong answer reported as the declared type is indistinguishable from a right one.",
     remediation:
-      "For a capability that was never supplied, configure it on the page or Cell in the designer, or supply it in the mock provider — a mock that omits a member #5 called reports this code rather than standing in with `undefined`. For a wrong answer, nothing here is misconfigured: the address answered something the recorded contract does not describe, so check the product runtime version — or, for a server command, the command's own implementation — before trusting the value.",
+      "Configure the capability on the page or Cell in the designer, or supply it in the mock provider — a mock that omits a member #5 called reports this code rather than standing in with `undefined`, and a command declared without a callable entry is declared but not supplied. Nothing is misconfigured when the *answer* is the wrong shape: the address answered something the recorded contract does not describe, so check the product runtime version — or, for a server command, the command's own implementation — before trusting the value.",
   },
   {
     id: "server-command-not-configured",

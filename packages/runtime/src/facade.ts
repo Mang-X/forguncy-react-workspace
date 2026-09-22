@@ -415,7 +415,23 @@ function buildRuntimeFacadeSurface(): RuntimeFacadeImplementation {
         );
       }
       if (typeof call !== "function") {
-        throw missingBinding(name, "the entry is not a command function");
+        // `capability-not-supplied`, not `provider-binding-missing`, and the
+        // difference is the whole point of this branch: the key *is* on the record,
+        // so nothing is missing from the provider — what sits behind a confirmed
+        // address is unusable, which is what that code's cause says. Its remediation
+        // fits too: the fix is to supply the command as a function, not to rebuild
+        // the provider.
+        //
+        // Routing this through `missingBinding` classified it as a provider wiring
+        // fault without anyone deciding — the helper's name and its hard-coded code
+        // are both about an address that is *not there*, and a command entry that is
+        // present but not callable is not that. Review caught it, and the fix is to
+        // stop borrowing the wrong code rather than to widen the row.
+        throw new RuntimeFacadeResolutionError(
+          "capability-not-supplied",
+          `Server command "${name}" is on the record but is not a function, so the call cannot be made: #5 records ServerCommands as a record of command name to async function. The page declared the command but did not supply it in the form the runtime calls.`,
+          name,
+        );
       }
       // Called *on the record*, not detached from it: #5 confirms the method form
       // (`props.ServerCommands.GetSalesData({})`), and a detached call hands the
@@ -852,6 +868,29 @@ function ownValue(record: unknown, key: string, address: string): unknown {
   return (record as Record<string, unknown>)[key];
 }
 
+/**
+ * A refusal for an address the runtime was supposed to inject and did not.
+ *
+ * The scope is written down because borrowing this helper for the wrong situation
+ * is a mistake this package has already made once, and the helper's hard-coded code
+ * is what hid it. It covers two things, and they share a remediation rather than
+ * just a shape:
+ *
+ * - an address that is **not there** — a key `ownValue` could not find, or a
+ *   bindings record that is missing altogether;
+ * - an address whose value is not the shape the runtime injects — a handle that is
+ *   not the handle, `ServerCommands` that is not the record of commands, a
+ *   `useDataSource` binding that is not callable.
+ *
+ * Every one of those is fixed by building the provider from the Cell's own props,
+ * which is why it is one code.
+ *
+ * It does **not** cover an address that resolved to something a *page* was supposed
+ * to supply and did not, in a usable form. A server command name is the case that
+ * matters: the record carries the key, so the command was declared and the fix is on
+ * the page — which is why `invokeServerCommand` refuses a non-callable entry with
+ * `capability-not-supplied` directly, rather than through here.
+ */
 function missingBinding(address: string, reason: string): RuntimeFacadeResolutionError {
   return new RuntimeFacadeResolutionError(
     "provider-binding-missing",
