@@ -582,36 +582,125 @@ export const LOCAL_DEV_HOST_RESOLUTION_MODEL = {
 } as const;
 
 /**
- * Whether a value is shaped like a row the local helpers can read.
+ * Whether a member of a caller-supplied list can be read, and why not when it cannot.
  *
  * The lists a caller supplies reach this module through a cast from a JSON config,
- * so a member can be anything at all. Each predicate below asks the same question —
- * "does this member carry the one field the reader is about to touch?" — because the
- * alternative, reading first and discovering afterwards, is what turns a
- * configuration the audit was supposed to *describe* into a stack trace.
+ * so a member can be anything at all.
  *
- * A member that fails this is not reported as a finding. It cannot be: it is not a
- * row, so it is not a row the table failed to cover, and there is no statement about
- * it more specific than "this is not a row" — a statement the guard already makes,
- * because the guard sees the list as it was given and throws with the row's own
- * detail. What a malformed member must not do is take the rest of the audit with it.
+ * These are **plain booleans, not `value is HostBridgeMapping` predicates**, and that
+ * distinction is the whole point. A `value is X` guard is a promise about the complete
+ * declared type, and checking one field does not make one: an earlier version of these
+ * helpers tested `specifier` and then returned `value is LocalDevModuleResolution`, so
+ * the compiler stopped objecting about fields nothing had looked at, and
+ * `{ specifier: "react", moduleIds: 42 }` sailed past a guard whose name said the
+ * whole row was sound. A boolean claims nothing beyond itself, so a reader that has
+ * been through one still has to say which fields it uses — which is the honest
+ * position, because these checks cover what the readers touch and not the whole type.
+ *
+ * Each check therefore covers exactly the fields its readers use, **and every reason a
+ * member can fail one is also a reason the loud path reports it** — the guard for
+ * resolution rows, `localDevModuleIdsOf` for bridge rows. Otherwise a member the
+ * derivations skip would go missing with nothing saying so, which is worse than the
+ * crash it replaced.
  */
-function isHostBridgeMapping(value: unknown): value is HostBridgeMapping {
-  return typeof value === "object" && value !== null && typeof (value as { specifier?: unknown }).specifier === "string";
+function localDevBridgeRowProblem(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null) return "it is not a row at all";
+  const row = value as { specifier?: unknown; moduleIds?: unknown };
+
+  if (!isNonEmptyString(row.specifier)) return "it names no specifier";
+
+  // `hostBridgeModuleIds` spreads this, so a non-list is a throw and a list holding
+  // something that is not a module id is a worklist entry no module can match.
+  if (row.moduleIds === undefined) return undefined;
+  if (!Array.isArray(row.moduleIds)) return "its moduleIds is not a list";
+  if (!row.moduleIds.every(entry => isNonEmptyString(entry))) {
+    return "its moduleIds carries something that is not a module id";
+  }
+  return undefined;
 }
 
-function isLocalDevModuleResolution(value: unknown): value is LocalDevModuleResolution {
-  return typeof value === "object" && value !== null && typeof (value as { specifier?: unknown }).specifier === "string";
+/** The tolerant half of the check above, for the derivations that have to survive a broken table. */
+function canReadBridgeRow(value: unknown): boolean {
+  return localDevBridgeRowProblem(value) === undefined;
+}
+
+function localDevResolutionRowProblem(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null) return "it is not a row at all";
+  const row = value as Record<string, unknown>;
+
+  if (!isNonEmptyString(row.specifier)) return "it names no specifier";
+
+  // The kind decides which set the row lands in, so an unrecognised one cannot be
+  // treated as resolvable: every value except `unsupported` used to be, which is how a
+  // row that resolved by nothing at all came back with a clean audit.
+  const kind = row.resolution;
+  if (!isNonEmptyString(kind) || !(LOCAL_DEV_LOCAL_RESOLUTION_KINDS as readonly string[]).includes(kind)) {
+    return `its resolution "${String(kind)}" is not one of ${LOCAL_DEV_LOCAL_RESOLUTION_KINDS.join(", ")}`;
+  }
+
+  if (row.localPackage !== undefined && !isNonEmptyString(row.localPackage)) {
+    return "its localPackage is not a package name";
+  }
+
+  // `localDevRecordedVersion` indexes the pinned target with this, so an unrecognised
+  // field yields `undefined` where the type promises a version — a comparison that
+  // silently never matches.
+  if (row.checkedVersionField !== undefined) {
+    if (
+      !isNonEmptyString(row.checkedVersionField) ||
+      !(LOCAL_DEV_VERSION_FIELDS as readonly string[]).includes(row.checkedVersionField)
+    ) {
+      return `its checkedVersionField "${String(row.checkedVersionField)}" is not one of ${LOCAL_DEV_VERSION_FIELDS.join(", ")}`;
+    }
+  }
+
+  if (row.alignmentUnchecked !== undefined && !isNonEmptyString(row.alignmentUnchecked)) {
+    return "its alignmentUnchecked is not an explanation";
+  }
+
+  return undefined;
+}
+
+/** The tolerant half of the check above. */
+function canReadResolutionRow(value: unknown): boolean {
+  return localDevResolutionRowProblem(value) === undefined;
+}
+
+/** What to call a resolution row in a finding, or `undefined` when its name is not usable either. */
+function localDevResolutionSubject(resolution: unknown): string | undefined {
+  if (typeof resolution === "object" && resolution !== null) {
+    const specifier = (resolution as { specifier?: unknown }).specifier;
+    if (isNonEmptyString(specifier)) return `"${specifier}"`;
+  }
+  return undefined;
 }
 
 /**
- * A dependency decision with a strategy the audit can compare.
+ * Whether the audit can read a decision's strategy and the package it names.
  *
- * `extension` is the only strategy this module acts on, so a member whose strategy
- * is not a string cannot be an `extension` decision and has no local half to check.
+ * Those are the two members the audit uses: `strategy` to find the `extension` rows,
+ * and `packageName` as the key that matches a decision to its choice — and as the
+ * subject of any finding about it. A member failing this is left out of the coverage
+ * question in both directions rather than read anyway, because a decision that names no
+ * package would otherwise reach the report as a finding about `undefined`, and one whose
+ * strategy is not a strategy cannot be classified at all.
+ *
+ * What is deliberately *not* duplicated here is the record's own shape: `core` owns that
+ * (`validateDependencyDecisionShape`), and a local finding about it would report one
+ * mistake twice. This module validates the vocabulary it invents — the extension choices
+ * are #22's own, so `local-dev-extension-choice-malformed` is theirs — and for a record
+ * another module owns it checks only that its own two reads are safe. That is the same
+ * boundary the audit declares for containers, applied to a member: the reader says what
+ * it used and stops, rather than re-deriving a verdict it is not the owner of.
  */
-function isDependencyDecision(value: unknown): value is DependencyDecision {
-  return typeof value === "object" && value !== null && typeof (value as { strategy?: unknown }).strategy === "string";
+function canReadDecision(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const decision = value as { strategy?: unknown; packageName?: unknown };
+  return (
+    isNonEmptyString(decision.strategy) &&
+    (DEPENDENCY_STRATEGIES as readonly string[]).includes(decision.strategy) &&
+    isNonEmptyString(decision.packageName)
+  );
 }
 
 /**
@@ -628,25 +717,64 @@ function isDependencyDecision(value: unknown): value is DependencyDecision {
  * {@link findLocalDevModuleIdResolution} returns one: a specifier the table does
  * not carry has no bridge row, and inventing one would make an orphan look
  * covered.
+ *
+ * A row that cannot be read is also not returned — {@link canReadBridgeRow} says
+ * which rows those are — so `undefined` covers two situations, "no row names this
+ * specifier" and "a row names it and is not readable", and this return type does not
+ * distinguish them. {@link localDevModuleIdsOf} is where the difference is said in
+ * words, because a reader sent to look for a missing row that is right there is no
+ * closer to a fix than one sent to repair a row it was told is missing.
  */
 export function findLocalDevBridgeRow(
   specifier: string,
   mappings: readonly HostBridgeMapping[] = HOST_BRIDGE_MAPPINGS,
 ): HostBridgeMapping | undefined {
-  return mappings.find(candidate => isHostBridgeMapping(candidate) && candidate.specifier === specifier);
+  return mappings.find(candidate => canReadBridgeRow(candidate) && candidate.specifier === specifier);
 }
 
-/** Every module id a resolution row covers, read from the bridge table. */
+/**
+ * Why no usable bridge row was found for a specifier, in words.
+ *
+ * The two situations above call for different sentences, so the guard asks for one of
+ * them by name instead of reporting both as absence. Which rows are unreadable is read
+ * off {@link localDevBridgeRowProblem}, the same check the derivations filter with, so
+ * a row cannot be refused by one and accepted by the other.
+ *
+ * A row that is neither absent nor unreadable cannot reach here, because
+ * {@link findLocalDevBridgeRow} would have returned it. Rows that share a specifier are
+ * read in table order and the first readable one decides, which is the same row the
+ * lookup would have returned.
+ */
+function localDevNoUsableBridgeRow(specifier: string, mappings: readonly HostBridgeMapping[]): string {
+  const named = (mappings as readonly unknown[]).filter(
+    candidate =>
+      typeof candidate === "object" &&
+      candidate !== null &&
+      (candidate as { specifier?: unknown }).specifier === specifier,
+  );
+  const problem = named.map(localDevBridgeRowProblem).find(reason => reason !== undefined);
+  if (problem === undefined) {
+    return `The local resolution rows name "${specifier}", which is not a row of the host bridge mapping table.`;
+  }
+  return `The local resolution rows name "${specifier}", and the host bridge row that carries it cannot be read: ${problem}. Every module id that row intercepts is unaccounted for while it stays that way, so its module ids cannot be taken from it.`;
+}
+
+/**
+ * Every module id a resolution row covers, read from the bridge table.
+ *
+ * The loud reader: `undefined` from {@link findLocalDevBridgeRow} stops the run, and
+ * the message says which of the two reasons it stopped for. A row whose `moduleIds` is
+ * not a list is refused here by name rather than by `hostBridgeModuleIds` spreading a
+ * number, which is what the refusal has to say to be about the table instead of about
+ * the run.
+ */
 export function localDevModuleIdsOf(
   specifier: string,
   mappings: readonly HostBridgeMapping[] = HOST_BRIDGE_MAPPINGS,
 ): readonly string[] {
   const mapping = findLocalDevBridgeRow(specifier, mappings);
   if (mapping === undefined) {
-    throw new LocalDevRuntimeContractError(
-      "mapping-coverage",
-      `The local resolution rows name "${specifier}", which is not a row of the host bridge mapping table.`,
-    );
+    throw new LocalDevRuntimeContractError("mapping-coverage", localDevNoUsableBridgeRow(specifier, mappings));
   }
   return hostBridgeModuleIds(mapping);
 }
@@ -658,6 +786,13 @@ export function localDevModuleIdsOf(
  * coverage guard. An orphan row contributes no module ids rather than a fabricated
  * one: the guard is what reports that the row exists, and these lists are the
  * harness's worklist, which cannot contain a module id nothing resolves.
+ *
+ * A row that cannot be read contributes nothing either, and for the same reason
+ * rather than by accident. The guard refuses a table containing one — that refusal is
+ * what `local-dev-mapping-coverage` carries — and the audit continues past it with the
+ * finding recorded, so a derivation reached with a broken row in hand is one whose
+ * caller has already been told. Throwing here would replace that finding with a stack
+ * trace in the middle of a list, which is the failure this pair was split to prevent.
  */
 function moduleIdsOfExistingRow(
   specifier: string,
@@ -680,11 +815,42 @@ function moduleIdsOfExistingRow(
  * The guard takes the table as a parameter for the reason #9's guards do: a
  * project that extends the table has to extend the projection in the same change,
  * and that has to fail loudly rather than at the first unresolved import.
+ *
+ * Both tables arrive through a cast from a JSON config, so a member can be anything
+ * at all, and each member is checked before anything is read off it. That ordering is
+ * the check's own value: `hostBridgeModuleIds` spreads `moduleIds`, so a row carrying
+ * `42` there would end the run in a `TypeError` from inside the spread, and a
+ * resolution row whose `resolution` is not one of the three kinds would pass every
+ * question below it — it neither says `unsupported` nor names no package nor lacks a
+ * version field — and then drop out of both the resolvable and the unsupported list,
+ * leaving a clean audit with nothing to say the row existed. A member that cannot be
+ * read is refused here, where there is one check to change, rather than read around.
  */
 export function assertLocalDevResolutionsCoverHostBridge(
   resolutions: readonly LocalDevModuleResolution[] = LOCAL_DEV_MODULE_RESOLUTIONS,
   mappings: readonly HostBridgeMapping[] = HOST_BRIDGE_MAPPINGS,
 ): void {
+  for (const mapping of mappings) {
+    const problem = localDevBridgeRowProblem(mapping);
+    if (problem !== undefined) {
+      throw new LocalDevRuntimeContractError(
+        "mapping-coverage",
+        `A row of the host bridge mapping table cannot be read: ${problem}, so the module ids it intercepts are unaccounted for. The table is refused rather than read around.`,
+      );
+    }
+  }
+
+  for (const resolution of resolutions) {
+    const problem = localDevResolutionRowProblem(resolution);
+    if (problem !== undefined) {
+      const named = localDevResolutionSubject(resolution);
+      throw new LocalDevRuntimeContractError(
+        "mapping-coverage",
+        `${named === undefined ? "A local resolution row" : `The local resolution row ${named}`} cannot be read: ${problem}. Its kind is what decides which module ids it stands in for, so a row like that would resolve by nothing and say nothing about it.`,
+      );
+    }
+  }
+
   const intercepted = new Set(hostBridgeInterceptedModuleIds(mappings));
   const covered = new Set<string>();
 
@@ -741,13 +907,18 @@ export function assertLocalDevResolutionsCoverHostBridge(
  * does not carry contributes nothing here, and
  * `local-dev-mapping-coverage` is what says so. Reporting the orphan *and* handing
  * back a worklist the harness cannot act on are different jobs.
+ *
+ * A row whose kind is not one of the three is left out for the same reason: which list
+ * it belongs in is decided by that kind, and nothing here may decide "resolvable" for a
+ * row that resolved by nothing. The guard refuses such a row by name, so leaving it out
+ * here is not the last word about it.
  */
 export function localDevResolvableModuleIds(
   resolutions: readonly LocalDevModuleResolution[] = LOCAL_DEV_MODULE_RESOLUTIONS,
   mappings: readonly HostBridgeMapping[] = HOST_BRIDGE_MAPPINGS,
 ): readonly string[] {
   return resolutions
-    .filter(isLocalDevModuleResolution)
+    .filter(canReadResolutionRow)
     .filter(resolution => resolution.resolution !== "unsupported")
     .flatMap(resolution => moduleIdsOfExistingRow(resolution.specifier, mappings));
 }
@@ -758,7 +929,7 @@ export function localDevUnsupportedModuleIds(
   mappings: readonly HostBridgeMapping[] = HOST_BRIDGE_MAPPINGS,
 ): readonly string[] {
   return resolutions
-    .filter(isLocalDevModuleResolution)
+    .filter(canReadResolutionRow)
     .filter(resolution => resolution.resolution === "unsupported")
     .flatMap(resolution => moduleIdsOfExistingRow(resolution.specifier, mappings));
 }
@@ -767,7 +938,7 @@ export function localDevUnsupportedModuleIds(
 export function localDevAlignmentChecks(
   resolutions: readonly LocalDevModuleResolution[] = LOCAL_DEV_MODULE_RESOLUTIONS,
 ): readonly LocalDevAlignmentExpectation[] {
-  return resolutions.filter(isLocalDevModuleResolution).flatMap(resolution =>
+  return resolutions.filter(canReadResolutionRow).flatMap(resolution =>
     resolution.checkedVersionField === undefined || resolution.localPackage === undefined
       ? []
       : [
@@ -820,16 +991,30 @@ export interface LocalDevModuleIdResolution {
  * npm path will handle it" would be exactly the assumption that hides a bridged
  * import — the two cases look identical from inside a module graph and are not the
  * same statement.
+ *
+ * Two members are asked, and each is asked only after the check that covers what is
+ * read off it: {@link canReadBridgeRow} decides whether a row can say which ids it
+ * intercepts at all, and {@link canReadResolutionRow} whether a row can say what stands
+ * in for the one it names. So `undefined` here also covers "a row that could not be
+ * read", and this return type does not distinguish it from "no row" — which is the
+ * deliberate boundary, because the answer that would matter, "the ordinary npm path
+ * will handle it", must not be handed out on the strength of a row nobody could read.
+ * {@link assertLocalDevResolutionsCoverHostBridge} is what refuses such a table; a
+ * caller that needs the two told apart has to have run it.
  */
 export function findLocalDevModuleIdResolution(
   moduleId: string,
   resolutions: readonly LocalDevModuleResolution[] = LOCAL_DEV_MODULE_RESOLUTIONS,
   mappings: readonly HostBridgeMapping[] = HOST_BRIDGE_MAPPINGS,
 ): LocalDevModuleIdResolution | undefined {
-  const mapping = mappings.find(candidate => hostBridgeModuleIds(candidate).includes(moduleId));
+  const mapping = mappings.find(
+    candidate => canReadBridgeRow(candidate) && hostBridgeModuleIds(candidate).includes(moduleId),
+  );
   if (mapping === undefined) return undefined;
 
-  const resolution = resolutions.find(candidate => candidate.specifier === mapping.specifier);
+  const resolution = resolutions.find(
+    candidate => canReadResolutionRow(candidate) && candidate.specifier === mapping.specifier,
+  );
   if (resolution === undefined) return undefined;
 
   return { moduleId, specifier: mapping.specifier, resolution };
@@ -1792,7 +1977,7 @@ export function auditLocalDevConfiguration(input: LocalDevAuditInput = {}): Loca
   if (input.decisions !== undefined) {
     const extensionDecisions = new Set(
       input.decisions
-        .filter(isDependencyDecision)
+        .filter(canReadDecision)
         .filter(decision => decision.strategy === "extension")
         .map(decision => decision.packageName),
     );
@@ -1812,8 +1997,14 @@ export function auditLocalDevConfiguration(input: LocalDevAuditInput = {}): Loca
   for (const decision of input.decisions ?? []) {
     // A member whose strategy is not a string cannot be an `extension` decision, so
     // it has no local half to check and nothing to contribute to the coverage
-    // question. Same reading as a non-string specifier above.
-    if (!isDependencyDecision(decision)) continue;
+    // question. Same reading as a non-string specifier above. A member that names no
+    // package is left out with it: `packageName` is both the key this loop matches
+    // choices by and the subject of the findings it raises, so reading a decision that
+    // lacks one would put `undefined` in a report. What that leaves uncovered is the
+    // record's own shape, which is `core`'s question (`validateDependencyDecisionShape`)
+    // rather than this audit's — and a local finding about it would report one mistake
+    // twice, once here and once from the validator that owns it.
+    if (!canReadDecision(decision)) continue;
     if (decision.strategy !== "extension") continue;
     // The package already carries a finding about the choice it declared, so saying
     // "no choice is declared" next to it would be a second finding for one mistake.

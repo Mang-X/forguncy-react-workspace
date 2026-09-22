@@ -1393,6 +1393,105 @@ describe("the diagnostic vocabulary", () => {
     expect(findLocalDevBridgeRow("react-dom")?.specifier).toBe("react-dom");
     expect(findLocalDevBridgeRow("react-dom/server")).toBeUndefined();
   });
+
+  // The third re-review's finding, and it was about the checks rather than the readers:
+  // `isHostBridgeMapping`, `isLocalDevModuleResolution` and `isDependencyDecision` each
+  // tested one field and returned `value is <the whole declared type>`. A predicate is a
+  // promise about the complete type, so the compiler stopped objecting about fields
+  // nothing had looked at, and `{ specifier: "react", moduleIds: 42 }` passed a guard
+  // whose name said the whole row was sound. These are the three cases the review named,
+  // one per field the three readers rely on.
+  //
+  // What the reviewed version did with each of them is asserted here too, because "it
+  // does not throw" is the weaker half of the fix: the mapping case threw from *inside*
+  // `auditLocalDevConfiguration` — the derivation that reads the table runs after the
+  // coverage guard, so the `TypeError` came out of the audit and the audit returned
+  // nothing at all; the resolution case produced a clean audit; and the decision case
+  // produced a finding whose subject was `undefined`.
+  const tableWithBrokenReactRow: HostBridgeMapping[] = [
+    { specifier: "react", moduleIds: 42 } as unknown as HostBridgeMapping,
+    ...HOST_BRIDGE_MAPPINGS.filter(mapping => mapping.specifier !== "react"),
+  ];
+
+  const resolutionsWithUnknownKind: LocalDevModuleResolution[] = LOCAL_DEV_MODULE_RESOLUTIONS.map(row =>
+    row.specifier === "react" ? { ...row, resolution: "bogus" as LocalDevModuleResolution["resolution"] } : row,
+  );
+
+  it("leaves out a bridge row it cannot read and keeps the rows it can", () => {
+    const resolvable = localDevResolvableModuleIds(LOCAL_DEV_MODULE_RESOLUTIONS, tableWithBrokenReactRow);
+
+    // `hostBridgeModuleIds` spreads `moduleIds`, so this row is a `TypeError` waiting for
+    // the first reader: the documented promise is that reading a table is not that.
+    expect(resolvable).not.toContain("react");
+    expect(resolvable).toContain("react-dom/client");
+    expect([...resolvable].sort()).toEqual(
+      [...hostBridgeInterceptedModuleIds(HOST_BRIDGE_MAPPINGS.filter(mapping => mapping.specifier !== "react"))].sort(),
+    );
+
+    // And the audit finishes, which is the part the reviewed version did not do.
+    const audit = auditLocalDevConfiguration({ mappings: tableWithBrokenReactRow });
+    const finding = audit.diagnostics.find(diagnostic => diagnostic.code === "local-dev-mapping-coverage");
+    expect(finding?.detail).toMatch(/moduleIds is not a list/);
+  });
+
+  it("distinguishes a broken bridge row from an absent one when it refuses", () => {
+    // A reader told "no row names this specifier" goes looking for a row that is right
+    // there, so the two reasons are said apart.
+    expect(() => localDevModuleIdsOf("react", tableWithBrokenReactRow)).toThrow(/cannot be read: its moduleIds is not a list/);
+    expect(() => localDevModuleIdsOf("react-dom/server", tableWithBrokenReactRow)).toThrow(
+      /not a row of the host bridge mapping table/,
+    );
+  });
+
+  it("refuses both tables at the guard rather than in the middle of a spread", () => {
+    expect(() => assertLocalDevResolutionsCoverHostBridge(LOCAL_DEV_MODULE_RESOLUTIONS, tableWithBrokenReactRow)).toThrow(
+      /moduleIds is not a list/,
+    );
+    expect(() => assertLocalDevResolutionsCoverHostBridge(resolutionsWithUnknownKind)).toThrow(/"bogus" is not one of/);
+    // A row with no usable name is still refused, and the sentence drops the name
+    // rather than putting a placeholder where one would go.
+    expect(() => assertLocalDevResolutionsCoverHostBridge([null as unknown as LocalDevModuleResolution])).toThrow(
+      /A local resolution row cannot be read/,
+    );
+  });
+
+  it("does not resolve a row whose kind is not a kind", () => {
+    const audit = auditLocalDevConfiguration({ resolutions: resolutionsWithUnknownKind });
+    // Every question the guard used to ask about this row — does it say `unsupported`,
+    // does it name no package, does it check no version field — it answered "no" to, so
+    // the row passed and then dropped out of every list derived from it. A clean audit
+    // for a row that resolves by nothing is the finding.
+    const finding = audit.diagnostics.find(diagnostic => diagnostic.code === "local-dev-mapping-coverage");
+    expect(finding?.detail).toMatch(/"bogus" is not one of npm-package, project-shim, unsupported/);
+
+    const resolvable = localDevResolvableModuleIds(resolutionsWithUnknownKind);
+    expect(resolvable).not.toContain("react");
+    expect(resolvable).toContain("react-dom/client");
+    expect(localDevUnsupportedModuleIds(resolutionsWithUnknownKind)).not.toContain("react");
+  });
+
+  it("reads a decision only through the two fields the audit uses", () => {
+    const audit = auditLocalDevConfiguration({
+      decisions: [{ strategy: "extension", packageName: undefined } as unknown as DependencyDecision],
+      extensionChoices: [tanstackSubstitute],
+    });
+
+    // The reviewed version matched this member on `strategy` alone and then reported it
+    // by `packageName`, so the finding was about a package nobody named — and a choice
+    // that the *record's* shape made unpairable looked like a choice whose decision had
+    // moved. What the audit claims is now bounded by what it read: the member answers
+    // neither direction of the coverage question, and the record's own shape stays
+    // `core`'s question rather than becoming a second finding here.
+    expect(audit.diagnostics.map(diagnostic => diagnostic.code)).toEqual(["local-dev-extension-choice-unmatched"]);
+    expect(audit.diagnostics.every(diagnostic => diagnostic.subject.length > 0)).toBe(true);
+  });
+
+  it("still reads the ids of a row it can read, with a broken neighbour in the table", () => {
+    expect(
+      findLocalDevModuleIdResolution("react-dom/client", LOCAL_DEV_MODULE_RESOLUTIONS, tableWithBrokenReactRow)?.specifier,
+    ).toBe("react-dom");
+    expect(findLocalDevModuleIdResolution("react", LOCAL_DEV_MODULE_RESOLUTIONS, tableWithBrokenReactRow)).toBeUndefined();
+  });
 });
 
 describe("authoring patterns the local loop must not reward", () => {
