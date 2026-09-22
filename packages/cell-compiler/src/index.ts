@@ -31,7 +31,8 @@
  * Scope note: this package states the *artifact* contract, the boundary that
  * produces one, and the rules that make local workspace packages source rather than
  * runtime modules. It does not resolve dependencies (#8), bundle a project with a
- * concrete bundler (#7), read a workspace graph off disk (#26, #28), package
+ * concrete bundler (#7), load or parse a project config (#26 owns that in `core` —
+ * `registry-plan` consumes an already-loaded registry and never reads disk), package
  * Forguncy frontend extensions, or measure the cell code budget (#21) — it takes
  * that budget, and the workspace graph, as configuration. What it does own is every
  * question that separates a Cell artifact from a web bundle, so a caller cannot
@@ -262,3 +263,7 @@ export type {
   CompileCellOutcome,
   CompileCellResult,
 } from "./artifact";
+
+// The #26 registry seam: declared Cell id in, compilable input + target out
+export { planCellCompile, planCellCompiles } from "./registry-plan";
+export type { CellCompilePlan, CellCompileTarget } from "./registry-plan";

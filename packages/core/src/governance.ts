@@ -131,6 +131,26 @@ export const EXTENSION_EXTERNALS_DECISION: ArchitectureDecisionSource = {
   url: "https://github.com/Mang-X/forguncy-react-workspace/issues/12",
 };
 
+/**
+ * The project configuration and Cell target declaration Spec.
+ *
+ * Declared here beside #4, #5, #8, #16, #9 and #12, for the same reason those
+ * are: it is a Spec built on #4 rather than an architecture decision, so adding
+ * it to {@link GOVERNING_ARCHITECTURE_DECISIONS} would relabel it and silently
+ * change what that list means.
+ *
+ * It is declared in `core` because `core` is where the contract lives: the
+ * compiler, the local dev harness and MCP sync all resolve Cells through the
+ * registry this package normalizes, so a second package owning the decision
+ * would recreate exactly the scattered mapping #26 exists to end.
+ */
+export const PROJECT_CONFIG_DECISION: ArchitectureDecisionSource = {
+  repository: "Mang-X/forguncy-react-workspace",
+  issue: 26,
+  title: "Spec: project configuration and React Cell target declarations",
+  url: "https://github.com/Mang-X/forguncy-react-workspace/issues/26",
+};
+
 /** Every governing architecture Spec, in the order a document should cite them. */
 export const GOVERNING_ARCHITECTURE_DECISIONS: readonly ArchitectureDecisionSource[] = [
   OWNERSHIP_AND_DEPENDENCY_DECISION,
@@ -178,6 +198,10 @@ export const EXTENSION_EXTERNALS_DECISION_REFERENCE = decisionReference(EXTENSIO
 
 export const EXTENSION_EXTERNALS_DECISION_QUALIFIED_REFERENCE =
   qualifiedDecisionReference(EXTENSION_EXTERNALS_DECISION);
+
+export const PROJECT_CONFIG_DECISION_REFERENCE = decisionReference(PROJECT_CONFIG_DECISION);
+
+export const PROJECT_CONFIG_DECISION_QUALIFIED_REFERENCE = qualifiedDecisionReference(PROJECT_CONFIG_DECISION);
 
 /**
  * The line every ownership/dependency Spec, plan and PR is expected to carry.
@@ -260,6 +284,8 @@ export const HOST_BRIDGE_CITATION_PATTERNS: readonly RegExp[] = citationPatterns
 
 export const EXTENSION_EXTERNALS_CITATION_PATTERNS: readonly RegExp[] =
   citationPatternsFor(EXTENSION_EXTERNALS_DECISION);
+
+export const PROJECT_CONFIG_CITATION_PATTERNS: readonly RegExp[] = citationPatternsFor(PROJECT_CONFIG_DECISION);
 
 export function citesDecision(
   text: string,

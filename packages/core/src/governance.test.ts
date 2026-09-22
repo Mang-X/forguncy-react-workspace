@@ -12,6 +12,10 @@ import {
   OWNERSHIP_AND_DEPENDENCY_DECISION,
   OWNERSHIP_AND_DEPENDENCY_DECISION_QUALIFIED_REFERENCE,
   OWNERSHIP_AND_DEPENDENCY_DECISION_REFERENCE,
+  PROJECT_CONFIG_CITATION_PATTERNS,
+  PROJECT_CONFIG_DECISION,
+  PROJECT_CONFIG_DECISION_QUALIFIED_REFERENCE,
+  PROJECT_CONFIG_DECISION_REFERENCE,
 } from "./governance";
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
@@ -38,6 +42,24 @@ describe("decision provenance", () => {
     expect(citesDecision("(#4)")).toBe(true);
     expect(citesDecision("Governing architecture Spec Issue(s): #8")).toBe(false);
     expect(DECISION_CITATION_PATTERNS).toHaveLength(3);
+  });
+
+  it("records the project configuration contract as its own governing decision (#26)", () => {
+    expect(PROJECT_CONFIG_DECISION.issue).toBe(26);
+    expect(PROJECT_CONFIG_DECISION.url).toBe(
+      "https://github.com/Mang-X/forguncy-react-workspace/issues/26",
+    );
+    expect(PROJECT_CONFIG_DECISION_REFERENCE).toBe("#26");
+    expect(PROJECT_CONFIG_DECISION_QUALIFIED_REFERENCE).toBe("Mang-X/forguncy-react-workspace#26");
+
+    // Same boundary-aware matching as every other decision, generalized through
+    // `citationPatternsFor` so #26 inherits the prefix-safe forms.
+    expect(PROJECT_CONFIG_CITATION_PATTERNS).toHaveLength(3);
+    for (const pattern of PROJECT_CONFIG_CITATION_PATTERNS) {
+      expect(citesDecision("#26", PROJECT_CONFIG_DECISION)).toBe(true);
+      expect(pattern.test("Mang-X/forguncy-react-workspace#260")).toBe(false);
+      expect(pattern.test("https://github.com/other/repo/issues/26")).toBe(false);
+    }
   });
 
   // Both helpers are exported as the canonical provenance API, so they must

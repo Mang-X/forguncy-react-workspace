@@ -22,11 +22,14 @@ describe("locating one target", () => {
     expect(SYNC_TARGET_LOCATOR.established).toContain("api.page.setCells");
   });
 
-  // #26 asks for the locator model to be updated against #5/#19's evidence before it is
-  // finalised, so the open question has to be findable rather than remembered.
-  it("records what is not settled about the locator", () => {
-    expect(SYNC_TARGET_LOCATOR.openQuestion).toMatch(/stable page id/i);
-    expect(SYNC_TARGET_LOCATOR.openQuestion).toMatch(/rename/i);
+  // #26 asked for the locator model to be updated against #5/#19's evidence before it
+  // was finalised; the answer is now data, imported from `core` rather than restated.
+  it("carries #26's finalization of the locator, resolved from probe evidence", () => {
+    expect(SYNC_TARGET_LOCATOR.resolution.status).toBe("final");
+    expect(SYNC_TARGET_LOCATOR.resolution.model).toBe("forguncy-page-cell/v0");
+    expect(SYNC_TARGET_LOCATOR.resolution.fields).toEqual(["pageName", "cell"]);
+    expect(SYNC_TARGET_LOCATOR.resolution.resolvedOpenQuestion).toMatch(/stable page id/i);
+    expect(SYNC_TARGET_LOCATOR.resolution.evidence.join("\n")).toMatch(/rename/i);
   });
 
   it("labels a target as one token for a diagnostic subject", () => {

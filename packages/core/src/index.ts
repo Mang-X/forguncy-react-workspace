@@ -17,12 +17,17 @@
  *   — https://github.com/Mang-X/forguncy-react-workspace/issues/9
  * - #12 "`extension` dependencies as external modules + `frontendLibraries` metadata"
  *   — https://github.com/Mang-X/forguncy-react-workspace/issues/12
+ * - #26 "project configuration and React Cell target declarations"
+ *   — https://github.com/Mang-X/forguncy-react-workspace/issues/26
  *
  * Scope note: this package states *semantics, boundaries, verified target facts,
  * the dependency-decision model, and the selection/probe policy*. It intentionally
  * does not resolve dependencies, bundle anything, run a probe, or maintain a
  * package compatibility database; those are separate Issues. Reading and writing
- * `fgc.lock.json` as a project artifact is `dependency-resolver`'s job.
+ * `fgc.lock.json` as a project artifact is `dependency-resolver`'s job. The
+ * project configuration contract (#26) it does own stops at declaring and
+ * normalizing "which source entry is which Forguncy Cell" — never at acting on a
+ * Forguncy project.
  */
 
 export {
@@ -136,6 +141,10 @@ export {
   OWNERSHIP_AND_DEPENDENCY_DECISION,
   OWNERSHIP_AND_DEPENDENCY_DECISION_QUALIFIED_REFERENCE,
   OWNERSHIP_AND_DEPENDENCY_DECISION_REFERENCE,
+  PROJECT_CONFIG_CITATION_PATTERNS,
+  PROJECT_CONFIG_DECISION,
+  PROJECT_CONFIG_DECISION_QUALIFIED_REFERENCE,
+  PROJECT_CONFIG_DECISION_REFERENCE,
   qualifiedDecisionReference,
   RUNTIME_CONTRACT_CITATION_PATTERNS,
   RUNTIME_CONTRACT_DECISION,
@@ -565,3 +574,69 @@ export type {
   SpecProvingCase,
   StrategyProbeSupport,
 } from "./selection-policy";
+
+// ---------------------------------------------------------------------------
+// Project configuration and React Cell target declarations (#26)
+// ---------------------------------------------------------------------------
+
+export {
+  CELL_ALLOWED_FIELDS,
+  CELL_REFERENCE_PATTERN,
+  CONFIG_ALLOWED_FIELDS,
+  DEFAULT_CODE_MARKER_NAMESPACE,
+  DEFAULT_DEPENDENCY_LOCK_PATH,
+  DEFAULT_FORGUNCY_CONFIG_FILE,
+  DEPENDENCY_DECISION_FIELD_NAMES,
+  defineForguncyConfig,
+  FORGUNCY_CONFIG_FILE_CANDIDATES,
+  FORGUNCY_CONFIG_SCHEMA_VERSION,
+  isConfigRecord,
+  normalizeCellReference,
+  RUNTIME_ALLOWED_FIELDS,
+  TARGET_LOCATOR_FINALIZATION,
+  TARGET_LOCATOR_MODEL,
+  targetLocatorKey,
+} from "./forguncy-config";
+export type {
+  CellCodeBudgetOverrides,
+  CellConfig,
+  ForguncyConfig,
+  ForguncyConfigSchemaVersion,
+  ForguncyTargetLocator,
+  RuntimeTargetConfig,
+  TargetLocatorModel,
+} from "./forguncy-config";
+
+export {
+  assertDistinctTargetClaims,
+  assertUniqueTargets,
+  CELL_ID_PATTERN,
+  createCellRegistry,
+  ForguncyConfigError,
+  isCellRegistry,
+  isSecretLikeKey,
+  machineSpecificPathProblem,
+  OUTPUT_ALLOWED_FIELDS,
+  TARGET_ALLOWED_FIELDS,
+} from "./cell-registry";
+export type {
+  CellRegistry,
+  ConfigDiagnostic,
+  ConfigDiagnosticCode,
+  CreateCellRegistryOptions,
+  NormalizedCellTarget,
+  NormalizedRuntimeTarget,
+  RegisteredCell,
+  TargetClaim,
+} from "./cell-registry";
+
+export {
+  findForguncyConfigFile,
+  importForguncyConfigModule,
+  loadForguncyConfig,
+} from "./config-loader";
+export type {
+  FindForguncyConfigFileOptions,
+  ForguncyConfigModuleLoader,
+  LoadForguncyConfigOptions,
+} from "./config-loader";
