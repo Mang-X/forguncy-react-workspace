@@ -394,19 +394,37 @@ export const RUNTIME_FACADE_RESOLUTION_MODEL = {
  * duplicate runtime copy per Cell unless intentionally tiny and stateless. The
  * compiler may lower facade imports to generated host bindings where appropriate."
  *
- * The façade exercises the exception condition rather than the prohibition:
- * holding no module state is what makes it safe for the compiler to inline it
- * per Cell (#6's boundary owns the lowering). The `holdsModuleState: false`
- * member is the load-bearing one — a façade singleton would break the moment two
- * cells on one page declared different mock providers, and #5 already records
- * that two cells can observe different snapshots of the same page global.
+ * **Amended by #29, because implementing the resolution #27 specifies in this
+ * same contract showed the condition could not hold as written.** #27 asks the
+ * façade to resolve its surface "from the installed provider"
+ * ({@link RUNTIME_FACADE_RESOLUTION_MODEL}), and implementing that needs exactly
+ * one thing held: the installed provider. A façade with no state at all cannot
+ * resolve a provider, and a façade *shared* between Cells cannot hold a per-Cell
+ * provider — two Cells rendering would clobber each other's props. So per-Cell
+ * duplication is not an allowed optimisation here, it is the requirement, and the
+ * condition for that exception has to describe what is actually held:
+ *
+ * - `holdsProviderSlot` is true, and the slot is per copy (`provider.ts`);
+ * - `holdsDomainState` is false, which is the invariant the original wording was
+ *   protecting: nothing business-, page- or cross-Cell-shaped is held, so two
+ *   Cells can never observe each other through the façade;
+ * - `perCellDuplicateAllowed` stays true, and it is now load-bearing rather than
+ *   an exception: it is what makes the slot per Cell.
+ *
+ * Replacing the boolean with two is the point rather than a tidy-up: a single
+ * `holdsModuleState` could not distinguish "holds nothing" from "holds the one
+ * thing every façade must hold", so either reading of it would have been wrong
+ * for one of the two answers.
  */
 export const RUNTIME_FACADE_PACKAGING_POLICY = {
-  holdsModuleState: false,
+  /** The provider slot is the whole of the façade's state. */
+  holdsProviderSlot: true,
+  /** No business data, no page state, no cross-Cell store. */
+  holdsDomainState: false,
   perCellDuplicateAllowed: true,
   compilerOwnsImportLowering: true,
   reason:
-    "A stateless façade has nothing to share between Cells, so inlining it costs bytes and buys no divergence. Whether the compiler lowers façade imports to generated host bindings is the artifact/compiler boundary's decision (#6), not this contract's; this module only states what the façade must hold in order for lowering to stay safe.",
+    "The slot is safe only because the package is flattened per Cell (#14), so a copy means a slot per Cell; hoisting it into a module two Cells share would hand both whichever rendered last. Whether the compiler lowers façade imports to generated host bindings is the artifact/compiler boundary's decision (#6), not this contract's; this module only states what the façade must hold in order for lowering to stay safe.",
 } as const;
 
 // ---------------------------------------------------------------------------

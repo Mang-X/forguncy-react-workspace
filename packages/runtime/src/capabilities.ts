@@ -537,6 +537,10 @@ export const RUNTIME_FACADE_CONTRACT_ERROR_CODES = [
   "family-not-admissible",
   "boundary-not-admissible",
   "binding-shadows-cell-scope",
+  // Raised by the surface audit (#29) rather than by a registry lookup: it means
+  // the registered surface and the members the accessor actually returns have
+  // drifted apart, which is a contract failure and not a resolution failure.
+  "surface-not-exposed",
 ] as const;
 
 export type RuntimeFacadeContractErrorCode = (typeof RUNTIME_FACADE_CONTRACT_ERROR_CODES)[number];
