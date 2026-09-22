@@ -1,6 +1,7 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { afterAll, describe, expect, it } from "vitest";
@@ -269,5 +270,94 @@ describe("scratch config directories", () => {
     expect(countAfterFirst).toBe(1);
     expect(global.__fgcLoadCount).toBe(1);
     delete global.__fgcLoadCount;
+  });
+});
+
+describe("the freshness boundary: what the default loader does not cover", () => {
+  // The default loader stamps the config file's own bytes. A module the config
+  // *imports* keeps its own URL, so native ESM caching means an edit to that
+  // module is invisible: the config's hash has not changed, and the child is
+  // reused from cache. This pair of tests pins both halves of the narrowed
+  // contract — the default loader's scope stops at the config file, and a host
+  // that supplies a graph-reloading `loadModule` observes the whole graph.
+  function writeSplitProject(root: string): void {
+    writeFileSync(join(root, "cell.ts"), "export const cell = 1;\n");
+    writeFileSync(
+      join(root, "cells.mjs"),
+      'export const cells = { scratch: { entry: "./cell.ts", target: { pageName: "旧页", cell: "A1" } } };\n',
+    );
+    writeFileSync(
+      join(root, "forguncy.config.mjs"),
+      'import { cells } from "./cells.mjs";\nexport default { cells };\n',
+    );
+  }
+
+  it("does not observe an edit to a module the config imports — the documented default scope", async () => {
+    const root = scratchDir();
+    writeSplitProject(root);
+
+    const first = await loadForguncyConfig({ root });
+    expect(first.require("scratch").target.locatorKey).toBe("旧页#A1");
+
+    writeFileSync(
+      join(root, "cells.mjs"),
+      'export const cells = { scratch: { entry: "./cell.ts", target: { pageName: "新页", cell: "B2" } } };\n',
+    );
+
+    // Stale on purpose: this is exactly why the contract says a long-lived host
+    // whose config imports project files must pass its own `loadModule`. If
+    // this assertion ever flips, Node's caching model changed and the contract
+    // should be revisited — not the assertion deleted.
+    const second = await loadForguncyConfig({ root });
+    expect(second.require("scratch").target.locatorKey).toBe("旧页#A1");
+  });
+
+  it("observes an edit to an imported module when the host supplies a graph-reloading loader", async () => {
+    // A stand-in for a host with a real config loader (Vite+'s
+    // `loadConfigFromFile` bundles its graph this way): rewrite each relative
+    // import with a content stamp of the file it points at, evaluate the result
+    // from a content-addressed sibling, and the whole one-level graph reloads
+    // when any of its files change — while an unchanged graph stays cached.
+    const graphReloadingLoader: ForguncyConfigModuleLoader = configFile => {
+      const dir = dirname(configFile);
+      const source = readFileSync(configFile, "utf8").replace(
+        /(from\s+["'])(\.[^"']+)(["'])/g,
+        (match, prefix: string, spec: string, suffix: string) => {
+          try {
+            const stamp = createHash("sha256")
+              .update(readFileSync(resolve(dir, spec)))
+              .digest("hex")
+              .slice(0, 16);
+            return `${prefix}${spec}?t=${stamp}${suffix}`;
+          } catch {
+            return match;
+          }
+        },
+      );
+      const contentAddressed = join(
+        dir,
+        `.graph-${createHash("sha256").update(source).digest("hex").slice(0, 16)}-${basename(configFile)}`,
+      );
+      writeFileSync(contentAddressed, source);
+      return import(pathToFileURL(contentAddressed).href);
+    };
+
+    const root = scratchDir();
+    writeSplitProject(root);
+
+    const first = await loadForguncyConfig({ root, loadModule: graphReloadingLoader });
+    expect(first.require("scratch").target.locatorKey).toBe("旧页#A1");
+
+    writeFileSync(
+      join(root, "cells.mjs"),
+      'export const cells = { scratch: { entry: "./cell.ts", target: { pageName: "新页", cell: "B2" } } };\n',
+    );
+
+    const second = await loadForguncyConfig({ root, loadModule: graphReloadingLoader });
+    expect(second.require("scratch").target.locatorKey).toBe("新页#B2");
+
+    // …and the other half: an unchanged graph must not re-evaluate either.
+    const third = await loadForguncyConfig({ root, loadModule: graphReloadingLoader });
+    expect(third.require("scratch").target.locatorKey).toBe("新页#B2");
   });
 });

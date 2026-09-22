@@ -21,13 +21,24 @@
  *   this module. Identity is recomputed from `pageName` + `cell` there (a stored
  *   `locatorKey` is never trusted), because after a partial sync there is no
  *   safe rollback.
+ * - **The request re-check.** The registry guard covers what the project
+ *   *declares*; a request can still name one id twice, and two requests for one
+ *   destination are the same last-write-wins hazard the guard exists for. So the
+ *   resolved claims are re-asserted with `assertDistinctTargetClaims` before any
+ *   of them leaves the module: one Cell owns one target, in the registry *and*
+ *   in the batch being planned.
  * - **No second locator spelling.** The returned `CellTarget` is the registry's
  *   normalized `pageName`/`cell` verbatim — the two fields `api.page.setCells`
  *   takes — so the plan, the dispatch and the designer call all carry the same
  *   coordinates the config declared.
+ *
+ * Structurally, not by convention: every exported function that *produces* a
+ * target resolves it through this module's guarded path. `syncCellInput` takes
+ * a registry and a Cell id rather than a registry entry, so there is no way to
+ * assemble a writable `SyncCellInput` from an unguarded registry.
  */
 
-import { assertUniqueTargets } from "@forguncy-react-workspace/core";
+import { assertDistinctTargetClaims, assertUniqueTargets } from "@forguncy-react-workspace/core";
 import type { CellRegistry, RegisteredCell } from "@forguncy-react-workspace/core";
 
 import { planCellSync } from "./sync-plan";
@@ -78,11 +89,15 @@ export function resolveCellSyncTarget(registry: CellRegistry, cellId: string): R
 }
 
 /**
- * Resolves a batch of declared Cell ids, guarding the *whole* batch first.
+ * Resolves a batch of declared Cell ids, guarding the registry *and* the batch.
  *
- * One guard call for the batch rather than one per cell: two ids resolving to
- * one Forguncy destination is a conflict between them, and only the full set
- * can show it.
+ * Two guards, because they cover different ways to arrive at one destination
+ * twice: `assertUniqueTargets` covers what the project declares, and
+ * `assertDistinctTargetClaims` runs on the *resolved request* — so `["orderList",
+ * "orderList"]`, or two ids a forged registry maps onto one coordinates pair,
+ * fails here rather than producing two plans for one Forguncy Cell. One guard
+ * call for the batch rather than one per cell: the conflict is between the
+ * members, and only the full set can show it.
  */
 export function resolveCellSyncTargets(
   registry: CellRegistry,
@@ -90,7 +105,7 @@ export function resolveCellSyncTargets(
 ): readonly ResolvedCellSyncTarget[] {
   assertUniqueTargets(registry);
 
-  return cellIds.map(cellId => {
+  const resolved = cellIds.map(cellId => {
     const cell = registry.require(cellId);
     return {
       cellId: cell.id,
@@ -98,20 +113,42 @@ export function resolveCellSyncTargets(
       locatorKey: cell.target.locatorKey,
     };
   });
+
+  assertDistinctTargetClaims(
+    resolved.map(claim => ({
+      cellId: claim.cellId,
+      pageName: claim.target.pageName,
+      cell: claim.target.cell,
+      locatorKey: claim.locatorKey,
+    })),
+    "cell sync request",
+  );
+
+  return resolved;
 }
 
 /**
- * The minimal sync input, assembled from a registry entry and an artifact.
+ * The minimal sync input, assembled from a registry and a declared Cell id.
  *
- * `SyncCellInput` stays exactly `{ target, artifact }`: this helper removes the
- * *lookup* step (id → entry → coordinates), not the boundary. Nothing else
- * about a plan — decisions, deployed state, policy — is folded in here.
+ * Takes `registry` + `cellId` rather than a registry entry on purpose: the
+ * entry is the value that could have come from a forged or stale registry
+ * without passing any guard, so the helper resolves through the guarded batch
+ * path itself. `SyncCellInput` stays exactly `{ target, artifact }` — this
+ * helper removes the *lookup* step (id → entry → coordinates), not the
+ * boundary, and nothing else about a plan — decisions, deployed state, policy —
+ * is folded in here.
  */
-export function syncCellInput(cell: RegisteredCell, artifact: SyncCellInput["artifact"]): SyncCellInput {
-  return {
-    target: targetOf(cell),
-    artifact,
-  };
+export function syncCellInput(
+  registry: CellRegistry,
+  cellId: string,
+  artifact: SyncCellInput["artifact"],
+): SyncCellInput {
+  const [resolved] = resolveCellSyncTargets(registry, [cellId]);
+  if (resolved === undefined) {
+    // Unreachable for the same reason as in `resolveCellSyncTarget`.
+    throw new Error(`No resolved target for Cell ${cellId}.`);
+  }
+  return { target: resolved.target, artifact };
 }
 
 /** One planned sync: the declared Cell id plus everything `planCellSync` needs. */

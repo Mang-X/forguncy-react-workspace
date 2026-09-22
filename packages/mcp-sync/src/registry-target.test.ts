@@ -148,15 +148,58 @@ describe("resolving a declared Cell to a sync target", () => {
     expect(resolved.map(entry => entry.cellId)).toEqual(["orderBoard", "orderList"]);
     expect(resolved.map(entry => entry.target.cell)).toEqual(["D4", "A1"]);
   });
+
+  // The registry guard covers what the project declares; the request guard
+  // covers how it is asked for. Both were review findings on PR #56: a batch
+  // naming one id twice would otherwise build two plans for one Cell and
+  // reintroduce last-write-wins at the boundary this module exists to protect.
+  it("refuses a batch that names the same logical id twice", () => {
+    const error = captureConfigError(() => resolveCellSyncTargets(registryOf(), ["orderList", "orderList"]));
+
+    expect(error.codes).toEqual(["duplicate-target", "duplicate-target"]);
+    expect(error.message).toContain("cell sync request");
+  });
+
+  it("refuses a batch whose two ids resolve to one destination", () => {
+    // Distinct logical ids, one coordinates pair — invisible to the registry
+    // guard only when the registry is forged *after* validation; visible here
+    // because the resolved claims are re-checked as a batch.
+    const error = captureConfigError(() => resolveCellSyncTargets(collidingRegistry(), ["orderList", "orderBoard"]));
+
+    expect(error.codes).toContain("duplicate-target");
+  });
 });
 
 describe("assembling the minimal sync input", () => {
   it("is a target and an artifact, with nothing in between", () => {
-    const cell = registryOf().require("orderList");
-    const input = syncCellInput(cell, generated());
+    const input = syncCellInput(registryOf(), "orderList", generated());
 
     expect(Object.keys(input).sort()).toEqual(["artifact", "target"]);
     expect(input.target).toEqual({ pageName: "销售订单", cell: "A1" });
+  });
+
+  // Review finding on PR #56: this helper took a `RegisteredCell`, so a caller
+  // could assemble a writable input from a forged registry without ever running
+  // the guard. It now takes registry + id and resolves through the guarded path.
+  it("refuses to assemble an input from an unguarded forged registry", () => {
+    const error = captureConfigError(() => syncCellInput(collidingRegistry(), "orderList", generated()));
+
+    expect(error.codes).toEqual(["duplicate-target", "duplicate-target"]);
+    expect(error.message).toContain("before any project mutation");
+  });
+
+  it("refuses an input request whose carried locator key contradicts its coordinates", () => {
+    const forged = registryOf();
+    const tampered: CellRegistry = {
+      ...forged,
+      cells: forged.cells.map(cell =>
+        cell.id === "orderList" ? { ...cell, target: { ...cell.target, locatorKey: "别处#Z9" } } : cell,
+      ),
+    };
+
+    const error = captureConfigError(() => syncCellInput(tampered, "orderList", generated()));
+
+    expect(error.codes).toContain("locator-key-mismatch");
   });
 });
 
@@ -189,6 +232,28 @@ describe("planning a batch of declared Cells", () => {
 
     // No partial batch: the guard runs before any plan is built, so there is no
     // world where one plan exists and the overwrite already happened.
+    expect(error.codes).toEqual(["duplicate-target", "duplicate-target"]);
+  });
+
+  it("refuses a plan batch that names one logical id twice", () => {
+    // Two entries, one Cell: without the request guard this produces two plans
+    // (potentially with different artifacts) for one Forguncy destination.
+    const error = captureConfigError(() =>
+      planCellSyncTargets(registryOf(), [
+        { cellId: "orderList", ...basePlan },
+        {
+          cellId: "orderList",
+          ...basePlan,
+          // A *different* artifact for the same Cell: the hazard is not two
+          // equal plans, it is two plans racing to write one destination.
+          artifact: {
+            code: `${CELL_ARTIFACT_BANNER}\nfunction App() { return 1; }\n`,
+            frontendLibraries: [],
+          },
+        },
+      ]),
+    );
+
     expect(error.codes).toEqual(["duplicate-target", "duplicate-target"]);
   });
 

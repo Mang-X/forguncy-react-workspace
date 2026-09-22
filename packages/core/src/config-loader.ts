@@ -19,6 +19,16 @@
  *   already has a richer config loader (Vite+'s `loadConfigFromFile`, for
  *   instance) instead of this package shipping one.
  *
+ * The default loader's freshness guarantee is scoped to the **config file's own
+ * bytes** — see `importForguncyConfigModule`. Native ESM caches by URL and this
+ * file deliberately does not ship a bundler, so a module the config *imports*
+ * keeps its own URL and its own cache entry. A long-lived host (#20's MCP
+ * server, a watch-mode CLI) that allows its config to import project files
+ * (`import { cells } from "./config/cells.js"`) must therefore supply a
+ * `loadModule` with module-graph invalidation whenever those files may change
+ * under it; the default loader is for one-shot processes and configs whose
+ * imports are stable for the life of the process.
+ *
  * In both shapes the resulting document goes through exactly one normalization
  * path — `createCellRegistry` — so "which entry is which Forguncy Cell" has one
  * answer.
@@ -55,16 +65,21 @@ export type ForguncyConfigModuleLoader = (configFile: string) => Promise<unknown
  * transpiler: if a host cannot import a `.ts` config, that host should pass
  * `loadModule`.
  *
- * **Freshness contract.** Native `import()` caches by URL, so a long-lived
- * process — the MCP server of #20, a watch-mode CLI — that imported a config
- * once would otherwise keep seeing the old module after the file changed, and
- * sync to the old target. Appending the file's content hash to the module URL
- * makes every call observe the file's *current* content, while an unchanged file
- * still resolves to a cached module and costs nothing. The limit is stated
- * rather than papered over: modules the config itself imports keep their own
- * URLs and the host runtime's caching; a host that needs module-graph-wide
- * reload semantics passes `loadModule` and uses its own loader (Vite+'s
- * `loadConfigFromFile` reloads its module graph exactly this way).
+ * **Freshness contract — the config file's bytes only, and this is the whole
+ * contract.** Native `import()` caches by URL. Appending the *config file's*
+ * content hash makes every call observe that file's current content, while an
+ * unchanged file still resolves to a cached module and costs nothing.
+ *
+ * What it does **not** cover, stated as an obligation rather than a footnote:
+ * modules the config itself imports keep their own URLs and the host runtime's
+ * cache, so an edit to `./config/cells.js` is invisible to this loader — the
+ * config's hash has not changed, and even when it has, the child module is
+ * reused from cache. A long-lived host (#20's MCP server, a watch-mode CLI)
+ * whose config imports project files that can change under it **must** pass its
+ * own `loadModule` with module-graph invalidation — Vite+'s `loadConfigFromFile`
+ * reloads its module graph exactly this way, by bundling. This package ships no
+ * bundler: inventing a second one here is precisely what "the config is loaded
+ * by the host's module runtime" forbids.
  */
 export const importForguncyConfigModule: ForguncyConfigModuleLoader = configFile => {
   const url = pathToFileURL(configFile).href;
@@ -126,7 +141,16 @@ export interface LoadForguncyConfigOptions extends CreateCellRegistryOptions {
    * first, then the `.mts`/`.mjs`/`.js` fallbacks.
    */
   readonly configFile?: string;
-  /** Overrides the module loader. Defaults to `importForguncyConfigModule`. */
+  /**
+   * Overrides the module loader. Defaults to `importForguncyConfigModule`.
+   *
+   * The default's freshness guarantee covers the config file's own bytes only —
+   * see that loader's contract. **A long-lived host whose config imports project
+   * files that may change while the process runs must pass a `loadModule` with
+   * module-graph invalidation** (Vite+'s `loadConfigFromFile`, a watch-mode
+   * bundler); otherwise an edit to an imported module is silently invisible and
+   * the caller keeps loading the previous document.
+   */
   readonly loadModule?: ForguncyConfigModuleLoader;
 }
 
