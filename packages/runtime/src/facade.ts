@@ -320,21 +320,27 @@ export interface RuntimeFacade<Commands extends ServerCommandParameterMap = Reco
   /**
    * Every configured permission's boolean, under the host's own name.
    *
-   * `Readonly<Record<string, boolean>>` rather than a keyed shape: #5 records one
-   * boolean per configured `permissions[].name`, and those names are designer-chosen,
-   * so a key union would be a declaration this package has no basis to make. The
-   * values are `readonly` too because the map is the host's resolved snapshot — a
-   * Cell that wrote to it would be editing host state, which is the ownership
-   * mistake `RUNTIME_FACADE_BOUNDARIES` exists to describe.
+   * `Readonly<Partial<Record<string, boolean>>>` rather than a keyed shape or a plain
+   * `Record<string, boolean>`: #5 records one boolean per *configured*
+   * `permissions[].name`, and those names are designer-chosen, so a key union would be a
+   * declaration this package has no basis to make — while a plain `Record` is the
+   * opposite mistake, promising a `boolean` at every string key when the evidence covers
+   * only the configured ones and an unconfigured key is simply absent. This repository
+   * does not enable `noUncheckedIndexedAccess`, so that promise would be collected
+   * silently: `const granted: boolean = map["NotConfigured"]` compiles, and reads
+   * `undefined` at runtime. `Partial` puts the absence back in the type where the
+   * evidence puts it. The values are `readonly` too because the map is the host's
+   * resolved snapshot — a Cell that wrote to it would be editing host state, which is
+   * the ownership mistake `RUNTIME_FACADE_BOUNDARIES` exists to describe.
    *
-   * The shape is *checked* at the boundary rather than asserted, unlike the members
-   * that forward a port type: the handle declares this member as
-   * `(...args: unknown[]) => unknown`, so `Readonly<Record<string, boolean>>` is a
-   * narrowing this package invents, and an invented claim is one it has to earn. See
-   * `permissionMap` for the answers it refuses and why each is refused for its own
-   * reason.
+   * The shape is *checked* at the boundary rather than asserted, unlike the members that
+   * forward a port type: the handle declares this member as
+   * `(...args: unknown[]) => unknown`, so this type is a narrowing the package invents,
+   * and an invented claim is one it has to earn. `permissionMap` refuses the answers that
+   * are not the recorded shape — and what it guarantees, that every *present* own entry
+   * holds a boolean, is now the same sentence this type says rather than a stronger one.
    */
-  getPermissions(): Readonly<Record<string, boolean>>;
+  getPermissions(): Readonly<Partial<Record<string, boolean>>>;
 
   /** A confirmed base prop, under the name `core` verified. */
   cellProp<Shape = unknown>(key: ExposedCellPropKey): Shape;
@@ -363,7 +369,7 @@ interface RuntimeFacadeImplementation {
   invokeServerCommand(name: string, ...parameters: readonly unknown[]): Promise<ServerCommandResult>;
   useDataSource(dataSourceName: string, options?: DataSourceQueryOptions): DataSourceResult;
   hasPermission(permissionName: string): boolean;
-  getPermissions(): Readonly<Record<string, boolean>>;
+  getPermissions(): Readonly<Partial<Record<string, boolean>>>;
   cellProp(key: ExposedCellPropKey): unknown;
   forguncyMember(member: ExposedForguncyMember): unknown;
 }
@@ -466,14 +472,16 @@ function buildRuntimeFacadeSurface(): RuntimeFacadeImplementation {
     // go through one helper, so the own-property rule and the receiver cannot apply
     // to two of the three paths and not the third.
     //
-    // They are also the only two members that *narrow* what the handle answers.
-    // `ForguncyPropMember` declares every member as `(...args: unknown[]) => unknown`,
-    // so `boolean` and `Readonly<Record<string, boolean>>` are types this file invents
-    // rather than types it forwards — and a claim this file invents is a claim this
-    // file has to check at the boundary. `invokeServerCommand` and `useDataSource` are
-    // deliberately not here: their shapes are declared in `contract.ts` as the port's
-    // own obligation, so re-testing them would be a second copy of a rule that already
-    // has an owner.
+    // They are also where the narrowing happens, and the reason is the handle's own
+    // type: `ForguncyPropMember` declares every member as
+    // `(...args: unknown[]) => unknown`, so `boolean` and the permission map's shape are
+    // types this file invents rather than types it forwards — and a claim this file
+    // invents is one it has to check at the boundary, which is what `answerShape` and
+    // `permissionMap` below do. `useDataSource` is the one member that does not narrow:
+    // its shape is declared in `contract.ts` as the port's own obligation, so re-testing
+    // it here would be a second copy of a rule that already has an owner. The command
+    // record is the middle case — it arrives as `Record<string, unknown>` and is narrowed
+    // on the spot — so its check lives where its value arrives, in `invokeServerCommand`.
     hasPermission: permissionName => {
       const check = hostHandleMember(requireRuntimeFacadeProvider(), "hasPermission") as (
         permissionName: string,
@@ -610,11 +618,16 @@ function answerShape(value: unknown): string {
 /**
  * The permission snapshot, or a refusal naming the answer that arrived.
  *
- * `Readonly<Record<string, boolean>>` is a *closed* claim that this file invents —
- * `ForguncyPropMember` declares the member as `(...args: unknown[]) => unknown` — so it
- * has to be earned here rather than cast into existence. Four shapes reach this
- * function in practice, and each is refused for its own reason rather than one shared
- * "not an object":
+ * The shape is invented here — `ForguncyPropMember` declares the member as
+ * `(...args: unknown[]) => unknown` — so it has to be earned rather than cast into
+ * existence. What is earned is exactly what the declared type says, no more: `Partial` in
+ * the return type and the loop at the bottom are the same claim, that every *present* own
+ * entry holds a boolean, and neither says anything about a key that is absent. That
+ * alignment is the point: before `Partial`, the type promised a `boolean` at every string
+ * key while this function could only ever verify the present ones.
+ *
+ * Four shapes reach this function in practice, and each is refused for its own reason
+ * rather than one shared "not an object":
  *
  * - **a thenable**: the object test below would pass it through unchanged, and answer a
  *   caller whose declared type is a value with a pending one.
@@ -630,7 +643,7 @@ function answerShape(value: unknown): string {
  * A record with no prototype is accepted: it is still a plain map of own enumerable
  * keys, which is all #5 recorded.
  */
-function permissionMap(value: unknown): Readonly<Record<string, boolean>> {
+function permissionMap(value: unknown): Readonly<Partial<Record<string, boolean>>> {
   const refuse = (clause: string): never => {
     throw new RuntimeFacadeResolutionError(
       "capability-not-supplied",
@@ -650,7 +663,7 @@ function permissionMap(value: unknown): Readonly<Record<string, boolean>> {
       return refuse(`${answerShape(granted)} for the permission "${permissionName}"`);
     }
   }
-  return value as Readonly<Record<string, boolean>>;
+  return value as Readonly<Partial<Record<string, boolean>>>;
 }
 
 /**

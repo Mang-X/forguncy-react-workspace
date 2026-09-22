@@ -52,7 +52,12 @@ export function createLocalDevProvider(): RuntimeFacadeProvider {
       // await something that is not a promise, and the mistake would only surface on a
       // real page.
       hasPermission: (permissionName: string) => permissionName === "Orders.Read",
-      getPermissions: (): Record<string, boolean> => ({ "Orders.Read": true }),
+      // `Partial` matches the facade's own type and the mock's own honesty: one entry
+      // per *configured* name, nothing at all for the ones this harness did not
+      // configure. A plain `Record<string, boolean>` would promise a value at every
+      // key and deliver `undefined`, which is exactly the gap the facade type refuses
+      // to paper over.
+      getPermissions: (): Partial<Record<string, boolean>> => ({ "Orders.Read": true }),
     },
     cellProps: { Permissions: [{ key: "Orders.Read" }] },
     serverCommands: {

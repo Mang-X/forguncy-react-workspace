@@ -121,7 +121,16 @@ export function canReadOrders(): boolean {
  * so this is the form whose shape a project does not have to declare. Reading the
  * base prop instead is `runtimeFacade().cellProp("Permissions")`, and it is a
  * different address — not a second way to reach this one.
+ *
+ * The `Partial` is not a stylistic choice, and it is worth reading code that does
+ * it wrong: #5 recorded one boolean per *configured* permission, not a boolean at
+ * every possible key. Declaring a plain `Record<string, boolean>` compiles happily
+ * because this repository does not enable `noUncheckedIndexedAccess`, so an
+ * unconfigured name would type as `boolean` and read `undefined` on a real page.
+ * Keeping the type `Partial` keeps that absence in the type, where the compiler can
+ * still catch it. Callers widening this return value back to a plain `Record` are
+ * re-making the mistake, not simplifying.
  */
-export function readOrderPermissions(): Readonly<Record<string, boolean>> {
+export function readOrderPermissions(): Readonly<Partial<Record<string, boolean>>> {
   return runtimeFacade().getPermissions();
 }

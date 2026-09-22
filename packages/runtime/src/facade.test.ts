@@ -482,6 +482,33 @@ function typeOnlyWrongAddress(): void {
   void facade.cellProp("NotABaseProp");
 }
 
+/**
+ * The permission map's type must not promise a boolean the runtime will not deliver.
+ *
+ * `getPermissions()` is `Readonly<Partial<Record<string, boolean>>>` and deliberately
+ * not a plain `Record`, because #5 recorded one boolean per *configured* name and
+ * nothing at all about the rest. This repository leaves `noUncheckedIndexedAccess`
+ * off, so a plain `Record<string, boolean>` would let an arbitrary index read as
+ * `boolean` while the value at runtime is `undefined` — a type stronger than the
+ * evidence. The directive below is what keeps that from creeping back: restoring the
+ * plain `Record` makes it an *unused* `@ts-expect-error`, which `tsc` fails on.
+ *
+ * The pair is completed by the runtime assertions in the test that calls this, where
+ * a configured name really does carry `true` and an unconfigured one really is
+ * `undefined` — so the type claims no more and the runtime delivers no less.
+ */
+function typeOnlyArbitraryPermissionKey(): void {
+  const permissions = runtimeFacade().getPermissions();
+  // @ts-expect-error an unconfigured name is `boolean | undefined`, not `boolean`
+  const granted: boolean = permissions["NotConfigured"];
+  void granted;
+
+  // The usable form of the same read: acknowledging the absence compiles, so the
+  // refusal above is the `undefined` rather than a member that never returns.
+  const coalesced: boolean = permissions["NotConfigured"] ?? false;
+  void coalesced;
+}
+
 describe("what the types refuse", () => {
   function installMock(): void {
     installRuntimeFacadeProvider(
@@ -544,6 +571,19 @@ describe("what the types refuse", () => {
     expect(() => runtimeFacade().forguncyMember("hasPermission" as never)).toThrow(
       /not the member that exposes it.*runtimeFacade\(\)\.hasPermission\(\)/,
     );
+  });
+
+  it("keeps an unconfigured permission name out of the boolean type", () => {
+    installMock();
+    expect(typeOnlyArbitraryPermissionKey).toBeTypeOf("function");
+
+    // The runtime half of the pair: the configured name carries its boolean and the
+    // unconfigured one is genuinely absent, which is *why* the type has to be
+    // `Partial` rather than a plain `Record`. If this ever returned a value at
+    // `NotConfigured`, the façade would be inventing one and the type would be right
+    // to promise it.
+    expect(runtimeFacade().getPermissions()["Orders.Read"]).toBe(true);
+    expect(runtimeFacade().getPermissions()["NotConfigured"]).toBeUndefined();
   });
 });
 

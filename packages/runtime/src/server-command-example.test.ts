@@ -64,7 +64,12 @@ function hostShapeProvider(): RuntimeFacadeProvider {
   // equality test below exists to catch, so the harness must model it rather than
   // smooth it over.
   handle.hasPermission = (permissionName: string) => permissionName === "Orders.Read";
-  handle.getPermissions = (): Record<string, boolean> => ({ "Orders.Read": true });
+  // `Partial`, for the same reason the façade's own type is: one entry per
+  // *configured* name is the whole of what #5 recorded, so the harness must not
+  // declare a boolean at every possible key. A plain `Record<string, boolean>` would
+  // compile here (this repo leaves `noUncheckedIndexedAccess` off) while lying about
+  // the unconfigured names, and a harness that lies is worse than no harness.
+  handle.getPermissions = (): Partial<Record<string, boolean>> => ({ "Orders.Read": true });
 
   const cellProps = {
     Forguncy: handle,
@@ -119,7 +124,7 @@ async function readThroughExample(): Promise<{
   };
   readonly refresh: { readonly errorCode: unknown; readonly errorMessage: unknown };
   readonly canRead: boolean;
-  readonly permissions: Readonly<Record<string, boolean>>;
+  readonly permissions: Readonly<Partial<Record<string, boolean>>>;
 }> {
   const summary = useOrdersSummary(3);
   const refresh = await refreshOrders({ top: 3 });
