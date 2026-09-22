@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@forguncy-react-workspace/cell-compiler": "workspace:*"
+    "@forguncy-react-workspace/cell-compiler": "workspace:*",
+    "@forguncy-react-workspace/core": "workspace:*"
   },
   "exports": {
     ".": "./src/index.ts"
