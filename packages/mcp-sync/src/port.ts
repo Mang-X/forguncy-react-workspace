@@ -104,6 +104,41 @@ export interface SetCellsRequest {
   readonly cells: readonly SetCellsCell[];
 }
 
+/**
+ * The mark that separates a request a plan authorised from the payload describing it.
+ *
+ * Declared rather than created: nothing reads it at runtime — the barrier is at the call
+ * site — and a value that never exists cannot be printed, serialized or compared by
+ * accident.
+ */
+declare const ISSUED_SET_CELLS_REQUEST: unique symbol;
+
+/**
+ * A `setCells` request a plan authorised, and the only thing
+ * {@link ForguncySyncPort.setCells} accepts.
+ *
+ * The brand cannot be named outside this module, so no caller can construct a value of this
+ * type; {@link issueSetCellsRequest} is the single construction point. Without it the claim
+ * "the payload is not the permission" is only a convention: `CellSyncMutation` is
+ * deliberately structurally equal to `SetCellsRequest` — it is the plan's report shape and
+ * has to read like the platform's call does — so handing `plan.write.mutation` straight to
+ * the port compiles, and skips `planSetCellsDispatch` for exactly the refused and skipped
+ * plans the gate exists to hold back.
+ */
+export type IssuedSetCellsRequest = SetCellsRequest & { readonly [ISSUED_SET_CELLS_REQUEST]: true };
+
+/**
+ * Mint the one value {@link ForguncySyncPort.setCells} accepts.
+ *
+ * Deliberately **not** exported from the package barrel: whoever can mint an issued request
+ * can bypass the gate, so this stays reachable only from the dispatch that makes the
+ * decision. The assertion is the standard opaque-type construction — the brand has no
+ * runtime representation, so there is no other way to produce one.
+ */
+export function issueSetCellsRequest(request: SetCellsRequest): IssuedSetCellsRequest {
+  return request as IssuedSetCellsRequest;
+}
+
 // ---------------------------------------------------------------------------
 // api.app.checkProjectErrors
 // ---------------------------------------------------------------------------
@@ -177,8 +212,16 @@ export interface GeneratedPage {
 export interface ForguncySyncPort {
   /** Resolve the stable ids and globals of the extensions the artifact references. */
   readonly listFrontendLibraries: (request: ListFrontendLibrariesRequest) => Promise<ListFrontendLibrariesResult>;
-  /** Write one Cell's generated source and its library references. */
-  readonly setCells: (request: SetCellsRequest) => Promise<void>;
+  /**
+   * Write one Cell's generated source and its library references.
+   *
+   * Takes {@link IssuedSetCellsRequest} rather than `SetCellsRequest` on purpose: that is
+   * the request `planSetCellsDispatch` minted, so this call cannot be reached with a
+   * payload the plan refused or with one for a target the plan had decided to skip. The
+   * transport never inspects the brand — it is a compile-time barrier at the call site,
+   * which is where the mistake would otherwise be made.
+   */
+  readonly setCells: (request: IssuedSetCellsRequest) => Promise<void>;
   /** Report the project's current error count. */
   readonly checkProjectErrors: () => Promise<ProjectErrorReport>;
   /** Generate the page and report the runtime locator for browser verification. */

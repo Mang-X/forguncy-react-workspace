@@ -39,9 +39,13 @@
  * own it would ignore a blocking diagnostic that has nothing to do with divergence — an
  * unverified extension, an absent designer call, an artifact that is not compiler output.
  *
- * {@link planSetCellsDispatch} is that answer, and it is the only export that hands back a
- * `SetCellsRequest`. Nothing else in this package may produce one, which is what keeps an
- * executor from sending a call the contract refused.
+ * {@link planSetCellsDispatch} is that answer, and it is the only way to obtain an
+ * {@link IssuedSetCellsRequest} — the type `ForguncySyncPort.setCells` accepts. The payload
+ * on `plan.write` is structurally a `SetCellsRequest` and stays readable there for
+ * reporting, but it is deliberately not the type the port takes, so handing the plan's own
+ * payload to `setCells` does not compile. A caller can still cast past any type-level
+ * barrier; what that costs is having to write the cast on purpose, which is the difference
+ * between a convention and a check.
  *
  * ## Why the write is normalized
  *
@@ -81,7 +85,8 @@ import { DEFAULT_CELL_OVERWRITE_POLICY } from "./divergence";
 import { verifyExtensionReferences, formatExtensionReferenceVerification } from "./extension-verification";
 import type { ExtensionReferenceVerification } from "./extension-verification";
 import { fingerprintArtifact, stampSyncMarker, stripSyncMarker } from "./fingerprint";
-import type { SetCellsCell, SetCellsRequest } from "./port";
+import { issueSetCellsRequest } from "./port";
+import type { IssuedSetCellsRequest, SetCellsCell } from "./port";
 import { cellTargetLabel } from "./target";
 import type { CellTarget, SyncCellInput } from "./target";
 
@@ -109,8 +114,14 @@ export const SYNC_MUTATION_GEOMETRY_NOTE =
  *
  * A one-element tuple rather than an array: sync writes one target per plan (#19's
  * "sync targets must be explicit"), and a type that can hold several would let a caller
- * add a second without anyone revisiting that rule. It is assignable to the port's
- * `SetCellsRequest`, which stays multi-cell because the platform's call is.
+ * add a second without anyone revisiting that rule.
+ *
+ * Structurally a `SetCellsRequest` — the port's shape stays multi-cell because the
+ * platform's call is — which is what makes it readable as the artifact's deployment
+ * representation, and what made it passable to the port as if it were permission. It is
+ * not: `setCells` takes an {@link IssuedSetCellsRequest}, which only
+ * {@link planSetCellsDispatch} mints, so this type is a report shape that happens to have
+ * the same fields rather than a request that may be sent.
  */
 export interface CellSyncMutation {
   readonly pageName: string;
@@ -524,8 +535,12 @@ const HOLD_FOR_WRITE_ACTION: Readonly<Record<CellWriteAction, PayloadHoldReason 
 export type CellSyncDispatch =
   | {
       readonly kind: "issue";
-      /** The platform's own request shape, ready for `ForguncySyncPort.setCells`. */
-      readonly request: SetCellsRequest;
+      /**
+       * The issued request — the only shape `ForguncySyncPort.setCells` accepts, and the
+       * only one that exists. Minted here rather than read off the plan, which is what
+       * makes `issue` the permission instead of `plan.write`.
+       */
+      readonly request: IssuedSetCellsRequest;
     }
   | {
       readonly kind: "hold";
@@ -558,7 +573,8 @@ function holdDetail(plan: CellSyncPlan, reason: PayloadHoldReason): string {
 }
 
 /**
- * The single decision an executor is bound by, and the only way to a `SetCellsRequest`.
+ * The single decision an executor is bound by, and the only way to an
+ * `IssuedSetCellsRequest` — without it there is no value the port will accept.
  *
  * Both enums are resolved through a total table before a request can be built, and the gate
  * is resolved first: `gate === "ready"` implying `writeAction === "write"` is a property of
@@ -585,5 +601,8 @@ export function planSetCellsDispatch(plan: CellSyncPlan): CellSyncDispatch {
   }
 
   const { mutation } = plan.write;
-  return { kind: "issue", request: { pageName: mutation.pageName, cells: [...mutation.cells] } };
+  return {
+    kind: "issue",
+    request: issueSetCellsRequest({ pageName: mutation.pageName, cells: [...mutation.cells] }),
+  };
 }

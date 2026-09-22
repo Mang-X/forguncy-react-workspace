@@ -10,6 +10,7 @@ import type { CompileCellResult } from "@forguncy-react-workspace/cell-compiler"
 
 import { syncDiagnosticCodes } from "./diagnostics";
 import { fingerprintArtifact, readSyncMarker, stampSyncMarker } from "./fingerprint";
+import * as mcpSync from "./index";
 import {
   CELL_SYNC_HOLD_REASONS,
   formatCellSyncPlan,
@@ -20,7 +21,14 @@ import {
   SYNC_MUTATION_GEOMETRY_NOTE,
   SYNC_MUTATION_OMITTED_FIELDS,
 } from "./sync-plan";
-import type { CellSyncDispatch, CellSyncPlan, CellSyncWrite, PlanCellSyncOptions } from "./sync-plan";
+import type {
+  CellSyncDispatch,
+  CellSyncMutation,
+  CellSyncPlan,
+  CellSyncWrite,
+  PlanCellSyncOptions,
+} from "./sync-plan";
+import type { ForguncySyncPort, IssuedSetCellsRequest } from "./port";
 import type { CellTarget } from "./target";
 
 /**
@@ -300,6 +308,66 @@ describe("what an executor may send", () => {
 
     // @ts-expect-error a hold carries no request, so there is nothing for an executor to send
     expect(hold.request).toBeUndefined();
+  });
+
+  it("cannot be handed to the port without going through the dispatch", () => {
+    // The payload being readable is not the same as the payload being sendable, and until
+    // the port stopped accepting `SetCellsRequest` the difference was a convention: the plan
+    // keeps an assembled mutation for a refused target, `CellSyncMutation` is structurally a
+    // `SetCellsRequest`, so `port.setCells(plan.write.mutation)` compiled and skipped the gate.
+    // This test is mostly its type annotations, because the barrier has to hold before
+    // anything runs.
+
+    /** Compile-time only: whether `From` may be passed where `To` is expected. */
+    type Assignable<From, To> = [From] extends [To] ? true : false;
+    type SetCellsParameter = Parameters<ForguncySyncPort["setCells"]>[0];
+
+    // The assertion *is* these two annotations: swap the expected values, or make the port
+    // accept `SetCellsRequest` again, and the test file stops compiling.
+    const mutationIsNotAccepted: Assignable<CellSyncMutation, SetCellsParameter> = false;
+    const issuedIsAccepted: Assignable<IssuedSetCellsRequest, SetCellsParameter> = true;
+
+    // Never called. It exists so the compiler checks the call site, and it is a function
+    // rather than a statement so the test does not make the call it forbids.
+    const bypass = (port: ForguncySyncPort, mutation: CellSyncMutation): Promise<void> => {
+      // @ts-expect-error the plan's payload is a report shape; only the dispatch mints a request
+      return port.setCells(mutation);
+    };
+
+    const calls: SetCellsParameter[] = [];
+    const port: ForguncySyncPort = {
+      listFrontendLibraries: async () => [],
+      setCells: async request => {
+        calls.push(request);
+      },
+      checkProjectErrors: async () => ({ errorCount: 0 }),
+      generatePageAsync: async () => ({ pageName: TARGET.pageName, pageUrl: "http://localhost:63982/Forguncy" }),
+    };
+
+    const plan = issuablePlan();
+    const dispatch = planSetCellsDispatch(plan);
+    expect(dispatch.kind).toBe("issue");
+    if (dispatch.kind !== "issue") return;
+    port.setCells(dispatch.request);
+
+    // Read at runtime so a passing compile is not the whole story: if `Assignable` were ever
+    // widened to `boolean`, both assertions below would still have to hold.
+    expect(issuedIsAccepted).toBe(true);
+    expect(mutationIsNotAccepted).toBe(false);
+    expect(typeof bypass).toBe("function");
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].pageName).toBe(TARGET.pageName);
+    expect(calls[0].cells).toEqual([...assembledWrite(plan).mutation.cells]);
+  });
+
+  it("keeps the request mint off the package's public surface", () => {
+    // `issueSetCellsRequest` has to be exported from `port.ts` for the dispatch to use it,
+    // and whoever can call it can bypass the gate — so the barrel names its exports one by
+    // one. A future `export * from "./port"` would reopen the bypass silently, which is the
+    // failure this asserts against rather than a stylistic preference.
+    expect("issueSetCellsRequest" in mcpSync).toBe(false);
+    expect("planSetCellsDispatch" in mcpSync).toBe(true);
   });
 });
 

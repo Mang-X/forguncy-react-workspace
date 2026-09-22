@@ -52,6 +52,7 @@ export type {
   ForguncySyncPortMethod,
   GeneratedPage,
   GeneratePageRequest,
+  IssuedSetCellsRequest,
   ListFrontendLibrariesRequest,
   ListFrontendLibrariesResult,
   ProjectErrorReport,
