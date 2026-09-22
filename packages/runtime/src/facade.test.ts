@@ -638,6 +638,30 @@ describe("host boundaries only a hostile fixture can see", () => {
   });
 
   /**
+   * The command result is the third narrowing this file does, so it is checked too.
+   *
+   * `serverCommandRecord` types the record as `Record<string, unknown>`, which makes
+   * `ServerCommandResult` a claim of this file's rather than a type it forwards, and #5
+   * records that a real call returns `{ errorCode, errorMessage, data: [...] }`. A
+   * command that resolves a primitive is therefore reported instead of being handed
+   * over as a record whose fields a caller would read as `undefined`. The host fixture
+   * is the awkward one on purpose: the mock's `serverCommands` is typed, so only a
+   * provider written the way a real host arrives can produce this answer.
+   */
+  it("refuses a command result that is not the record #5 recorded", async () => {
+    installRuntimeFacadeProvider(
+      createHostRuntimeFacadeProvider({
+        cellProps: hostCellProps({ ServerCommands: { GetSalesData: async () => undefined } }),
+        useDataSource: unusedDataSource,
+      }),
+    );
+
+    await expect(runtimeFacade<{ GetSalesData: [] }>().invokeServerCommand("GetSalesData")).rejects.toThrow(
+      /answered a value whose typeof is "undefined" rather than the result record/,
+    );
+  });
+
+  /**
    * A typed member's declared return is a claim about the host, so an answer of the
    * wrong type is reported rather than coerced into it.
    *
@@ -655,6 +679,95 @@ describe("host boundaries only a hostile fixture can see", () => {
 
     expect(() => runtimeFacade().hasPermission("Orders.Read")).toThrow(/rather than the boolean/);
     expect(() => runtimeFacade().getPermissions()).toThrow(/rather than the permission map/);
+  });
+
+  /**
+   * The same boundary against every wrong answer rather than one, because "not an
+   * object" was the test that let them all through.
+   *
+   * The thenable cases are the ones that matter: `typeof promise === "object"` passes an
+   * object test, so before this was fixed an async mock was cast straight into a
+   * permission map and a caller whose declared type is a value was handed a pending
+   * one — the host/mock timing difference these typed members exist to remove, restored
+   * by the very check meant to keep shapes honest. Each case is asserted against the
+   * *reason* it is refused for, so a catch-all message would fail here.
+   */
+  it("refuses every wrong answer to a narrowed return, naming the one that arrived", () => {
+    type MockMembers = NonNullable<
+      NonNullable<Parameters<typeof createMockRuntimeFacadeProvider>[0]>["forguncyMembers"]
+    >;
+    const cases: readonly {
+      readonly why: string;
+      readonly members: MockMembers;
+      readonly expected: RegExp;
+    }[] = [
+      {
+        why: "an async mock, the shape that would restore the timing difference",
+        members: { getPermissions: async () => ({ "Orders.Read": true }) },
+        expected: /answered a thenable — typeof "object"/,
+      },
+      {
+        why: "an async boolean on the other narrowed member",
+        members: { hasPermission: async () => true },
+        expected: /hasPermission\("Orders.Read"\) answered a thenable/,
+      },
+      {
+        why: "an array, whose indices would read as permission names",
+        members: { getPermissions: () => [{ name: "Orders.Read" }] },
+        expected: /answered an array/,
+      },
+      {
+        why: "a Map, whose entries a record read cannot see",
+        members: { getPermissions: () => new Map([["Orders.Read", true]]) },
+        expected: /and not a plain record whose own keys are permission names/,
+      },
+      {
+        why: "a Date",
+        members: { getPermissions: () => new Date() },
+        expected: /and not a plain record/,
+      },
+      {
+        why: "a non-boolean value, which would read true in a condition and false in a comparison",
+        members: { getPermissions: () => ({ "Orders.Read": "yes" }) },
+        expected: /a value whose typeof is "string" for the permission "Orders.Read"/,
+      },
+      {
+        why: "a boolean beside an absent one",
+        members: { getPermissions: () => ({ "Orders.Read": true, "Orders.Write": undefined }) },
+        expected: /a value whose typeof is "undefined" for the permission "Orders.Write"/,
+      },
+    ];
+
+    for (const { why, members, expected } of cases) {
+      uninstallRuntimeFacadeProvider();
+      installRuntimeFacadeProvider(createMockRuntimeFacadeProvider({ forguncyMembers: members }));
+      const call =
+        "getPermissions" in members
+          ? (): unknown => runtimeFacade().getPermissions()
+          : (): unknown => runtimeFacade().hasPermission("Orders.Read");
+      expect(call, why).toThrow(expected);
+    }
+  });
+
+  /**
+   * And the accepting half, so the boundary is a shape test rather than a suspicion of
+   * anything unusual.
+   *
+   * A record with no prototype is accepted on purpose: it is still a plain map of own
+   * enumerable keys, which is all #5 recorded, and refusing it would be this file
+   * inventing a requirement the evidence does not make.
+   */
+  it("answers a plain record of booleans, with or without a prototype", () => {
+    installRuntimeFacadeProvider(
+      createMockRuntimeFacadeProvider({
+        forguncyMembers: {
+          getPermissions: () =>
+            Object.assign(Object.create(null), { "Orders.Read": true, "Orders.Write": false }),
+        },
+      }),
+    );
+
+    expect(runtimeFacade().getPermissions()).toEqual({ "Orders.Read": true, "Orders.Write": false });
   });
 });
 

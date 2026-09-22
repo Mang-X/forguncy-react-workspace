@@ -326,6 +326,13 @@ export interface RuntimeFacade<Commands extends ServerCommandParameterMap = Reco
    * values are `readonly` too because the map is the host's resolved snapshot — a
    * Cell that wrote to it would be editing host state, which is the ownership
    * mistake `RUNTIME_FACADE_BOUNDARIES` exists to describe.
+   *
+   * The shape is *checked* at the boundary rather than asserted, unlike the members
+   * that forward a port type: the handle declares this member as
+   * `(...args: unknown[]) => unknown`, so `Readonly<Record<string, boolean>>` is a
+   * narrowing this package invents, and an invented claim is one it has to earn. See
+   * `permissionMap` for the answers it refuses and why each is refused for its own
+   * reason.
    */
   getPermissions(): Readonly<Record<string, boolean>>;
 
@@ -412,10 +419,27 @@ function buildRuntimeFacadeSurface(): RuntimeFacadeImplementation {
       // `async` on purpose: an unconfigured command must surface as a rejection
       // of the promise the caller is already awaiting, not as a synchronous throw
       // that a `.catch()` would miss.
-      return await (call as (...args: readonly unknown[]) => Promise<ServerCommandResult>).call(
+      const result = await (call as (...args: readonly unknown[]) => Promise<unknown>).call(
         commands,
         ...parameters,
       );
+      // The third place this file narrows what a provider gave back, and the last one
+      // whose claim can be checked at all: `serverCommandRecord` types the record as
+      // `Record<string, unknown>`, so `ServerCommandResult` is this file's claim about
+      // what a command resolves to, and the only part of that claim #5 records beyond
+      // the reserved keys is that a real call *is* a record
+      // (`{ errorCode, errorMessage, data: [...] }`). Object-ness is therefore all that
+      // is asked, and requiring the reserved keys here would contradict
+      // `ServerCommandResult`'s deliberate optionality — which exists because #5
+      // recorded the keys, not what a given command puts in them.
+      if (result === null || typeof result !== "object") {
+        throw new RuntimeFacadeResolutionError(
+          "capability-not-supplied",
+          `Server command "${name}" answered ${answerShape(result)} rather than the result record #5 recorded, so the call cannot be reported as having returned one.`,
+          name,
+        );
+      }
+      return result as ServerCommandResult;
     },
 
     useDataSource: (dataSourceName, options) => {
@@ -441,6 +465,15 @@ function buildRuntimeFacadeSurface(): RuntimeFacadeImplementation {
     // differ only in that #5 called them, so the façade can fix their shapes. Both
     // go through one helper, so the own-property rule and the receiver cannot apply
     // to two of the three paths and not the third.
+    //
+    // They are also the only two members that *narrow* what the handle answers.
+    // `ForguncyPropMember` declares every member as `(...args: unknown[]) => unknown`,
+    // so `boolean` and `Readonly<Record<string, boolean>>` are types this file invents
+    // rather than types it forwards — and a claim this file invents is a claim this
+    // file has to check at the boundary. `invokeServerCommand` and `useDataSource` are
+    // deliberately not here: their shapes are declared in `contract.ts` as the port's
+    // own obligation, so re-testing them would be a second copy of a rule that already
+    // has an owner.
     hasPermission: permissionName => {
       const check = hostHandleMember(requireRuntimeFacadeProvider(), "hasPermission") as (
         permissionName: string,
@@ -454,7 +487,7 @@ function buildRuntimeFacadeSurface(): RuntimeFacadeImplementation {
       if (typeof granted !== "boolean") {
         throw new RuntimeFacadeResolutionError(
           "capability-not-supplied",
-          `props.Forguncy.hasPermission("${permissionName}") answered ${typeof granted} rather than the boolean #5 recorded, so the check's result cannot be reported as one.`,
+          `props.Forguncy.hasPermission("${permissionName}") answered ${answerShape(granted)} rather than the boolean #5 recorded, so the check's result cannot be reported as one.`,
           permissionName,
         );
       }
@@ -463,19 +496,7 @@ function buildRuntimeFacadeSurface(): RuntimeFacadeImplementation {
 
     getPermissions: () => {
       const read = hostHandleMember(requireRuntimeFacadeProvider(), "getPermissions") as () => unknown;
-      const snapshot = read();
-      // Same reason as above, one step further: answering `{}` for a host that
-      // returned nothing would turn "the host said nothing" into "the user may do
-      // nothing". #5 recorded a plain map, so a non-object is a mismatch to report
-      // rather than a state to interpret.
-      if (snapshot === null || typeof snapshot !== "object") {
-        throw new RuntimeFacadeResolutionError(
-          "capability-not-supplied",
-          `props.Forguncy.getPermissions() answered ${typeof snapshot} rather than the permission map #5 recorded, so the snapshot is not available through the handle.`,
-          "getPermissions",
-        );
-      }
-      return snapshot as Readonly<Record<string, boolean>>;
+      return permissionMap(read());
     },
 
     cellProp: key => {
@@ -548,6 +569,88 @@ function hostHandleMember(
     );
   }
   return (value as (...args: readonly unknown[]) => unknown).bind(handle);
+}
+
+/**
+ * Whether an answer is a thenable, i.e. a promise wearing an object.
+ *
+ * Named rather than inlined because two boundaries have to refuse the same answer, and
+ * because `typeof promise === "object"` is precisely the test that lets one through.
+ * It is also the wrong answer whose wrongness a declared type cannot reveal: a caller
+ * holding what its type says is a value cannot see that it is holding a pending one.
+ */
+function isThenable(value: unknown): boolean {
+  return typeof (value as { then?: unknown } | null | undefined)?.then === "function";
+}
+
+/**
+ * A refusal's name for the answer that arrived.
+ *
+ * One vocabulary for both narrowed members, so their refusals read as one rule with
+ * several causes rather than as several rules. `null` and an array are named rather
+ * than described, because `typeof` calls both of them `"object"` — the two least
+ * informative things a message could say about the answers that are wrong for
+ * structural reasons.
+ *
+ * A thenable carries its reason with it, because it is the one cause that needs one:
+ * refusing rather than awaiting is a decision, and awaiting here would be the façade
+ * choosing an answer #5 did not record. Both permission calls were read
+ * synchronously, so a promise is exactly the shape that puts a synchronous host call
+ * and the mock on different timings.
+ */
+function answerShape(value: unknown): string {
+  if (isThenable(value)) {
+    return 'a thenable — typeof "object", so an object test passes it unchanged, and #5 read this call synchronously';
+  }
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "an array";
+  return `a value whose typeof is "${typeof value}"`;
+}
+
+/**
+ * The permission snapshot, or a refusal naming the answer that arrived.
+ *
+ * `Readonly<Record<string, boolean>>` is a *closed* claim that this file invents —
+ * `ForguncyPropMember` declares the member as `(...args: unknown[]) => unknown` — so it
+ * has to be earned here rather than cast into existence. Four shapes reach this
+ * function in practice, and each is refused for its own reason rather than one shared
+ * "not an object":
+ *
+ * - **a thenable**: the object test below would pass it through unchanged, and answer a
+ *   caller whose declared type is a value with a pending one.
+ * - **an array**: `Object.entries` would read its indices as permission names.
+ * - **anything that is not a plain record**: a `Map` is the case that matters, because
+ *   its entries are invisible to the record read at the bottom, so it would answer
+ *   `{}` — an empty permission map. That is the silently empty snapshot #5 reports as
+ *   a contract-breaking failure mode rather than as a state to interpret, so refusing
+ *   the shape is the only answer that does not invent one.
+ * - **a record holding a non-boolean**: `{"Orders.Read": "yes"}` would become a map
+ *   that reads `true` in a condition and `false` in a comparison.
+ *
+ * A record with no prototype is accepted: it is still a plain map of own enumerable
+ * keys, which is all #5 recorded.
+ */
+function permissionMap(value: unknown): Readonly<Record<string, boolean>> {
+  const refuse = (clause: string): never => {
+    throw new RuntimeFacadeResolutionError(
+      "capability-not-supplied",
+      `props.Forguncy.getPermissions() answered ${clause} rather than the permission map #5 recorded.`,
+      "getPermissions",
+    );
+  };
+
+  if (isThenable(value)) return refuse(answerShape(value));
+  if (Array.isArray(value)) return refuse(answerShape(value));
+  if (value === null || typeof value !== "object") return refuse(answerShape(value));
+  if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) {
+    return refuse(`${answerShape(value)}, and not a plain record whose own keys are permission names`);
+  }
+  for (const [permissionName, granted] of Object.entries(value)) {
+    if (typeof granted !== "boolean") {
+      return refuse(`${answerShape(granted)} for the permission "${permissionName}"`);
+    }
+  }
+  return value as Readonly<Record<string, boolean>>;
 }
 
 /**

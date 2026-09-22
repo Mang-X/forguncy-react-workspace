@@ -197,9 +197,9 @@ export const RUNTIME_FACADE_ABSENCE_MODES: readonly RuntimeFacadeAbsenceMode[] =
     shape: "throws",
     addressKind: "forguncy-member",
     cause:
-      "The address exists on the provider but nothing usable is behind it, so calling it would be a `TypeError` at the point of use rather than a statement about the capability.",
+      "The address exists on the provider but nothing usable is behind it: either the member is not callable, or a member that *was* called answered a shape #5 did not record. The first would be a `TypeError` at the point of use; the second is the worse one, because a wrong answer reported as the declared type is indistinguishable from a right one.",
     remediation:
-      "Configure the capability on the page or Cell in the designer, or supply it in the mock provider. A mock that omits it reports this code rather than standing in with `undefined`.",
+      "Configure the capability on the page or Cell in the designer, or supply it in the mock provider. A mock that omits it reports this code rather than standing in with `undefined`. When the *answer* is the wrong shape, nothing here is misconfigured: the address answered something the recorded contract does not describe, so check the product runtime version — or the provider — before trusting the value.",
   },
   {
     id: "server-command-not-configured",
