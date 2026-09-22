@@ -96,6 +96,18 @@ export interface BundledCellModule {
   readonly inlinedPackages?: readonly string[];
   /** Files the bundler emitted next to `code`. Any entry breaks the single-artifact contract. */
   readonly emittedAssets?: readonly string[];
+  /**
+   * Findings in #6's vocabulary that only the build could observe.
+   *
+   * Optional because the report fields above cover most artifact violations on
+   * their own, and a fixture port has nothing to add. The real port uses it for
+   * the conditions no output field can express — a decision that contradicts a
+   * mapping table, an artifact reading an extension module no decision declares
+   * — reported here rather than smuggled in from the plans' own vocabularies,
+   * which are about mappings rather than artifacts and stay separate (#7's
+   * bundler documents which plan codes translate and which do not).
+   */
+  readonly diagnostics?: readonly CellArtifactDiagnostic[];
 }
 
 export interface CellBundlingRequest {
@@ -271,6 +283,12 @@ export function assembleCellArtifact(input: AssembleCellArtifactInput): CompileC
   const metadataDiagnostics = auditFrontendLibraries(collection.libraries);
 
   const diagnostics = dedupeCellArtifactDiagnostics([
+    // The bundler's own findings first: when one of them names the same
+    // condition an audit below also reports (an unmapped extension decision is
+    // visible both in the plan and in the output report), the build's more
+    // specific explanation — which can say *why* the mapping is unusable — is
+    // the one a reader keeps after deduplication.
+    ...(module.diagnostics ?? []),
     ...decisionDiagnostics,
     ...importDiagnostics,
     ...inlinedDiagnostics,

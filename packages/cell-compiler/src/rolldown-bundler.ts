@@ -1,0 +1,575 @@
+/**
+ * The Rolldown-backed implementation of {@link CellBundlerPort}.
+ *
+ * Decision source: GitHub Issue #7 — "Implement: Cell compiler MVP for a single
+ * React entry"
+ * (https://github.com/Mang-X/forguncy-react-workspace/issues/7), downstream of
+ * #6's compiler boundary (https://github.com/Mang-X/forguncy-react-workspace/issues/6),
+ * which names Vite+/Rolldown as the bundler half this package may use rather
+ * than becoming a second resolver.
+ *
+ * Three groups of decisions are load-bearing, each the answer to one acceptance
+ * criterion:
+ *
+ * 1. **A virtual entry shim, not a rewritten entry.** The authored module is
+ *    never transformed to add an export. A generated shim imports it as a
+ *    namespace and binds `default ?? App` — the `App`-binding entry shape #5
+ *    records — so authored source reaches the artifact byte-for-byte and an
+ *    entry may use either export style. The shim's `IMPORT_IS_UNDEFINED`
+ *    warnings are also the only build-time signal that an entry exports
+ *    *neither* name; when both fire, the build refuses rather than shipping a
+ *    binding of `void 0`.
+ * 2. **One IIFE, no chunk loading.** `format: "iife"` with `codeSplitting: false`
+ *    produces exactly one script whose export lands on
+ *    `CellBundlingRequest.componentBinding`, the name the generated wrapper
+ *    references. `transform.jsx: "react-jsx"` routes authored JSX through
+ *    `react/jsx-runtime`, which the host-bridge plan then intercepts, so no
+ *    React implementation is bundled; `experimental.attachDebugInfo: "none"`
+ *    keeps `//#region` comments — which embed module ids and would make output
+ *    machine-dependent — out of the code.
+ * 3. **Plans wire the resolver, and the report feeds #6's audits.** Bare
+ *    specifiers are consulted against `planHostBridge` first (the page's own
+ *    modules win) and `planExtensionExternals` second; an interception is loaded
+ *    as a `\0`-virtual CommonJS module, the `moduleType` the platform's own
+ *    generated modules are written in. Findings the artifact audits cannot see
+ *    from the output report alone are translated into #6's diagnostic
+ *    vocabulary and returned in `BundledCellModule.diagnostics`.
+ *
+ * What is deliberately *not* here: the two plan vocabularies are not collapsed
+ * into #6's. A mapping finding ("this table row cannot be honoured") and an
+ * artifact finding ("this artifact breaks a guarantee") are two findings, not
+ * two spellings of one — `core`'s vocabulary comments pin that split — so only
+ * the subset whose statement is literally about the produced artifact is
+ * translated, arm by arm, in {@link translateHostFinding} and
+ * {@link translateExtensionFinding}.
+ */
+
+import { statSync } from "node:fs";
+import path from "node:path";
+
+import type { ExtensionExternalDiagnostic } from "@forguncy-react-workspace/core";
+import { rolldown, type OutputAsset, type OutputChunk } from "rolldown";
+
+import type { BundledCellModule, CellBundlerPort, CellBundlingRequest } from "./artifact";
+import { packageNameOfSpecifier } from "./artifact";
+import type { CellArtifactDiagnostic } from "./diagnostics";
+import { createCellArtifactDiagnostic, dedupeCellArtifactDiagnostics } from "./diagnostics";
+import type { ExtensionExternalsPlan } from "./extension-externals";
+import { planExtensionExternals } from "./extension-externals";
+import type { HostBridgeDiagnostic, HostBridgePlan } from "./host-bridge";
+import { planHostBridge } from "./host-bridge";
+
+// ---------------------------------------------------------------------------
+// Options
+// ---------------------------------------------------------------------------
+
+export interface CreateRolldownCellBundlerOptions {
+  /**
+   * The directory relative entries resolve against.
+   *
+   * One option only: everything else the build needs arrives per call in the
+   * {@link CellBundlingRequest}, so a bundler instance is stateless between
+   * builds and two of them cannot contaminate each other.
+   */
+  readonly dir: string;
+}
+
+/**
+ * Creates the bundler half of `compileCell`.
+ *
+ * Returned by a factory rather than exported as an instance so `compileCell`
+ * stays ignorant of Rolldown and the contract tests can keep injecting their
+ * fixture port.
+ */
+export function createRolldownCellBundler(options: CreateRolldownCellBundlerOptions): CellBundlerPort {
+  return {
+    bundle: request => bundleWithRolldown(options.dir, request),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Virtual module ids
+// ---------------------------------------------------------------------------
+
+/**
+ * The id the generated entry shim is registered under.
+ *
+ * Fixed and path-free: the shim exists per build, is never read from disk, and
+ * warnings attributed to this exact id are how {@link assertEntryComponentBinding}
+ * tells "this entry has no component" apart from "this entry's own imports are
+ * mistyped" — the latter names the authored file, not the shim.
+ */
+const CELL_ENTRY_SHIM_ID = "cell-entry-shim.js";
+
+const HOST_VIRTUAL_PREFIX = "\0cell-host:";
+const EXTENSION_VIRTUAL_PREFIX = "\0cell-ext:";
+
+/**
+ * The shim source: default-export-first, else the named `App` #5's resolution
+ * order falls back to.
+ *
+ * Both names are read deliberately. #5 established that entries use either
+ * style, and a shim that picked one would silently compile the other into
+ * `undefined`; reading both lets the missing-name warnings distinguish "neither
+ * exists" from either normal case.
+ */
+function renderEntryShim(resolvedEntry: string): string {
+  // Forward slashes on purpose: the specifier is embedded in a generated
+  // import, and every rolldown resolver accepts `/` on Windows while `\` is
+  // not universally read as a path separator inside a specifier.
+  const entrySpecifier = resolvedEntry.split(path.sep).join("/");
+  return [
+    `import * as __fgcCellEntryModule from ${JSON.stringify(entrySpecifier)};`,
+    `const __fgcCellEntryComponent = __fgcCellEntryModule.default ?? __fgcCellEntryModule.App;`,
+    `export default __fgcCellEntryComponent;`,
+    ``,
+  ].join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Specifier classification
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether a specifier names a package the mapping tables could know.
+ *
+ * Path-like specifiers are never consulted against the plans: a table row is a
+ * package name, so the answer for `./App` is already decided by ordinary
+ * resolution, and asking the plans would only collect findings about decisions
+ * the specifier cannot have.
+ */
+function isBareSpecifier(source: string): boolean {
+  if (source.startsWith("\0")) return false;
+  if (source.startsWith(".") || source.startsWith("/")) return false;
+  if (source.startsWith("data:") || source.startsWith("file:")) return false;
+  return !path.isAbsolute(source);
+}
+
+// ---------------------------------------------------------------------------
+// Failure descriptions
+// ---------------------------------------------------------------------------
+
+/**
+ * Removes colour and cursor codes.
+ *
+ * Rolldown frames every message with ANSI styling; #6's diagnostics land in CI
+ * logs that get diffed, and an escape sequence inside a message makes two
+ * identical failures compare unequal. Stripped at the point of escape so no
+ * downstream consumer has to know that bundlers paint their text.
+ */
+function stripAnsi(text: string): string {
+  // SGR parameters and the cursor-letter they terminate; every sequence
+  // observed from rolldown's frames is of this shape.
+  // eslint-disable-next-line no-control-regex -- matching the escape byte is the entire point of this pattern.
+  return text.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "");
+}
+
+function firstLine(text: string): string {
+  const newline = text.indexOf("\n");
+  return newline === -1 ? text : text.slice(0, newline);
+}
+
+interface ReportedBuildError {
+  readonly message?: unknown;
+  readonly id?: unknown;
+  readonly loc?: Readonly<{ file?: unknown; line?: unknown; column?: unknown }> | null;
+}
+
+function hasReportedErrors(value: unknown): value is { readonly errors: readonly unknown[] } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "errors" in value &&
+    Array.isArray((value as { readonly errors?: unknown }).errors)
+  );
+}
+
+/**
+ * One reported error as one line: message first, location pulled out of the
+ * structured `loc` rather than scraped from the painted frame.
+ *
+ * The frame itself — the source excerpt with its box-drawing characters — is
+ * dropped on purpose. `compileCell` embeds this text in a diagnostic's `detail`;
+ * the message and `file:line:column` are what a reader needs to act on, and the
+ * excerpt would carry the entry's absolute path into a log artifact.
+ */
+function describeReportedError(value: unknown): string {
+  if (typeof value !== "object" || value === null) return stripAnsi(String(value));
+  const error = value as ReportedBuildError;
+  const message =
+    typeof error.message === "string"
+      ? firstLine(stripAnsi(error.message))
+      : stripAnsi(String(error.message ?? ""));
+  const loc = error.loc ?? undefined;
+  const file = typeof loc?.file === "string" ? loc.file : typeof error.id === "string" ? error.id : undefined;
+  const line = typeof loc?.line === "number" ? loc.line : undefined;
+  const column = typeof loc?.column === "number" ? loc.column : undefined;
+  if (file === undefined) return message;
+  if (line === undefined) return `${message} (${file})`;
+  if (column === undefined) return `${message} (${file}:${line})`;
+  return `${message} (${file}:${line}:${column})`;
+}
+
+/**
+ * Turns an escaped bundler failure into one clean message.
+ *
+ * `compileCell`'s catch builds the `bundler-failure` diagnostic from whatever
+ * the thrown error says, so this message *is* the structured diagnostic's
+ * content: reported errors reduce to `message (file:line:column)` lines, and
+ * anything unstructured passes through stripped rather than raw.
+ */
+function describeBuildFailure(error: unknown): string {
+  if (hasReportedErrors(error) && error.errors.length > 0) {
+    return error.errors.map(describeReportedError).join("\n");
+  }
+  if (error instanceof Error) return stripAnsi(error.message);
+  return stripAnsi(String(error));
+}
+
+// ---------------------------------------------------------------------------
+// The report
+// ---------------------------------------------------------------------------
+
+const NODE_MODULES_MARKER = "node_modules/";
+
+/**
+ * The package a module id was flattened from, or `undefined` for anything that
+ * did not come from an installed dependency.
+ *
+ * The *last* `node_modules/` segment wins, which is what makes pnpm's layout
+ * (`…/.pnpm/react@19.2.7/node_modules/react/index.js`) and a hoisted layout
+ * (`…/node_modules/react/index.js`) answer the same, and what keeps a virtual
+ * interception id (`\0cell-host:react/jsx-runtime`) from answering at all.
+ */
+function packageNameOfModuleId(moduleId: string): string | undefined {
+  const normalized = moduleId.replace(/\\/g, "/");
+  const at = normalized.lastIndexOf(NODE_MODULES_MARKER);
+  if (at < 0) return undefined;
+  const segments = normalized.slice(at + NODE_MODULES_MARKER.length).split("/");
+  const [first, second] = segments;
+  if (first === undefined || first.length === 0) return undefined;
+  if (first.startsWith("@")) {
+    return second === undefined || second.length === 0 ? first : `${first}/${second}`;
+  }
+  return first;
+}
+
+function inlinedPackageNames(moduleIds: readonly string[]): string[] {
+  const packages = new Set<string>();
+  for (const moduleId of moduleIds) {
+    const packageName = packageNameOfModuleId(moduleId);
+    if (packageName !== undefined) packages.add(packageName);
+  }
+  // Sorted so the report is byte-stable like the code is: #7's determinism
+  // criterion covers the whole compile result, not only its largest field.
+  return [...packages].sort();
+}
+
+// ---------------------------------------------------------------------------
+// Plan consultation and translation
+// ---------------------------------------------------------------------------
+
+interface CapturedLog {
+  readonly code: string;
+  readonly id: string;
+  readonly message: string;
+}
+
+/**
+ * The bridge's findings, translated into the artifact's vocabulary — or
+ * dropped, with the reason written at the arm.
+ *
+ * The split core insists on is visible here: a bridge diagnostic is about a
+ * mapping, and `duplicate-host-mapping` is about a produced artifact, so an arm
+ * may only translate when the finding's statement is literally true of the
+ * artifact. `host-module-duplicated` is the clearest case — "the decision
+ * contradicts the table" is the mapping's finding, but "this artifact carries a
+ * second copy of an identity-sensitive module" is the artifact's, and it is
+ * only reportable when the copy is actually in `inlinedPackages`.
+ */
+function translateHostFinding(
+  finding: HostBridgeDiagnostic,
+  inlinedPackages: readonly string[],
+  referencedPackages: ReadonlySet<string>,
+): CellArtifactDiagnostic | undefined {
+  // Whether the artifact actually carries the package the finding names —
+  // imported (and so bound into the artifact) or inlined. This is the line
+  // between an artifact-true statement and a decision-layer one for the arms
+  // below: a conflict between decisions the entry never imports binds none of
+  // this artifact's globals, so reporting it here would claim a guarantee
+  // break the artifact does not commit.
+  const packageInArtifact =
+    referencedPackages.has(packageNameOfSpecifier(finding.specifier)) ||
+    inlinedPackages.includes(finding.specifier);
+  switch (finding.code) {
+    case "host-module-duplicated":
+      if (!inlinedPackages.includes(finding.specifier)) return undefined;
+      return createCellArtifactDiagnostic("duplicate-host-mapping", finding.specifier, {
+        detail: finding.detail,
+      });
+    case "host-mapping-conflict":
+      // An incoherent table cannot vouch for any identity it binds — but only
+      // for the identities this artifact binds: see `packageInArtifact` above
+      // and the vocabulary rule in this function's header comment.
+      if (!packageInArtifact) return undefined;
+      return createCellArtifactDiagnostic("duplicate-host-mapping", finding.specifier, {
+        detail: finding.detail,
+      });
+    case "host-mapping-missing":
+    case "host-adapter-not-used":
+      // Mapping-level findings whose artifact-visible consequences — a
+      // surviving import, an inlined copy — #6's report-field audits already
+      // report when they occur. Translating them here as well would state one
+      // condition twice under two codes, which is the confusion core's
+      // vocabulary comment warns about; an *unused* bad decision breaks no
+      // guarantee of the artifact.
+      return undefined;
+    case "host-global-missing":
+    case "host-global-incompatible":
+    case "host-member-not-verified":
+      // Runtime codes: they describe a page evaluated without the global, not
+      // a built artifact, and no plan emits them for a build. The arms exist
+      // so a future code cannot silently fall through an implicit `undefined`.
+      return undefined;
+  }
+}
+
+/**
+ * The extension plan's findings, translated the same way and by the same rule.
+ *
+ * `extension-mapping-missing` and `extension-mapping-conflict` are both
+ * artifact-level statements of "this `extension` decision has no usable
+ * mapping" — the artifact would reference a library identity the table does
+ * not verify — which is exactly #12's `missing-extension-mapping`.
+ * `extension-not-declared` is the artifact reading a mapped extension module
+ * that no decision declares: the generated module would read a global
+ * `frontendLibraries` never names, so from the artifact's side the dependency
+ * arrived without a usable decision.
+ */
+function translateExtensionFinding(finding: ExtensionExternalDiagnostic): CellArtifactDiagnostic | undefined {
+  switch (finding.code) {
+    case "extension-mapping-missing":
+    case "extension-mapping-conflict":
+    case "extension-library-unverified":
+    case "extension-global-mismatch":
+      return createCellArtifactDiagnostic("missing-extension-mapping", finding.subject, {
+        detail: finding.detail,
+      });
+    case "extension-not-declared":
+      return createCellArtifactDiagnostic("unresolved-dependency-decision", finding.subject, {
+        detail: finding.detail,
+      });
+    case "extension-bundle-missing":
+    case "extension-types-missing":
+    case "extension-global-missing":
+      // Runtime codes about a page that did not load the extension; no plan
+      // emits them for a build. Kept explicit so the switch stays exhaustive.
+      return undefined;
+  }
+}
+
+function byCodeThenSubject(
+  a: { readonly code: string; readonly subject: string },
+  b: { readonly code: string; readonly subject: string },
+): number {
+  if (a.code !== b.code) return a.code < b.code ? -1 : 1;
+  return a.subject === b.subject ? 0 : a.subject < b.subject ? -1 : 1;
+}
+
+// ---------------------------------------------------------------------------
+// The build
+// ---------------------------------------------------------------------------
+
+function isRegularFile(file: string): boolean {
+  try {
+    return statSync(file).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Refuses an entry that offers no component for the shim to bind.
+ *
+ * Detection runs on the shim's own warnings rather than on parsed exports: the
+ * two `IMPORT_IS_UNDEFINED` warnings are rolldown telling us it evaluated both
+ * `default` and `App` against the entry's namespace and found nothing — the
+ * authoritative answer to "does a component exist", from the same resolution
+ * the artifact will run at, with no second parser to disagree with it. One
+ * warning is normal (entries legitimately use either export style); both mean
+ * the build would succeed and hand the cell a binding of `void 0`, which #6's
+ * error model asks to refuse structurally instead.
+ */
+function assertEntryComponentBinding(logs: readonly CapturedLog[], entry: string): void {
+  const missing = new Set<string>();
+  for (const log of logs) {
+    if (log.code !== "IMPORT_IS_UNDEFINED" || log.id !== CELL_ENTRY_SHIM_ID) continue;
+    const match = /Import `([^`]+)`/.exec(stripAnsi(log.message));
+    if (match?.[1] !== undefined) missing.add(match[1]);
+  }
+  if (missing.has("default") && missing.has("App")) {
+    throw new Error(
+      `The entry "${entry}" exports neither a default export nor a named "App" export, so there is no component for the ReactCellType entry to bind.`,
+    );
+  }
+}
+
+async function bundleWithRolldown(dir: string, request: CellBundlingRequest): Promise<BundledCellModule> {
+  const resolvedEntry = path.resolve(dir, request.entry);
+  if (!isRegularFile(resolvedEntry)) {
+    // Refused before the build rather than left to the bundler's
+    // UNRESOLVED_ENTRY wording: the caller gets the entry as authored and the
+    // path it was resolved to, with no frame to strip.
+    throw new Error(`The entry "${request.entry}" does not exist at ${resolvedEntry}.`);
+  }
+
+  const decisions = request.dependencies;
+  const shimSource = renderEntryShim(resolvedEntry);
+  const logs: CapturedLog[] = [];
+  const virtualModules = new Map<string, string>();
+  // Every bare specifier the entry asked the plans about — the "in play" set
+  // the host translation uses to keep mapping findings artifact-true.
+  const referencedPackages = new Set<string>();
+
+  const hostFindings = new Map<string, HostBridgeDiagnostic>();
+  const extensionFindings = new Map<string, ExtensionExternalDiagnostic>();
+  const hostPlans = new Map<string, HostBridgePlan>();
+  const extensionPlans = new Map<string, ExtensionExternalsPlan>();
+
+  function consultHostPlan(referencedSpecifiers: readonly string[]): HostBridgePlan {
+    const plan = planHostBridge({ decisions, referencedSpecifiers });
+    for (const finding of plan.diagnostics) {
+      hostFindings.set(`${finding.code} ${finding.specifier}`, finding);
+    }
+    return plan;
+  }
+
+  function consultExtensionPlan(referencedSpecifiers: readonly string[]): ExtensionExternalsPlan {
+    const plan = planExtensionExternals({ decisions, referencedSpecifiers });
+    for (const finding of plan.diagnostics) {
+      extensionFindings.set(`${finding.code} ${finding.subject}`, finding);
+    }
+    return plan;
+  }
+
+  function interceptionFor(specifier: string): { readonly id: string; readonly source: string } | undefined {
+    referencedPackages.add(packageNameOfSpecifier(specifier));
+    let hostPlan = hostPlans.get(specifier);
+    if (hostPlan === undefined) {
+      hostPlan = consultHostPlan([specifier]);
+      hostPlans.set(specifier, hostPlan);
+    }
+    // The page's own modules first: a host row and an extension row naming the
+    // same specifier must resolve to the page object, never to a second copy
+    // behind an extension global.
+    if (hostPlan.activation === "stated") {
+      const host = hostPlan.interceptions.find(candidate => candidate.moduleId === specifier);
+      if (host !== undefined) return { id: `${HOST_VIRTUAL_PREFIX}${specifier}`, source: host.source };
+    }
+
+    let extensionPlan = extensionPlans.get(specifier);
+    if (extensionPlan === undefined) {
+      extensionPlan = consultExtensionPlan([specifier]);
+      extensionPlans.set(specifier, extensionPlan);
+    }
+    // `wireable` rather than merely `stated`: a decision that contradicts the
+    // mapping row must not be interposed behind a global the row does not agree
+    // on — the import stays ordinary, the plan's finding travels through
+    // `diagnostics`, and the artifact is refused in the same vocabulary an
+    // unwired extension import would be.
+    if (extensionPlan.activation === "stated" && extensionPlan.wireable) {
+      const extension = extensionPlan.interceptions.find(candidate => candidate.moduleId === specifier);
+      if (extension !== undefined) return { id: `${EXTENSION_VIRTUAL_PREFIX}${specifier}`, source: extension.source };
+    }
+    return undefined;
+  }
+
+  // Consulted once with no references: decision-vs-mapping contradictions are
+  // reported even when the entry imports nothing bare, so a broken decision
+  // cannot hide behind an entry that never exercises it. Per-specifier plans
+  // below add the reference-route findings and activation.
+  consultHostPlan([]);
+  consultExtensionPlan([]);
+
+  let build: Awaited<ReturnType<typeof rolldown>> | undefined;
+  let output: (OutputChunk | OutputAsset)[];
+  try {
+    build = await rolldown({
+      input: CELL_ENTRY_SHIM_ID,
+      onLog: (_level, log) => {
+        // Collected, not forwarded: the build's warnings are read here (entry
+        // shape); the report and the audits speak for everything else.
+        logs.push({ code: log.code ?? "", id: log.id ?? "", message: log.message });
+      },
+      transform: { jsx: "react-jsx" },
+      experimental: { attachDebugInfo: "none" },
+      plugins: [
+        {
+          name: "cell-compiler-rolldown-bundler",
+          resolveId(source) {
+            if (source === CELL_ENTRY_SHIM_ID) return CELL_ENTRY_SHIM_ID;
+            if (!isBareSpecifier(source)) return null;
+            const interception = interceptionFor(source);
+            if (interception === undefined) return null;
+            virtualModules.set(interception.id, interception.source);
+            // `moduleType: "commonjs"` because both plans' generated sources
+            // are `module.exports = …` — the same interop the extension unit
+            // tests exercise through a real build, so an authored
+            // `import { x }` and a namespace import each enumerate the
+            // interposed module correctly.
+            return { id: interception.id, moduleType: "commonjs" };
+          },
+          load(id) {
+            if (id === CELL_ENTRY_SHIM_ID) return shimSource;
+            const source = virtualModules.get(id);
+            return source === undefined ? null : source;
+          },
+        },
+      ],
+    });
+    ({ output } = await build.generate({
+      format: "iife",
+      name: request.componentBinding,
+      codeSplitting: false,
+    }));
+  } catch (error) {
+    throw new Error(describeBuildFailure(error));
+  } finally {
+    await build?.close();
+  }
+
+  assertEntryComponentBinding(logs, request.entry);
+
+  const entryChunk = output.find(candidate => candidate.type === "chunk" && candidate.isEntry);
+  if (entryChunk === undefined || entryChunk.type !== "chunk") {
+    throw new Error(`The bundler produced no entry chunk for "${request.entry}".`);
+  }
+
+  const emittedAssets = output
+    .filter(candidate => candidate !== entryChunk)
+    .map(candidate => candidate.fileName)
+    .sort();
+  const externalImports = [...entryChunk.imports].sort();
+  const inlinedPackages = inlinedPackageNames(Object.keys(entryChunk.modules));
+
+  const translated: (CellArtifactDiagnostic | undefined)[] = [];
+  for (const finding of [...hostFindings.values()].sort((a, b) =>
+    byCodeThenSubject({ code: a.code, subject: a.specifier }, { code: b.code, subject: b.specifier }),
+  )) {
+    translated.push(translateHostFinding(finding, inlinedPackages, referencedPackages));
+  }
+  for (const finding of [...extensionFindings.values()].sort(byCodeThenSubject)) {
+    translated.push(translateExtensionFinding(finding));
+  }
+  const diagnostics = dedupeCellArtifactDiagnostics(
+    translated.filter((diagnostic): diagnostic is CellArtifactDiagnostic => diagnostic !== undefined),
+  );
+
+  return {
+    code: entryChunk.code,
+    externalImports,
+    inlinedPackages,
+    emittedAssets,
+    diagnostics,
+  };
+}
