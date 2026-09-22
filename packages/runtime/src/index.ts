@@ -320,3 +320,16 @@ export type {
   MockRuntimeFacadeOptions,
   MockStandInCellPropKey,
 } from "./mock-provider";
+
+// #28 — the fixture module contract: what a project's `fixture` default-exports
+// and how a local harness turns it into the mock provider. The registry
+// (#26/#56) says *where* the fixture is; this says *what shape it has* and
+// refuses every way that shape can be wrong before a harness installs it.
+export {
+  CELL_FIXTURE_ERROR_CODES,
+  CELL_FIXTURE_OPTION_FIELDS,
+  CellFixtureError,
+  createCellFixtureProvider,
+  resolveCellFixtureOptions,
+} from "./cell-fixture";
+export type { CellFixtureContext, CellFixtureErrorCode } from "./cell-fixture";
