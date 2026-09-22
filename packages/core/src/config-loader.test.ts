@@ -286,9 +286,12 @@ describe("the freshness boundary: what the default loader does not cover", () =>
       join(root, "cells.mjs"),
       'export const cells = { scratch: { entry: "./cell.ts", target: { pageName: "旧页", cell: "A1" } } };\n',
     );
+    // The counter makes re-evaluation observable: a content-addressed copy that
+    // actually re-ran bumps it, a cache hit does not.
     writeFileSync(
       join(root, "forguncy.config.mjs"),
-      'import { cells } from "./cells.mjs";\nexport default { cells };\n',
+      'globalThis.__fgcGraphEvaluations = (globalThis.__fgcGraphEvaluations ?? 0) + 1;\n' +
+        'import { cells } from "./cells.mjs";\nexport default { cells };\n',
     );
   }
 
@@ -342,11 +345,14 @@ describe("the freshness boundary: what the default loader does not cover", () =>
       return import(pathToFileURL(contentAddressed).href);
     };
 
+    const global = globalThis as { __fgcGraphEvaluations?: number };
+    delete global.__fgcGraphEvaluations;
     const root = scratchDir();
     writeSplitProject(root);
 
     const first = await loadForguncyConfig({ root, loadModule: graphReloadingLoader });
     expect(first.require("scratch").target.locatorKey).toBe("旧页#A1");
+    expect(global.__fgcGraphEvaluations).toBe(1);
 
     writeFileSync(
       join(root, "cells.mjs"),
@@ -355,9 +361,13 @@ describe("the freshness boundary: what the default loader does not cover", () =>
 
     const second = await loadForguncyConfig({ root, loadModule: graphReloadingLoader });
     expect(second.require("scratch").target.locatorKey).toBe("新页#B2");
+    // The edit re-evaluated the graph — the half the default loader cannot do.
+    expect(global.__fgcGraphEvaluations).toBe(2);
 
-    // …and the other half: an unchanged graph must not re-evaluate either.
+    // …and the other half: an unchanged graph is a cache hit, not a re-run.
     const third = await loadForguncyConfig({ root, loadModule: graphReloadingLoader });
     expect(third.require("scratch").target.locatorKey).toBe("新页#B2");
+    expect(global.__fgcGraphEvaluations).toBe(2);
+    delete global.__fgcGraphEvaluations;
   });
 });
