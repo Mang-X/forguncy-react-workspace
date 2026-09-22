@@ -1,5 +1,5 @@
 /**
- * Where a sync writes: the target locator, and what is still open about it.
+ * Where a sync writes: the target locator, and how #26 finalized it.
  *
  * Decision source: GitHub Issue #19 — "Spec: one-way MCP sync from generated
  * artifacts to Forguncy ReactCellType"
@@ -34,6 +34,7 @@
  */
 
 import type { CompileCellResult } from "@forguncy-react-workspace/cell-compiler";
+import { TARGET_LOCATOR_FINALIZATION } from "@forguncy-react-workspace/core";
 
 /**
  * One ReactCellType Cell, located the way the designer API locates one.
@@ -66,12 +67,16 @@ export function cellTargetLabel(target: CellTarget): string {
 }
 
 /**
- * What is established about the target locator, and what is still open.
+ * What is established about the target locator, and how it was finalized.
  *
  * Recorded as data for the same reason `core` records its decisions as data: #26 asks
- * for the locator model to be updated against #5/#19's evidence before it is
- * finalised, and an open question that only exists in a comment cannot be found by
- * whoever finalises it.
+ * for the locator model to be updated against #5/#19's evidence before it is finalised,
+ * and a question that only exists in a comment cannot be found by whoever finalises it.
+ *
+ * The resolution itself lives in `core` (`TARGET_LOCATOR_FINALIZATION`), because that is
+ * where the config contract — and therefore the answer every consumer of this package
+ * inherits — is owned. This package references it rather than restating it, so there is
+ * exactly one copy of the probe evidence.
  */
 export const SYNC_TARGET_LOCATOR = {
   /** The fields, in the order the designer call takes them. */
@@ -83,14 +88,11 @@ export const SYNC_TARGET_LOCATOR = {
    */
   established: "Both fields are the ones `api.page.setCells` accepts, and both were used by #5's probe.",
   /**
-   * The open question, stated so it is not mistaken for a settled answer.
+   * #26's resolution of the question #19 deliberately left open — no stable page id
+   * exists in the designer MCP surface, so `pageName + cell` is final.
    *
-   * A page name is user-visible and renamable, so it is not obviously stable identity
-   * across a rename — while #26's own rules ask that renaming a source file not change
-   * a Cell's logical identity. Whether the designer API exposes a page id that is
-   * stable across renames was not probed, and choosing a name over an id is a decision
-   * that belongs to #5's evidence or to a fresh probe, not to this package.
+   * Imported from `core`, not restated: #26 finalized the model there, and a second
+   * copy of the evidence would be a second thing to keep true.
    */
-  openQuestion:
-    "Whether a stable page id exists that a rename does not change. Until it is probed, the locator uses the page name, and #26/#28 must resolve or accept that before the target model is finalised.",
+  resolution: TARGET_LOCATOR_FINALIZATION,
 } as const;

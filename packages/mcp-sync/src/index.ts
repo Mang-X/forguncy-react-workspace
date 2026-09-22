@@ -18,10 +18,13 @@
  * Scope note: this package states *what a sync writes, from where, in what order, what it
  * refuses, and what it may not claim*. It does not issue a designer call — #20 owns the
  * transport — does not compile an artifact (#6/#7), does not resolve dependencies (#8),
- * does not read a project's Cell targets (#26/#28), and does not package a Forguncy
- * extension (that is `MangMax/forguncy-frontend-library`'s, which is also where #19 sends
- * a missing extension). What it owns is every question that separates a deployment step
- * from a file copy, so a caller cannot deploy by accident.
+ * and does not package a Forguncy extension (that is `MangMax/forguncy-frontend-library`'s,
+ * which is also where #19 sends a missing extension). Reading a project's Cell targets is
+ * delegated, not owned: `registry-target` resolves an explicit Cell id through `core`'s
+ * #26 registry — the one place "which entry is which Forguncy Cell" is answered — so this
+ * package never parses a config or scans a project for something to overwrite. What it
+ * owns is every question that separates a deployment step from a file copy, so a caller
+ * cannot deploy by accident.
  *
  * The two things a caller should read first are `unestablishedSyncCapabilities()` — which
  * designer operations have no recorded call name, and therefore block the flow end to end
@@ -41,9 +44,16 @@ export {
   MCP_SYNC_GOVERNING_SPEC_REFERENCE_LINE,
 } from "./provenance";
 
-// Where a sync writes, and what is still open about the locator
+// Where a sync writes: the locator, #26's finalization of it, and the registry seam
 export { cellTargetLabel, SYNC_TARGET_LOCATOR } from "./target";
 export type { CellTarget, SyncCellInput } from "./target";
+export {
+  planCellSyncTargets,
+  resolveCellSyncTarget,
+  resolveCellSyncTargets,
+  syncCellInput,
+} from "./registry-target";
+export type { CellSyncTargetPlan, ResolvedCellSyncTarget } from "./registry-target";
 
 // The designer surface the flow needs, and the operations it deliberately lacks
 export { FORGUNCY_SYNC_PORT_METHODS } from "./port";
