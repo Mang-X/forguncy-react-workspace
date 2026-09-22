@@ -28,6 +28,21 @@
  * the flow cannot be validated afterwards, and a caller that reads only a single
  * "executable" flag would deploy without knowing that.
  *
+ * ## The one answer an executor may act on
+ *
+ * `write`, `gate` and `writeAction` are three separate facts, and **none of them alone is
+ * permission to call `setCells`**. `write.kind === "assembled"` says a payload exists — a
+ * plan deliberately keeps one even when it refuses, because that payload is what `force`
+ * would send and what a reviewer reads, so the payload is not the permission.
+ * `gate === "ready"` says no blocking diagnostic was raised; it does not say there is
+ * anything to send. `writeAction === "write"` says the target may be replaced, and on its
+ * own it would ignore a blocking diagnostic that has nothing to do with divergence — an
+ * unverified extension, an absent designer call, an artifact that is not compiler output.
+ *
+ * {@link planSetCellsDispatch} is that answer, and it is the only export that hands back a
+ * `SetCellsRequest`. Nothing else in this package may produce one, which is what keeps an
+ * executor from sending a call the contract refused.
+ *
  * ## Why the write is normalized
  *
  * The mutation's `frontendLibraries` is put through #6's canonical form and the
@@ -65,7 +80,7 @@ import type { CellDivergence, CellOverwritePolicy, CellWriteAction, DeployedCell
 import { DEFAULT_CELL_OVERWRITE_POLICY } from "./divergence";
 import { verifyExtensionReferences, formatExtensionReferenceVerification } from "./extension-verification";
 import type { ExtensionReferenceVerification } from "./extension-verification";
-import { fingerprintArtifact, stampSyncMarker, stripSyncMarker, SyncFingerprintError } from "./fingerprint";
+import { fingerprintArtifact, stampSyncMarker, stripSyncMarker } from "./fingerprint";
 import type { SetCellsCell, SetCellsRequest } from "./port";
 import { cellTargetLabel } from "./target";
 import type { CellTarget, SyncCellInput } from "./target";
@@ -408,11 +423,17 @@ export function formatCellSyncSteps(plan: CellSyncPlan): string {
 
 /** A report block for a CI log or a PR body. */
 export function formatCellSyncPlan(plan: CellSyncPlan): string {
+  // Read from the same function an executor is bound by, so "what the report says" and
+  // "what may be sent" cannot drift apart.
+  const dispatch = planSetCellsDispatch(plan);
   const lines = [
     `Sync target: ${cellTargetLabel(plan.target)}`,
     `Artifact fingerprint: ${plan.fingerprint}`,
     formatCellDivergence(plan.divergence),
     `Write action: ${plan.writeAction} (gate: ${plan.gate})`,
+    dispatch.kind === "issue"
+      ? "Dispatch: issue the `setCells` call."
+      : `Dispatch: hold — ${dispatch.reason}: ${dispatch.detail}`,
     plan.overriddenConflict === undefined
       ? "No conflict was overridden."
       : `Overridden by an explicit force: ${plan.overriddenConflict.kind} — ${plan.overriddenConflict.detail}`,
@@ -436,26 +457,133 @@ export function formatCellSyncPlan(plan: CellSyncPlan): string {
 }
 
 /**
- * A `SetCellsRequest` for a plan's mutation, ready to hand to the port.
+ * Why a plan's mutation may not be issued.
  *
- * The one adapter between the contract's single-Cell mutation and the platform's
- * multi-Cell call. Explicit rather than an implicit widening at each call site, so the
- * place where "sync writes exactly one target" stops being expressible is a single
- * function a reader can find.
- *
- * Throws when the plan assembled no write, and the throw is a programming error rather
- * than a routine outcome: a caller reaches an executor only after reading the plan, so
- * asking for the request of a plan that refused to assemble one means the plan's
- * `write.kind` was not read. The error carries the same code the plan's diagnostic does,
- * so the two answers cannot be about different conditions.
+ * Four reasons, and they are not interchangeable: the *next step* differs. A refused gate
+ * stops the run and has to be reported; a resolved conflict has to be looked at by a person;
+ * an identical target continues to the read-only steps, because a caller that asked for a
+ * deployment locator should get one whether or not the write was needed; and an artifact
+ * that is not compiler output means there was never anything to send.
  */
-export function toSetCellsRequest(plan: CellSyncPlan): SetCellsRequest {
-  if (plan.write.kind !== "assembled") {
-    throw new SyncFingerprintError(
-      "artifact-not-generated",
-      `A \`setCells\` request was asked of a plan that has nothing to write: ${plan.write.reason.message}`,
-    );
+export const CELL_SYNC_HOLD_REASONS = [
+  "nothing-to-write",
+  "gate-refused",
+  "target-diverged",
+  "already-identical",
+] as const;
+
+export type CellSyncHoldReason = (typeof CELL_SYNC_HOLD_REASONS)[number];
+
+/**
+ * The reasons a hold can carry once a payload exists.
+ *
+ * `nothing-to-write` is deliberately not one of them: it is decided from the payload's own
+ * absence, before either table below is consulted, so a table entry claiming it would be
+ * describing a state it can never be reached in.
+ */
+type PayloadHoldReason = Exclude<CellSyncHoldReason, "nothing-to-write">;
+
+/**
+ * Which hold reason each gate implies, if any.
+ *
+ * Total, and consulted before the payload can be handed over, for the same reason the write
+ * action table is: the failure mode of a chain of comparisons here is fail *open*. This was
+ * written as `if (plan.gate === "refused")` first, which would send a plan issued by any gate
+ * the author did not think of — and a write that should not have been sent is exactly the
+ * defect this function exists to prevent. A new gate value is a compile error here instead.
+ */
+const HOLD_FOR_GATE: Readonly<Record<CellSyncGate, PayloadHoldReason | undefined>> = {
+  ready: undefined,
+  skipped: "already-identical",
+  refused: "gate-refused",
+};
+
+/**
+ * How each write action holds a mutation back. A total `Record` rather than a chain of
+ * comparisons, so a new action cannot be added without deciding whether it may be issued —
+ * the failure mode of a missing branch here is a call that should not be sent.
+ */
+const HOLD_FOR_WRITE_ACTION: Readonly<Record<CellWriteAction, PayloadHoldReason | undefined>> = {
+  write: undefined,
+  skip: "already-identical",
+  conflict: "target-diverged",
+};
+
+/**
+ * What an executor is allowed to do with a plan: issue its `setCells` call, or not, and why.
+ *
+ * A discriminated pair rather than a boolean plus a payload, and `issue` is the **only** case
+ * that carries a request. That is the point: an executor cannot obtain a request for a plan
+ * the contract refused, because there is nowhere to obtain it from. The refused payload stays
+ * readable on `plan.write` for reporting — deliberately not from here, where an executor would
+ * find it and send it.
+ *
+ * `hold.detail` names where the explanation lives rather than restating it, so this stays one
+ * decision and does not become a second copy of the diagnostics.
+ */
+export type CellSyncDispatch =
+  | {
+      readonly kind: "issue";
+      /** The platform's own request shape, ready for `ForguncySyncPort.setCells`. */
+      readonly request: SetCellsRequest;
+    }
+  | {
+      readonly kind: "hold";
+      readonly reason: CellSyncHoldReason;
+      readonly detail: string;
+    };
+
+/** Why a plan was held, in one sentence an executor can put in a log line. */
+function holdDetail(plan: CellSyncPlan, reason: PayloadHoldReason): string {
+  switch (reason) {
+    case "gate-refused": {
+      // Codes, not subjects, and deduplicated: several diagnostics can share a code (one per
+      // unestablished capability, one per library), and a report line that repeated the code
+      // would read as one finding per detector. The subjects and the remediation are on the
+      // plan's own diagnostics, which the report prints directly below this line.
+      const blocking = [
+        ...new Set(
+          plan.diagnostics
+            .filter(diagnostic => SYNC_DIAGNOSTIC_RULES[diagnostic.code].blocksMutation)
+            .map(diagnostic => diagnostic.code),
+        ),
+      ];
+      return `Refused before the write: ${blocking.join(", ")}. See the plan's diagnostics for the remediation.`;
+    }
+    case "already-identical":
+      return "The target already holds this artifact, so the mutation is not issued. The read-only steps after it still run.";
+    case "target-diverged":
+      return `The target diverged and the policy refused to overwrite it: ${plan.divergence.detail}`;
   }
+}
+
+/**
+ * The single decision an executor is bound by, and the only way to a `SetCellsRequest`.
+ *
+ * Both enums are resolved through a total table before a request can be built, and the gate
+ * is resolved first: `gate === "ready"` implying `writeAction === "write"` is a property of
+ * the *current* rule table — one divergence rule flipping `blocksMutation` would break it —
+ * so the two are checked as the independent conditions they are rather than relying on a
+ * coincidence. Being wrong here costs a write that should not have happened, which is worth
+ * two lookups.
+ */
+export function planSetCellsDispatch(plan: CellSyncPlan): CellSyncDispatch {
+  // Absence first: with no payload there is nothing to send whatever else is true, and
+  // `nothing-to-write` is the more precise answer than a gate refusal it implies.
+  if (plan.write.kind !== "assembled") {
+    return { kind: "hold", reason: "nothing-to-write", detail: plan.write.reason.message };
+  }
+
+  const gateHold = HOLD_FOR_GATE[plan.gate];
+  if (gateHold !== undefined) {
+    return { kind: "hold", reason: gateHold, detail: holdDetail(plan, gateHold) };
+  }
+
+  const writeHold = HOLD_FOR_WRITE_ACTION[plan.writeAction];
+  if (writeHold !== undefined) {
+    return { kind: "hold", reason: writeHold, detail: holdDetail(plan, writeHold) };
+  }
+
   const { mutation } = plan.write;
-  return { pageName: mutation.pageName, cells: [...mutation.cells] };
+  return { kind: "issue", request: { pageName: mutation.pageName, cells: [...mutation.cells] } };
 }

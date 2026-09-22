@@ -201,16 +201,19 @@ export type { SyncStepOutcome } from "./step-outcomes";
 
 // The plan
 export {
+  CELL_SYNC_HOLD_REASONS,
   formatCellSyncPlan,
   formatCellSyncSteps,
   planCellSync,
+  planSetCellsDispatch,
   serializeCellSyncMutation,
   SYNC_MUTATION_GEOMETRY_NOTE,
   SYNC_MUTATION_OMITTED_FIELDS,
-  toSetCellsRequest,
 } from "./sync-plan";
 export type {
+  CellSyncDispatch,
   CellSyncGate,
+  CellSyncHoldReason,
   CellSyncMutation,
   CellSyncPlan,
   CellSyncWrite,

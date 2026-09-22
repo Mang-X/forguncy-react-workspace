@@ -9,17 +9,18 @@ import {
 import type { CompileCellResult } from "@forguncy-react-workspace/cell-compiler";
 
 import { syncDiagnosticCodes } from "./diagnostics";
-import { fingerprintArtifact, readSyncMarker, stampSyncMarker, SyncFingerprintError } from "./fingerprint";
+import { fingerprintArtifact, readSyncMarker, stampSyncMarker } from "./fingerprint";
 import {
+  CELL_SYNC_HOLD_REASONS,
   formatCellSyncPlan,
   formatCellSyncSteps,
   planCellSync,
+  planSetCellsDispatch,
   serializeCellSyncMutation,
   SYNC_MUTATION_GEOMETRY_NOTE,
   SYNC_MUTATION_OMITTED_FIELDS,
-  toSetCellsRequest,
 } from "./sync-plan";
-import type { CellSyncPlan, CellSyncWrite, PlanCellSyncOptions } from "./sync-plan";
+import type { CellSyncDispatch, CellSyncPlan, CellSyncWrite, PlanCellSyncOptions } from "./sync-plan";
 import type { CellTarget } from "./target";
 
 /**
@@ -81,6 +82,18 @@ function assembledWrite(plan: CellSyncPlan): Extract<CellSyncWrite, { kind: "ass
   return plan.write;
 }
 
+/**
+ * A plan shaped so that a write would be issued.
+ *
+ * Synthetic on purpose: `planCellSync` cannot produce an issuable plan today, because the two
+ * designer operations with no established call name make every plan refuse. That is the
+ * honest state, and it is exactly why the permission logic has to be testable without it —
+ * otherwise the only path to `issue` would be an unverifiable one.
+ */
+function issuablePlan(overrides: Partial<CellSyncPlan> = {}): CellSyncPlan {
+  return { ...planFor(), gate: "ready", writeAction: "write", diagnostics: [], ...overrides };
+}
+
 function statusByStep(plan: CellSyncPlan): Record<string, string> {
   return Object.fromEntries(plan.steps.map(step => [step.stepId, step.status]));
 }
@@ -109,12 +122,12 @@ describe("assembling the write", () => {
   });
 
   it("asks for exactly one target, located the way the platform does", () => {
-    const plan = planFor();
+    const plan = issuablePlan();
 
     expect(plan.target).toBe(TARGET);
-    expect(toSetCellsRequest(plan)).toEqual({
-      pageName: "OrderPage",
-      cells: [...assembledWrite(plan).mutation.cells],
+    expect(planSetCellsDispatch(plan)).toEqual({
+      kind: "issue",
+      request: { pageName: "OrderPage", cells: [...assembledWrite(plan).mutation.cells] },
     });
   });
 
@@ -180,6 +193,113 @@ describe("the two questions the plan answers", () => {
         "4.write-cell-source=not-reached 5.save-project-if-required=blocked(save-project) " +
         "6.check-project-errors=not-reached 7.generate-page=not-reached 8.return-runtime-locator=not-reached",
     );
+  });
+});
+
+describe("what an executor may send", () => {
+  // A plan keeps an assembled payload even for a refused target, deliberately: that payload
+  // is what `force` would send and what a reviewer reads. So the payload cannot also be the
+  // permission — this block is what makes the permission fail closed.
+
+  it("hands back a request only for a plan that may be issued", () => {
+    const plan = issuablePlan();
+
+    expect(planSetCellsDispatch(plan)).toEqual({
+      kind: "issue",
+      request: { pageName: "OrderPage", cells: [...assembledWrite(plan).mutation.cells] },
+    });
+  });
+
+  it("holds a refused plan even though it carries a payload", () => {
+    const plan = planFor();
+
+    expect(plan.gate).toBe("refused");
+    expect(plan.write.kind).toBe("assembled");
+    const dispatch = planSetCellsDispatch(plan);
+    expect(dispatch.kind).toBe("hold");
+    if (dispatch.kind !== "hold") return;
+    expect(dispatch.reason).toBe("gate-refused");
+    // Named once, not once per detector: two capabilities are unestablished, and the
+    // subjects and their remediation live on the plan's own diagnostics.
+    expect(dispatch.detail.match(/sync-capability-unestablished/g)).toHaveLength(1);
+  });
+
+  it("holds a skipped target even though it carries an assembled payload", () => {
+    // The idempotency half of the review: `writeAction === "skip"` with a payload present.
+    // Built to the shape the contract allows rather than read off a real plan, because a real
+    // identical target is still refused today — see the test below — so the plan is
+    // synthesized the same way the conflict case above is.
+    const dispatch = planSetCellsDispatch(issuablePlan({ gate: "skipped", writeAction: "skip" }));
+
+    expect(dispatch.kind).toBe("hold");
+    if (dispatch.kind !== "hold") return;
+    expect(dispatch.reason).toBe("already-identical");
+  });
+
+  it("reports the refusal, not the idempotency, when an identical target is also refused", () => {
+    // Pinned because it is easy to get backwards, and because it states where the two
+    // defences sit relative to each other. A real identical target never reaches
+    // `already-identical`: the two designer operations with no established call name refuse
+    // the plan first, so this is what an executor actually sees today. The write-action table
+    // is the second line of defence, not the first — `already-identical` becomes reachable
+    // once those operations are established.
+    const first = planFor();
+    const second = planFor({
+      deployed: {
+        kind: "read",
+        code: assembledWrite(first).stampedCode,
+        frontendLibraries: generated().frontendLibraries,
+      },
+    });
+
+    expect(second.writeAction).toBe("skip");
+    expect(second.gate).toBe("refused");
+    const dispatch = planSetCellsDispatch(second);
+    expect(dispatch.kind).toBe("hold");
+    if (dispatch.kind !== "hold") return;
+    expect(dispatch.reason).toBe("gate-refused");
+  });
+
+  it("does not depend on a conflict always blocking the gate", () => {
+    // `writeAction === "conflict"` with a non-refused gate is unreachable under the current
+    // rule table — every divergence that conflicts also raises a blocking diagnostic. The
+    // adapter must not rely on that coincidence: one rule flipping `blocksMutation` would
+    // otherwise make a refused overwrite issuable.
+    const conflicted = planFor({ deployed: { kind: "read", code: "designer work" } });
+    expect(conflicted.writeAction).toBe("conflict");
+
+    const dispatch = planSetCellsDispatch(issuablePlan({ writeAction: "conflict", divergence: conflicted.divergence }));
+    expect(dispatch.kind).toBe("hold");
+    if (dispatch.kind !== "hold") return;
+    expect(dispatch.reason).toBe("target-diverged");
+  });
+
+  it("holds a plan that has nothing to write before asking about the gate", () => {
+    const plan = planFor({ artifact: { code: CODE_BODY, frontendLibraries: [] } });
+
+    // Both conditions are true for this plan; `nothing-to-write` is the more precise answer,
+    // because there is nothing to send whatever else is true.
+    expect(plan.gate).toBe("refused");
+    const dispatch = planSetCellsDispatch(plan);
+    expect(dispatch.kind).toBe("hold");
+    if (dispatch.kind !== "hold") return;
+    expect(dispatch.reason).toBe("nothing-to-write");
+  });
+
+  it("names its hold reasons, so an executor can report the one it hit", () => {
+    expect([...CELL_SYNC_HOLD_REASONS]).toEqual([
+      "nothing-to-write",
+      "gate-refused",
+      "target-diverged",
+      "already-identical",
+    ]);
+  });
+
+  it("cannot be made to yield a request from a hold", () => {
+    const hold: CellSyncDispatch = { kind: "hold", reason: "gate-refused", detail: "…" };
+
+    // @ts-expect-error a hold carries no request, so there is nothing for an executor to send
+    expect(hold.request).toBeUndefined();
   });
 });
 
@@ -275,17 +395,15 @@ describe("an artifact that is not compiler output", () => {
     expect(formatCellSyncPlan(plan)).toContain("Nothing to write:");
   });
 
-  it("refuses a setCells request, with the same code the plan reported", () => {
+  it("hands out no request, and gives the same reason the plan reported", () => {
     const plan = planFor({ artifact: notGenerated });
 
-    let thrown: unknown;
-    try {
-      toSetCellsRequest(plan);
-    } catch (error) {
-      thrown = error;
-    }
-    expect(thrown).toBeInstanceOf(SyncFingerprintError);
-    expect((thrown as SyncFingerprintError).code).toBe("artifact-not-generated");
+    if (plan.write.kind !== "not-assembled") throw new Error("Expected no assembled write.");
+    const dispatch = planSetCellsDispatch(plan);
+    expect(dispatch.kind).toBe("hold");
+    if (dispatch.kind !== "hold") return;
+    expect(dispatch.reason).toBe("nothing-to-write");
+    expect(dispatch.detail).toBe(plan.write.reason.message);
 
     // The marker refuses for the same reason and with the same code, so the plan and the
     // marker cannot be about two different conditions.
@@ -295,7 +413,7 @@ describe("an artifact that is not compiler output", () => {
     } catch (error) {
       markerRefusal = error;
     }
-    expect((markerRefusal as SyncFingerprintError).code).toBe("artifact-not-generated");
+    expect((markerRefusal as { code?: string }).code).toBe("artifact-not-generated");
   });
 });
 
