@@ -52,6 +52,7 @@ describe("façade capability registry", () => {
       "data-source-binding",
       "permission-snapshot",
       "permission-check",
+      "permission-map-read",
       "current-user",
       "session-control",
       "file-upload",
@@ -223,14 +224,28 @@ describe("omitted candidate families", () => {
 // recorded per capability, so a typed signature has to be paid for with evidence
 // rather than added because it reads well.
 describe("confirmation levels", () => {
-  // Only the two bridges #5 actually called are call-shape; everything else is a
-  // name it verified and never invoked.
+  /**
+   * Only the bridges #5 executed are call-shape.
+   *
+   * This list is also the one the review moved, and the move is the point rather
+   * than a detail: the first version held two entries because it was derived from
+   * the *key list* `core` records for `props.Forguncy`, which says which names exist
+   * and nothing about whether any was called. #5's own comments record
+   * `hasPermission("ProbePermission")` → `true` and `getPermissions()` →
+   * `{"ProbePermission": true}` — neither awaited, beside a command call the same
+   * section reports as `await … resolved in 185 ms` — so both belong here.
+   */
   it("records call-shape only where the probe executed a call", () => {
     expect(
       RUNTIME_FACADE_CAPABILITIES.filter(capability => capability.confirmation === "call-shape").map(
         capability => capability.id,
       ),
-    ).toEqual(["server-command-invocation", "data-source-binding"]);
+    ).toEqual([
+      "server-command-invocation",
+      "data-source-binding",
+      "permission-check",
+      "permission-map-read",
+    ]);
   });
 
   // #5 executed three `useDataSource` calls, so the data-source binding is not a
@@ -244,13 +259,46 @@ describe("confirmation levels", () => {
     expect(binding.note).toMatch(/error state/);
   });
 
+  /**
+   * Two addresses, one map, different evidence — so two capabilities.
+   *
+   * `props.Permissions` was keyed and never invoked; `props.Forguncy.getPermissions()`
+   * was called and answered. A confirmation is a property of the *call*, so a single
+   * level could not honestly cover both, and the version that filed them together
+   * recorded the executed call as a mere member name — the same over-claim
+   * `data-source-binding` had already been corrected for, one address over.
+   */
+  it("separates a keyed value prop from the handle call that returns the same map", () => {
+    const snapshot = findRuntimeFacadeCapability("permission-snapshot");
+    const mapRead = findRuntimeFacadeCapability("permission-map-read");
+    const check = findRuntimeFacadeCapability("permission-check");
+
+    expect(snapshot.confirmation).toBe("member-presence");
+    expect(snapshot.hostBindings).toEqual([{ kind: "cell-prop", prop: "Permissions" }]);
+    expect(mapRead.confirmation).toBe("call-shape");
+    expect(mapRead.hostBindings).toEqual([{ kind: "forguncy-member", member: "getPermissions" }]);
+    expect(check.confirmation).toBe("call-shape");
+    expect(check.hostBindings).toEqual([{ kind: "forguncy-member", member: "hasPermission" }]);
+
+    // The notes carry the evidence rather than the conclusion, including the
+    // synchronous detail that separates these two calls from the command call
+    // recorded beside them in #5.
+    for (const capability of [check, mapRead]) {
+      expect(capability.note, capability.id).toMatch(/await/);
+      expect(capability.note, capability.id).toMatch(/ProbePermission/);
+    }
+    // And the snapshot has to point at the call it is not, or a reader sees two
+    // capabilities for one map with no explanation.
+    expect(snapshot.note).toMatch(/getPermissions/);
+    expect(snapshot.note).toMatch(/permission-map-read/);
+  });
+
   it("leaves every other member at presence-only, where #5 stopped", () => {
     const presenceOnly = RUNTIME_FACADE_CAPABILITIES.filter(
       capability => capability.confirmation === "member-presence",
     ).map(capability => capability.id);
     expect(presenceOnly).toEqual([
       "permission-snapshot",
-      "permission-check",
       "current-user",
       "session-control",
       "file-upload",
@@ -309,6 +357,7 @@ describe("ownership projection", () => {
     for (const id of [
       "permission-snapshot",
       "permission-check",
+      "permission-map-read",
       "current-user",
       "session-control",
     ] as const) {

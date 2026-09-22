@@ -1,0 +1,16 @@
+{
+  "name": "@examples/runtime-facade",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "//dependencies": [
+    "The façade is a workspace package this example imports by name, exactly as a",
+    "Cell's authored source does: the compiler flattens the import into the",
+    "generated artifact (#14), so the dependency is a source dependency rather than",
+    "a deployed module. It is the only dependency the example declares, because",
+    "reaching the host through anything else is the coupling #27 removes."
+  ],
+  "dependencies": {
+    "@forguncy-react-workspace/runtime": "workspace:*"
+  }
+}

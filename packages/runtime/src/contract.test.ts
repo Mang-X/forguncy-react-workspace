@@ -61,9 +61,11 @@ function forguncyMembers(
 function mockCellProps(overrides: Partial<RuntimeFacadeCellProps> = {}): RuntimeFacadeCellProps {
   return {
     Forguncy: forguncyMembers(),
-    Permissions: [],
+    // The shapes an executed page hands a Cell for the two always-injected value props:
+    // an empty record rather than an array, and an empty object rather than `undefined`.
+    Permissions: {},
     ServerCommands: {},
-    ImageContext: undefined,
+    ImageContext: {},
     ...overrides,
   };
 }
@@ -148,7 +150,7 @@ describe("the confirmed server-command call shape", () => {
 // public facade."
 describe("the provider boundary", () => {
   it("makes the host and the mock the same type, so a consumer cannot tell them apart", () => {
-    const host = providerOf("host", { cellProps: { Permissions: [{ key: "Orders.Read" }] } });
+    const host = providerOf("host", { cellProps: { Permissions: { "Orders.Read": true } } });
     const mock = providerOf("mock");
 
     expect(host.kind).toBe("host");
@@ -360,9 +362,15 @@ describe("port coverage", () => {
 // #27's packaging section: a façade that is host-backed "must not add a duplicate
 // runtime copy per Cell unless intentionally tiny and stateless".
 describe("packaging policy", () => {
-  it("takes the stateless exception instead of the per-cell prohibition", () => {
-    expect(RUNTIME_FACADE_PACKAGING_POLICY.holdsModuleState).toBe(false);
+  // #29 amended this from a single `holdsModuleState: false` because implementing
+  // #27's own "resolved from the installed provider" needs one thing held. The
+  // test therefore asserts both halves of what replaced it: the slot exists, and
+  // what the policy was protecting (no domain state) still does not.
+  it("takes the tiny-and-slot-bearing exception instead of the per-cell prohibition", () => {
+    expect(RUNTIME_FACADE_PACKAGING_POLICY.holdsProviderSlot).toBe(true);
+    expect(RUNTIME_FACADE_PACKAGING_POLICY.holdsDomainState).toBe(false);
     expect(RUNTIME_FACADE_PACKAGING_POLICY.perCellDuplicateAllowed).toBe(true);
+    expect(RUNTIME_FACADE_PACKAGING_POLICY.reason).toMatch(/#14/);
   });
 
   // Lowering is #6's decision, not this contract's; stating it here would let the
