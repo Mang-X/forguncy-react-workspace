@@ -216,13 +216,15 @@ describe("the absence taxonomy", () => {
       // A mock that fills the handle's keys and supplies none of them: present,
       // not callable. This is the absence the mock must not paper over.
       //
-      // `logIn` rather than `hasPermission`, which moved to a typed member of its
-      // own when #5's comments turned out to record it being called: reaching a
-      // typed call through the accessor is now `binding-not-exposed`, a different
-      // code with a different fix, and this scenario is about the value behind a
-      // confirmed address being missing rather than about the address being wrong.
+      // Driven through the typed `hasPermission`, and that is now the only kind of
+      // address that can produce this code: requiring a callable value is a signature,
+      // so only the members #5 actually *called* may demand one. A `member-presence`
+      // address is handed over exactly as the handle holds it — see the façade's
+      // `hostHandleMember` and the regression beside the receiver test in
+      // `facade.test.ts` — because #5 confirmed those names from the handle's key list
+      // and never read their `typeof`.
       installRuntimeFacadeProvider(createMockRuntimeFacadeProvider());
-      runtimeFacade().forguncyMember("logIn");
+      runtimeFacade().hasPermission("ProbePermission");
     },
     "server-command-not-configured": async () => {
       installRuntimeFacadeProvider(createMockRuntimeFacadeProvider());

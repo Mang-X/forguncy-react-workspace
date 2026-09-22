@@ -657,6 +657,44 @@ describe("host boundaries only a hostile fixture can see", () => {
   });
 
   /**
+   * A `member-presence` address is an address, not a signature.
+   *
+   * `forguncyMember` reaches the capabilities whose confirmation is `member-presence`,
+   * and #5 confirmed only that those names appear in the handle's key list — never that
+   * any of them is callable, nor what its `typeof` is. Before this was fixed, all nine
+   * went through the same helper the two *called* members use, so the value was forced
+   * to be a function and bound; a confirmed address holding anything else was refused
+   * with `capability-not-supplied`. That is the façade inventing a callability contract
+   * the registry does not carry, and it contradicts the accessor's own promise: the
+   * address is the façade's claim, the shape is the caller's.
+   *
+   * `getCurrentUser` carries this test because the neighbouring receiver test already
+   * covers the function case; what has to be visible is the *non*-function value, which
+   * is the one the old shared path refused. The fixture is deliberately an object rather
+   * than `undefined`: `undefined` is a value a provider might legitimately not carry,
+   * and confusing "not a function" with "not present" is the other way this could be
+   * got wrong.
+   */
+  it("hands a presence-only address over as read, without demanding callability", () => {
+    installRuntimeFacadeProvider(
+      createHostRuntimeFacadeProvider({
+        cellProps: hostCellProps({
+          Forguncy: { getCurrentUser: { userName: "dev@example.com" } },
+        }),
+        useDataSource: unusedDataSource,
+      }),
+    );
+
+    expect(runtimeFacade().forguncyMember("getCurrentUser")).toEqual({ userName: "dev@example.com" });
+    // And the declared shape is still the caller's to choose, so the same value is
+    // usable under the type the caller supplies — which is what
+    // `caller-declared-shape` has to mean if it is to mean anything.
+    expect(runtimeFacade().forguncyMember<{ userName: string }>("getCurrentUser").userName).toBe(
+      "dev@example.com",
+    );
+  });
+
+  /**
    * A name supplied by the caller is a *string*, and `record[name]` walks the
    * prototype chain.
    *

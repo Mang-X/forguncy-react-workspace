@@ -467,10 +467,14 @@ function buildRuntimeFacadeSurface(): RuntimeFacadeImplementation {
       return (binding as RuntimeFacadeHostBindings["useDataSource"])(dataSourceName, options);
     },
 
-    // The two handle members below resolve exactly as `forguncyMember` does; they
-    // differ only in that #5 called them, so the façade can fix their shapes. Both
-    // go through one helper, so the own-property rule and the receiver cannot apply
-    // to two of the three paths and not the third.
+    // The two handle members below resolve their address the same way `forguncyMember`
+    // does — the same own-property rule, the same receiver preservation — but they
+    // resolve it through `hostHandleMethod` rather than `hostHandleMember`, and that
+    // difference is the whole point of having two helpers: #5 *called* these two, so
+    // demanding a callable value here is paid for by evidence. The nine
+    // `member-presence` addresses behind `forguncyMember` were only ever seen in the
+    // handle's key list, so the same demand there would be a contract the evidence
+    // never gave — see `hostHandleMember`.
     //
     // They are also where the narrowing happens, and the reason is the handle's own
     // type: `ForguncyPropMember` declares every member as
@@ -483,7 +487,7 @@ function buildRuntimeFacadeSurface(): RuntimeFacadeImplementation {
     // record is the middle case — it arrives as `Record<string, unknown>` and is narrowed
     // on the spot — so its check lives where its value arrives, in `invokeServerCommand`.
     hasPermission: permissionName => {
-      const check = hostHandleMember(requireRuntimeFacadeProvider(), "hasPermission") as (
+      const check = hostHandleMethod(requireRuntimeFacadeProvider(), "hasPermission") as (
         permissionName: string,
       ) => unknown;
       const granted = check(permissionName);
@@ -503,7 +507,7 @@ function buildRuntimeFacadeSurface(): RuntimeFacadeImplementation {
     },
 
     getPermissions: () => {
-      const read = hostHandleMember(requireRuntimeFacadeProvider(), "getPermissions") as () => unknown;
+      const read = hostHandleMethod(requireRuntimeFacadeProvider(), "getPermissions") as () => unknown;
       return permissionMap(read());
     },
 
@@ -542,33 +546,70 @@ function serverCommandRecord(provider: RuntimeFacadeProvider): Record<string, un
 }
 
 /**
- * A callable `props.Forguncy` member, bound to the handle that owns it.
+ * The `props.Forguncy` handle, or a refusal naming it.
  *
- * Returns the member **bound** rather than the raw function, and that is the whole
- * point of the helper: #5 confirms the method form
- * (`props.Forguncy.hasPermission(…)`, `props.Forguncy.getPermissions()`), and never
- * that a handle member survives being detached from its object. Handing out
- * `handle[member]` unchanged would call it with `this === undefined`, which is a
- * behaviour nothing observed — the shape of over-claim this package exists to
- * refuse. Binding here, once, is also what keeps the three call sites from each
- * having to remember.
- *
- * Every caller names its member from `CELL_FORGUNCY_PROP_KEYS`, so this cannot be
- * asked for an address #5 never saw.
+ * Split out because the two member helpers below differ in exactly one thing — what
+ * they require of the value they find — and the handle read is not that thing.
+ * Duplicating it would let the two drift over the part they agree about.
  */
-function hostHandleMember(
-  provider: RuntimeFacadeProvider,
-  member: ForguncyPropMember,
-): (...args: readonly unknown[]) => unknown {
+function forguncyHandle(provider: RuntimeFacadeProvider): Record<string, unknown> {
   const handle = ownValue(portBinding(provider, "cellProps"), "Forguncy", "Forguncy");
   if (handle === null || typeof handle !== "object") {
     throw missingBinding("Forguncy", "the value is not the handle the host injects");
   }
+  return handle as Record<string, unknown>;
+}
+
+/**
+ * A `props.Forguncy` member #5 only ever saw in the handle's key list.
+ *
+ * Returns the own value: **bound when it is a function**, and otherwise handed over
+ * exactly as it was read. The restraint is the point. These addresses are
+ * `member-presence` — #5 recorded `Object.keys(props.Forguncy)` and never called one
+ * of them, nor read its `typeof` — so "is a function" is not part of anything the
+ * façade observed. Requiring it here would be a contract invented in the
+ * implementation, one the registry does not carry, and it would refuse a shape the
+ * current evidence plainly allows: a confirmed address holding a non-function value.
+ *
+ * Binding, where it applies, follows the same observation the call-shaped members
+ * follow: #5 only saw the method form (`props.Forguncy.hasPermission(…)`) and never a
+ * detached one, so a function goes back bound to its handle rather than raw. A
+ * non-function has no receiver to lose, so it is returned untouched — and the caller's
+ * declared shape is what decides whether it can be used at all.
+ *
+ * Every caller names its member from `CELL_FORGUNCY_PROP_KEYS`, so this cannot be
+ * asked for an address #5 never saw.
+ */
+function hostHandleMember(provider: RuntimeFacadeProvider, member: ForguncyPropMember): unknown {
+  const handle = forguncyHandle(provider);
   const value = ownValue(handle, member, member);
-  // Own property, then callable. `ownValue` already applies the first rule; this
-  // adds the second, because #5 observed the handle's `Object.keys` and a member
-  // that is present but not callable is a capability nothing can use — so it is
-  // reported rather than handed over for the caller to trip over.
+  return typeof value === "function"
+    ? (value as (...args: readonly unknown[]) => unknown).bind(handle)
+    : value;
+}
+
+/**
+ * A *callable* `props.Forguncy` member, bound to the handle that owns it.
+ *
+ * For the two members #5 actually called — `hasPermission` and `getPermissions`. A
+ * `member-presence` address must not come through here: demanding a callable value is
+ * a signature, and a signature has to be paid for with `confirmation` (see
+ * `hostHandleMember`). Keeping this helper reserved for the call-shaped members is what
+ * stops that rule being quietly relaxed by a shared code path — which is exactly how it
+ * was relaxed before review.
+ *
+ * Returns the member **bound** rather than the raw function: #5 confirms the method
+ * form (`props.Forguncy.hasPermission(…)`, `props.Forguncy.getPermissions()`) and never
+ * that a handle member survives being detached from its object. Handing out
+ * `handle[member]` unchanged would call it with `this === undefined`, which is a
+ * behaviour nothing observed — the shape of over-claim this package exists to refuse.
+ */
+function hostHandleMethod(
+  provider: RuntimeFacadeProvider,
+  member: ForguncyPropMember,
+): (...args: readonly unknown[]) => unknown {
+  const handle = forguncyHandle(provider);
+  const value = ownValue(handle, member, member);
   if (typeof value !== "function") {
     throw new RuntimeFacadeResolutionError(
       "capability-not-supplied",
