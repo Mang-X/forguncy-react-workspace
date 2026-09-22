@@ -23,6 +23,7 @@ import type { RuntimeFacadeHostBindings, RuntimeFacadeProvider } from "./contrac
 import {
   assertLocalDevBoundariesAreAdmissible,
   assertLocalDevClaimsAreLocalOnly,
+  assertLocalDevExtensionChoicesAreDeclared,
   assertLocalDevLoopStagesAreAdmissible,
   assertLocalDevMockSuppliesEveryBaseProp,
   assertLocalDevProviderIsMock,
@@ -39,6 +40,7 @@ import {
   LOCAL_DEV_DIAGNOSTIC_CODES,
   LOCAL_DEV_DIAGNOSTIC_RULES,
   LOCAL_DEV_ERROR_SURFACING,
+  LOCAL_DEV_EXTENSION_CHOICE_MODES,
   LOCAL_DEV_FORBIDDEN_PATTERNS,
   LOCAL_DEV_FORBIDDEN_PATTERN_IDS,
   LOCAL_DEV_GOVERNING_DECISIONS,
@@ -60,7 +62,9 @@ import {
   localDevFailureContrast,
   localDevHandlingForStrategy,
   localDevModuleIdsOf,
+  findLocalDevBridgeRow,
   findLocalDevModuleIdResolution,
+  localDevExtensionChoiceProblem,
   localDevProtectedConcerns,
   localDevRealRuntimeOwedChecks,
   localDevRealRuntimeStage,
@@ -73,9 +77,10 @@ import type {
   LocalDevBoundary,
   LocalDevClaim,
   LocalDevDiagnosticCode,
+  LocalDevExtensionChoice,
+  LocalDevExtensionRealRuntimeOnly,
   LocalDevLoopStage,
   LocalDevModuleResolution,
-  LocalDevSubstitute,
 } from "./local-dev";
 import {
   LOCAL_DEV_RUNTIME_CITATION_PATTERNS,
@@ -120,11 +125,20 @@ const extensionDecision: DependencyDecision = {
   globalName: "TanStackQueryReact",
 };
 
-const tanstackSubstitute: LocalDevSubstitute = {
+const tanstackSubstitute: LocalDevExtensionChoice = {
   packageName: "@tanstack/react-query",
+  mode: "substitute",
   kind: "npm-package",
   resolvesTo: "@tanstack/react-query",
   justification: "Local UI work; the cross-cell singleton semantics are not exercised locally.",
+};
+
+/** The other branch #22 allows: the project accepts that validation happens on the page. */
+const tanstackRealRuntimeOnly: LocalDevExtensionRealRuntimeOnly = {
+  packageName: "@tanstack/react-query",
+  mode: "real-runtime-only",
+  reason: "the extension's cross-cell singleton is the whole reason it is an extension.",
+  consequence: "local renders exercise the query client's local behaviour only.",
 };
 
 // #22's Problem section asks for a fast local loop "without pretending a simulator
@@ -625,25 +639,135 @@ describe("dependency decisions under local development", () => {
   });
 
   // #22 names this requirement directly: an `extension` package needs an explicit
-  // local shim/npm source, or a statement that real-runtime validation is required.
+  // local shim/npm source, or it must be marked as requiring real-runtime
+  // validation. Both branches are one field with two modes, so neither valid state
+  // can be reported as the other.
   it("makes an extension dependency the project's decision, not the harness's", () => {
     const handling = localDevHandlingForStrategy("extension");
     expect(handling.localHandling).toBe("local-substitute-required");
-    expect(handling.requiresFromTheProject).toMatch(/substitute/);
+    expect(handling.requiresFromTheProject).toMatch(/LocalDevExtensionChoice/);
     expect(handling.realRuntimeClaimedBy).toMatch(/#13/);
+  });
 
-    const unresolved = auditLocalDevConfiguration({ decisions: [extensionDecision] });
-    expect(unresolved.diagnostics.map(diagnostic => diagnostic.code)).toContain(
-      "local-dev-extension-needs-substitute",
-    );
-
-    const resolved = auditLocalDevConfiguration({
+  it("accepts the substitute branch and reports nothing for it", () => {
+    const audit = auditLocalDevConfiguration({
       decisions: [extensionDecision],
-      substitutes: [tanstackSubstitute],
+      extensionChoices: [tanstackSubstitute],
     });
-    expect(resolved.diagnostics.map(diagnostic => diagnostic.code)).not.toContain(
+    expect(audit.diagnostics).toEqual([]);
+    expect(audit.realRuntimeOnly).toEqual([]);
+  });
+
+  // The branch that used to be unrepresentable: recording the choice does not make
+  // it an omission, and the finding says which packages the loop cannot exercise.
+  it("accepts the real-runtime-only branch as a decision rather than an omission", () => {
+    const audit = auditLocalDevConfiguration({
+      decisions: [extensionDecision],
+      extensionChoices: [tanstackRealRuntimeOnly],
+    });
+
+    const codes = audit.diagnostics.map(diagnostic => diagnostic.code);
+    expect(codes).toContain("local-dev-extension-real-runtime-only");
+    expect(codes).not.toContain("local-dev-extension-needs-substitute");
+    expect(audit.realRuntimeOnly).toEqual(["@tanstack/react-query"]);
+
+    const finding = audit.diagnostics.find(
+      diagnostic => diagnostic.code === "local-dev-extension-real-runtime-only",
+    );
+    expect(finding?.subject).toBe("@tanstack/react-query");
+    expect(finding?.detail).toContain(tanstackRealRuntimeOnly.reason);
+    expect(finding?.detail).toContain(tanstackRealRuntimeOnly.consequence);
+
+    // Non-blocking, and that is the difference the second branch exists to make.
+    expect(LOCAL_DEV_DIAGNOSTIC_RULES["local-dev-extension-real-runtime-only"].blocksLocalDevelopment).toBe(
+      false,
+    );
+    expect(LOCAL_DEV_DIAGNOSTIC_RULES["local-dev-extension-needs-substitute"].blocksLocalDevelopment).toBe(
+      true,
+    );
+  });
+
+  it("reports an undeclared extension dependency as an omission", () => {
+    const audit = auditLocalDevConfiguration({ decisions: [extensionDecision] });
+    const codes = audit.diagnostics.map(diagnostic => diagnostic.code);
+    expect(codes).toContain("local-dev-extension-needs-substitute");
+    expect(codes).not.toContain("local-dev-extension-real-runtime-only");
+    expect(audit.realRuntimeOnly).toEqual([]);
+  });
+
+  it("records both modes, and only two", () => {
+    expect([...LOCAL_DEV_EXTENSION_CHOICE_MODES]).toEqual(["substitute", "real-runtime-only"]);
+  });
+
+  // A mode name with nothing behind it is still an omission. Otherwise the fix for
+  // "the second branch is unrepresentable" would be a branch that is representable
+  // and empty.
+  it("does not let an empty acknowledgement count as a decision", () => {
+    const empty: LocalDevExtensionRealRuntimeOnly = {
+      packageName: "@tanstack/react-query",
+      mode: "real-runtime-only",
+      reason: "   ",
+      consequence: "local renders exercise less.",
+    };
+    expect(localDevExtensionChoiceProblem(empty)).toMatch(/gives no reason/);
+    expect(() => assertLocalDevExtensionChoicesAreDeclared([empty])).toThrow(/is not a decision/);
+
+    const audit = auditLocalDevConfiguration({
+      decisions: [extensionDecision],
+      extensionChoices: [empty],
+    });
+    const finding = audit.diagnostics.find(
+      diagnostic => diagnostic.code === "local-dev-extension-needs-substitute",
+    );
+    expect(finding?.detail).toMatch(/learned the vocabulary/);
+    expect(audit.realRuntimeOnly).toEqual([]);
+  });
+
+  it("requires an acknowledgement to say what it leaves unexercised", () => {
+    const noConsequence: LocalDevExtensionChoice = {
+      packageName: "@tanstack/react-query",
+      mode: "real-runtime-only",
+      reason: "no local equivalent.",
+      consequence: "",
+    };
+    expect(localDevExtensionChoiceProblem(noConsequence)).toMatch(/states no consequence/);
+  });
+
+  it("requires a substitute to say what it resolves to and why it is acceptable", () => {
+    for (const broken of [
+      { ...tanstackSubstitute, resolvesTo: "" },
+      { ...tanstackSubstitute, justification: "" },
+      { ...tanstackSubstitute, packageName: "" },
+    ]) {
+      expect(localDevExtensionChoiceProblem(broken), JSON.stringify(broken)).toBeDefined();
+      expect(() => assertLocalDevExtensionChoicesAreDeclared([broken])).toThrow(
+        LocalDevRuntimeContractError,
+      );
+    }
+    expect(() => assertLocalDevExtensionChoicesAreDeclared([tanstackSubstitute])).not.toThrow();
+    expect(localDevExtensionChoiceProblem(tanstackSubstitute)).toBeUndefined();
+    expect(localDevExtensionChoiceProblem(tanstackRealRuntimeOnly)).toBeUndefined();
+  });
+
+  // A mode the union does not have reaches here from untyped data (a JSON config),
+  // and falling off the switch would read as "this choice is fine".
+  it("does not let an unknown mode pass as a decision", () => {
+    const alien = {
+      packageName: "@tanstack/react-query",
+      mode: "ignore-for-now",
+    } as unknown as LocalDevExtensionChoice;
+
+    expect(localDevExtensionChoiceProblem(alien)).toMatch(/not one of the two branches/);
+    expect(() => assertLocalDevExtensionChoicesAreDeclared([alien])).toThrow(/is not a decision/);
+
+    const audit = auditLocalDevConfiguration({
+      decisions: [extensionDecision],
+      extensionChoices: [alien],
+    });
+    expect(audit.diagnostics.map(diagnostic => diagnostic.code)).toContain(
       "local-dev-extension-needs-substitute",
     );
+    expect(audit.realRuntimeOnly).toEqual([]);
   });
 
   it("claims the inline strategy as the strongest local case", () => {
@@ -781,6 +905,10 @@ describe("the diagnostic vocabulary", () => {
     for (const audit of [
       auditLocalDevConfiguration({ installedVersions: { react: "18.2.0" } }),
       auditLocalDevConfiguration({ decisions: [extensionDecision] }),
+      auditLocalDevConfiguration({
+        decisions: [extensionDecision],
+        extensionChoices: [tanstackRealRuntimeOnly],
+      }),
       auditLocalDevConfiguration({ mockBindings: mockBindings(["Permissions"]) }),
       auditLocalDevConfiguration({ referencedSpecifiers: ["dayjs"] }),
       // A row the project cannot stand in for locally.
@@ -854,6 +982,69 @@ describe("the diagnostic vocabulary", () => {
     expect(codes).toContain("local-dev-mapping-coverage");
     // The rest of the audit still ran.
     expect(codes).toContain("local-dev-extension-needs-substitute");
+  });
+
+  // The direction the first version of this suite missed: an *orphan* resolution row
+  // trips the guard via `localDevModuleIdsOf`, and the derivations that run after the
+  // guard used to throw on the same input — so a configuration error produced a stack
+  // trace instead of the diagnostic that had just been constructed for it.
+  const orphanRow: LocalDevModuleResolution = {
+    specifier: "react-dom/server",
+    resolution: "npm-package",
+    localPackage: "react-dom",
+    alignmentUnchecked: "fixture: a row whose specifier is not a bridge row",
+    note: "fixture orphan",
+  };
+
+  it("returns a finding for an orphan resolution row instead of throwing after the guard", () => {
+    const resolutions = [...LOCAL_DEV_MODULE_RESOLUTIONS, orphanRow];
+    expect(() => auditLocalDevConfiguration({ resolutions })).not.toThrow();
+
+    const audit = auditLocalDevConfiguration({ resolutions });
+    const finding = audit.diagnostics.find(
+      diagnostic => diagnostic.code === "local-dev-mapping-coverage",
+    );
+    expect(finding?.detail).toMatch(/react-dom\/server/);
+    // An orphan row contributes no module id to the harness's worklist: it resolves
+    // nothing, and `local-dev-mapping-coverage` is what says so.
+    expect(audit.resolvable).not.toContain("react-dom/server");
+    expect([...audit.resolvable].sort()).toEqual([...hostBridgeInterceptedModuleIds()].sort());
+  });
+
+  it("leaves the throwing guard intact for callers that want the failure", () => {
+    expect(() =>
+      assertLocalDevResolutionsCoverHostBridge([...LOCAL_DEV_MODULE_RESOLUTIONS, orphanRow]),
+    ).toThrow(/not a row of the host bridge/);
+  });
+
+  // The promise is about the whole function, not only the guards it calls on purpose.
+  it("never throws, whatever the configuration", () => {
+    const brokenAtOnce: LocalDevModuleResolution[] = [
+      ...LOCAL_DEV_MODULE_RESOLUTIONS.filter(resolution => resolution.specifier !== "antd"),
+      orphanRow,
+      orphanRow,
+    ];
+
+    expect(() =>
+      auditLocalDevConfiguration({
+        resolutions: brokenAtOnce,
+        decisions: [extensionDecision],
+        extensionChoices: [tanstackSubstitute, tanstackRealRuntimeOnly],
+        installedVersions: { react: "0.0.0" },
+        mockBindings: mockBindings(["Permissions"]),
+        referencedSpecifiers: ["dayjs", "echarts", "unmapped"],
+      }),
+    ).not.toThrow();
+
+    const audit = auditLocalDevConfiguration({ resolutions: brokenAtOnce });
+    expect(audit.diagnostics.map(diagnostic => diagnostic.code)).toContain(
+      "local-dev-mapping-coverage",
+    );
+  });
+
+  it("reads a bridge row without throwing, unlike the guard-facing accessor", () => {
+    expect(findLocalDevBridgeRow("react-dom")?.specifier).toBe("react-dom");
+    expect(findLocalDevBridgeRow("react-dom/server")).toBeUndefined();
   });
 });
 

@@ -492,7 +492,15 @@ export interface LocalDevModuleResolution {
    */
   readonly specifier: string;
   readonly resolution: LocalDevLocalResolutionKind;
-  /** The published package the ids resolve to locally. Required unless `unsupported`. */
+  /**
+   * The package or shim path the ids resolve to locally. Required unless
+   * `unsupported`.
+   *
+   * A `project-shim` names the module or file the project supplies instead of a
+   * package, which is why this is one field rather than a package name beside a
+   * path: the harness resolves both the same way, and `localDevAlignmentChecks`
+   * simply finds no installed version to compare for a shim.
+   */
   readonly localPackage?: string;
   /**
    * The recorded field the local package's version is checked against, when one
@@ -573,12 +581,34 @@ export const LOCAL_DEV_HOST_RESOLUTION_MODEL = {
   note: "The compile path and the dev path ask the same question of the same row — which module id is host-provided — and then answer it differently on purpose: the artifact binds the page's object, and the dev harness resolves the published package. Keeping one table is what stops a row being added for one path and forgotten in the other.",
 } as const;
 
+/**
+ * The bridge row a local resolution projects, or `undefined`.
+ *
+ * The non-throwing half of {@link localDevModuleIdsOf}, and the split is the
+ * point rather than an accident: a **guard** has to fail loudly on a row that does
+ * not exist, while a **report** has to survive the same input long enough to
+ * describe it. Anything derived after the coverage guard therefore goes through
+ * here, or an orphan resolution row turns into an exception and takes the rest of
+ * the audit with it.
+ *
+ * `undefined` rather than a default, for the reason
+ * {@link findLocalDevModuleIdResolution} returns one: a specifier the table does
+ * not carry has no bridge row, and inventing one would make an orphan look
+ * covered.
+ */
+export function findLocalDevBridgeRow(
+  specifier: string,
+  mappings: readonly HostBridgeMapping[] = HOST_BRIDGE_MAPPINGS,
+): HostBridgeMapping | undefined {
+  return mappings.find(candidate => candidate.specifier === specifier);
+}
+
 /** Every module id a resolution row covers, read from the bridge table. */
 export function localDevModuleIdsOf(
   specifier: string,
   mappings: readonly HostBridgeMapping[] = HOST_BRIDGE_MAPPINGS,
 ): readonly string[] {
-  const mapping = mappings.find(candidate => candidate.specifier === specifier);
+  const mapping = findLocalDevBridgeRow(specifier, mappings);
   if (mapping === undefined) {
     throw new LocalDevRuntimeContractError(
       "mapping-coverage",
@@ -586,6 +616,22 @@ export function localDevModuleIdsOf(
     );
   }
   return hostBridgeModuleIds(mapping);
+}
+
+/**
+ * The module ids of a row, or none when the row does not exist.
+ *
+ * The tolerant form, used by every derivation the audit performs *after* the
+ * coverage guard. An orphan row contributes no module ids rather than a fabricated
+ * one: the guard is what reports that the row exists, and these lists are the
+ * harness's worklist, which cannot contain a module id nothing resolves.
+ */
+function moduleIdsOfExistingRow(
+  specifier: string,
+  mappings: readonly HostBridgeMapping[],
+): readonly string[] {
+  const mapping = findLocalDevBridgeRow(specifier, mappings);
+  return mapping === undefined ? [] : hostBridgeModuleIds(mapping);
 }
 
 /**
@@ -654,24 +700,32 @@ export function assertLocalDevResolutionsCoverHostBridge(
   }
 }
 
-/** A module id the dev harness can stand in for. */
+/**
+ * A module id the dev harness can stand in for.
+ *
+ * Tolerant of an orphan resolution row, because this is one of the lists the
+ * audit derives after the coverage guard has run: a row whose specifier the table
+ * does not carry contributes nothing here, and
+ * `local-dev-mapping-coverage` is what says so. Reporting the orphan *and* handing
+ * back a worklist the harness cannot act on are different jobs.
+ */
 export function localDevResolvableModuleIds(
   resolutions: readonly LocalDevModuleResolution[] = LOCAL_DEV_MODULE_RESOLUTIONS,
   mappings: readonly HostBridgeMapping[] = HOST_BRIDGE_MAPPINGS,
 ): readonly string[] {
   return resolutions
     .filter(resolution => resolution.resolution !== "unsupported")
-    .flatMap(resolution => localDevModuleIdsOf(resolution.specifier, mappings));
+    .flatMap(resolution => moduleIdsOfExistingRow(resolution.specifier, mappings));
 }
 
-/** A module id the table intercepts and no local resolution covers. */
+/** A module id the table intercepts and no local resolution covers. Tolerant, for the reason above. */
 export function localDevUnsupportedModuleIds(
   resolutions: readonly LocalDevModuleResolution[] = LOCAL_DEV_MODULE_RESOLUTIONS,
   mappings: readonly HostBridgeMapping[] = HOST_BRIDGE_MAPPINGS,
 ): readonly string[] {
   return resolutions
     .filter(resolution => resolution.resolution === "unsupported")
-    .flatMap(resolution => localDevModuleIdsOf(resolution.specifier, mappings));
+    .flatMap(resolution => moduleIdsOfExistingRow(resolution.specifier, mappings));
 }
 
 /** The bridge rows whose local substitution carries a version check. */
@@ -868,10 +922,14 @@ export interface LocalDevStrategyHandling {
  *
  * `extension` is the entry #22 names explicitly ("surface dependency decisions so
  * `extension` packages can either use an explicit local shim/npm source or be
- * marked as requiring real-runtime validation"), and it is the only one that can
- * leave a local configuration incomplete: the harness cannot invent a substitute,
- * because the reason the package is an `extension` in the first place is that its
- * module identity or its cross-cell singleton semantics matter.
+ * marked as requiring real-runtime validation"). Both halves of that sentence are a
+ * `LocalDevExtensionChoice`, and it is the only entry that can leave a local
+ * configuration *incomplete* rather than merely inexact: the harness cannot invent
+ * a substitute, because the reason the package is an `extension` in the first place
+ * is that its module identity or its cross-cell singleton semantics matter. So the
+ * project declares one of the two branches, and an undeclared package is reported as
+ * an omission — which is a different finding from a declared `real-runtime-only`, and
+ * has to stay different or the report teaches people to ignore it.
  */
 export const LOCAL_DEV_STRATEGY_HANDLINGS: readonly LocalDevStrategyHandling[] = [
   {
@@ -893,9 +951,9 @@ export const LOCAL_DEV_STRATEGY_HANDLINGS: readonly LocalDevStrategyHandling[] =
     strategy: "extension",
     localHandling: "local-substitute-required",
     requiresFromTheProject:
-      "A local substitute — the published package or a project shim — or an explicit acknowledgement that this dependency needs real-runtime validation.",
+      "One of two recorded choices per package (`LocalDevExtensionChoice`): a local substitute — the published package or a project shim — with its justification, or a `real-runtime-only` acknowledgement saying why no stand-in is used and what stays unexercised.",
     localClaim:
-      "Only that the cell compiles and renders against whatever the substitute is. Nothing about the extension: not its global name in this project, not its version, and not whether the ReactCellType reference resolves at load time.",
+      "Only that the cell compiles and renders against whatever the substitute is. Nothing about the extension: not its global name in this project, not its version, and not whether the ReactCellType reference resolves at load time. Under `real-runtime-only` the local claim is narrower still — the dependency is not exercised at all.",
     realRuntimeClaimedBy:
       "#13 (the extension PoC) and #12's contract, which own the `frontendLibraries` reference and the load-time global.",
   },
@@ -961,23 +1019,113 @@ export function localDevHandlingForStrategy(strategy: DependencyStrategy): Local
 }
 
 /**
- * What a local stand-in for an `extension` dependency is, declared rather than
- * inferred.
+ * What the project decided about an `extension` dependency in local development.
  *
- * A bare "use npm instead" would be the harness deciding that a deployment
- * difference does not matter, which is not the harness's call to make: the project
- * is the only party that knows whether the singleton semantics its cell relies on
- * are exercised locally. So a substitute carries a justification, and the audit
- * reports its absence rather than assuming the published package will do.
+ * #22 asks for exactly two outcomes, and the type is the pair rather than a single
+ * record because the second outcome is a *decision* and not a missing field:
+ * "an `extension` package can either use an explicit local shim/npm source or be
+ * marked as requiring real-runtime validation". A model with only a substitute
+ * makes the second branch unrepresentable, and the consequence is specific — every
+ * project that deliberately left the dependency to real-runtime validation would be
+ * reported as if it had forgotten to configure something, and a diagnostic that
+ * cannot tell a decision from an omission teaches people to ignore it.
+ *
+ * Both members carry prose the harness cannot supply on the project's behalf. A
+ * bare "use npm instead" would be the harness deciding that a deployment difference
+ * does not matter, and the project is the only party that knows whether the
+ * singleton semantics its cell relies on are exercised locally.
  */
-export interface LocalDevSubstitute {
+export const LOCAL_DEV_EXTENSION_CHOICE_MODES = ["substitute", "real-runtime-only"] as const;
+
+export type LocalDevExtensionChoiceMode = (typeof LOCAL_DEV_EXTENSION_CHOICE_MODES)[number];
+
+/** The project stands the extension global in for locally. */
+export interface LocalDevExtensionSubstitute {
   /** The package whose decision is `extension`. */
   readonly packageName: string;
+  readonly mode: "substitute";
   readonly kind: "npm-package" | "project-shim";
   /** What the substitute resolves to locally. */
   readonly resolvesTo: string;
   /** Why this is an acceptable stand-in for local UI work. */
   readonly justification: string;
+}
+
+/**
+ * The project accepts that this dependency cannot be exercised locally.
+ *
+ * `consequence` is required and separate from `reason` because the two answer
+ * different questions: *why* the extension has no local equivalent, and *what the
+ * developer will not be able to see*. The second is what a teammate needs, and it is
+ * the one an acknowledgement written in a hurry leaves out.
+ */
+export interface LocalDevExtensionRealRuntimeOnly {
+  readonly packageName: string;
+  readonly mode: "real-runtime-only";
+  /** Why no local stand-in is used. */
+  readonly reason: string;
+  /** What this leaves unexercised, stated for whoever reads the audit next. */
+  readonly consequence: string;
+}
+
+export type LocalDevExtensionChoice = LocalDevExtensionSubstitute | LocalDevExtensionRealRuntimeOnly;
+
+/**
+ * What is missing from an `extension` choice, or `undefined` when it is a decision.
+ *
+ * A validator rather than a boolean, so the audit can say *which* part of the
+ * declaration is absent. An acknowledgement with an empty `reason` is not a
+ * decision with a terse author, it is an omission that has learned the vocabulary —
+ * which is why the audit counts a choice that fails here as *not declared* rather
+ * than as declared-and-slightly-thin.
+ */
+export function localDevExtensionChoiceProblem(choice: LocalDevExtensionChoice): string | undefined {
+  if (choice.packageName.trim().length === 0) return "it names no package";
+
+  // Read the mode through `string` rather than straight off the union. A mode the
+  // union does not have can only arrive from untyped data — a JSON project config —
+  // and falling off the switch below would read as "no problem", which is the exact
+  // silent pass this validator exists to prevent. Same reasoning as the shape guards
+  // that read a mapping through an untyped view.
+  const mode: string = choice.mode;
+  if (!(LOCAL_DEV_EXTENSION_CHOICE_MODES as readonly string[]).includes(mode)) {
+    return `the mode "${mode}" is not one of the two branches #22 allows`;
+  }
+
+  switch (choice.mode) {
+    case "substitute":
+      if (choice.resolvesTo.trim().length === 0) return "the substitute names nothing to resolve to";
+      if (choice.justification.trim().length === 0) return "the substitute gives no justification";
+      return undefined;
+    case "real-runtime-only":
+      if (choice.reason.trim().length === 0) return "the acknowledgement gives no reason";
+      if (choice.consequence.trim().length === 0) {
+        return "the acknowledgement states no consequence, so nothing says what it leaves unexercised";
+      }
+      return undefined;
+  }
+}
+
+/**
+ * Refuse an `extension` choice that is not a decision.
+ *
+ * The structural defence behind #22's two valid branches: without it, the
+ * `real-runtime-only` mode could be reached by writing the mode and nothing else,
+ * and the repository would have traded one unrepresentable state for one that is
+ * representable but empty.
+ */
+export function assertLocalDevExtensionChoicesAreDeclared(
+  choices: readonly LocalDevExtensionChoice[] = [],
+): void {
+  for (const choice of choices) {
+    const problem = localDevExtensionChoiceProblem(choice);
+    if (problem !== undefined) {
+      throw new LocalDevRuntimeContractError(
+        "extension-choice-not-declared",
+        `The local choice for "${choice.packageName || "(unnamed)"}" (${choice.mode}) is not a decision: ${problem}.`,
+      );
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1183,6 +1331,7 @@ export const LOCAL_DEV_DIAGNOSTIC_CODES = [
   "local-dev-no-local-stand-in",
   "local-dev-deferred-host-module",
   "local-dev-extension-needs-substitute",
+  "local-dev-extension-real-runtime-only",
   "local-dev-host-version-mismatch",
   "local-dev-mock-surface-incomplete",
 ] as const;
@@ -1240,12 +1389,22 @@ export const LOCAL_DEV_DIAGNOSTIC_RULES: Readonly<Record<LocalDevDiagnosticCode,
   },
   "local-dev-extension-needs-substitute": {
     code: "local-dev-extension-needs-substitute",
-    label: "An `extension` dependency has no declared local substitute",
-    states: "A dependency decision is `extension` and the project declared no local stand-in for it.",
+    label: "An `extension` dependency has no declared local choice",
+    states:
+      "A dependency decision is `extension` and the project declared neither a substitute nor a `real-runtime-only` acknowledgement for it — or declared one that is not a decision.",
     remediation:
-      "Declare a substitute with its justification, or mark the dependency as requiring real-runtime validation. A harness cannot choose for the project: whether the singleton semantics the cell relies on are exercised locally is not a fact the harness can observe.",
+      "Declare one of the two branches: a substitute with its justification, or a `real-runtime-only` acknowledgement with its reason and its consequence. A harness cannot choose for the project — whether the singleton semantics the cell relies on are exercised locally is not a fact it can observe — but silence is not a choice either, which is why an empty acknowledgement counts as this finding rather than as the one below.",
     fixOwner: "dependency-decision",
     blocksLocalDevelopment: true,
+  },
+  "local-dev-extension-real-runtime-only": {
+    code: "local-dev-extension-real-runtime-only",
+    label: "An `extension` dependency is deliberately left to real-runtime validation",
+    states: "The project recorded a `real-runtime-only` choice for this package.",
+    remediation:
+      "Nothing to fix — this is the second of the two branches #22 allows, and it is deliberately non-blocking. It is reported rather than dropped so the audit's output distinguishes a decision from an omission, and so whoever reads it knows which dependency the local loop cannot exercise at all.",
+    fixOwner: "dependency-decision",
+    blocksLocalDevelopment: false,
   },
   "local-dev-host-version-mismatch": {
     code: "local-dev-host-version-mismatch",
@@ -1301,8 +1460,15 @@ export interface LocalDevAuditInput {
   readonly mappings?: readonly HostBridgeMapping[];
   /** The decisions the project's lock carries, when the caller knows them. */
   readonly decisions?: readonly DependencyDecision[];
-  /** The local stand-ins the project declared for its `extension` dependencies. */
-  readonly substitutes?: readonly LocalDevSubstitute[];
+  /**
+   * What the project decided about each of its `extension` dependencies.
+   *
+   * Both of #22's branches arrive here — a substitute and a `real-runtime-only`
+   * acknowledgement are the same field with different modes — because a project that
+   * chose the second branch is not missing a value, and an input shape that could not
+   * express its choice would report a recorded decision as an omission.
+   */
+  readonly extensionChoices?: readonly LocalDevExtensionChoice[];
   /** The versions the local process actually resolved, keyed by package name. */
   readonly installedVersions?: Readonly<Record<string, string>>;
   /** The mock host surface, when one is configured. */
@@ -1326,6 +1492,14 @@ export interface LocalDevAudit {
   readonly unresolved: readonly string[];
   /** The version comparisons the harness has to make, with #5's expected values. */
   readonly alignment: readonly LocalDevAlignmentExpectation[];
+  /**
+   * The packages the project deliberately left to real-runtime validation.
+   *
+   * Separate from {@link diagnostics} because it is not a problem: it is the list of
+   * dependencies the local loop provably cannot exercise, which a report has to be
+   * able to print without calling them findings.
+   */
+  readonly realRuntimeOnly: readonly string[];
   /** Everything the local loop cannot establish, for a report. */
   readonly owed: readonly LocalDevOwedCheck[];
 }
@@ -1338,11 +1512,17 @@ export interface LocalDevAudit {
  * that abandons the rest of the audit. So the table guards are called and their
  * throws converted, and the checks that need a caller-supplied input abstain when
  * it was not supplied rather than treating "not stated" as "empty".
+ *
+ * The no-throw promise covers the *whole* function, not only the guards it calls
+ * explicitly, and that is a stronger statement than it looks: an input bad enough
+ * to trip the coverage guard is exactly the input the derivations below still have
+ * to survive, which is why they go through `moduleIdsOfExistingRow` rather than
+ * through `localDevModuleIdsOf`. A report that throws while describing a problem has
+ * replaced its own diagnostic with a stack trace.
  */
 export function auditLocalDevConfiguration(input: LocalDevAuditInput = {}): LocalDevAudit {
   const resolutions = input.resolutions ?? LOCAL_DEV_MODULE_RESOLUTIONS;
   const mappings = input.mappings ?? HOST_BRIDGE_MAPPINGS;
-  const substitutes = input.substitutes ?? [];
   const diagnostics: LocalDevDiagnostic[] = [];
 
   try {
@@ -1387,17 +1567,51 @@ export function auditLocalDevConfiguration(input: LocalDevAuditInput = {}): Loca
     );
   }
 
-  const substituteNames = new Set(substitutes.map(substitute => substitute.packageName));
+  // Split into the choices that are decisions and the ones that only look like
+  // them. A choice that fails the validator does not count as declaring anything:
+  // otherwise `real-runtime-only` would be reachable by writing the mode and nothing
+  // else, and the repository would have traded one unrepresentable state for a
+  // representable but empty one.
+  const declaredChoices = new Map<string, LocalDevExtensionChoice>();
+  const malformedChoices = new Map<string, string>();
+  for (const choice of input.extensionChoices ?? []) {
+    const problem = localDevExtensionChoiceProblem(choice);
+    if (problem === undefined) {
+      declaredChoices.set(choice.packageName, choice);
+    } else {
+      malformedChoices.set(choice.packageName, problem);
+    }
+  }
+
+  const realRuntimeOnly: string[] = [];
   for (const decision of input.decisions ?? []) {
     if (decision.strategy !== "extension") continue;
-    if (substituteNames.has(decision.packageName)) continue;
-    diagnostics.push(
-      createLocalDevDiagnostic(
-        "local-dev-extension-needs-substitute",
-        decision.packageName,
-        `The decision is \`extension\` and no local substitute is declared, so the cell cannot be exercised locally as written. Declaring a substitute records why the published package or shim is an acceptable stand-in; declining to declare one records that this dependency needs real-runtime validation.`,
-      ),
-    );
+
+    const choice = declaredChoices.get(decision.packageName);
+    if (choice === undefined) {
+      const problem = malformedChoices.get(decision.packageName);
+      diagnostics.push(
+        createLocalDevDiagnostic(
+          "local-dev-extension-needs-substitute",
+          decision.packageName,
+          problem === undefined
+            ? "The decision is `extension` and no local choice is declared, so the cell cannot be exercised locally as written. Declaring a substitute records why the published package or shim is an acceptable stand-in; declaring `real-runtime-only` records that validation happens on the page instead."
+            : `The decision is \`extension\` and the declared choice is not a decision: ${problem}. An acknowledgement with no content is an omission that has learned the vocabulary, so it is reported as one.`,
+        ),
+      );
+      continue;
+    }
+
+    if (choice.mode === "real-runtime-only") {
+      realRuntimeOnly.push(choice.packageName);
+      diagnostics.push(
+        createLocalDevDiagnostic(
+          "local-dev-extension-real-runtime-only",
+          choice.packageName,
+          `Recorded as needing real-runtime validation: ${choice.reason} Consequently ${choice.consequence}`,
+        ),
+      );
+    }
   }
 
   const alignment = localDevAlignmentChecks(resolutions);
@@ -1435,6 +1649,7 @@ export function auditLocalDevConfiguration(input: LocalDevAuditInput = {}): Loca
     resolvable: localDevResolvableModuleIds(resolutions, mappings),
     unresolved: unsupported,
     alignment,
+    realRuntimeOnly,
     owed: localDevRealRuntimeOwedChecks(),
   };
 }
@@ -1449,6 +1664,9 @@ export function formatLocalDevAudit(audit: LocalDevAudit): string {
     audit.alignment.length === 0
       ? "No version check is available."
       : `Version checks: ${audit.alignment.map(entry => `${entry.localPackage}===${entry.expected}`).join(", ")}`,
+    audit.realRuntimeOnly.length === 0
+      ? "No extension dependency is left to real-runtime validation."
+      : `Left to real-runtime validation by decision: ${audit.realRuntimeOnly.join(", ")}`,
     audit.diagnostics.length === 0
       ? "No local dev diagnostics."
       : `${audit.diagnostics.length} local dev diagnostic(s):\n${formatLocalDevDiagnostics(audit.diagnostics)}`,
@@ -1524,6 +1742,7 @@ export const LOCAL_DEV_CONTRACT_ERROR_CODES = [
   "loop-stage-not-admissible",
   "mapping-coverage",
   "strategy-handling-coverage",
+  "extension-choice-not-declared",
   "claim-not-local",
   "mock-surface-incomplete",
   "provider-is-not-a-mock",
