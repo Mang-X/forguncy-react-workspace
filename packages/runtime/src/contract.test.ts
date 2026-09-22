@@ -61,9 +61,11 @@ function forguncyMembers(
 function mockCellProps(overrides: Partial<RuntimeFacadeCellProps> = {}): RuntimeFacadeCellProps {
   return {
     Forguncy: forguncyMembers(),
-    Permissions: [],
+    // The shapes an executed page hands a Cell for the two always-injected value props:
+    // an empty record rather than an array, and an empty object rather than `undefined`.
+    Permissions: {},
     ServerCommands: {},
-    ImageContext: undefined,
+    ImageContext: {},
     ...overrides,
   };
 }
@@ -148,7 +150,7 @@ describe("the confirmed server-command call shape", () => {
 // public facade."
 describe("the provider boundary", () => {
   it("makes the host and the mock the same type, so a consumer cannot tell them apart", () => {
-    const host = providerOf("host", { cellProps: { Permissions: [{ key: "Orders.Read" }] } });
+    const host = providerOf("host", { cellProps: { Permissions: { "Orders.Read": true } } });
     const mock = providerOf("mock");
 
     expect(host.kind).toBe("host");

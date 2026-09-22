@@ -73,7 +73,10 @@ function hostShapeProvider(): RuntimeFacadeProvider {
 
   const cellProps = {
     Forguncy: handle,
-    Permissions: [{ key: "Orders.Read" }],
+    // The shapes an executed page hands a Cell: `Permissions` is a record of configured
+    // name to boolean (not an array of descriptors) and `ImageContext` is an empty
+    // object when no image is configured (not `undefined`).
+    Permissions: { "Orders.Read": true },
     ServerCommands: {
       GetSalesData: async (payload: Readonly<Record<string, unknown>>) => ({
         errorCode: 0,
@@ -81,7 +84,7 @@ function hostShapeProvider(): RuntimeFacadeProvider {
         payload,
       }),
     },
-    ImageContext: undefined,
+    ImageContext: {},
   } as unknown as RuntimeFacadeCellProps;
 
   // The Cell's own wrapper-local, as the host injects it: the page declares

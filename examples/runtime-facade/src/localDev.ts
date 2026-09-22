@@ -59,7 +59,12 @@ export function createLocalDevProvider(): RuntimeFacadeProvider {
       // to paper over.
       getPermissions: (): Partial<Record<string, boolean>> => ({ "Orders.Read": true }),
     },
-    cellProps: { Permissions: [{ key: "Orders.Read" }] },
+    // `props.Permissions` is the snapshot the runtime injects as a base prop: a plain
+    // record of configured name to boolean, `{}` when nothing is configured. Observed
+    // in an executed page, and the same object `getPermissions()` answers with — so a
+    // harness that stood in with an array of `{ key }` would have been describing a
+    // host that does not exist.
+    cellProps: { Permissions: { "Orders.Read": true } },
     serverCommands: {
       GetSalesData: async payload => ({ errorCode: 0, errorMessage: "OK", payload }),
     },

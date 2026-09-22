@@ -49,13 +49,16 @@ describe("mock provider shape", () => {
     expect((caught as RuntimeFacadeContractError).code).toBe("unknown-host-binding");
   });
 
-  // A value prop the mock was not given stays `undefined` rather than being
-  // defaulted: #5 pinned the key and left what an empty snapshot means open, so a
-  // default here would assert a shape on the host's behalf.
-  it("leaves an unsupplied value prop undefined instead of plausible", () => {
+  // The two value props the runtime injects as an empty *object* on every Cell, whatever
+  // the page configured. This used to default them to `undefined` on the argument that
+  // #5 left what an empty snapshot means open and a default would assert a shape on the
+  // host's behalf — an executed page closed that question: both arrive as `{}`, and the
+  // empty snapshot is empty rather than absent. A harness can still override either with
+  // `undefined` when it wants to exercise the resolver's presence rule.
+  it("defaults the two always-injected value props to the empty object the runtime sends", () => {
     const props = cellPropsOf(createMockRuntimeFacadeProvider());
-    expect(props.Permissions).toBeUndefined();
-    expect(props.ImageContext).toBeUndefined();
+    expect(props.Permissions).toEqual({});
+    expect(props.ImageContext).toEqual({});
     expect(props.ServerCommands).toEqual({});
   });
 

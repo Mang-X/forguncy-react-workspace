@@ -149,6 +149,14 @@ export function createMockRuntimeFacadeProvider<
     string,
     unknown
   >;
+  // Two of them are injected as an empty *object* on every Cell, including a Cell that
+  // configured nothing — an executed page handed a Cell `{}` for each of these. Leaving
+  // them `undefined` would make the mock a different host in the one direction a local
+  // harness must never lean: `Object.keys(props.Permissions)` throws locally and works
+  // in production. Defaulted before the override loop, so a harness that deliberately
+  // wants `undefined` can still ask for it and exercise the resolver's presence rule.
+  cellProps.Permissions = {};
+  cellProps.ImageContext = {};
   for (const [key, value] of Object.entries(options.cellProps ?? {})) {
     if (!(CELL_PROPS_BASE_KEYS as readonly string[]).includes(key)) {
       throw new RuntimeFacadeContractError(

@@ -317,7 +317,7 @@ describe("resolving through the installed provider", () => {
           // something to reach that is not also a typed member.
           getCurrentUser: () => ({ userName: "dev@example.com" }),
         },
-        cellProps: { Permissions: [{ key: "Orders.Read" }] },
+        cellProps: { Permissions: { "Orders.Read": true } },
         // The call shape #5 executed: one object argument.
         serverCommands: {
           GetSalesData: async payload => ({ errorCode: 0, errorMessage: "OK", echo: payload }),
@@ -329,14 +329,23 @@ describe("resolving through the installed provider", () => {
 
   it("reads a base prop under its confirmed name", () => {
     installMock();
-    expect(runtimeFacade().cellProp("Permissions")).toEqual([{ key: "Orders.Read" }]);
+    // The shape an executed page hands a Cell: a plain record of configured name to
+    // boolean, not an array of descriptors.
+    expect(runtimeFacade().cellProp("Permissions")).toEqual({ "Orders.Read": true });
   });
 
-  // The rule that separates a value prop from a function member: #5 pinned the
-  // key, and the emptiness of `Permissions` is an open question, so `undefined`
-  // is passed through rather than refused.
-  it("passes an undefined value prop through instead of inventing an error", () => {
+  // The rule that separates a value prop from a function member: the resolver answers
+  // *presence*, and what the value holds is the caller's to declare. The runtime
+  // injects `{}` for an unconfigured `ImageContext` and a harness may hand over
+  // `undefined`; neither is a missing binding, so neither is refused.
+  it("passes a value prop through whatever it holds instead of inventing an error", () => {
     installRuntimeFacadeProvider(createMockRuntimeFacadeProvider());
+    expect(runtimeFacade().cellProp("ImageContext")).toEqual({});
+
+    uninstallRuntimeFacadeProvider();
+    installRuntimeFacadeProvider(
+      createMockRuntimeFacadeProvider({ cellProps: { ImageContext: undefined } }),
+    );
     expect(runtimeFacade().cellProp("ImageContext")).toBeUndefined();
   });
 
@@ -520,7 +529,7 @@ describe("what the types refuse", () => {
           getPermissions: () => ({ "Orders.Read": true }),
           getCurrentUser: () => ({ userName: "dev@example.com" }),
         },
-        cellProps: { Permissions: [{ key: "Orders.Read" }] },
+        cellProps: { Permissions: { "Orders.Read": true } },
         serverCommands: { GetSalesData: async () => ({ errorCode: 0 }) },
       }),
     );
@@ -542,7 +551,9 @@ describe("what the types refuse", () => {
 
     // Both halves of the pair: un-declared is unusable, declared works.
     expect(runtimeFacade().forguncyMember("getCurrentUser")).toBeTypeOf("function");
-    expect(runtimeFacade().cellProp("Permissions")).toEqual([{ key: "Orders.Read" }]);
+    // The shape an executed page hands a Cell: a plain record of configured name to
+    // boolean, not an array of descriptors.
+    expect(runtimeFacade().cellProp("Permissions")).toEqual({ "Orders.Read": true });
     expect(
       runtimeFacade().forguncyMember<() => { userName: string }>("getCurrentUser")().userName,
     ).toBe("dev@example.com");
