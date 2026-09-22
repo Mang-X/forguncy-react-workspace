@@ -379,6 +379,87 @@ export function App() {
     expect(diagnostic?.subject).toBe("@tanstack/react-query");
     expect(diagnostic?.message).toContain("wrong-library");
   });
+
+  it("refuses an installed package inlined without a dependency decision", async () => {
+    // The review's regression case: a real npm package the fixture can resolve
+    // by ordinary lookup (it has its own `node_modules`), with no decision at
+    // all. #4 requires every non-workspace dependency to map to host | inline |
+    // extension | replace, so an undecided installed package must never reach
+    // `compiled` — `auditInlinedPackages` skips no-decision packages because
+    // workspace source legitimately has none, which is exactly the hole this
+    // test pins shut.
+    const dir = fixture("undecided-installed", {
+      "App.jsx": `import { value } from "sneaky-dep";
+
+export function App() {
+  return <i>{value}</i>;
+}
+`,
+      "node_modules/sneaky-dep/package.json": JSON.stringify({
+        name: "sneaky-dep",
+        version: "1.0.0",
+        main: "index.js",
+      }),
+      "node_modules/sneaky-dep/index.js": 'module.exports = { value: "from-sneaky" };\n',
+    });
+
+    const outcome = await compileFixture(dir, "App.jsx");
+
+    expect(outcome.status).toBe("rejected");
+    if (outcome.status !== "rejected") return;
+    expect(outcome.diagnostics.map(diagnostic => diagnostic.code)).toContain("unresolved-dependency-decision");
+    const diagnostic = outcome.diagnostics.find(item => item.code === "unresolved-dependency-decision");
+    expect(diagnostic?.subject).toBe("sneaky-dep");
+    expect(diagnostic?.message).toContain("no dependency decision covers it");
+  });
+
+  it("accepts an installed package inlined with an explicit inline decision", async () => {
+    const dir = fixture("decided-installed", {
+      "App.jsx": `import { value } from "sneaky-dep";
+
+export function App() {
+  return <i>{value}</i>;
+}
+`,
+      "node_modules/sneaky-dep/package.json": JSON.stringify({
+        name: "sneaky-dep",
+        version: "1.0.0",
+        main: "index.js",
+      }),
+      "node_modules/sneaky-dep/index.js": 'module.exports = { value: "from-sneaky" };\n',
+    });
+
+    const outcome = await compileFixture(dir, "App.jsx", [
+      { strategy: "inline", packageName: "sneaky-dep" },
+    ]);
+
+    expect(outcome.status).toBe("compiled");
+    if (outcome.status !== "compiled") return;
+    expect(outcome.artifact.code).toContain("from-sneaky");
+  });
+
+  it("accepts relative workspace source with no dependency decision", async () => {
+    // Workspace source (#14) needs no decision: it is source, not a runtime
+    // module, and the undecided-installed-package check above must not
+    // mistake it for one. The relative import never enters `inlinedPackages`
+    // (its module id carries no `node_modules` segment), so this test proves
+    // the new report is scoped to installed packages only.
+    const dir = fixture("workspace-source", {
+      "App.jsx": `import { label } from "./widget";
+
+export function App() {
+  return <i>{label}</i>;
+}
+`,
+      "widget.jsx": 'export const label = "from-workspace";\n',
+    });
+
+    const outcome = await compileFixture(dir, "App.jsx");
+
+    expect(outcome.status).toBe("compiled");
+    if (outcome.status !== "compiled") return;
+    expect(outcome.artifact.code).toContain("from-workspace");
+  });
 });
 
 /** The compiled artifact's code, for the narrowing-after-assert tests above. */

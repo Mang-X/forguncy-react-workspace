@@ -33,7 +33,15 @@
  *    as a `\0`-virtual CommonJS module, the `moduleType` the platform's own
  *    generated modules are written in. Findings the artifact audits cannot see
  *    from the output report alone are translated into #6's diagnostic
- *    vocabulary and returned in `BundledCellModule.diagnostics`.
+ *    vocabulary and returned in `BundledCellModule.diagnostics`. One such
+ *    finding is reported directly here: an installed package (resolved under
+ *    `node_modules`) that the bundler inlined with no `DependencyDecision`
+ *    covering it. #4 requires every non-workspace dependency to map to
+ *    `host | inline | extension | replace`; `auditInlinedPackages` cannot see
+ *    this case because a package with no decision is skipped there (workspace
+ *    source legitimately has none, #14), so the bundler's own module ids —
+ *    which distinguish workspace source from an installed package via
+ *    {@link resolvesIntoNodeModules} — are what make the report possible.
  *
  * What is deliberately *not* here: the two plan vocabularies are not collapsed
  * into #6's. A mapping finding ("this table row cannot be honoured") and an
@@ -44,14 +52,14 @@
  * {@link translateExtensionFinding}.
  */
 
-import { statSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import path from "node:path";
 
 import type { ExtensionExternalDiagnostic } from "@forguncy-react-workspace/core";
 import { rolldown, type OutputAsset, type OutputChunk } from "rolldown";
 
 import type { BundledCellModule, CellBundlerPort, CellBundlingRequest } from "./artifact";
-import { packageNameOfSpecifier } from "./artifact";
+import { findDependencyDecision, packageNameOfSpecifier } from "./artifact";
 import type { CellArtifactDiagnostic } from "./diagnostics";
 import { createCellArtifactDiagnostic, dedupeCellArtifactDiagnostics } from "./diagnostics";
 import type { ExtensionExternalsPlan } from "./extension-externals";
@@ -263,6 +271,29 @@ function inlinedPackageNames(moduleIds: readonly string[]): string[] {
   // Sorted so the report is byte-stable like the code is: #7's determinism
   // criterion covers the whole compile result, not only its largest field.
   return [...packages].sort();
+}
+
+/**
+ * Whether a module id resolves, after following symlinks, to a real path under
+ * `node_modules`.
+ *
+ * The line between "installed package" and "workspace source reached through a
+ * `node_modules` symlink": #14's workspace packages are source and need no
+ * `DependencyDecision`, while an installed package without one must be refused
+ * (#4). Rolldown normally resolves symlinks to real paths — so workspace source
+ * already answers `false` here — but the `realpathSync` call is deliberate
+ * defence against a `preserveSymlinks` configuration that would leave the
+ * module id under `node_modules` while the real file lives elsewhere.
+ */
+function resolvesIntoNodeModules(moduleId: string): boolean {
+  try {
+    return realpathSync(moduleId).split(path.sep).join("/").includes(NODE_MODULES_MARKER);
+  } catch {
+    // A module id that cannot be resolved to a real path is judged on its own
+    // text: if it says `node_modules`, treat it as installed rather than
+    // silently accepting a package the decision layer never saw.
+    return moduleId.split(path.sep).join("/").includes(NODE_MODULES_MARKER);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -550,7 +581,8 @@ async function bundleWithRolldown(dir: string, request: CellBundlingRequest): Pr
     .map(candidate => candidate.fileName)
     .sort();
   const externalImports = [...entryChunk.imports].sort();
-  const inlinedPackages = inlinedPackageNames(Object.keys(entryChunk.modules));
+  const moduleIds = Object.keys(entryChunk.modules);
+  const inlinedPackages = inlinedPackageNames(moduleIds);
 
   const translated: (CellArtifactDiagnostic | undefined)[] = [];
   for (const finding of [...hostFindings.values()].sort((a, b) =>
@@ -560,6 +592,23 @@ async function bundleWithRolldown(dir: string, request: CellBundlingRequest): Pr
   }
   for (const finding of [...extensionFindings.values()].sort(byCodeThenSubject)) {
     translated.push(translateExtensionFinding(finding));
+  }
+  // Every installed package the bundler inlined must have a decision. This is
+  // the case `auditInlinedPackages` cannot see: a package with no decision is
+  // skipped there, because workspace source legitimately has none (#14). The
+  // module ids are what distinguish the two — workspace source resolves outside
+  // `node_modules`, an installed package does not — so the check lives here,
+  // where the ids are still in hand.
+  for (const packageName of inlinedPackages) {
+    if (findDependencyDecision(decisions, packageName) !== undefined) continue;
+    const moduleId = moduleIds.find(id => packageNameOfModuleId(id) === packageName);
+    if (moduleId !== undefined && resolvesIntoNodeModules(moduleId)) {
+      translated.push(
+        createCellArtifactDiagnostic("unresolved-dependency-decision", packageName, {
+          detail: `The bundle inlined "${packageName}" from an installed dependency, but no dependency decision covers it.`,
+        }),
+      );
+    }
   }
   const diagnostics = dedupeCellArtifactDiagnostics(
     translated.filter((diagnostic): diagnostic is CellArtifactDiagnostic => diagnostic !== undefined),
