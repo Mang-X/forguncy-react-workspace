@@ -24,6 +24,7 @@ import { CELL_FORGUNCY_PROP_KEYS, CELL_PROPS_BASE_KEYS } from "@forguncy-react-w
  */
 import {
   canReadOrders,
+  readOrderPermissions,
   refreshOrders,
   useOrdersSummary,
 } from "../../../examples/runtime-facade/src/orders";
@@ -31,6 +32,7 @@ import { createLocalDevProvider } from "../../../examples/runtime-facade/src/loc
 import type { OrdersSummary } from "../../../examples/runtime-facade/src/orders";
 
 import type { DataSourceBinding, RuntimeFacadeCellProps, RuntimeFacadeProvider } from "./contract";
+import { runtimeFacade } from "./facade";
 import { createHostRuntimeFacadeProvider } from "./host-provider";
 import { installRuntimeFacadeProvider, uninstallRuntimeFacadeProvider } from "./provider";
 
@@ -54,7 +56,15 @@ function hostShapeProvider(): RuntimeFacadeProvider {
     string,
     unknown
   >;
-  handle.hasPermission = async (permissionName: string) => permissionName === "Orders.Read";
+  // Synchronous, because the host's are: #5 recorded `hasPermission(…)` → `true` and
+  // `getPermissions()` → `{"ProbePermission": true}` with no `await`, beside a command
+  // call the same section reports as `await … resolved in 185 ms`. A harness that
+  // resolved them would be more permissive than the target and would let authored
+  // source await something that is not a promise — which is exactly the drift the
+  // equality test below exists to catch, so the harness must model it rather than
+  // smooth it over.
+  handle.hasPermission = (permissionName: string) => permissionName === "Orders.Read";
+  handle.getPermissions = (): Record<string, boolean> => ({ "Orders.Read": true });
 
   const cellProps = {
     Forguncy: handle,
@@ -109,14 +119,21 @@ async function readThroughExample(): Promise<{
   };
   readonly refresh: { readonly errorCode: unknown; readonly errorMessage: unknown };
   readonly canRead: boolean;
+  readonly permissions: Readonly<Record<string, boolean>>;
 }> {
   const summary = useOrdersSummary(3);
   const refresh = await refreshOrders({ top: 3 });
-  const canRead = await canReadOrders();
+  // No `await` on either, and that is the assertion rather than a style: both are
+  // confirmed *synchronous* calls, so the authored source has nothing to await. A
+  // re-introduced promise would still satisfy an `await` here and would only be caught
+  // by the type check, which is why the example's own return types are pinned too.
+  const canRead = canReadOrders();
+  const permissions = readOrderPermissions();
   return {
     summary: { rows: summary.rows.length, totalCount: summary.totalCount, error: summary.error },
     refresh: { errorCode: refresh.errorCode, errorMessage: refresh.errorMessage },
     canRead,
+    permissions,
   };
 }
 
@@ -144,6 +161,28 @@ describe("the server-command example", () => {
     expect(result.summary.error).toBeNull();
     expect(result.refresh).toEqual({ errorCode: 0, errorMessage: "OK" });
     expect(result.canRead).toBe(true);
+    expect(result.permissions).toEqual({ "Orders.Read": true });
+  });
+
+  /**
+   * The two calls the review corrected, asserted at the point of use.
+   *
+   * A promise-returning `hasPermission` would still satisfy an `await` and still
+   * satisfy `.toBe(true)` after one, so "the example works" cannot distinguish it —
+   * which is exactly why the first draft of this example passed while contradicting
+   * #5. The check that does distinguish it is that the member is not thenable, because
+   * a synchronous answer is the shape the probe actually recorded.
+   */
+  it("reaches the host's permission calls synchronously, as #5 recorded them", () => {
+    installRuntimeFacadeProvider(hostShapeProvider());
+
+    const granted = runtimeFacade().hasPermission("Orders.Read");
+    const permissions = runtimeFacade().getPermissions();
+
+    expect(granted).toBe(true);
+    expect(permissions).toEqual({ "Orders.Read": true });
+    expect(granted).not.toBeInstanceOf(Promise);
+    expect(permissions).not.toBeInstanceOf(Promise);
   });
 
   /**

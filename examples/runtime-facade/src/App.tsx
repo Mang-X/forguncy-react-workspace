@@ -17,14 +17,21 @@
  * package's test suite.
  */
 
-import { refreshOrders, useOrdersSummary } from "./orders";
+import { canReadOrders, readOrderPermissions, refreshOrders, useOrdersSummary } from "./orders";
 
 export function App() {
   const summary = useOrdersSummary(3);
+  // Synchronous, and that is the point of showing it here: the permission check is
+  // a confirmed call, so there is no `await`, no loading state to invent and no
+  // declaration to write. A `useState` holder for a promise would be the shape the
+  // first draft of this example had, and it was not what #5 recorded.
+  const mayRead = canReadOrders();
+  const permissions = readOrderPermissions();
 
   return (
     <section>
       <h2>本月销售</h2>
+      {mayRead ? null : <p role="alert">当前用户没有 Orders.Read 权限。</p>}
       {summary.error ? (
         <p role="alert">销售数据不可用：{String(summary.error)}</p>
       ) : (
@@ -34,6 +41,7 @@ export function App() {
           ))}
         </ul>
       )}
+      <p>权限：{Object.entries(permissions).map(([name, granted]) => `${name}=${granted}`).join("、")}</p>
       <ExportButton />
     </section>
   );

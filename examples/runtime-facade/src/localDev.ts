@@ -44,9 +44,15 @@ const SALES_ROWS = [
 export function createLocalDevProvider(): RuntimeFacadeProvider {
   return createMockRuntimeFacadeProvider<AppServerCommands>({
     forguncyMembers: {
-      // Declared the same way the authored source declares it — this project's
-      // expectation, in one place on each side.
-      hasPermission: async (permissionName: string) => permissionName === "Orders.Read",
+      // Both synchronous, because both are synchronous on the host: #5 recorded
+      // `hasPermission(…)` → `true` and `getPermissions()` → `{"ProbePermission": true}`
+      // with no `await`, unlike the command call beside them. A mock that returned
+      // promises would be *more* permissive than the target, which is the one
+      // direction a local harness must never lean — it would teach authored source to
+      // await something that is not a promise, and the mistake would only surface on a
+      // real page.
+      hasPermission: (permissionName: string) => permissionName === "Orders.Read",
+      getPermissions: (): Record<string, boolean> => ({ "Orders.Read": true }),
     },
     cellProps: { Permissions: [{ key: "Orders.Read" }] },
     serverCommands: {

@@ -171,6 +171,18 @@ export type RuntimeFacadeHostBinding =
  * three executed `useDataSource` calls, so it is not, and keeping an unused level
  * would have implied coverage this contract does not have.
  *
+ * The same correction had to be made one address over, and it is recorded here
+ * because the mistake is structural rather than clerical: `permission-check` and
+ * the `getPermissions` address of `permission-snapshot` were first written as
+ * `member-presence`, because the summary this module derives its key lists from
+ * records only the *names* on the `props.Forguncy` handle. #5's own comments
+ * record both being called (`hasPermission("ProbePermission")` → `true`,
+ * `getPermissions()` → `{"ProbePermission": true}`, neither awaited), so the level
+ * was wrong in the direction that matters: it told a reader nothing was run at the
+ * exact place a call shape was available. The rule that follows is that a level is
+ * set from the executed call, never from the key list — and, since a level is per
+ * capability, two addresses with different evidence cannot share one.
+ *
  * There is deliberately no "expected" or "conventional" member: collapsing the
  * levels is what would make the façade's types look stronger than the evidence
  * behind them.
@@ -263,6 +275,7 @@ export const RUNTIME_FACADE_FAMILIES: readonly RuntimeFacadeFamily[] = [
       "data-source-binding",
       "permission-snapshot",
       "permission-check",
+      "permission-map-read",
       "current-user",
       "session-control",
       "file-upload",
@@ -344,6 +357,7 @@ export const RUNTIME_FACADE_CAPABILITY_IDS = [
   "data-source-binding",
   "permission-snapshot",
   "permission-check",
+  "permission-map-read",
   "current-user",
   "session-control",
   "file-upload",
@@ -397,12 +411,9 @@ export const RUNTIME_FACADE_CAPABILITIES: readonly RuntimeFacadeCapability[] = [
         "#4 records permissions as host-resolved context a cell must consume rather than recompute; `Permissions` is a base prop key, and #5 records its emptiness as an open question instead of a second meaning.",
     },
     confirmation: "member-presence",
-    hostBindings: [
-      { kind: "cell-prop", prop: "Permissions" },
-      { kind: "forguncy-member", member: "getPermissions" },
-    ],
+    hostBindings: [{ kind: "cell-prop", prop: "Permissions" }],
     evidenceSources: ["cell-props-key-order", "forguncy-prop-facade"],
-    note: "#5 leaves it open whether the snapshot can come back empty for a configured permission, so the façade must not treat an empty snapshot as a decided negative.",
+    note: "#5 leaves it open whether the snapshot can come back empty for a configured permission, so the façade must not treat an empty snapshot as a decided negative. The handle's `getPermissions()` returns the same map and *was* called, which is why it is not this capability's second address: a value prop and an executed call cannot share one confirmation level, so filing both here recorded the call as a mere name. It is `permission-map-read`.",
   },
   {
     id: "permission-check",
@@ -413,9 +424,25 @@ export const RUNTIME_FACADE_CAPABILITIES: readonly RuntimeFacadeCapability[] = [
       concern: "permissions",
       basis: "The check is the host's own evaluation, which is what #4 requires a cell to consume rather than reproduce.",
     },
-    confirmation: "member-presence",
+    confirmation: "call-shape",
     hostBindings: [{ kind: "forguncy-member", member: "hasPermission" }],
     evidenceSources: ["forguncy-prop-facade"],
+    note: "#5 executed `props.Forguncy.hasPermission(\"ProbePermission\")` and recorded the returned value — `true` for a configured, permitted name — **without** `await`, unlike the `ServerCommands` call recorded beside it, which the same section reports as `await … resolved in 185 ms`. So the call is synchronous and returns a boolean. What stays unpinned is the negative: the probe only ran a granted permission, so `false` for a denied name is what the return type implies rather than a case that was executed.",
+  },
+  {
+    id: "permission-map-read",
+    family: "cell-props-and-context",
+    summary: "Read every configured permission's boolean through the host handle.",
+    scope: {
+      kind: "application",
+      concern: "permissions",
+      basis:
+        "The same concern as the snapshot it mirrors: #4 puts the resolved permission set on Forguncy's side, and #5 records the map as one boolean per configured `permissions[].name`.",
+    },
+    confirmation: "call-shape",
+    hostBindings: [{ kind: "forguncy-member", member: "getPermissions" }],
+    evidenceSources: ["forguncy-prop-facade"],
+    note: "#5 executed `props.Forguncy.getPermissions()` and recorded `{\"ProbePermission\": true}` without `await`, so this is the synchronous map form of `permission-snapshot`. It is filed as its own capability because a confirmation is a property of the call, and this is a different call: the snapshot has no invocation to confirm, so one level could not honestly cover both — the same over-claim `data-source-binding` was corrected for, one address over.",
   },
   {
     id: "current-user",

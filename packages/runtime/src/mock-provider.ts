@@ -66,7 +66,14 @@ export type MockDataSourceResolver = (options?: DataSourceQueryOptions) => DataS
 export type MockStandInCellPropKey = Exclude<CellPropKey, "Forguncy" | "ServerCommands">;
 
 export interface MockRuntimeFacadeOptions<Commands extends ServerCommandParameterMap = Record<never, never>> {
-  /** Handle members the project wants to stand in for, by their confirmed names. */
+  /**
+   * Handle members the project wants to stand in for, by their confirmed names.
+   *
+   * A value that depends on `this` sees the mock's own handle, because that is what
+   * the façade binds the member to — the same receiver a host member would get. It
+   * is not the object literal the value was written in, which is the parity the host
+   * forces rather than a choice this module makes.
+   */
   readonly forguncyMembers?: Partial<Record<ForguncyPropMember, unknown>>;
   /** Value props the project wants to stand in for. */
   readonly cellProps?: Partial<Record<MockStandInCellPropKey, unknown>>;
@@ -156,7 +163,16 @@ export function createMockRuntimeFacadeProvider<
 
   const dataSources = options.dataSources ?? {};
   const useDataSource: DataSourceBinding = (dataSourceName, query) => {
-    const resolver = dataSources[dataSourceName];
+    // `Object.hasOwn`, for the same reason the façade asks it of `ServerCommands`: a
+    // data-source name is a string a caller supplies, so a bare read walks the
+    // prototype chain and `toString` / `constructor` answer with functions. The
+    // undeclared-source path below would then never be reached for them, and the
+    // mock would answer with a string where #5 records an error *state* — a local
+    // harness disagreeing with the host about a shape, which is the one thing it
+    // must not do.
+    const resolver = Object.hasOwn(dataSources, dataSourceName)
+      ? dataSources[dataSourceName]
+      : undefined;
     if (typeof resolver !== "function") {
       // The host's own shape for this case: an error state rather than a throw.
       return {

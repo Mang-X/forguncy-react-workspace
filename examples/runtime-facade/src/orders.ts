@@ -24,11 +24,15 @@
  *    what any command takes — so the parameter knowledge is this project's
  *    claim, written once, and a command the project forgot to declare is not
  *    callable at all.
- * 3. **The handle member's signature is declared at the point of use.**
- *    `hasPermission` was *observed* to exist and never called, so the façade
- *    returns `unknown` for it and the declaration below is the shape this project
- *    expects. That is the honest place for it: a human can correct one line here,
- *    whereas a signature inside the façade would read as evidence.
+ * 3. **A confirmed call shape is used as one.** #5 executed
+ *    `props.Forguncy.hasPermission("ProbePermission")` and recorded `true` — with no
+ *    `await`, where the `ServerCommands` call recorded in the same section is
+ *    reported as `await … resolved in 185 ms`. So the permission check is a
+ *    *synchronous* call whose return was observed, and the façade types it rather
+ *    than leaving the author to declare it. This file therefore contains no
+ *    `forguncyMember` declaration and no promise wrapper: the first draft of this
+ *    example had both, and they were wrong for the reason the registry's levels
+ *    exist to prevent — a shape nobody had run.
  * 4. **The data source is read through the façade's `useDataSource`**, which is
  *    the same confirmed wrapper-local under its own name — so this file needs no
  *    import for it and the local harness can supply it.
@@ -96,14 +100,28 @@ export async function refreshOrders(payload: Readonly<Record<string, unknown>> =
 }
 
 /**
- * Ask the host whether the current user holds a permission.
+ * Ask the host whether the current user holds the permission this Cell needs.
  *
- * The declared signature is this project's expectation, not the façade's claim:
- * #5 verified that `props.Forguncy.hasPermission` exists and did not call it, so
- * the façade resolves it to `unknown` until a shape is supplied here.
+ * Synchronous, and it declares nothing: #5 executed the call
+ * (`props.Forguncy.hasPermission("ProbePermission")` → `true`) and did not await it
+ * while awaiting the `ServerCommands` call recorded beside it, so the call shape is
+ * confirmed and the façade types it. The one case #5 never ran is a *denied*
+ * permission, so `false` here is what the return type claims rather than something
+ * that was observed.
  */
-export function canReadOrders(): Promise<boolean> {
-  const hasPermission =
-    runtimeFacade().forguncyMember<(permissionName: string) => Promise<boolean>>("hasPermission");
-  return hasPermission("Orders.Read");
+export function canReadOrders(): boolean {
+  return runtimeFacade().hasPermission("Orders.Read");
+}
+
+/**
+ * Every configured permission's boolean, through the host's own handle.
+ *
+ * The second confirmed call, and separately worth showing: `props.Permissions` and
+ * `props.Forguncy.getPermissions()` carry the same map, but only this one is a call,
+ * so this is the form whose shape a project does not have to declare. Reading the
+ * base prop instead is `runtimeFacade().cellProp("Permissions")`, and it is a
+ * different address — not a second way to reach this one.
+ */
+export function readOrderPermissions(): Readonly<Record<string, boolean>> {
+  return runtimeFacade().getPermissions();
 }

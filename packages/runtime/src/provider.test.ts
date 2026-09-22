@@ -215,8 +215,14 @@ describe("the absence taxonomy", () => {
     "capability-not-supplied": async () => {
       // A mock that fills the handle's keys and supplies none of them: present,
       // not callable. This is the absence the mock must not paper over.
+      //
+      // `logIn` rather than `hasPermission`, which moved to a typed member of its
+      // own when #5's comments turned out to record it being called: reaching a
+      // typed call through the accessor is now `binding-not-exposed`, a different
+      // code with a different fix, and this scenario is about the value behind a
+      // confirmed address being missing rather than about the address being wrong.
       installRuntimeFacadeProvider(createMockRuntimeFacadeProvider());
-      runtimeFacade().forguncyMember("hasPermission");
+      runtimeFacade().forguncyMember("logIn");
     },
     "server-command-not-configured": async () => {
       installRuntimeFacadeProvider(createMockRuntimeFacadeProvider());

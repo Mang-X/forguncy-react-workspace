@@ -131,9 +131,15 @@ export type {
 // The low-level escape hatch, kept out of the façade's public surface
 export { getHostGlobal } from "./host-globals";
 
-// #29 — the façade surface: four members, each an address for admitted
+// #29 — the façade surface: six members, each an address for admitted
 // capabilities, plus the audit that keeps the registry and the implementation
 // from drifting apart.
+//
+// Four of the six are typed, because #5 *called* four capabilities
+// (`invokeServerCommand`, `useDataSource`, `hasPermission`, `getPermissions`);
+// the other two are the declared-shape accessors `cellProp` and `forguncyMember`,
+// which assert a confirmed address and resolve to `unknown` until the caller
+// declares the shape it expects.
 //
 // `runtimeFacadeSurface()` (facade.ts) and `requireRuntimeFacadeProvider()`
 // (provider.ts) are deliberately *not* re-exported. The first hands out the same

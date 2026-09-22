@@ -1,5 +1,5 @@
 /**
- * The façade's public surface: the four members authored source is allowed to
+ * The façade's public surface: the six members authored source is allowed to
  * call, and the audit that keeps them honest.
  *
  * Decision source: GitHub Issue #27 — "Spec: typed Forguncy runtime facade for
@@ -15,20 +15,30 @@
  * one an address for capabilities the registry admitted, each one resolving
  * through whichever provider the harness installed.
  *
- * ## Why four members and not eleven
+ * ## Why six members and not twelve
  *
- * One member per capability would produce eleven signatures, and #5 pinned the
- * call shape of exactly two of them (`#27`'s `confirmation` field:
- * `call-shape` for `server-command-invocation` and `data-source-binding`,
- * `member-presence` for the other nine). So the surface is split by that same
- * line rather than by taste:
+ * One member per capability would produce twelve signatures, and #5 pinned the
+ * call shape of only four of them (`#27`'s `confirmation` field: `call-shape` for
+ * `server-command-invocation`, `data-source-binding`, `permission-check` and
+ * `permission-map-read`; `member-presence` for the other eight). So the surface is
+ * split by that same line rather than by taste:
  *
  * - a `call-shape` capability is reachable through a **typed member** —
- *   `invokeServerCommand` and `useDataSource` — because a call was observed;
+ *   `invokeServerCommand`, `useDataSource`, `hasPermission` and `getPermissions` —
+ *   because a call was observed;
  * - a `member-presence` capability is reachable through a **declared-shape
  *   accessor** — `cellProp` and `forguncyMember` — which asserts the confirmed
  *   *address* and resolves to `unknown` until the caller declares the shape it
  *   expects.
+ *
+ * The two handle members keep the host's own names (`props.Forguncy.hasPermission`,
+ * `props.Forguncy.getPermissions`) because the address is the thing a reader has to
+ * be able to check against #5, and because a rename would give one binding two
+ * spellings — the rule `RUNTIME_FACADE_FORBIDDEN_PATTERNS` already records. They are
+ * two members rather than one because their return shapes differ, and they are typed
+ * members rather than entries in `forguncyMember` because #5 *called* them: the
+ * accessor exists for names whose signature nobody observed, so putting a called
+ * member there would discard the one thing that lets the façade type it.
  *
  * That split is not documentation, it is checked: `auditRuntimeFacadeSurface`
  * reports `signature-outruns-confirmation` for a member that types a
@@ -92,6 +102,8 @@ import { requireRuntimeFacadeProvider, RuntimeFacadeResolutionError } from "./pr
 export const RUNTIME_FACADE_SURFACE_MEMBER_IDS = [
   "invokeServerCommand",
   "useDataSource",
+  "hasPermission",
+  "getPermissions",
   "cellProp",
   "forguncyMember",
 ] as const;
@@ -120,13 +132,16 @@ export const RUNTIME_FACADE_CELL_PROP_ADDRESSES = [
  * The handle members `forguncyMember` reaches, in `CELL_FORGUNCY_PROP_KEYS`
  * order.
  *
- * Eleven of #5's fourteen, and the three omitted ones are omitted for reasons
- * the registry already records: `DataSourceCompareType` and
- * `DataSourceRelationType` are wrapper-locals a Cell can already name, and
- * `Permissions` is the base prop `cellProp` exposes. Addressing any of them here
- * would be the second-address failure `binding-shadows-cell-scope` refuses at
- * the capability level, one level down. The derivation test asserts the
- * exclusion rather than trusting it.
+ * Nine of #5's fourteen, and the five omitted ones are omitted for reasons the
+ * registry already records: `DataSourceCompareType` and
+ * `DataSourceRelationType` are wrapper-locals a Cell can already name,
+ * `Permissions` is the base prop `cellProp` exposes, and `hasPermission` and
+ * `getPermissions` are the two members #5 *called*, which is why each has a typed
+ * member of its own. Addressing any of them here would be the second-address
+ * failure `binding-shadows-cell-scope` refuses at the capability level, one level
+ * down. The derivation test asserts the exclusion rather than trusting it, and the
+ * number of omissions is the number of entries missing from `CELL_FORGUNCY_PROP_KEYS`
+ * — a count the test also checks, so a sixth reason has to be written down.
  */
 export const RUNTIME_FACADE_FORGUNCY_MEMBER_ADDRESSES = [
   "ConvertDateToOADate",
@@ -134,9 +149,7 @@ export const RUNTIME_FACADE_FORGUNCY_MEMBER_ADDRESSES = [
   "ConvertToCssColor",
   "exposeMethod",
   "getCurrentUser",
-  "getPermissions",
   "getUploadLimit",
-  "hasPermission",
   "logIn",
   "logOut",
   "uploadFiles",
@@ -186,11 +199,13 @@ export interface RuntimeFacadeSurfaceMember {
 /**
  * The surface, as data.
  *
- * `exposes` is a union over the registry rather than a one-member-per-capability
- * restatement: `permission-snapshot` has two confirmed addresses (`Permissions`
- * on the props and `getPermissions` on the handle), so it is exposed by both
- * accessors, and the audit reads that as redundancy that is *reachability*
- * rather than as duplication.
+ * `exposes` names the capabilities a member is the surface for, and the two
+ * registries decide whether that is consistent: a capability no member exposes is
+ * `capability-unexposed`, and one whose address no exposing member can carry is
+ * `address-unreachable`. Keeping the list here rather than deriving the members
+ * from the registry is what lets the audit compare a *built* object against the
+ * declaration — the `member-not-implemented` / `surface-member-unregistered` pair
+ * below — instead of comparing the registry with itself.
  */
 export const RUNTIME_FACADE_SURFACE: readonly RuntimeFacadeSurfaceMember[] = [
   {
@@ -208,6 +223,20 @@ export const RUNTIME_FACADE_SURFACE: readonly RuntimeFacadeSurfaceMember[] = [
     summary: "Read a data source the page declared, with its loading and error state.",
   },
   {
+    id: "hasPermission",
+    exposes: ["permission-check"],
+    carrier: { kind: "forguncy-member" },
+    signature: "confirmed-call-shape",
+    summary: "Ask the host's own permission check whether the current user holds a permission.",
+  },
+  {
+    id: "getPermissions",
+    exposes: ["permission-map-read"],
+    carrier: { kind: "forguncy-member" },
+    signature: "confirmed-call-shape",
+    summary: "Read the host's permission map, one boolean per configured permission name.",
+  },
+  {
     id: "cellProp",
     exposes: ["permission-snapshot", "image-context"],
     carrier: { kind: "cell-prop" },
@@ -217,8 +246,6 @@ export const RUNTIME_FACADE_SURFACE: readonly RuntimeFacadeSurfaceMember[] = [
   {
     id: "forguncyMember",
     exposes: [
-      "permission-snapshot",
-      "permission-check",
       "current-user",
       "session-control",
       "file-upload",
@@ -278,6 +305,30 @@ export interface RuntimeFacade<Commands extends ServerCommandParameterMap = Reco
    */
   useDataSource(dataSourceName: string, options?: DataSourceQueryOptions): DataSourceResult;
 
+  /**
+   * The host's own permission check, under its confirmed name.
+   *
+   * Synchronous, because that is what #5 recorded: the probe called
+   * `props.Forguncy.hasPermission("ProbePermission")` and logged `true`, while the
+   * `ServerCommands` call recorded in the same section is logged as
+   * `await … resolved in 185 ms`. A `Promise<boolean>` here would be a shape nothing
+   * observed — and precisely the one an author would write by assuming the handle
+   * mirrors the command record.
+   */
+  hasPermission(permissionName: string): boolean;
+
+  /**
+   * Every configured permission's boolean, under the host's own name.
+   *
+   * `Readonly<Record<string, boolean>>` rather than a keyed shape: #5 records one
+   * boolean per configured `permissions[].name`, and those names are designer-chosen,
+   * so a key union would be a declaration this package has no basis to make. The
+   * values are `readonly` too because the map is the host's resolved snapshot — a
+   * Cell that wrote to it would be editing host state, which is the ownership
+   * mistake `RUNTIME_FACADE_BOUNDARIES` exists to describe.
+   */
+  getPermissions(): Readonly<Record<string, boolean>>;
+
   /** A confirmed base prop, under the name `core` verified. */
   cellProp<Shape = unknown>(key: ExposedCellPropKey): Shape;
 
@@ -304,6 +355,8 @@ export interface RuntimeFacade<Commands extends ServerCommandParameterMap = Reco
 interface RuntimeFacadeImplementation {
   invokeServerCommand(name: string, ...parameters: readonly unknown[]): Promise<ServerCommandResult>;
   useDataSource(dataSourceName: string, options?: DataSourceQueryOptions): DataSourceResult;
+  hasPermission(permissionName: string): boolean;
+  getPermissions(): Readonly<Record<string, boolean>>;
   cellProp(key: ExposedCellPropKey): unknown;
   forguncyMember(member: ExposedForguncyMember): unknown;
 }
@@ -325,18 +378,22 @@ interface RuntimeFacadeImplementation {
 function buildRuntimeFacadeSurface(): RuntimeFacadeImplementation {
   return {
     invokeServerCommand: async (name, ...parameters) => {
-      const provider = requireRuntimeFacadeProvider();
-      const commands = ownValue(portBinding(provider, "cellProps"), "ServerCommands", "ServerCommands");
-      if (commands === null || typeof commands !== "object") {
-        throw missingBinding("ServerCommands", "the value is not the record of commands the host injects");
-      }
+      const commands = serverCommandRecord(requireRuntimeFacadeProvider());
       // A *named-record* address, so absence is read differently from the
       // rectangular ones (a base prop, a handle member): #5 records that only the
       // names in `availableServerCommands` are present, so a name that is not
       // there is a page configuration and gets its own code. Reading it with the
       // presence rule above would report every unconfigured command as a wiring
       // fault.
-      const call = (commands as Record<string, unknown>)[name];
+      //
+      // `Object.hasOwn` rather than `commands[name]`, because `name` is a string a
+      // caller supplies and a bare read walks the prototype chain: `toString`,
+      // `constructor`, `valueOf` and the rest of `Object.prototype` all answer with
+      // a function, so the branch below — the one #5's unconfigured-command
+      // observation is about — would never be reached for them, and the command
+      // would be invoked. Own keys are what the observation is about, so own keys
+      // are what is asked about.
+      const call = Object.hasOwn(commands, name) ? commands[name] : undefined;
       if (call === undefined) {
         throw new RuntimeFacadeResolutionError(
           "server-command-not-configured",
@@ -347,10 +404,18 @@ function buildRuntimeFacadeSurface(): RuntimeFacadeImplementation {
       if (typeof call !== "function") {
         throw missingBinding(name, "the entry is not a command function");
       }
+      // Called *on the record*, not detached from it: #5 confirms the method form
+      // (`props.ServerCommands.GetSalesData({})`), and a detached call hands the
+      // command `undefined` as `this`. That difference is invisible until the
+      // command uses `this`, which is why the regression drives one that does.
+      //
       // `async` on purpose: an unconfigured command must surface as a rejection
       // of the promise the caller is already awaiting, not as a synchronous throw
       // that a `.catch()` would miss.
-      return await (call as (...args: readonly unknown[]) => Promise<ServerCommandResult>)(...parameters);
+      return await (call as (...args: readonly unknown[]) => Promise<ServerCommandResult>).call(
+        commands,
+        ...parameters,
+      );
     },
 
     useDataSource: (dataSourceName, options) => {
@@ -363,7 +428,54 @@ function buildRuntimeFacadeSurface(): RuntimeFacadeImplementation {
       // undeclared data source as an error *state* on the result, so passing the
       // name through is passing through the host's own contract. See
       // `RUNTIME_FACADE_ABSENCE_MODES`' `undeclared-data-source` row.
+      //
+      // Called bare, unlike the record addresses around it, and the asymmetry is read
+      // off the evidence rather than chosen: `useDataSource` is a wrapper-local
+      // function in the cell scope (`CELL_SOURCE_EXECUTION_MODEL.userCodeNesting`),
+      // and #5 records it called as `useDataSource("Sales", { top: 3 })` — a form
+      // with no owning object, so there is no receiver to preserve.
       return (binding as RuntimeFacadeHostBindings["useDataSource"])(dataSourceName, options);
+    },
+
+    // The two handle members below resolve exactly as `forguncyMember` does; they
+    // differ only in that #5 called them, so the façade can fix their shapes. Both
+    // go through one helper, so the own-property rule and the receiver cannot apply
+    // to two of the three paths and not the third.
+    hasPermission: permissionName => {
+      const check = hostHandleMember(requireRuntimeFacadeProvider(), "hasPermission") as (
+        permissionName: string,
+      ) => unknown;
+      const granted = check(permissionName);
+      // Checked rather than coerced, because the declared return is a claim this
+      // member has to be able to make: `Boolean("false")` is `true`, so a truthiness
+      // conversion would report every permission as granted against a host that
+      // answered a string, and returning `false` for an unobserved shape would be
+      // the guess #29's fifth acceptance criterion forbids.
+      if (typeof granted !== "boolean") {
+        throw new RuntimeFacadeResolutionError(
+          "capability-not-supplied",
+          `props.Forguncy.hasPermission("${permissionName}") answered ${typeof granted} rather than the boolean #5 recorded, so the check's result cannot be reported as one.`,
+          permissionName,
+        );
+      }
+      return granted;
+    },
+
+    getPermissions: () => {
+      const read = hostHandleMember(requireRuntimeFacadeProvider(), "getPermissions") as () => unknown;
+      const snapshot = read();
+      // Same reason as above, one step further: answering `{}` for a host that
+      // returned nothing would turn "the host said nothing" into "the user may do
+      // nothing". #5 recorded a plain map, so a non-object is a mismatch to report
+      // rather than a state to interpret.
+      if (snapshot === null || typeof snapshot !== "object") {
+        throw new RuntimeFacadeResolutionError(
+          "capability-not-supplied",
+          `props.Forguncy.getPermissions() answered ${typeof snapshot} rather than the permission map #5 recorded, so the snapshot is not available through the handle.`,
+          "getPermissions",
+        );
+      }
+      return snapshot as Readonly<Record<string, boolean>>;
     },
 
     cellProp: key => {
@@ -379,26 +491,63 @@ function buildRuntimeFacadeSurface(): RuntimeFacadeImplementation {
 
     forguncyMember: member => {
       const confirmed = claimForguncyMemberAddress("forguncyMember", member);
-      const provider = requireRuntimeFacadeProvider();
-      const props = portBinding(provider, "cellProps");
-      const handle = ownValue(props, "Forguncy", "Forguncy");
-      if (handle === null || typeof handle !== "object") {
-        throw missingBinding("Forguncy", "the value is not the handle the host injects");
-      }
-      const value = ownValue(handle, confirmed, confirmed);
-      // Members are functions: #5 observed the handle's `Object.keys`, and a
-      // member that is present but not callable is a capability nothing can use,
-      // so it is reported rather than handed over as `undefined`.
-      if (typeof value !== "function") {
-        throw new RuntimeFacadeResolutionError(
-          "capability-not-supplied",
-          `props.Forguncy.${confirmed} is not callable, so the ${confirmed} capability was not supplied. Configure it in the designer, or supply it in the mock provider.`,
-          confirmed,
-        );
-      }
-      return value;
+      return hostHandleMember(requireRuntimeFacadeProvider(), confirmed);
     },
   };
+}
+
+/**
+ * The `ServerCommands` record the host injected, or a refusal.
+ *
+ * Reads the address with the same presence rule the other base props use, so a
+ * provider that carries props but no command record is reported as the wiring fault
+ * it is rather than as a page that configured no commands — the two are different
+ * claims and only one of them is a remediation.
+ */
+function serverCommandRecord(provider: RuntimeFacadeProvider): Record<string, unknown> {
+  const commands = ownValue(portBinding(provider, "cellProps"), "ServerCommands", "ServerCommands");
+  if (commands === null || typeof commands !== "object") {
+    throw missingBinding("ServerCommands", "the value is not the record of commands the host injects");
+  }
+  return commands as Record<string, unknown>;
+}
+
+/**
+ * A callable `props.Forguncy` member, bound to the handle that owns it.
+ *
+ * Returns the member **bound** rather than the raw function, and that is the whole
+ * point of the helper: #5 confirms the method form
+ * (`props.Forguncy.hasPermission(…)`, `props.Forguncy.getPermissions()`), and never
+ * that a handle member survives being detached from its object. Handing out
+ * `handle[member]` unchanged would call it with `this === undefined`, which is a
+ * behaviour nothing observed — the shape of over-claim this package exists to
+ * refuse. Binding here, once, is also what keeps the three call sites from each
+ * having to remember.
+ *
+ * Every caller names its member from `CELL_FORGUNCY_PROP_KEYS`, so this cannot be
+ * asked for an address #5 never saw.
+ */
+function hostHandleMember(
+  provider: RuntimeFacadeProvider,
+  member: ForguncyPropMember,
+): (...args: readonly unknown[]) => unknown {
+  const handle = ownValue(portBinding(provider, "cellProps"), "Forguncy", "Forguncy");
+  if (handle === null || typeof handle !== "object") {
+    throw missingBinding("Forguncy", "the value is not the handle the host injects");
+  }
+  const value = ownValue(handle, member, member);
+  // Own property, then callable. `ownValue` already applies the first rule; this
+  // adds the second, because #5 observed the handle's `Object.keys` and a member
+  // that is present but not callable is a capability nothing can use — so it is
+  // reported rather than handed over for the caller to trip over.
+  if (typeof value !== "function") {
+    throw new RuntimeFacadeResolutionError(
+      "capability-not-supplied",
+      `props.Forguncy.${member} is not callable, so the ${member} capability was not supplied. Configure it in the designer, or supply it in the mock provider.`,
+      member,
+    );
+  }
+  return (value as (...args: readonly unknown[]) => unknown).bind(handle);
 }
 
 /**
@@ -479,11 +628,34 @@ function claimForguncyMemberAddress(
   if (!(RUNTIME_FACADE_FORGUNCY_MEMBER_ADDRESSES as readonly string[]).includes(member)) {
     throw new RuntimeFacadeResolutionError(
       "binding-not-exposed",
-      `"${member}" is a confirmed handle member but "${accessor}" does not expose it: the base prop "${member}" is already reachable under its own name, and a wrapper-local is already reachable in Cell source.`,
+      `"${member}" is a confirmed handle member but "${accessor}" is not the member that exposes it: ${handleAddressOwner(member)}`,
       member,
     );
   }
   return member as ExposedForguncyMember;
+}
+
+/**
+ * Where an omitted handle address *is* reachable, said in the words of the cause.
+ *
+ * `RUNTIME_FACADE_FORGUNCY_MEMBER_ADDRESSES` leaves five of #5's fourteen out for
+ * three different reasons, and the clause after the colon is the part a reader
+ * acts on — so it names the member rather than restating the refusal. Saying only
+ * "that is not the member that exposes it" is what sends an author to the *other*
+ * wrong accessor, which is the same mistake one step later.
+ *
+ * The shared phrase is what keeps the three one error class: each is a confirmed
+ * address reached through the wrong member, and the fix is the same shape in all
+ * three cases — name the member the registry names for it.
+ */
+function handleAddressOwner(member: string): string {
+  if ((RUNTIME_FACADE_SURFACE_MEMBER_IDS as readonly string[]).includes(member)) {
+    return `#5 executed props.Forguncy.${member}(), so the façade calls it under the host's own name as runtimeFacade().${member}(), and a second address is a second way for the façade to be wrong.`;
+  }
+  if ((RUNTIME_FACADE_CELL_PROP_ADDRESSES as readonly string[]).includes(member)) {
+    return `it is the base prop "${member}", so cellProp("${member}") is the member that exposes it, and a second address is a second way for the façade to be wrong.`;
+  }
+  return `it is a wrapper-local the Cell scope declares for itself, so Cell source names ${member} directly and props.Forguncy is not its address.`;
 }
 
 // ---------------------------------------------------------------------------

@@ -124,6 +124,41 @@ describe("mock data sources", () => {
     // product wording is not evidence this repository has.
     expect(String(result.error)).toContain("NoSuchSource");
   });
+
+  /**
+   * A data-source name is a string a caller supplies, so `dataSources[name]` walks the
+   * prototype chain.
+   *
+   * `toString`, `constructor`, `valueOf` and the rest answer with a *function*, so the
+   * `typeof resolver !== "function"` guard below them passes and the mock would call
+   * `Object.prototype.toString` and hand its return value back as if it were a data
+   * source result. A local harness quietly disagreeing with the host about a shape is
+   * the one thing it must never do, so the fixture names the cases that reach it, and
+   * `Object.hasOwn` is the fix they check.
+   */
+  it("answers an undeclared source named after a prototype member with the host's error state", () => {
+    const bindings = createMockRuntimeFacadeProvider({ dataSources: {} }).bindings;
+
+    for (const inherited of ["toString", "constructor", "valueOf", "hasOwnProperty"]) {
+      const result = bindings.useDataSource(inherited);
+      expect(result.data, inherited).toEqual([]);
+      expect(result.totalCount, inherited).toBe(0);
+      expect(result.loading, inherited).toBe(false);
+      expect(String(result.error), inherited).toContain(inherited);
+    }
+  });
+
+  // The complement, so the fix cannot be "refuse everything": a project is allowed to
+  // name a source after a prototype member, and an own key still wins.
+  it("still answers a source the project declared under a prototype member's name", () => {
+    const bindings = createMockRuntimeFacadeProvider({
+      dataSources: { constructor: createMockDataSource([{ id: 1 }]) },
+    }).bindings;
+
+    const result = bindings.useDataSource("constructor");
+    expect(result.data).toEqual([{ id: 1 }]);
+    expect(result.error).toBeNull();
+  });
 });
 
 describe("mock server commands", () => {
