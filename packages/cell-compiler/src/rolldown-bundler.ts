@@ -458,6 +458,12 @@ async function bundleWithRolldown(dir: string, request: CellBundlingRequest): Pr
   const shimSource = renderEntryShim(resolvedEntry);
   const logs: CapturedLog[] = [];
   const virtualModules = new Map<string, string>();
+  // Every bare specifier that fell through interception, paired with the
+  // resolved module id Rolldown would have used anyway. Provenance so the
+  // report can name the real bare specifier (`sneaky-dep/subpath`) instead of
+  // the folded package root (`sneaky-dep`), preserving exact-subpath decision
+  // precedence.
+  const fallThroughResolutions = new Map<string, string>();
   // Every bare specifier the entry asked the plans about — the "in play" set
   // the host translation uses to keep mapping findings artifact-true.
   const referencedPackages = new Set<string>();
@@ -537,11 +543,25 @@ async function bundleWithRolldown(dir: string, request: CellBundlingRequest): Pr
       plugins: [
         {
           name: "cell-compiler-rolldown-bundler",
-          resolveId(source) {
+          async resolveId(source, importer, options) {
             if (source === CELL_ENTRY_SHIM_ID) return CELL_ENTRY_SHIM_ID;
             if (!isBareSpecifier(source)) return null;
             const interception = interceptionFor(source);
-            if (interception === undefined) return null;
+            if (interception === undefined) {
+              // Not intercepted: record where Rolldown's own resolution lands
+              // so the report can attribute the bundled module to this exact
+              // bare specifier. `skipSelf: true` keeps this probe from re-entering
+              // this hook; the subsequent `return null` lets the normal
+              // resolution pass run once for the real build.
+              const resolved = await this.resolve(source, importer, {
+                ...options,
+                skipSelf: true,
+              });
+              if (resolved !== null && resolved.external !== true) {
+                fallThroughResolutions.set(source, resolved.id);
+              }
+              return null;
+            }
             virtualModules.set(interception.id, interception.source);
             // `moduleType: "commonjs"` because both plans' generated sources
             // are `module.exports = …` — the same interop the extension unit
@@ -583,6 +603,18 @@ async function bundleWithRolldown(dir: string, request: CellBundlingRequest): Pr
   const externalImports = [...entryChunk.imports].sort();
   const moduleIds = Object.keys(entryChunk.modules);
   const inlinedPackages = inlinedPackageNames(moduleIds);
+  // Bare specifiers whose resolved module actually landed in the entry chunk
+  // and whose id sits under `node_modules` after symlink resolution. Sorted for
+  // byte-stable reports; the decision loop and `auditInlinedPackages` both read
+  // this list so exact-subpath precedence survives the fold into package names.
+  const moduleIdSet = new Set(moduleIds);
+  const inlinedSpecifiers = [...fallThroughResolutions.entries()]
+    .filter(([, resolvedId]) => {
+      const normalized = resolvedId.replace(/\\/g, "/");
+      return moduleIdSet.has(normalized) && resolvesIntoNodeModules(resolvedId);
+    })
+    .map(([specifier]) => specifier)
+    .sort();
 
   const translated: (CellArtifactDiagnostic | undefined)[] = [];
   for (const finding of [...hostFindings.values()].sort((a, b) =>
@@ -593,22 +625,19 @@ async function bundleWithRolldown(dir: string, request: CellBundlingRequest): Pr
   for (const finding of [...extensionFindings.values()].sort(byCodeThenSubject)) {
     translated.push(translateExtensionFinding(finding));
   }
-  // Every installed package the bundler inlined must have a decision. This is
-  // the case `auditInlinedPackages` cannot see: a package with no decision is
-  // skipped there, because workspace source legitimately has none (#14). The
-  // module ids are what distinguish the two — workspace source resolves outside
-  // `node_modules`, an installed package does not — so the check lives here,
-  // where the ids are still in hand.
-  for (const packageName of inlinedPackages) {
-    if (findDependencyDecision(decisions, packageName) !== undefined) continue;
-    const moduleId = moduleIds.find(id => packageNameOfModuleId(id) === packageName);
-    if (moduleId !== undefined && resolvesIntoNodeModules(moduleId)) {
-      translated.push(
-        createCellArtifactDiagnostic("unresolved-dependency-decision", packageName, {
-          detail: `The bundle inlined "${packageName}" from an installed dependency, but no dependency decision covers it.`,
-        }),
-      );
-    }
+  // Every installed bare specifier the bundler inlined must have a decision
+  // that covers *that specifier*. Looking up the folded package root would
+  // lose exact-subpath precedence: `{ inline, "sneaky-dep/subpath" }` covers
+  // `sneaky-dep/subpath` but not `sneaky-dep`, and vice versa. Workspace
+  // source legitimately has no decision (#14); `inlinedSpecifiers` already
+  // excludes it because its resolved id sits outside `node_modules`.
+  for (const specifier of inlinedSpecifiers) {
+    if (findDependencyDecision(decisions, specifier) !== undefined) continue;
+    translated.push(
+      createCellArtifactDiagnostic("unresolved-dependency-decision", specifier, {
+        detail: `The bundle inlined "${specifier}" from an installed dependency, but no dependency decision covers it.`,
+      }),
+    );
   }
   const diagnostics = dedupeCellArtifactDiagnostics(
     translated.filter((diagnostic): diagnostic is CellArtifactDiagnostic => diagnostic !== undefined),
@@ -618,6 +647,7 @@ async function bundleWithRolldown(dir: string, request: CellBundlingRequest): Pr
     code: entryChunk.code,
     externalImports,
     inlinedPackages,
+    inlinedSpecifiers,
     emittedAssets,
     diagnostics,
   };

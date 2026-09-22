@@ -460,6 +460,68 @@ export function App() {
     if (outcome.status !== "compiled") return;
     expect(outcome.artifact.code).toContain("from-workspace");
   });
+
+  it("honors an exact-subpath inline decision that does not cover the package root", async () => {
+    // Regression for the review's package-name folding finding: the entry
+    // imports only `sneaky-dep/subpath`, governed by an exact-subpath inline
+    // decision. Folding the module id to `sneaky-dep` before the decision
+    // lookup would miss that exact record (exact-first precedence) and report
+    // a false `unresolved-dependency-decision`.
+    const dir = fixture("exact-subpath-inline", {
+      "App.jsx": `import { value } from "sneaky-dep/subpath";
+
+export function App() {
+  return <i>{value}</i>;
+}
+`,
+      "node_modules/sneaky-dep/package.json": JSON.stringify({
+        name: "sneaky-dep",
+        version: "1.0.0",
+        main: "index.js",
+      }),
+      "node_modules/sneaky-dep/subpath.js": 'module.exports = { value: "from-subpath" };\n',
+    });
+
+    const outcome = await compileFixture(dir, "App.jsx", [
+      { strategy: "inline", packageName: "sneaky-dep/subpath" },
+    ]);
+
+    expect(outcome.status).toBe("compiled");
+    if (outcome.status !== "compiled") return;
+    expect(outcome.artifact.code).toContain("from-subpath");
+  });
+
+  it("lets an exact-subpath inline decision override a package-level host decision", async () => {
+    // The companion regression: package-level `host` for `sneaky-dep`, exact
+    // `inline` for `sneaky-dep/subpath`. Only the subpath is bundled, so the
+    // governing decision is the exact inline record. Folding the module id to
+    // the package root before `auditInlinedPackages` would pick the package-level
+    // `host` decision and falsely report `duplicate-host-mapping`.
+    const dir = fixture("exact-subpath-overrides-host", {
+      "App.jsx": `import { value } from "sneaky-dep/subpath";
+
+export function App() {
+  return <i>{value}</i>;
+}
+`,
+      "node_modules/sneaky-dep/package.json": JSON.stringify({
+        name: "sneaky-dep",
+        version: "1.0.0",
+        main: "index.js",
+      }),
+      "node_modules/sneaky-dep/subpath.js": 'module.exports = { value: "from-subpath" };\n',
+    });
+
+    const outcome = await compileFixture(dir, "App.jsx", [
+      { strategy: "host", packageName: "sneaky-dep", globalName: "React" },
+      { strategy: "inline", packageName: "sneaky-dep/subpath" },
+    ]);
+
+    expect(outcome.status).toBe("compiled");
+    if (outcome.status !== "compiled") return;
+    expect(outcome.artifact.code).toContain("from-subpath");
+    expect(outcome.artifact.diagnostics ?? []).toEqual([]);
+  });
 });
 
 /** The compiled artifact's code, for the narrowing-after-assert tests above. */

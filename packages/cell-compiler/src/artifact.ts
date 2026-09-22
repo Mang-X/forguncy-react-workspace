@@ -94,6 +94,15 @@ export interface BundledCellModule {
   readonly externalImports?: readonly string[];
   /** Packages the bundler flattened into `code`. */
   readonly inlinedPackages?: readonly string[];
+  /**
+   * Bare specifiers the bundler actually inlined from installed packages.
+   *
+   * Package names fold `sneaky-dep` and `sneaky-dep/subpath` into one entry,
+   * which destroys the exact-subpath precedence `findDependencyDecision` relies
+   * on. Specifier-level provenance lets each decision lookup use the real bare
+   * specifier. Optional because fixture bundlers only report package names.
+   */
+  readonly inlinedSpecifiers?: readonly string[];
   /** Files the bundler emitted next to `code`. Any entry breaks the single-artifact contract. */
   readonly emittedAssets?: readonly string[];
   /**
@@ -267,7 +276,7 @@ export function assembleCellArtifact(input: AssembleCellArtifactInput): CompileC
 
   const decisionDiagnostics = auditDependencyDecisions(dependencies);
   const importDiagnostics = auditExternalImports(module.externalImports ?? [], dependencies);
-  const inlinedDiagnostics = auditInlinedPackages(module.inlinedPackages ?? [], dependencies);
+  const inlinedDiagnostics = auditInlinedPackages(module.inlinedPackages ?? [], dependencies, module.inlinedSpecifiers);
   const assetDiagnostics = auditEmittedAssets(module.emittedAssets ?? []);
   const collection = collectFrontendLibraries(dependencies);
 
@@ -575,11 +584,22 @@ function auditExternalImports(
 function auditInlinedPackages(
   inlinedPackages: readonly string[],
   dependencies: readonly DependencyDecision[],
+  inlinedSpecifiers?: readonly string[],
 ): readonly CellArtifactDiagnostic[] {
   const diagnostics: CellArtifactDiagnostic[] = [];
 
-  for (const packageName of inlinedPackages) {
-    const decision = findDependencyDecision(dependencies, packageName);
+  // Specifier-level provenance when present: each bare specifier keeps its
+  // exact-subpath identity so `findDependencyDecision` can apply exact-first
+  // precedence. Package names fall back for fixture bundlers that only report
+  // package roots, and for packages in the set that no specifier covers.
+  const specifierPackageNames = new Set(
+    (inlinedSpecifiers ?? []).map(specifier => packageNameOfSpecifier(specifier)),
+  );
+  const leftoverPackages = inlinedPackages.filter(name => !specifierPackageNames.has(name));
+  const subjects = [...(inlinedSpecifiers ?? []), ...leftoverPackages];
+
+  for (const subject of subjects) {
+    const decision = findDependencyDecision(dependencies, subject);
     if (decision === undefined) continue;
 
     switch (decision.strategy) {
