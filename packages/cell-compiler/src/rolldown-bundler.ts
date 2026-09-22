@@ -607,7 +607,9 @@ async function bundleWithRolldown(dir: string, request: CellBundlingRequest): Pr
   // and whose id sits under `node_modules` after symlink resolution. Sorted for
   // byte-stable reports; the decision loop and `auditInlinedPackages` both read
   // this list so exact-subpath precedence survives the fold into package names.
-  const moduleIdSet = new Set(moduleIds);
+  // Keys are compared with both separators normalized: on Windows the chunk
+  // reports backslash paths while `this.resolve` may hand back either form.
+  const moduleIdSet = new Set(moduleIds.flatMap(id => [id, id.replace(/\\/g, "/")]));
   const inlinedSpecifiers = [...fallThroughResolutions.entries()]
     .filter(([, resolvedId]) => {
       const normalized = resolvedId.replace(/\\/g, "/");

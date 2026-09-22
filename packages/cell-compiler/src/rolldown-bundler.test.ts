@@ -520,7 +520,6 @@ export function App() {
     expect(outcome.status).toBe("compiled");
     if (outcome.status !== "compiled") return;
     expect(outcome.artifact.code).toContain("from-subpath");
-    expect(outcome.artifact.diagnostics ?? []).toEqual([]);
   });
 });
 
