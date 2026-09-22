@@ -703,10 +703,31 @@ function standsInForModuleId(resolution: LocalDevModuleResolution): boolean {
 }
 
 /**
+ * The installed package a row's version can be compared against, or `undefined` when there is none.
+ *
+ * Narrower than {@link localDevResolutionTarget} on purpose, and the difference is the kind:
+ * `npm-package` names a package the project's tree installs, which is the only thing "the
+ * installed version equals the version #5's target ships" can be asked about. A `project-shim`
+ * names a module or file the project supplies *instead of* a package — the row's own
+ * `localPackage` doc says so — and there is no installed version of a source file to compare
+ * against a host version. Reading the shared accessor alone derived
+ * `Version checks: ./react-shim.ts===19.2.7`, and a matching key in `installedVersions`
+ * produced a `local-dev-host-version-mismatch` for a shim.
+ *
+ * A shim stands in for a module id and does not carry a package-version check, so it belongs in
+ * {@link localDevResolvableModuleIds} and not in {@link localDevAlignmentChecks} — which is why
+ * this is a second accessor rather than a filter on the first.
+ */
+function localDevAlignmentTarget(resolution: LocalDevModuleResolution): string | undefined {
+  return resolution.resolution === "npm-package" ? localDevResolutionTarget(resolution) : undefined;
+}
+
+/**
  * Why a row's kind and its substitution fields disagree, or `undefined` when they agree.
  *
- * One question — what does this row say stands in for the module id it names? — with the two
- * ways a row can contradict its own answer. Both were review findings, in successive rounds:
+ * One question — what does this row say stands in for the module id it names, and what does that
+ * claim let it be asked? — with the three ways a row can contradict its own answer. All three
+ * were review findings, in successive rounds:
  *
  * - it declares a stand-in and names none, so there is nothing to resolve;
  * - it declares none (`unsupported`) and carries a substitution's fields anyway, which are
@@ -715,31 +736,40 @@ function standsInForModuleId(resolution: LocalDevModuleResolution): boolean {
  *   derived a comparison the row's kind denies — the audit printed `Declared without a local
  *   stand-in: react` beside `Version checks: react===19.2.7`, and a mismatching
  *   `installedVersions.react` produced a `local-dev-host-version-mismatch` for a package
- *   nothing stands in for.
+ *   nothing stands in for;
+ * - it declares a `project-shim` and carries `checkedVersionField`, which is a package-version
+ *   field on a row whose target is a module or file. A shim does stand in for a module id, so
+ *   it is not `unsupported` and not refused for naming nothing — what it cannot do is name an
+ *   installed version, and `alignmentUnchecked` is the field for saying why none exists.
  *
- * {@link standsInForModuleId} is the same question asked positively, which is why the guard
- * and the derivations share {@link localDevResolutionTarget} rather than each reading
- * `localPackage` for itself.
+ * {@link standsInForModuleId} and {@link localDevAlignmentTarget} are the same questions asked
+ * positively, which is why the guard and the derivations share the accessors rather than each
+ * reading `localPackage` for itself.
  */
 function localDevSubstitutionProblem(resolution: LocalDevModuleResolution): string | undefined {
   const target = localDevResolutionTarget(resolution);
+  const versionField = resolution.checkedVersionField;
 
-  if (resolution.resolution !== "unsupported") {
-    return target === undefined
-      ? `is "${resolution.resolution}" and names no package, so there is nothing to resolve`
-      : undefined;
+  if (resolution.resolution === "unsupported") {
+    const stale = [
+      target === undefined ? undefined : `localPackage "${target}"`,
+      versionField === undefined ? undefined : `checkedVersionField "${versionField}"`,
+    ].filter((field): field is string => field !== undefined);
+
+    return stale.length === 0
+      ? undefined
+      : `is "unsupported", so nothing stands in for it, and still carries ${stale.join(" and ")} — fields that are read by nothing, because there is no substitution to resolve or to compare`;
   }
 
-  const stale = [
-    target === undefined ? undefined : `localPackage "${target}"`,
-    resolution.checkedVersionField === undefined
-      ? undefined
-      : `checkedVersionField "${resolution.checkedVersionField}"`,
-  ].filter((field): field is string => field !== undefined);
+  if (target === undefined) {
+    return `is "${resolution.resolution}" and names no package, so there is nothing to resolve`;
+  }
 
-  return stale.length === 0
-    ? undefined
-    : `is "unsupported", so nothing stands in for it, and still carries ${stale.join(" and ")} — fields that are read by nothing, because there is no substitution to resolve or to compare`;
+  if (resolution.resolution === "project-shim" && versionField !== undefined) {
+    return `is "project-shim" and carries checkedVersionField "${versionField}", and a shim is a module or file the project supplies: there is no installed version of it to compare against #5's recorded target. State why no comparison exists in alignmentUnchecked instead`;
+  }
+
+  return undefined;
 }
 
 /**
@@ -1018,34 +1048,31 @@ export function localDevUnsupportedModuleIds(
 /**
  * The bridge rows whose local substitution carries a version check.
  *
- * A substitution is what makes the comparison mean anything, which is why the filter is
- * {@link standsInForModuleId} and not `checkedVersionField` alone. A row that declares
- * `unsupported` has no local substitution, and a row can carry both fields anyway — the
- * guard skips the missing-target rule for `unsupported`, and the version-field-or-reason
- * rule is satisfied by a field nothing should read. Asking for the comparison then makes a
- * claim the row denies: the audit printed `Declared without a local stand-in: react` beside
- * `Version checks: react===19.2.7`, and, given a differing `installedVersions.react`, a
- * `local-dev-host-version-mismatch` about a package its own row says the local loop does not
- * stand in for.
+ * A substitution is what makes the comparison mean anything, and a substitution of a *package*
+ * is what makes it answerable, which is why the target comes from
+ * {@link localDevAlignmentTarget} rather than from {@link standsInForModuleId}: a row can stand
+ * in for a module id with a shim and still have no installed version to compare. Filtering on the
+ * broader predicate derived `Version checks: ./react-shim.ts===19.2.7` and, given a matching key
+ * in `installedVersions`, a `local-dev-host-version-mismatch` about a source file.
  *
- * The expected values are still read off #5's pinned target and never stored, and the
- * substitution's package comes from {@link localDevResolutionTarget}, so the expectation
- * names the thing the row actually stands in with rather than a field beside it.
+ * A `project-shim` that carries `checkedVersionField` at all is refused by the guard, so the two
+ * readers agree: this list is the installed packages whose version can be compared, and the guard
+ * says when a row asks for that comparison without having one to make. The expected values are
+ * still read off #5's pinned target and never stored.
  */
 export function localDevAlignmentChecks(
   resolutions: readonly LocalDevModuleResolution[] = LOCAL_DEV_MODULE_RESOLUTIONS,
 ): readonly LocalDevAlignmentExpectation[] {
   return resolutions
     .filter(canReadResolutionRow)
-    .filter(standsInForModuleId)
     .flatMap(resolution => {
       const field = resolution.checkedVersionField;
-      const target = localDevResolutionTarget(resolution);
-      if (field === undefined || target === undefined) return [];
+      const packageName = localDevAlignmentTarget(resolution);
+      if (field === undefined || packageName === undefined) return [];
       return [
         {
           specifier: resolution.specifier,
-          localPackage: target,
+          localPackage: packageName,
           field,
           expected: localDevRecordedVersion(field),
         },

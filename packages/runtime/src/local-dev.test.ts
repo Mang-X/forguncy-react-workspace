@@ -1585,6 +1585,68 @@ describe("the diagnostic vocabulary", () => {
     expect(audit.alignment.map(entry => entry.localPackage)).toEqual(["react-dom"]);
     expect(audit.diagnostics.map(diagnostic => diagnostic.code)).toContain("local-dev-mapping-coverage");
   });
+
+  // The sixth re-review's finding: the third kind-to-claim boundary, after `unsupported` (which
+  // cannot claim a stand-in) and the packageless row (which cannot claim anything). A
+  // `project-shim` names the module or file the project supplies *instead of* a package, so it
+  // can stand in for a module id and cannot carry a package-version comparison — the row's own
+  // `localPackage` doc says `localDevAlignmentChecks` "simply finds no installed version to
+  // compare for a shim", and the implementation derived one anyway.
+  it("does not ask for an installed-package version check on a project shim", () => {
+    const shimmedTable: LocalDevModuleResolution[] = LOCAL_DEV_MODULE_RESOLUTIONS.map(row =>
+      row.specifier === "react"
+        ? {
+            specifier: "react",
+            resolution: "project-shim",
+            localPackage: "./react-shim.ts",
+            checkedVersionField: "hostReactVersion",
+            note: "fixture: a shim carrying a package-version field",
+          }
+        : row,
+    );
+
+    expect(() => assertLocalDevResolutionsCoverHostBridge(shimmedTable)).toThrow(
+      /is "project-shim" and carries checkedVersionField "hostReactVersion"/,
+    );
+
+    const audit = auditLocalDevConfiguration({
+      resolutions: shimmedTable,
+      // A key that would match, so the shim has every chance to produce a mismatch.
+      installedVersions: { "./react-shim.ts": "18.0.0" },
+    });
+
+    // The shim does stand in for the module id...
+    expect(audit.resolvable).toContain("react");
+    // ...and there is no installed package to compare, so no expectation and no mismatch.
+    expect(audit.alignment.map(entry => entry.localPackage)).toEqual(["react-dom"]);
+    expect(audit.diagnostics.map(diagnostic => diagnostic.code)).not.toContain("local-dev-host-version-mismatch");
+    // The meaningless field is reported rather than silently ignored.
+    expect(audit.diagnostics.map(diagnostic => diagnostic.code)).toContain("local-dev-mapping-coverage");
+  });
+
+  it("accepts a shim that says why no version comparison exists", () => {
+    const shimmedTable: LocalDevModuleResolution[] = [
+      {
+        specifier: "react",
+        resolution: "project-shim",
+        localPackage: "./react-shim.ts",
+        alignmentUnchecked:
+          "fixture: the project supplies this module, so no installed package version exists to compare against #5's target",
+        note: "fixture shim",
+      },
+      ...LOCAL_DEV_MODULE_RESOLUTIONS.filter(row => row.specifier !== "react"),
+    ];
+
+    expect(() => assertLocalDevResolutionsCoverHostBridge(shimmedTable)).not.toThrow();
+
+    const audit = auditLocalDevConfiguration({
+      resolutions: shimmedTable,
+      installedVersions: { "./react-shim.ts": "18.0.0" },
+    });
+    expect(audit.resolvable).toContain("react");
+    expect(audit.alignment.map(entry => entry.localPackage)).toEqual(["react-dom"]);
+    expect(audit.diagnostics.map(diagnostic => diagnostic.code)).not.toContain("local-dev-host-version-mismatch");
+  });
 });
 
 describe("authoring patterns the local loop must not reward", () => {
