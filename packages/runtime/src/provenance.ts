@@ -1,9 +1,12 @@
 /**
- * Decision provenance for the runtime façade contract.
+ * Decision provenance for the runtime package's Specs.
  *
- * Decision source: GitHub Issue #27 — "Spec: typed Forguncy runtime facade for
- * application-owned capabilities"
- * (https://github.com/Mang-X/forguncy-react-workspace/issues/27).
+ * Decision sources, one per Spec this package is the executable projection of:
+ * - GitHub Issue #27 — "Spec: typed Forguncy runtime facade for application-owned
+ *   capabilities"
+ *   (https://github.com/Mang-X/forguncy-react-workspace/issues/27)
+ * - GitHub Issue #22 — "Spec: local Vite+ development runtime for React Cells"
+ *   (https://github.com/Mang-X/forguncy-react-workspace/issues/22)
  *
  * Repository rules put Specs in Issues and forbid a duplicated `specs/` tree, so
  * this package has no document to cite. It does not therefore get to *not* cite
@@ -13,13 +16,17 @@
  * downstream of is the failure mode this module prevents.
  *
  * The upstream records are re-exported from `core` rather than re-typed here, so
- * a second copy of "#4" cannot drift away from the first. Only #27 is declared in
- * this file, and it is declared here rather than added to `core` on purpose:
- * `core` holds the architecture decisions *every* package must obey and keeps
- * `GOVERNING_ARCHITECTURE_DECISIONS` to the architecture Specs. #27 is a
- * downstream façade Spec built on #4 and #5, so adding it to that list would
- * relabel it as an architecture decision and silently change what the list
- * means.
+ * a second copy of "#4" cannot drift away from the first. #27 and #22 are declared
+ * here rather than added to `core` on purpose: `core` holds the architecture
+ * decisions *every* package must obey and keeps `GOVERNING_ARCHITECTURE_DECISIONS`
+ * to the architecture Specs. Both of these are downstream Specs — #27 on #4/#5,
+ * #22 on #4/#5/#9/#27 — so adding either to that list would relabel it as an
+ * architecture decision and silently change what the list means.
+ *
+ * Two records, two governing lists, because the two Specs govern different
+ * modules: `RUNTIME_GOVERNING_DECISIONS` is the façade contract's answer, and
+ * `local-dev.ts` composes its own from {@link LOCAL_DEV_RUNTIME_DECISION}. Keeping
+ * them apart is what stops `#22` from being read as part of the façade's contract.
  */
 
 import {
@@ -70,3 +77,31 @@ export const RUNTIME_GOVERNING_SPEC_REFERENCE_LINE = formatGoverningSpecReferenc
 
 /** Patterns a document must match to count as citing the façade contract. */
 export const RUNTIME_FACADE_CITATION_PATTERNS: readonly RegExp[] = citationPatternsFor(RUNTIME_FACADE_DECISION);
+
+/**
+ * The local development runtime Spec this package projects.
+ *
+ * Separate from {@link RUNTIME_FACADE_DECISION} because the two answer different
+ * questions and are consumed by different modules: #27 says which capabilities a
+ * Cell may reach through an accessor and what the façade must not become, while #22
+ * says what a local process may stand in for and what it may then claim. A change
+ * to `local-dev.ts` that cited #27 alone would be attributing the local loop's
+ * boundary decisions to a Spec that does not make them.
+ */
+export const LOCAL_DEV_RUNTIME_DECISION: ArchitectureDecisionSource = {
+  repository: "Mang-X/forguncy-react-workspace",
+  issue: 22,
+  title: "Spec: local Vite+ development runtime for React Cells",
+  url: "https://github.com/Mang-X/forguncy-react-workspace/issues/22",
+};
+
+/** Short form, e.g. `#22`. */
+export const LOCAL_DEV_RUNTIME_DECISION_REFERENCE = decisionReference(LOCAL_DEV_RUNTIME_DECISION);
+
+/** Repo-qualified short form, for a reference that travels outside this repository. */
+export const LOCAL_DEV_RUNTIME_DECISION_QUALIFIED_REFERENCE =
+  `${LOCAL_DEV_RUNTIME_DECISION.repository}${LOCAL_DEV_RUNTIME_DECISION_REFERENCE}`;
+
+/** Patterns a document must match to count as citing the local dev runtime Spec. */
+export const LOCAL_DEV_RUNTIME_CITATION_PATTERNS: readonly RegExp[] =
+  citationPatternsFor(LOCAL_DEV_RUNTIME_DECISION);

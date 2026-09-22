@@ -1,15 +1,22 @@
 /**
  * `@forguncy-react-workspace/runtime` — the executable projection of the runtime
- * façade contract.
+ * façade contract (#27) and the local development runtime contract (#22).
  *
- * Decision source: GitHub Issue #27 — "Spec: typed Forguncy runtime facade for
- * application-owned capabilities"
- * (https://github.com/Mang-X/forguncy-react-workspace/issues/27), which is
- * itself downstream of:
+ * Decision sources: GitHub Issues
+ * - #27 — "Spec: typed Forguncy runtime facade for application-owned capabilities"
+ *   (https://github.com/Mang-X/forguncy-react-workspace/issues/27)
+ * - #22 — "Spec: local Vite+ development runtime for React Cells"
+ *   (https://github.com/Mang-X/forguncy-react-workspace/issues/22)
+ *
+ * both of which are downstream of:
  * - #4 "application ownership boundaries and dependency strategy semantics"
  *   — https://github.com/Mang-X/forguncy-react-workspace/issues/4
  * - #5 "establish the ReactCellType target/runtime contract on Forguncy 12.0.100"
  *   — https://github.com/Mang-X/forguncy-react-workspace/issues/5
+ *
+ * and #22 additionally of:
+ * - #9 "host module bridge for React, ReactDOM, antd and built-in globals"
+ *   — https://github.com/Mang-X/forguncy-react-workspace/issues/9
  *
  * Implementation: GitHub Issue #29 — "Implement: typed Forguncy runtime facade
  * and local mock provider"
@@ -20,21 +27,29 @@
  * (local development).
  *
  * Scope note: this package states *which capabilities the façade may expose, on
- * which boundary, what it must not become, and how the same surface is reached
- * from the host and from a mock*. It does not build the local dev harness
- * (#22/#23), resolve dependencies (#8), or produce a Cell artifact (#6) — the
+ * which boundary, and what it must not become* (#27), *what a local process may
+ * stand in for and what it may then claim* (#22), and *how the same surface is
+ * reached from the host and from a mock* (#29). It does not build the local dev
+ * harness (#23), resolve dependencies (#8), or produce a Cell artifact (#6) — the
  * generated binding that installs the host provider is emitted by the
  * artifact/compiler boundary (#7), and this package only states the shape it has
- * to satisfy.
+ * to satisfy. What it does own is the answer to every question that separates a
+ * façade from a second application framework, and every question that separates a
+ * local feedback loop from a validation path.
  *
- * A green `vp test` here says the *contract* and the *resolution* hold. It says
+ * A green `vp test` here says the *contracts* and the *resolution* hold. It says
  * nothing about Forguncy runtime behaviour: `#5` owns that evidence, and this
- * package only ever cites it. No part of this package has been executed against
- * a real Forguncy page.
+ * package only ever cites it. The host half of that evidence has since been
+ * re-read from an executed Forguncy page, which confirmed the addresses and shapes
+ * this package is built on; no part of this package has itself run in a page.
  */
 
 // Provenance
 export {
+  LOCAL_DEV_RUNTIME_CITATION_PATTERNS,
+  LOCAL_DEV_RUNTIME_DECISION,
+  LOCAL_DEV_RUNTIME_DECISION_QUALIFIED_REFERENCE,
+  LOCAL_DEV_RUNTIME_DECISION_REFERENCE,
   RUNTIME_FACADE_CITATION_PATTERNS,
   RUNTIME_FACADE_DECISION,
   RUNTIME_FACADE_DECISION_QUALIFIED_REFERENCE,
@@ -130,6 +145,102 @@ export type {
 
 // The low-level escape hatch, kept out of the façade's public surface
 export { getHostGlobal } from "./host-globals";
+
+// The local development runtime contract (#22)
+export {
+  assertLocalDevBoundariesAreAdmissible,
+  assertLocalDevClaimsAreLocalOnly,
+  assertLocalDevExtensionChoicesAreDeclared,
+  assertLocalDevLoopStagesAreAdmissible,
+  assertLocalDevMockSuppliesEveryBaseProp,
+  assertLocalDevProviderIsMock,
+  assertLocalDevResolutionsCoverHostBridge,
+  assertLocalDevStrategyHandlingsCoverStrategies,
+  auditLocalDevConfiguration,
+  createLocalDevDiagnostic,
+  findLocalDevBoundaryForConcern,
+  findLocalDevModuleIdResolution,
+  formatLocalDevAudit,
+  formatLocalDevDiagnostic,
+  formatLocalDevDiagnostics,
+  formatLocalDevValidationDistinction,
+  LOCAL_DEV_BOUNDARIES,
+  LOCAL_DEV_BOUNDARY_BEHAVIOURS,
+  LOCAL_DEV_BOUNDARY_IDS,
+  LOCAL_DEV_CLAIMS,
+  LOCAL_DEV_CLAIM_IDS,
+  LOCAL_DEV_CONTRACT_ERROR_CODES,
+  LOCAL_DEV_DECISION_HANDLINGS,
+  LOCAL_DEV_DIAGNOSTIC_CODES,
+  LOCAL_DEV_DIAGNOSTIC_RULES,
+  LOCAL_DEV_ERROR_SURFACES,
+  LOCAL_DEV_ERROR_SURFACING,
+  LOCAL_DEV_EXTENSION_CHOICE_MODES,
+  LOCAL_DEV_EXTENSION_SUBSTITUTE_KINDS,
+  LOCAL_DEV_FORBIDDEN_PATTERNS,
+  LOCAL_DEV_FORBIDDEN_PATTERN_IDS,
+  LOCAL_DEV_GOVERNING_DECISIONS,
+  LOCAL_DEV_GOVERNING_SPEC_REFERENCE_LINE,
+  LOCAL_DEV_HOST_MAPPING_SOURCE,
+  LOCAL_DEV_HOST_RESOLUTION_MODEL,
+  LOCAL_DEV_LOCAL_RESOLUTION_KINDS,
+  LOCAL_DEV_LOOP_STAGES,
+  LOCAL_DEV_LOOP_STAGE_IDS,
+  LOCAL_DEV_MODULE_RESOLUTIONS,
+  LOCAL_DEV_MOCK_SURFACE,
+  LOCAL_DEV_MOCK_SURFACE_SOURCE,
+  LOCAL_DEV_NON_GOALS,
+  LOCAL_DEV_STRATEGY_HANDLINGS,
+  LOCAL_DEV_VERSION_FIELDS,
+  LocalDevRuntimeContractError,
+  localDevAlignmentChecks,
+  localDevDeferredHostModules,
+  localDevDischargeableChecks,
+  localDevExtensionChoiceProblem,
+  localDevFailureContrast,
+  localDevHandlingForStrategy,
+  localDevModuleIdsOf,
+  findLocalDevBridgeRow,
+  localDevProtectedConcerns,
+  localDevRealRuntimeOwedChecks,
+  localDevRealRuntimeStage,
+  localDevRecordedVersion,
+  localDevResolvableModuleIds,
+  localDevResolvedBridgeRows,
+  localDevUnsupportedModuleIds,
+} from "./local-dev";
+export type {
+  LocalDevAlignmentExpectation,
+  LocalDevAudit,
+  LocalDevAuditInput,
+  LocalDevBoundary,
+  LocalDevBoundaryBehaviour,
+  LocalDevBoundaryId,
+  LocalDevClaim,
+  LocalDevClaimId,
+  LocalDevContractErrorCode,
+  LocalDevDecisionHandling,
+  LocalDevDiagnostic,
+  LocalDevDiagnosticCode,
+  LocalDevDiagnosticRule,
+  LocalDevErrorSurface,
+  LocalDevExtensionChoice,
+  LocalDevExtensionChoiceMode,
+  LocalDevExtensionRealRuntimeOnly,
+  LocalDevExtensionSubstitute,
+  LocalDevExtensionSubstituteKind,
+  LocalDevFixOwner,
+  LocalDevForbiddenPattern,
+  LocalDevForbiddenPatternId,
+  LocalDevLocalResolutionKind,
+  LocalDevLoopStage,
+  LocalDevLoopStageId,
+  LocalDevModuleIdResolution,
+  LocalDevModuleResolution,
+  LocalDevOwedCheck,
+  LocalDevStrategyHandling,
+  LocalDevVersionField,
+} from "./local-dev";
 
 // #29 — the façade surface: six members, each an address for admitted
 // capabilities, plus the audit that keeps the registry and the implementation
