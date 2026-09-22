@@ -64,10 +64,26 @@ describe("Vite+ plugin registry wiring", () => {
     const registry: CellRegistry = createCellRegistry(multiCellConfig(), { root: validMultiRoot });
     const plugin = forguncy({ config: registry });
 
-    // A different root must not silently re-resolve every entry path.
-    plugin.configResolved({ root: duplicateRoot });
+    // Same root as the one it was normalized against: the object is adopted
+    // as-is. Re-normalizing would build a *new* registry, so identity proves it.
+    plugin.configResolved({ root: validMultiRoot });
 
     expect(plugin.api.registry()).toBe(registry);
+  });
+
+  it("refuses a pre-normalized registry normalized against a different root, rather than resolving its specifiers against the wrong directory", () => {
+    const registry: CellRegistry = createCellRegistry(multiCellConfig(), { root: validMultiRoot });
+    const plugin = forguncy({ config: registry });
+
+    // The virtual module builds `/`-rooted specifiers from registry.root while
+    // the dev server resolves them against its own root: two roots would mean
+    // reading files the registry never checked. Refused loudly instead.
+    const error = captureConfigError(() => plugin.configResolved({ root: duplicateRoot }));
+
+    expect(error.codes).toEqual(["registry-root-mismatch"]);
+    expect(error.message).toContain(validMultiRoot);
+    expect(error.message).toContain(duplicateRoot);
+    expect(plugin.api.registry()).toBeUndefined();
   });
 
   it("fails duplicate targets at config resolution, before any build or sync", () => {
@@ -203,33 +219,33 @@ describe("the virtual Cell module seam", () => {
     ]);
   });
 
-  it("refuses an out-of-root entry or fixture at the first hook that sees it, not only at load", () => {
-    /** A registry that skipped `createCellRegistry`, so the plugin's own belt-and-braces containment check is what runs. */
-    function registryWithStrayPaths(cell: RegisteredCell): CellRegistry {
-      return {
-        root: validMultiRoot,
-        schemaVersion: 1,
-        targetLocatorModel: "forguncy-page-cell/v0",
-        runtime: {
-          codeMarkerNamespace: "fgc",
-          dependencyLockPath: "fgc.lock.json",
-          dependencyLockPathAbsolute: join(validMultiRoot, "fgc.lock.json"),
-        },
-        cells: [cell],
-        cellIds: [cell.id],
-        get: id => (id === cell.id ? cell : undefined),
-        require: id => {
-          if (id !== cell.id) {
-            throw new ForguncyConfigError([
-              { code: "unknown-cell-id", path: `cells.${id}`, message: "no such Cell" },
-            ]);
-          }
-          return cell;
-        },
-        byTarget: locatorKey => (locatorKey === cell.target.locatorKey ? cell : undefined),
-      };
-    }
+  /** A registry that skipped `createCellRegistry`, so the plugin's own belt-and-braces containment check is what runs. */
+  function registryWithStrayPaths(cell: RegisteredCell): CellRegistry {
+    return {
+      root: validMultiRoot,
+      schemaVersion: 1,
+      targetLocatorModel: "forguncy-page-cell/v0",
+      runtime: {
+        codeMarkerNamespace: "fgc",
+        dependencyLockPath: "fgc.lock.json",
+        dependencyLockPathAbsolute: join(validMultiRoot, "fgc.lock.json"),
+      },
+      cells: [cell],
+      cellIds: [cell.id],
+      get: id => (id === cell.id ? cell : undefined),
+      require: id => {
+        if (id !== cell.id) {
+          throw new ForguncyConfigError([
+            { code: "unknown-cell-id", path: `cells.${id}`, message: "no such Cell" },
+          ]);
+        }
+        return cell;
+      },
+      byTarget: locatorKey => (locatorKey === cell.target.locatorKey ? cell : undefined),
+    };
+  }
 
+  it("refuses an out-of-root entry or fixture at the first hook that sees it, not only at load", () => {
     const strayEntry: RegisteredCell = {
       id: "strayEntry",
       entry: "../stray.ts",
@@ -247,16 +263,43 @@ describe("the virtual Cell module seam", () => {
 
     for (const cell of [strayEntry, strayFixture]) {
       const expectedField = cell.id === "strayEntry" ? "entry" : "fixture";
+      const expectedCode =
+        cell.id === "strayEntry" ? "entry-outside-project-root" : "fixture-outside-project-root";
       const plugin = forguncy({ config: registryWithStrayPaths(cell) });
       plugin.configResolved({ root: validMultiRoot });
 
       const atResolve = captureConfigError(() => plugin.resolveId(cellVirtualModuleId(cell.id)));
-      expect(atResolve.codes).toEqual(["entry-outside-project-root"]);
+      expect(atResolve.codes).toEqual([expectedCode]);
       expect(atResolve.message).toContain(expectedField);
 
       const atLoad = captureConfigError(() => plugin.load(`\0${cellVirtualModuleId(cell.id)}`));
-      expect(atLoad.codes).toEqual(["entry-outside-project-root"]);
+      expect(atLoad.codes).toEqual([expectedCode]);
       expect(atLoad.message).toContain(expectedField);
     }
+  });
+
+  it("refuses an entry whose path.relative answer is absolute — Windows cross-drive — at the same hooks", () => {
+    // `path.win32.relative` answers a cross-drive query with the target's
+    // absolute path instead of a `..` chain (pure string math, so no second
+    // drive need exist); without the `isAbsolute` clause that answer would
+    // sail through the `..` guard. Pick a drive ≠ the fixture's so the case is
+    // deterministic on Windows; on POSIX the same input is simply an odd
+    // relative path and is refused by the `..` rule instead — either way the
+    // out-of-root refusal must hold.
+    const otherDrive = validMultiRoot.startsWith("D:") ? "C:" : "D:";
+    const crossDrive: RegisteredCell = {
+      id: "crossDrive",
+      entry: "./cells/cross-drive.ts",
+      entryPath: `${otherDrive}\\forguncy-issue28-outside\\cell.ts`,
+      target: { pageName: "销售订单", cell: "Y9", locatorKey: "销售订单#Y9" },
+    };
+    const plugin = forguncy({ config: registryWithStrayPaths(crossDrive) });
+    plugin.configResolved({ root: validMultiRoot });
+
+    const atResolve = captureConfigError(() => plugin.resolveId(cellVirtualModuleId("crossDrive")));
+    expect(atResolve.codes).toEqual(["entry-outside-project-root"]);
+
+    const atLoad = captureConfigError(() => plugin.load(`\0${cellVirtualModuleId("crossDrive")}`));
+    expect(atLoad.codes).toEqual(["entry-outside-project-root"]);
   });
 });

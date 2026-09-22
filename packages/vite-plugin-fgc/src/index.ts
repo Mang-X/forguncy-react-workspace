@@ -21,7 +21,7 @@
  * nothing here imports Vite to do it.
  */
 
-import { relative, sep } from "node:path";
+import { isAbsolute, relative, sep } from "node:path";
 
 import {
   createCellRegistry,
@@ -41,6 +41,12 @@ export interface ForguncyPluginOptions {
    *
    * Omit it only when something else in the pipeline will supply the registry;
    * otherwise `resolveCell` has nothing to resolve against and says so.
+   *
+   * A registry normalized elsewhere must have been normalized against *this*
+   * project's root: generated Cell modules import their entries with
+   * root-relative specifiers, which the dev server resolves against its own
+   * root, so `configResolved` refuses a mismatched root
+   * (`registry-root-mismatch`) rather than resolve the wrong file.
    */
   readonly config?: ForguncyConfig | CellRegistry;
   /** Verify declared entries exist on disk while normalizing. Defaults to `true`. */
@@ -59,7 +65,10 @@ export interface ForguncyPluginApi {
  *
  * `configResolved` is the first hook that carries the resolved project root, which
  * is why normalization waits for it: resolving entries against anything else would
- * bind the registry to the wrong directory.
+ * bind the registry to the wrong directory. The same root also gates a
+ * pre-normalized registry — it is adopted only when its root *is* the host's
+ * root (`registry-root-mismatch` otherwise), because the virtual module's
+ * root-relative specifiers resolve against the host root, not the registry's.
  *
  * `resolveId`/`load` are the Issue #28 dev seam: one Cell, one virtual module,
  * whose exports are the contract Issue #23's harness consumes (`cellId`,
@@ -124,15 +133,23 @@ export function virtualModuleCellId(id: string): string | undefined {
  * machine path (the registry already refuses entries outside the project root,
  * so root-relative is always inside), and POSIX because import specifiers are
  * URL-shaped even on Windows. The containment check below is belt-and-braces
- * for a hand-built registry object that skipped `createCellRegistry`'s own.
+ * for a hand-built registry object that skipped `createCellRegistry`'s own,
+ * and applies exactly the rule `createCellRegistry` applies: a non-empty
+ * relative answer that is neither `..`-prefixed nor absolute. Absolute answers
+ * are reachable on Windows, where `path.relative` replies to a cross-drive
+ * query with the target's absolute path instead of a `..` chain — without the
+ * `isAbsolute` clause that answer would sail through and become a specifier
+ * like `/D:/...`. The code names the field that was out of bounds, mirroring
+ * core's `entry-`/`fixture-outside-project-root` split so callers branching on
+ * `ForguncyConfigError.codes` see one failure class per problem.
  */
-function rootRelativeSpecifier(root: string, absolute: string, cellId: string, field: string): string {
+function rootRelativeSpecifier(root: string, absolute: string, cellId: string, field: "entry" | "fixture"): string {
   const rel = relative(root, absolute);
-  if (rel === "" || rel.startsWith("..") || rel.startsWith(`..${sep}`)) {
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
     throw new ForguncyConfigError(
       [
         {
-          code: "entry-outside-project-root",
+          code: field === "fixture" ? "fixture-outside-project-root" : "entry-outside-project-root",
           path: `cells.${cellId}.${field}`,
           message: `The ${field} of Cell "${cellId}" resolves outside the project root ("${absolute}"), so it cannot be referenced from a generated module. Keep managed source inside the project.`,
         },
@@ -251,9 +268,32 @@ export function forguncy(options: ForguncyPluginOptions = {}): ForguncyVitePlugi
         return;
       }
 
-      registry = isCellRegistry(options.config)
-        ? options.config
-        : createCellRegistry(options.config, { root: config.root, requireEntryFiles });
+      if (!isCellRegistry(options.config)) {
+        registry = createCellRegistry(options.config, { root: config.root, requireEntryFiles });
+        return;
+      }
+
+      // A pre-normalized registry is adopted as-is — but only when it was
+      // normalized against *this* project's root. The virtual module's import
+      // specifiers are built from `registry.root` and the dev server resolves
+      // `/`-rooted specifiers against its own `config.root`; with two roots
+      // those specifiers would silently point at different files (or none).
+      // `relative` is the comparison rather than string equality so trailing
+      // separators, mixed separators, and Windows casing all count as equal.
+      if (relative(config.root, options.config.root) !== "") {
+        throw new ForguncyConfigError(
+          [
+            {
+              code: "registry-root-mismatch",
+              path: "config.root",
+              message: `The Cell registry was normalized against project root "${options.config.root}", but this project's root is "${config.root}". Generated Cell modules import their entries with root-relative specifiers, which the dev server resolves against the project root — a registry rooted elsewhere would resolve to different files than the registry checked. Pass the raw forguncy.config (letting the plugin normalize it against this root), or re-normalize the registry with createCellRegistry(config, { root: <this project's root> }).`,
+            },
+          ],
+          FORGUNCY_PLUGIN_NAME,
+        );
+      }
+
+      registry = options.config;
     },
     resolveId(id) {
       const claim = claimCellModule(id);

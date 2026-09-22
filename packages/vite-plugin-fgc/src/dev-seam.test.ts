@@ -1,6 +1,7 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { createCellRegistry, ForguncyConfigError } from "@forguncy-react-workspace/core";
 import type { ForguncyConfig } from "@forguncy-react-workspace/core";
 import { createServer } from "vite";
 import type { ViteDevServer } from "vite";
@@ -89,5 +90,69 @@ describe("the dev seam under a real Vite dev server", () => {
     await expect(server.ssrLoadModule(cellVirtualModuleId("broken"))).rejects.toThrowError(
       /Available exports: helper/,
     );
+  });
+});
+
+/**
+ * The pre-normalized-registry path: Issue #28 lets a host normalize the config
+ * itself and hand the registry over, and PR review asked for proof that this
+ * path *executes* under a real dev server — and that a registry normalized
+ * against a different root is refused instead of being resolved against the
+ * Vite root. Green here is a local check of this seam, not a Forguncy runtime
+ * claim.
+ */
+describe("a pre-normalized registry under a real Vite dev server", () => {
+  it("serves the seam when the registry was normalized against this root", async () => {
+    const registry = createCellRegistry(config, { root: fixtureRoot });
+    const own = await createServer({
+      root: fixtureRoot,
+      configFile: false,
+      logLevel: "silent",
+      appType: "custom",
+      plugins: [forguncy({ config: registry })],
+      server: { middlewareMode: true, hmr: false, watch: null },
+    });
+
+    try {
+      const module = await own.ssrLoadModule(cellVirtualModuleId("orderList"));
+
+      expect(module.cellId).toBe("orderList");
+      expect(typeof module.Cell).toBe("function");
+      expect(module.Cell()).toBe("order-list-app");
+      expect(module.fixture).toEqual({ cellProps: { Permissions: { Orders: "read" } } });
+    } finally {
+      await own.close();
+    }
+  });
+
+  it("refuses a registry normalized against a different root at config resolution, naming both roots", async () => {
+    // Normalized one directory up, entries declared but not required on disk:
+    // what is being tested is the root agreement, not file existence.
+    const registry = createCellRegistry(config, {
+      root: join(fixtureRoot, ".."),
+      requireEntryFiles: false,
+    });
+    const failure: unknown = await createServer({
+      root: fixtureRoot,
+      configFile: false,
+      logLevel: "silent",
+      appType: "custom",
+      plugins: [forguncy({ config: registry })],
+      server: { middlewareMode: true, hmr: false, watch: null },
+    }).then(
+      async unexpected => {
+        await unexpected.close();
+        return undefined;
+      },
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBeInstanceOf(ForguncyConfigError);
+    const configError = failure as ForguncyConfigError;
+    expect(configError.codes).toEqual(["registry-root-mismatch"]);
+    // The message names the registry's root exactly as this test built it, and
+    // Vite's own root — Vite normalizes `config.root` to forward slashes.
+    expect(configError.message).toContain(join(fixtureRoot, ".."));
+    expect(configError.message).toContain(fixtureRoot.split("\\").join("/"));
   });
 });
