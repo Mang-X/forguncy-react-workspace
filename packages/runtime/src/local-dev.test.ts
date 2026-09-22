@@ -31,6 +31,7 @@ import {
   assertLocalDevStrategyHandlingsCoverStrategies,
   auditLocalDevConfiguration,
   findLocalDevBoundaryForConcern,
+  formatLocalDevAudit,
   formatLocalDevValidationDistinction,
   LOCAL_DEV_BOUNDARIES,
   LOCAL_DEV_BOUNDARY_IDS,
@@ -1417,6 +1418,19 @@ describe("the diagnostic vocabulary", () => {
     row.specifier === "react" ? { ...row, resolution: "bogus" as LocalDevModuleResolution["resolution"] } : row,
   );
 
+  // A row that declares a stand-in and names nothing to resolve — the shape the guard's
+  // "names no package, so there is nothing to resolve" rule is about.
+  const packagelessReactRow: LocalDevModuleResolution = {
+    specifier: "react",
+    resolution: "npm-package",
+    alignmentUnchecked: "fixture: a row that declares a stand-in and names none",
+    note: "fixture packageless",
+  };
+
+  const tableWithPackagelessReactRow: LocalDevModuleResolution[] = LOCAL_DEV_MODULE_RESOLUTIONS.map(row =>
+    row.specifier === "react" ? packagelessReactRow : row,
+  );
+
   it("leaves out a bridge row it cannot read and keeps the rows it can", () => {
     const resolvable = localDevResolvableModuleIds(LOCAL_DEV_MODULE_RESOLUTIONS, tableWithBrokenReactRow);
 
@@ -1491,6 +1505,41 @@ describe("the diagnostic vocabulary", () => {
       findLocalDevModuleIdResolution("react-dom/client", LOCAL_DEV_MODULE_RESOLUTIONS, tableWithBrokenReactRow)?.specifier,
     ).toBe("react-dom");
     expect(findLocalDevModuleIdResolution("react", LOCAL_DEV_MODULE_RESOLUTIONS, tableWithBrokenReactRow)).toBeUndefined();
+  });
+
+  // The fourth re-review's finding, which is the round-5 distinction one step further out:
+  // being safe to read is not the same as resolving. `localPackage` is what the row's own
+  // doc calls "required unless `unsupported`", and the guard refuses a row that declares
+  // `npm-package` / `project-shim` and names nothing to resolve — but the derivation
+  // filtered on readability and kind alone, so one report carried a finding saying there is
+  // nothing to resolve *and* a worklist listing the module id as one the harness stands in
+  // for. The claim now requires the field that makes it true.
+  it("does not claim a stand-in for a row the guard refused for naming nothing to resolve", () => {
+    const audit = auditLocalDevConfiguration({ resolutions: tableWithPackagelessReactRow });
+
+    // The row is refused by name, with the fix it needs.
+    const finding = audit.diagnostics.find(diagnostic => diagnostic.code === "local-dev-mapping-coverage");
+    expect(finding?.detail).toMatch(/Local resolution "react" is "npm-package" and names no package/);
+
+    // No list claims what that finding denies, and the rows that do resolve still resolve.
+    expect(audit.resolvable).not.toContain("react");
+    expect(audit.resolvable).toContain("react-dom/client");
+    expect(audit.unresolved).not.toContain("react");
+  });
+
+  it("prints a claim it can make beside a finding about a row it refused", () => {
+    // The same table, read through the report rather than the audit: the module id must not
+    // be printed as resolvable, and the claim line has to be one the audit can actually
+    // assert — "No module id lacks a local stand-in" was a statement about every module id,
+    // printed beside a finding that denied it for one of them.
+    const audit = auditLocalDevConfiguration({ resolutions: tableWithPackagelessReactRow });
+    const report = formatLocalDevAudit(audit);
+
+    expect(report.split("\n")[0]).toBe(`Local dev resolvable module ids: ${audit.resolvable.join(", ")}`);
+    expect(report).not.toMatch(/No module id lacks a local stand-in/);
+    expect(report).toMatch(/No bridged module id is declared without a local stand-in\./);
+    // And the refused row is still reported in the same report.
+    expect(report).toMatch(/local-dev-mapping-coverage/);
   });
 });
 

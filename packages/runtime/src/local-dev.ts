@@ -676,6 +676,45 @@ function localDevResolutionSubject(resolution: unknown): string | undefined {
 }
 
 /**
+ * The package or shim path a row resolves to, or `undefined` when it names none.
+ *
+ * One accessor for the field that turns a declared kind into an actual stand-in, because
+ * `localPackage` is `unknown` in a table that arrived by cast: a reader that reached for it
+ * directly would be assuming a shape nothing had checked, which is what
+ * {@link localDevResolutionRowProblem} exists to prevent.
+ */
+function localDevResolutionTarget(resolution: LocalDevModuleResolution): string | undefined {
+  const target = resolution.localPackage;
+  return isNonEmptyString(target) ? target : undefined;
+}
+
+/**
+ * Whether a row makes the claim {@link localDevResolvableModuleIds} is a list of.
+ *
+ * Two conditions, and the second is the one this exists for. A row has to declare a
+ * stand-in — `unsupported` is the kind whose whole content is that it declares none — *and*
+ * name the thing it resolves to. Being readable is not the same as resolving: the guard
+ * refuses a row that declares a stand-in and names none ("there is nothing to resolve"), so
+ * a worklist built out of readability alone listed a module id beside a finding that said
+ * nothing resolves it. The claim and the list are now the same statement.
+ */
+function standsInForModuleId(resolution: LocalDevModuleResolution): boolean {
+  return resolution.resolution !== "unsupported" && localDevResolutionTarget(resolution) !== undefined;
+}
+
+/**
+ * Why a row that declares a stand-in cannot name one, or `undefined` when it names it.
+ *
+ * The guard's half of {@link standsInForModuleId}, spelled with the same accessor so the
+ * refusal and the worklist cannot answer one question two ways.
+ */
+function localDevMissingTargetProblem(resolution: LocalDevModuleResolution): string | undefined {
+  return localDevResolutionTarget(resolution) === undefined
+    ? `is "${resolution.resolution}" and names no package, so there is nothing to resolve`
+    : undefined;
+}
+
+/**
  * Whether the audit can read a decision's strategy and the package it names.
  *
  * Those are the two members the audit uses: `strategy` to find the `extension` rows,
@@ -867,11 +906,14 @@ export function assertLocalDevResolutionsCoverHostBridge(
       covered.add(moduleId);
     }
 
-    if (resolution.resolution !== "unsupported" && resolution.localPackage === undefined) {
-      throw new LocalDevRuntimeContractError(
-        "mapping-coverage",
-        `Local resolution "${resolution.specifier}" is "${resolution.resolution}" and names no package, so there is nothing to resolve.`,
-      );
+    if (resolution.resolution !== "unsupported") {
+      const noTarget = localDevMissingTargetProblem(resolution);
+      if (noTarget !== undefined) {
+        throw new LocalDevRuntimeContractError(
+          "mapping-coverage",
+          `Local resolution "${resolution.specifier}" ${noTarget}.`,
+        );
+      }
     }
 
     if (resolution.checkedVersionField === undefined && resolution.alignmentUnchecked === undefined) {
@@ -912,6 +954,16 @@ export function assertLocalDevResolutionsCoverHostBridge(
  * it belongs in is decided by that kind, and nothing here may decide "resolvable" for a
  * row that resolved by nothing. The guard refuses such a row by name, so leaving it out
  * here is not the last word about it.
+ *
+ * A row that declares a stand-in and names none is left out too, and this is the list
+ * where that matters most: {@link standsInForModuleId} is the same condition the guard
+ * refuses such a row with, so the worklist cannot claim a stand-in beside a finding that
+ * says there is nothing to resolve. It is the second reading of one rule, not a second
+ * rule — the row is refused by name and reported as `local-dev-mapping-coverage`, and this
+ * list simply does not claim what that finding denies. It is deliberately in *neither*
+ * list rather than moved to {@link localDevUnsupportedModuleIds}: "nothing stands in for
+ * this" is a statement the row did not make, and reporting it as one would be a second
+ * finding about one mistake, in a different code, with different advice.
  */
 export function localDevResolvableModuleIds(
   resolutions: readonly LocalDevModuleResolution[] = LOCAL_DEV_MODULE_RESOLUTIONS,
@@ -919,7 +971,7 @@ export function localDevResolvableModuleIds(
 ): readonly string[] {
   return resolutions
     .filter(canReadResolutionRow)
-    .filter(resolution => resolution.resolution !== "unsupported")
+    .filter(standsInForModuleId)
     .flatMap(resolution => moduleIdsOfExistingRow(resolution.specifier, mappings));
 }
 
@@ -1813,9 +1865,24 @@ export interface LocalDevAuditInput {
 
 export interface LocalDevAudit {
   readonly diagnostics: readonly LocalDevDiagnostic[];
-  /** The module ids the harness can stand in for. */
+  /**
+   * The module ids the harness can stand in for.
+   *
+   * A row contributes here only when it makes that claim: it declares a stand-in and names
+   * the package or shim path it resolves to ({@link standsInForModuleId}). Readable is not
+   * the claim, so a row the guard refused for naming nothing to resolve is absent here even
+   * though the row is present in the table.
+   */
   readonly resolvable: readonly string[];
-  /** The module ids the table intercepts and no local resolution covers. */
+  /**
+   * The module ids whose row declares no local stand-in (`unsupported`).
+   *
+   * Not the complement of {@link resolvable} when a table is broken: a row that declares a
+   * stand-in and names none contributes to *neither* list, because "nothing stands in for
+   * this module" is a statement that row did not make. `local-dev-mapping-coverage` is the
+   * one report about it, and it names the row rather than the module ids it would have
+   * covered.
+   */
   readonly unresolved: readonly string[];
   /** The version comparisons the harness has to make, with #5's expected values. */
   readonly alignment: readonly LocalDevAlignmentExpectation[];
@@ -2078,9 +2145,14 @@ export function auditLocalDevConfiguration(input: LocalDevAuditInput = {}): Loca
 export function formatLocalDevAudit(audit: LocalDevAudit): string {
   return [
     `Local dev resolvable module ids: ${audit.resolvable.join(", ") || "(none)"}`,
+    // A statement about what the rows declared, which is the stronger claim this audit can
+    // make: a table the guard refused is reported by its findings, and a row that resolved
+    // by nothing is one of them rather than an entry in a list. "No module id lacks a local
+    // stand-in" would have been the stronger sentence and an unsayable one — it asserted
+    // something about every module id, beside a finding that denied it for one of them.
     audit.unresolved.length === 0
-      ? "No module id lacks a local stand-in."
-      : `No local stand-in for: ${audit.unresolved.join(", ")}`,
+      ? "No bridged module id is declared without a local stand-in."
+      : `Declared without a local stand-in: ${audit.unresolved.join(", ")}`,
     audit.alignment.length === 0
       ? "No version check is available."
       : `Version checks: ${audit.alignment.map(entry => `${entry.localPackage}===${entry.expected}`).join(", ")}`,
