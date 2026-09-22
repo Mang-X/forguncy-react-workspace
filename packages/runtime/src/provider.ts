@@ -113,7 +113,13 @@ export const RUNTIME_FACADE_ABSENCE_SHAPES = ["throws", "returns-the-hosts-error
 
 export type RuntimeFacadeAbsenceShape = (typeof RUNTIME_FACADE_ABSENCE_SHAPES)[number];
 
-/** Which family of address an absence is about. */
+/**
+ * The families of address a façade call can name.
+ *
+ * A family, not a registry: `cell-prop` and `forguncy-member` are two families of
+ * address `core` records, and `provider` is the slot failures that are about no
+ * particular address at all (nothing is installed, two providers conflict).
+ */
 export const RUNTIME_FACADE_ADDRESS_KINDS = [
   "provider",
   "cell-prop",
@@ -139,7 +145,40 @@ export type RuntimeFacadeAbsenceId = RuntimeFacadeResolutionErrorCode | "undecla
 export interface RuntimeFacadeAbsenceMode {
   readonly id: RuntimeFacadeAbsenceId;
   readonly shape: RuntimeFacadeAbsenceShape;
-  readonly addressKind: RuntimeFacadeAddressKind;
+  /**
+   * Every address family a lookup can fail at and produce this code, in the order
+   * they are listed in `RUNTIME_FACADE_ADDRESS_KINDS`.
+   *
+   * Plural, and that is a correction rather than a convenience. A resolution error
+   * names a *diagnosis*, and one diagnosis can arise at more than one family:
+   *
+   * - `host-binding-not-confirmed` is one rule — "the name is not an address #5
+   *   observed" — applied to a base prop and to a handle member;
+   * - `binding-not-exposed` is likewise one rule — "a confirmed address reached
+   *   through the wrong member" — applied to both;
+   * - `capability-not-supplied` covers a `props.Forguncy` member that answered a
+   *   shape #5 did not record, *and* a server command that resolved to something
+   *   other than the result record;
+   * - `provider-binding-missing` covers the provider's own bindings record, a base
+   *   prop, and a handle member, because all three are read through the same
+   *   own-property rule.
+   *
+   * A single-valued field had to pick one family and be wrong about the rest, which
+   * is what review found: the row named `forguncy-member` while
+   * `invokeServerCommand` was throwing the same code about a `server-command-name`.
+   * Splitting the codes by family instead was the alternative and was rejected —
+   * `binding-not-exposed` for a base prop and for a handle member are the same
+   * diagnosis with the same fix, so two codes would differ only in which registry
+   * they consult, which is an invented API of exactly the kind this package refuses.
+   *
+   * What each entry claims is narrow and testable, in both directions: a test drives
+   * one real call per family listed here (so a family nothing produces fails), and
+   * asserts every producer's family is listed (so a producer the row omits fails).
+   * `address` on the thrown error may name something finer-grained *within* the
+   * family — the permission name for `hasPermission`, say — because that is what the
+   * reader needs; the family is what the lookup belongs to.
+   */
+  readonly addressKinds: readonly RuntimeFacadeAddressKind[];
   /** Why the address is absent. Stated as the cause, not as the symptom. */
   readonly cause: string;
   /** What the reader should change. An error a reader cannot act on is a crash. */
@@ -150,7 +189,7 @@ export const RUNTIME_FACADE_ABSENCE_MODES: readonly RuntimeFacadeAbsenceMode[] =
   {
     id: "provider-not-installed",
     shape: "throws",
-    addressKind: "provider",
+    addressKinds: ["provider"],
     cause:
       "No provider was installed in this copy of the package, so no address resolves. The provider is selected by the harness, never by the Cell.",
     remediation:
@@ -159,7 +198,7 @@ export const RUNTIME_FACADE_ABSENCE_MODES: readonly RuntimeFacadeAbsenceMode[] =
   {
     id: "provider-kind-conflict",
     shape: "throws",
-    addressKind: "provider",
+    addressKinds: ["provider"],
     cause:
       "A provider of another kind is already installed in this copy, so installing this one would mean two harnesses driving the same Cell — and the Cell would silently change environment mid-life.",
     remediation:
@@ -168,16 +207,16 @@ export const RUNTIME_FACADE_ABSENCE_MODES: readonly RuntimeFacadeAbsenceMode[] =
   {
     id: "host-binding-not-confirmed",
     shape: "throws",
-    addressKind: "cell-prop",
+    addressKinds: ["cell-prop", "forguncy-member"],
     cause:
-      "The requested name is not an address #5 observed at that family. Reachable from JavaScript that never saw the types, and from a `as never` cast in TypeScript.",
+      "The requested name is not an address #5 observed at either family the accessors reach. Reachable from JavaScript that never saw the types, and from an `as never` cast in TypeScript.",
     remediation:
       "Use a name `core` records: `CELL_PROPS_BASE_KEYS` for a base prop, `CELL_FORGUNCY_PROP_KEYS` for a handle member.",
   },
   {
     id: "binding-not-exposed",
     shape: "throws",
-    addressKind: "cell-prop",
+    addressKinds: ["cell-prop", "forguncy-member"],
     cause:
       "The name is a confirmed address, but this accessor is not the façade member that exposes it. Reaching one address through two members is how a façade acquires a second way to be wrong.",
     remediation:
@@ -186,25 +225,25 @@ export const RUNTIME_FACADE_ABSENCE_MODES: readonly RuntimeFacadeAbsenceMode[] =
   {
     id: "provider-binding-missing",
     shape: "throws",
-    addressKind: "provider",
+    addressKinds: ["provider", "cell-prop", "forguncy-member", "cell-hook"],
     cause:
-      "The installed provider does not carry the address at all. The ReactCellType runtime injects every base prop key and the whole handle on every Cell, so this is a wiring fault rather than a state a page can be in.",
+      "The installed provider does not carry the address at all — whether the missing thing is the provider's own bindings record, a base prop, a handle member, or the `useDataSource` hook. The ReactCellType runtime injects every base prop key and the whole handle on every Cell, so this is a wiring fault rather than a state a page can be in.",
     remediation:
       "Build the provider through `createHostRuntimeFacadeProvider()` from the cell's own `props`, or through `createMockRuntimeFacadeProvider()` in local development. Both fill the addresses the runtime always injects.",
   },
   {
     id: "capability-not-supplied",
     shape: "throws",
-    addressKind: "forguncy-member",
+    addressKinds: ["forguncy-member", "server-command-name"],
     cause:
-      "The address exists on the provider but nothing usable is behind it: either a member #5 *called* is not callable, or such a member answered a shape #5 did not record. Callability is asked only of the two members whose call shape #5 recorded — a `member-presence` address is handed over as the handle holds it, because #5 read its name from the key list and never its `typeof` — so a non-function at one of those addresses is a shape the evidence permits, not this code. The wrong-answer case is the worse one, because a wrong answer reported as the declared type is indistinguishable from a right one.",
+      "The address exists on the provider but what is behind it contradicts #5's record: a member #5 *called* is not callable, or such a member answered a shape #5 did not record, or a server command resolved to something other than the result record. Callability is asked only of the two members whose call shape #5 recorded — a `member-presence` address is handed over as the handle holds it, because #5 read its name from the key list and never its `typeof` — so a non-function at one of those addresses is a shape the evidence permits, not this code. The wrong-answer cases are the worse ones, because a wrong answer reported as the declared type is indistinguishable from a right one.",
     remediation:
-      "Configure the capability on the page or Cell in the designer, or supply it in the mock provider. For a member #5 called, a mock that omits it reports this code rather than standing in with `undefined`. When the *answer* is the wrong shape, nothing here is misconfigured: the address answered something the recorded contract does not describe, so check the product runtime version — or the provider — before trusting the value.",
+      "For a capability that was never supplied, configure it on the page or Cell in the designer, or supply it in the mock provider — a mock that omits a member #5 called reports this code rather than standing in with `undefined`. For a wrong answer, nothing here is misconfigured: the address answered something the recorded contract does not describe, so check the product runtime version — or, for a server command, the command's own implementation — before trusting the value.",
   },
   {
     id: "server-command-not-configured",
     shape: "throws",
-    addressKind: "server-command-name",
+    addressKinds: ["server-command-name"],
     cause:
       "#5 records only the names in `availableServerCommands` as present, so an unconfigured name is `undefined` on the record by design — the page did not make that command available to this Cell.",
     remediation:
@@ -213,7 +252,7 @@ export const RUNTIME_FACADE_ABSENCE_MODES: readonly RuntimeFacadeAbsenceMode[] =
   {
     id: "undeclared-data-source",
     shape: "returns-the-hosts-error-state",
-    addressKind: "data-source-name",
+    addressKinds: ["data-source-name"],
     cause:
       "#5 records a name that was never declared as an error state whose message contains the name, not as a thrown exception, so the binding answers with that state.",
     remediation:
