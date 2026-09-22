@@ -951,7 +951,7 @@ export const LOCAL_DEV_STRATEGY_HANDLINGS: readonly LocalDevStrategyHandling[] =
     strategy: "extension",
     localHandling: "local-substitute-required",
     requiresFromTheProject:
-      "One of two recorded choices per package (`LocalDevExtensionChoice`): a local substitute — the published package or a project shim — with its justification, or a `real-runtime-only` acknowledgement saying why no stand-in is used and what stays unexercised.",
+      "Exactly one of two recorded choices per package (`LocalDevExtensionChoice`): a local substitute — the published package or a project shim — with its justification, or a `real-runtime-only` acknowledgement saying why no stand-in is used and what stays unexercised. Exactly one, because the two are exclusive readings of the same decision.",
     localClaim:
       "Only that the cell compiles and renders against whatever the substitute is. Nothing about the extension: not its global name in this project, not its version, and not whether the ReactCellType reference resolves at load time. Under `real-runtime-only` the local claim is narrower still — the dependency is not exercised at all.",
     realRuntimeClaimedBy:
@@ -1034,17 +1034,37 @@ export function localDevHandlingForStrategy(strategy: DependencyStrategy): Local
  * bare "use npm instead" would be the harness deciding that a deployment difference
  * does not matter, and the project is the only party that knows whether the
  * singleton semantics its cell relies on are exercised locally.
+ *
+ * A package appears in this list at most once. Two entries for one package are not
+ * two decisions — they are two mutually exclusive readings of one, and keeping
+ * either would make the audit's answer depend on the order of the array: reversing
+ * the list would move the package between `substitute` and `real-runtime-only`
+ * without anyone editing a decision. A duplicate is refused rather than resolved,
+ * because resolving it would be the harness picking one of two things the project
+ * stated.
  */
 export const LOCAL_DEV_EXTENSION_CHOICE_MODES = ["substitute", "real-runtime-only"] as const;
 
 export type LocalDevExtensionChoiceMode = (typeof LOCAL_DEV_EXTENSION_CHOICE_MODES)[number];
+
+/**
+ * The two ways a project can stand in for an extension global locally.
+ *
+ * A const tuple rather than a union written out in one place only, for the same
+ * reason the modes are one: the validator has to be able to name the set at
+ * runtime, and a union that exists only in the type checker cannot be checked
+ * against a JSON project config.
+ */
+export const LOCAL_DEV_EXTENSION_SUBSTITUTE_KINDS = ["npm-package", "project-shim"] as const;
+
+export type LocalDevExtensionSubstituteKind = (typeof LOCAL_DEV_EXTENSION_SUBSTITUTE_KINDS)[number];
 
 /** The project stands the extension global in for locally. */
 export interface LocalDevExtensionSubstitute {
   /** The package whose decision is `extension`. */
   readonly packageName: string;
   readonly mode: "substitute";
-  readonly kind: "npm-package" | "project-shim";
+  readonly kind: LocalDevExtensionSubstituteKind;
   /** What the substitute resolves to locally. */
   readonly resolvesTo: string;
   /** Why this is an acceptable stand-in for local UI work. */
@@ -1071,60 +1091,112 @@ export interface LocalDevExtensionRealRuntimeOnly {
 export type LocalDevExtensionChoice = LocalDevExtensionSubstitute | LocalDevExtensionRealRuntimeOnly;
 
 /**
+ * A string with content, read without touching the value.
+ *
+ * Every string member of a choice goes through this rather than being compared
+ * directly, because the input reaches the validator from `unknown`: a JSON project
+ * config is parsed before it is typed, so a field the type calls `string` can be a
+ * number at runtime, and `.trim()` on a number is a throw. Checking the type before
+ * reading the value is what makes the validator total.
+ */
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+/**
+ * What to call a choice in a finding, when its own name may not be usable.
+ *
+ * A malformed entry is exactly the one whose `packageName` cannot be trusted — it
+ * may be missing, a number, or the entry may be `null` — so a finding about it
+ * cannot be keyed on the name it was supposed to have. The placeholder keeps the
+ * finding addressable without naming a package that was never named.
+ */
+function localDevChoiceSubject(choice: unknown): string {
+  if (typeof choice === "object" && choice !== null) {
+    const packageName = (choice as { packageName?: unknown }).packageName;
+    if (isNonEmptyString(packageName)) return packageName;
+  }
+  return "(an unnamed extension choice)";
+}
+
+/**
  * What is missing from an `extension` choice, or `undefined` when it is a decision.
  *
  * A validator rather than a boolean, so the audit can say *which* part of the
  * declaration is absent. An acknowledgement with an empty `reason` is not a
- * decision with a terse author, it is an omission that has learned the vocabulary —
- * which is why the audit counts a choice that fails here as *not declared* rather
- * than as declared-and-slightly-thin.
+ * decision with a terse author, it is an omission that has learned the vocabulary.
+ *
+ * Takes `unknown` on purpose, and inspects before it reads. The declared type on
+ * {@link LocalDevAuditInput} is the contract, but a config read from JSON is
+ * `unknown` until something has checked it, and the cast that turns it into
+ * `LocalDevExtensionChoice` belongs to the caller. Trusting that cast is how "the
+ * audit never throws" gets broken by a number where a string was expected, so the
+ * two members that select the branch — `packageName` and `mode` — are checked as
+ * strings first, and the branch is taken on the checked value rather than on the
+ * union, because falling off a `switch` reads as "no problem", which is the exact
+ * silent pass this validator exists to prevent.
  */
-export function localDevExtensionChoiceProblem(choice: LocalDevExtensionChoice): string | undefined {
-  if (choice.packageName.trim().length === 0) return "it names no package";
+export function localDevExtensionChoiceProblem(choice: unknown): string | undefined {
+  if (typeof choice !== "object" || choice === null) return "it is not a choice at all";
+  const declared = choice as Record<string, unknown>;
 
-  // Read the mode through `string` rather than straight off the union. A mode the
-  // union does not have can only arrive from untyped data — a JSON project config —
-  // and falling off the switch below would read as "no problem", which is the exact
-  // silent pass this validator exists to prevent. Same reasoning as the shape guards
-  // that read a mapping through an untyped view.
-  const mode: string = choice.mode;
+  if (!isNonEmptyString(declared.packageName)) return "it names no package";
+
+  const mode = declared.mode;
+  if (!isNonEmptyString(mode)) return "it selects neither branch";
   if (!(LOCAL_DEV_EXTENSION_CHOICE_MODES as readonly string[]).includes(mode)) {
     return `the mode "${mode}" is not one of the two branches #22 allows`;
   }
 
-  switch (choice.mode) {
-    case "substitute":
-      if (choice.resolvesTo.trim().length === 0) return "the substitute names nothing to resolve to";
-      if (choice.justification.trim().length === 0) return "the substitute gives no justification";
-      return undefined;
-    case "real-runtime-only":
-      if (choice.reason.trim().length === 0) return "the acknowledgement gives no reason";
-      if (choice.consequence.trim().length === 0) {
-        return "the acknowledgement states no consequence, so nothing says what it leaves unexercised";
-      }
-      return undefined;
+  // Past this point the branch is known, so only its own fields remain — and each
+  // is still checked before it is touched, for the same reason.
+  if (mode === "substitute") {
+    const kind = declared.kind;
+    if (!isNonEmptyString(kind) || !(LOCAL_DEV_EXTENSION_SUBSTITUTE_KINDS as readonly string[]).includes(kind)) {
+      return `the substitute kind "${String(kind)}" is not one of the two #22 allows`;
+    }
+    if (!isNonEmptyString(declared.resolvesTo)) return "the substitute names nothing to resolve to";
+    if (!isNonEmptyString(declared.justification)) return "the substitute gives no justification";
+    return undefined;
   }
+
+  if (!isNonEmptyString(declared.reason)) return "the acknowledgement gives no reason";
+  if (!isNonEmptyString(declared.consequence)) {
+    return "the acknowledgement states no consequence, so nothing says what it leaves unexercised";
+  }
+  return undefined;
 }
 
 /**
- * Refuse an `extension` choice that is not a decision.
+ * Refuse an `extension` choice that is not a decision, or a package that has two.
  *
- * The structural defence behind #22's two valid branches: without it, the
- * `real-runtime-only` mode could be reached by writing the mode and nothing else,
- * and the repository would have traded one unrepresentable state for one that is
- * representable but empty.
+ * The structural defence behind #22's two valid branches: without the first check,
+ * `real-runtime-only` could be reached by writing the mode and nothing else, and the
+ * repository would have traded one unrepresentable state for one that is
+ * representable but empty. The second check is the same argument one level up — two
+ * entries for one package make the branch depend on the order of the list, so the
+ * pair is refused rather than resolved.
  */
 export function assertLocalDevExtensionChoicesAreDeclared(
   choices: readonly LocalDevExtensionChoice[] = [],
 ): void {
+  const declared = new Set<string>();
   for (const choice of choices) {
     const problem = localDevExtensionChoiceProblem(choice);
     if (problem !== undefined) {
       throw new LocalDevRuntimeContractError(
         "extension-choice-not-declared",
-        `The local choice for "${choice.packageName || "(unnamed)"}" (${choice.mode}) is not a decision: ${problem}.`,
+        `The local choice for "${localDevChoiceSubject(choice)}" is not a decision: ${problem}.`,
       );
     }
+
+    if (declared.has(choice.packageName)) {
+      throw new LocalDevRuntimeContractError(
+        "extension-choice-duplicated",
+        `The package "${choice.packageName}" carries more than one local choice. A package has one decision, so a second entry is not a second decision — with both present, which branch applies would depend on the order of the list. Declare exactly one.`,
+      );
+    }
+    declared.add(choice.packageName);
   }
 }
 
@@ -1330,6 +1402,8 @@ export const LOCAL_DEV_DIAGNOSTIC_CODES = [
   "local-dev-mapping-coverage",
   "local-dev-no-local-stand-in",
   "local-dev-deferred-host-module",
+  "local-dev-extension-choice-malformed",
+  "local-dev-extension-choice-duplicated",
   "local-dev-extension-needs-substitute",
   "local-dev-extension-real-runtime-only",
   "local-dev-host-version-mismatch",
@@ -1387,13 +1461,30 @@ export const LOCAL_DEV_DIAGNOSTIC_RULES: Readonly<Record<LocalDevDiagnosticCode,
     fixOwner: "host-bridge-mapping",
     blocksLocalDevelopment: false,
   },
+  "local-dev-extension-choice-malformed": {
+    code: "local-dev-extension-choice-malformed",
+    label: "A declared `extension` choice is not a decision",
+    states: "A choice in the project's list is missing a part its branch requires.",
+    remediation:
+      "Fill in the part the finding names — the two branches ask for different fields, so the fix is to complete the one that was chosen. A choice that has learned the vocabulary but not the content is still an omission: an acknowledgement with a `consequence` left empty does not say what the local loop cannot exercise, and a substitute with no `resolvesTo` does not say what it stands in. The list is inspected without trusting its declared type, so a value that is not a choice at all reaches the same finding rather than a stack trace.",
+    fixOwner: "dependency-decision",
+    blocksLocalDevelopment: true,
+  },
+  "local-dev-extension-choice-duplicated": {
+    code: "local-dev-extension-choice-duplicated",
+    label: "One `extension` package carries more than one local choice",
+    states: "Two or more well-formed choices name the same package.",
+    remediation:
+      "Keep exactly one entry and delete the rest. A package has one decision, so a second entry is not a second decision: with both present, the branch that applies would depend on their order in the list, and reversing the list would move the package between `substitute` and `real-runtime-only` without anyone editing a decision. Neither entry is used, because picking one would be the harness deciding something the project stated twice.",
+    fixOwner: "dependency-decision",
+    blocksLocalDevelopment: true,
+  },
   "local-dev-extension-needs-substitute": {
     code: "local-dev-extension-needs-substitute",
     label: "An `extension` dependency has no declared local choice",
-    states:
-      "A dependency decision is `extension` and the project declared neither a substitute nor a `real-runtime-only` acknowledgement for it — or declared one that is not a decision.",
+    states: "A dependency decision is `extension` and the project declared no choice for it.",
     remediation:
-      "Declare one of the two branches: a substitute with its justification, or a `real-runtime-only` acknowledgement with its reason and its consequence. A harness cannot choose for the project — whether the singleton semantics the cell relies on are exercised locally is not a fact it can observe — but silence is not a choice either, which is why an empty acknowledgement counts as this finding rather than as the one below.",
+      "Declare one of the two branches: a substitute with its justification, or a `real-runtime-only` acknowledgement with its reason and its consequence. A harness cannot choose for the project — whether the singleton semantics the cell relies on are exercised locally is not a fact it can observe — but silence is not a choice either. A choice that was declared and is incomplete is reported as `local-dev-extension-choice-malformed` instead, because the fix there is to complete the branch rather than to pick one.",
     fixOwner: "dependency-decision",
     blocksLocalDevelopment: true,
   },
@@ -1467,6 +1558,12 @@ export interface LocalDevAuditInput {
    * acknowledgement are the same field with different modes — because a project that
    * chose the second branch is not missing a value, and an input shape that could not
    * express its choice would report a recorded decision as an omission.
+   *
+   * The declared type is the contract; the list is still inspected at runtime rather
+   * than trusted, because a project config read from JSON reaches the audit through
+   * a cast. Each package may appear **at most once**: two entries for one package are
+   * two readings of one decision, and the audit refuses the pair instead of letting
+   * the array's order pick a branch.
    */
   readonly extensionChoices?: readonly LocalDevExtensionChoice[];
   /** The versions the local process actually resolved, keyed by package name. */
@@ -1519,6 +1616,15 @@ export interface LocalDevAudit {
  * to survive, which is why they go through `moduleIdsOfExistingRow` rather than
  * through `localDevModuleIdsOf`. A report that throws while describing a problem has
  * replaced its own diagnostic with a stack trace.
+ *
+ * The scope of that promise, since it is easy to over-read: it covers the *members*
+ * of every caller-supplied list, because those arrive from a JSON config through a
+ * cast and none of them is read before it is inspected — `localDevExtensionChoiceProblem`
+ * takes `unknown` for exactly this reason, and a `packageName` that is a number is a
+ * finding rather than a `TypeError`. It does not cover the containers themselves: a
+ * value whose declared type is violated outright — a list that is not a list, a record
+ * that is not an object — is the declared type's job, here and on `resolutions` and
+ * `decisions` alike.
  */
 export function auditLocalDevConfiguration(input: LocalDevAuditInput = {}): LocalDevAudit {
   const resolutions = input.resolutions ?? LOCAL_DEV_MODULE_RESOLUTIONS;
@@ -1567,36 +1673,70 @@ export function auditLocalDevConfiguration(input: LocalDevAuditInput = {}): Loca
     );
   }
 
-  // Split into the choices that are decisions and the ones that only look like
-  // them. A choice that fails the validator does not count as declaring anything:
-  // otherwise `real-runtime-only` would be reachable by writing the mode and nothing
-  // else, and the repository would have traded one unrepresentable state for a
-  // representable but empty one.
-  const declaredChoices = new Map<string, LocalDevExtensionChoice>();
-  const malformedChoices = new Map<string, string>();
+  // Two properties of the declaration list, both checked before anything reads it:
+  // every entry has to be a decision, and no package may carry two.
+  //
+  // Neither check trusts the declared type. A config read from JSON arrives as
+  // `unknown` and the cast that turns it into `LocalDevExtensionChoice[]` is the
+  // caller's, so every member is inspected before it is touched — and an entry the
+  // validator rejects never becomes a map key, which is what stops the duplicate
+  // check from being the place a number gets used as a package name.
+  const wellFormedChoices: LocalDevExtensionChoice[] = [];
+  const reportedChoices = new Set<string>();
   for (const choice of input.extensionChoices ?? []) {
     const problem = localDevExtensionChoiceProblem(choice);
     if (problem === undefined) {
-      declaredChoices.set(choice.packageName, choice);
-    } else {
-      malformedChoices.set(choice.packageName, problem);
+      wellFormedChoices.push(choice);
+      continue;
     }
+    const subject = localDevChoiceSubject(choice);
+    reportedChoices.add(subject);
+    diagnostics.push(
+      createLocalDevDiagnostic(
+        "local-dev-extension-choice-malformed",
+        subject,
+        `The declared choice is not a decision: ${problem}. An entry that has learned the vocabulary but not the content is an omission, so it is reported as one rather than counted as the branch it names.`,
+      ),
+    );
+  }
+
+  const choiceOccurrences = new Map<string, number>();
+  for (const choice of wellFormedChoices) {
+    choiceOccurrences.set(choice.packageName, (choiceOccurrences.get(choice.packageName) ?? 0) + 1);
+  }
+
+  const declaredChoices = new Map<string, LocalDevExtensionChoice>();
+  for (const choice of wellFormedChoices) {
+    const occurrences = choiceOccurrences.get(choice.packageName) ?? 0;
+    if (occurrences > 1) {
+      if (reportedChoices.has(choice.packageName)) continue;
+      reportedChoices.add(choice.packageName);
+      diagnostics.push(
+        createLocalDevDiagnostic(
+          "local-dev-extension-choice-duplicated",
+          choice.packageName,
+          `Declared ${occurrences} times. Neither entry is used: with both present, which branch applies would depend on the order of the list, so the decision is reported as unresolved rather than resolved by position.`,
+        ),
+      );
+      continue;
+    }
+    declaredChoices.set(choice.packageName, choice);
   }
 
   const realRuntimeOnly: string[] = [];
   for (const decision of input.decisions ?? []) {
     if (decision.strategy !== "extension") continue;
+    // The package already carries a finding about the choice it declared, so saying
+    // "no choice is declared" next to it would be a second finding for one mistake.
+    if (reportedChoices.has(decision.packageName)) continue;
 
     const choice = declaredChoices.get(decision.packageName);
     if (choice === undefined) {
-      const problem = malformedChoices.get(decision.packageName);
       diagnostics.push(
         createLocalDevDiagnostic(
           "local-dev-extension-needs-substitute",
           decision.packageName,
-          problem === undefined
-            ? "The decision is `extension` and no local choice is declared, so the cell cannot be exercised locally as written. Declaring a substitute records why the published package or shim is an acceptable stand-in; declaring `real-runtime-only` records that validation happens on the page instead."
-            : `The decision is \`extension\` and the declared choice is not a decision: ${problem}. An acknowledgement with no content is an omission that has learned the vocabulary, so it is reported as one.`,
+          "The decision is `extension` and no local choice is declared, so the cell cannot be exercised locally as written. Declaring a substitute records why the published package or shim is an acceptable stand-in; declaring `real-runtime-only` records that validation happens on the page instead.",
         ),
       );
       continue;
@@ -1743,6 +1883,7 @@ export const LOCAL_DEV_CONTRACT_ERROR_CODES = [
   "mapping-coverage",
   "strategy-handling-coverage",
   "extension-choice-not-declared",
+  "extension-choice-duplicated",
   "claim-not-local",
   "mock-surface-incomplete",
   "provider-is-not-a-mock",

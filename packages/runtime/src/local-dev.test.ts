@@ -41,6 +41,7 @@ import {
   LOCAL_DEV_DIAGNOSTIC_RULES,
   LOCAL_DEV_ERROR_SURFACING,
   LOCAL_DEV_EXTENSION_CHOICE_MODES,
+  LOCAL_DEV_EXTENSION_SUBSTITUTE_KINDS,
   LOCAL_DEV_FORBIDDEN_PATTERNS,
   LOCAL_DEV_FORBIDDEN_PATTERN_IDS,
   LOCAL_DEV_GOVERNING_DECISIONS,
@@ -716,10 +717,20 @@ describe("dependency decisions under local development", () => {
       decisions: [extensionDecision],
       extensionChoices: [empty],
     });
+
+    // One finding for one mistake. The entry is reported as malformed on its own
+    // terms — the fix is to fill in the missing reason — and the decision-level
+    // "no choice is declared" is suppressed, because both findings would point at
+    // the same empty field with the same fix.
+    const codes = audit.diagnostics.map(diagnostic => diagnostic.code);
+    expect(codes).toContain("local-dev-extension-choice-malformed");
+    expect(codes).not.toContain("local-dev-extension-needs-substitute");
+
     const finding = audit.diagnostics.find(
-      diagnostic => diagnostic.code === "local-dev-extension-needs-substitute",
+      diagnostic => diagnostic.code === "local-dev-extension-choice-malformed",
     );
-    expect(finding?.detail).toMatch(/learned the vocabulary/);
+    expect(finding?.subject).toBe("@tanstack/react-query");
+    expect(finding?.detail).toMatch(/gives no reason/);
     expect(audit.realRuntimeOnly).toEqual([]);
   });
 
@@ -749,6 +760,98 @@ describe("dependency decisions under local development", () => {
     expect(localDevExtensionChoiceProblem(tanstackRealRuntimeOnly)).toBeUndefined();
   });
 
+  it("records the two substitute kinds, and only two", () => {
+    expect([...LOCAL_DEV_EXTENSION_SUBSTITUTE_KINDS]).toEqual(["npm-package", "project-shim"]);
+    expect(
+      localDevExtensionChoiceProblem({ ...tanstackSubstitute, kind: "project-shim" }),
+    ).toBeUndefined();
+  });
+
+  // The re-review's second finding: the validator claimed the untyped-JSON boundary
+  // while reading `.trim()` off members it had not checked, so a value that was not a
+  // string threw a `TypeError` instead of becoming a configuration finding. Every
+  // case below reached the old version that way — a `null` entry, a numeric
+  // `packageName`, a missing `mode` — and the promise being made is about the whole
+  // list, not only the entries that happen to be shaped right.
+  it("answers for a value that is not a choice at all, instead of throwing", () => {
+    for (const garbage of [
+      null,
+      undefined,
+      42,
+      "substitute",
+      [],
+      {},
+      { mode: "substitute", kind: "npm-package", resolvesTo: "x", justification: "y" },
+      { packageName: 42, mode: "substitute", kind: "npm-package", resolvesTo: "x", justification: "y" },
+      { packageName: "pkg" },
+      { packageName: "pkg", mode: 7 },
+      { packageName: "pkg", mode: "substitute", kind: 7 },
+    ]) {
+      expect(() => localDevExtensionChoiceProblem(garbage), JSON.stringify(garbage)).not.toThrow();
+      expect(localDevExtensionChoiceProblem(garbage), JSON.stringify(garbage)).toBeDefined();
+    }
+  });
+
+  it("validates the whole substitute shape, including the kind", () => {
+    // `mode` was checked at runtime; `kind` was not, so a substitute with a kind
+    // #22 never allowed passed as a decision.
+    expect(localDevExtensionChoiceProblem({ ...tanstackSubstitute, kind: "webpack-alias" })).toMatch(
+      /substitute kind/,
+    );
+    expect(localDevExtensionChoiceProblem({ ...tanstackSubstitute, kind: 7 })).toMatch(
+      /substitute kind/,
+    );
+
+    // A non-string where a string is required is a finding, not a `TypeError`.
+    expect(localDevExtensionChoiceProblem({ ...tanstackSubstitute, resolvesTo: 42 })).toMatch(
+      /names nothing to resolve to/,
+    );
+    expect(localDevExtensionChoiceProblem({ ...tanstackSubstitute, justification: null })).toMatch(
+      /gives no justification/,
+    );
+    expect(localDevExtensionChoiceProblem({ ...tanstackRealRuntimeOnly, reason: [] })).toMatch(
+      /gives no reason/,
+    );
+    expect(localDevExtensionChoiceProblem({ ...tanstackRealRuntimeOnly, consequence: 3 })).toMatch(
+      /states no consequence/,
+    );
+  });
+
+  it("turns a malformed entry into a finding even when no decision list was supplied", () => {
+    // The list is audited on its own. A caller who supplied choices but not decisions
+    // still hears about an entry that is not a choice, and the audit does not need a
+    // decision to notice.
+    for (const garbage of [null, 42, { packageName: "pkg", mode: "substitute" }]) {
+      const choices = [garbage as unknown as LocalDevExtensionChoice];
+      expect(() => auditLocalDevConfiguration({ extensionChoices: choices })).not.toThrow();
+      expect(
+        auditLocalDevConfiguration({ extensionChoices: choices }).diagnostics.map(
+          diagnostic => diagnostic.code,
+        ),
+        JSON.stringify(garbage),
+      ).toEqual(["local-dev-extension-choice-malformed"]);
+    }
+  });
+
+  it("names an entry it cannot name, rather than throwing on the name", () => {
+    const audit = auditLocalDevConfiguration({
+      extensionChoices: [null as unknown as LocalDevExtensionChoice],
+    });
+    expect(audit.diagnostics[0]?.subject).toBe("(an unnamed extension choice)");
+  });
+
+  it("refuses the guard a value that is not a choice, as a contract error", () => {
+    for (const garbage of [null, 42, { packageName: "pkg" }]) {
+      let caught: unknown;
+      try {
+        assertLocalDevExtensionChoicesAreDeclared([garbage as unknown as LocalDevExtensionChoice]);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught, JSON.stringify(garbage)).toBeInstanceOf(LocalDevRuntimeContractError);
+    }
+  });
+
   // A mode the union does not have reaches here from untyped data (a JSON config),
   // and falling off the switch would read as "this choice is fine".
   it("does not let an unknown mode pass as a decision", () => {
@@ -764,10 +867,70 @@ describe("dependency decisions under local development", () => {
       decisions: [extensionDecision],
       extensionChoices: [alien],
     });
-    expect(audit.diagnostics.map(diagnostic => diagnostic.code)).toContain(
-      "local-dev-extension-needs-substitute",
-    );
+    const codes = audit.diagnostics.map(diagnostic => diagnostic.code);
+    expect(codes).toContain("local-dev-extension-choice-malformed");
+    expect(codes).not.toContain("local-dev-extension-needs-substitute");
     expect(audit.realRuntimeOnly).toEqual([]);
+  });
+
+  // The re-review's first finding. Each entry was individually valid, so a map keyed
+  // on the package name held them last-write-wins and reversing the array moved the
+  // package between the two branches. A decision that a reordering can reverse is not
+  // a decision, so the pair is refused rather than resolved.
+  it("refuses two choices for one package instead of letting the order pick a branch", () => {
+    const conflict = [tanstackSubstitute, tanstackRealRuntimeOnly];
+    const reversed = [...conflict].reverse();
+
+    for (const choices of [conflict, reversed]) {
+      const audit = auditLocalDevConfiguration({
+        decisions: [extensionDecision],
+        extensionChoices: choices,
+      });
+      const codes = audit.diagnostics.map(diagnostic => diagnostic.code);
+
+      expect(codes).toContain("local-dev-extension-choice-duplicated");
+      // Neither branch is selected, which is what makes the order irrelevant.
+      expect(audit.realRuntimeOnly).toEqual([]);
+      expect(codes).not.toContain("local-dev-extension-real-runtime-only");
+      // And one finding for the one mistake, not a second "nothing is declared".
+      expect(codes).not.toContain("local-dev-extension-needs-substitute");
+    }
+
+    // The report is identical in both orders — the property that was missing, since
+    // order-dependence was the whole of "last write wins".
+    const report = (choices: LocalDevExtensionChoice[]): string[] =>
+      auditLocalDevConfiguration({ decisions: [extensionDecision], extensionChoices: choices })
+        .diagnostics.map(diagnostic => `${diagnostic.code}:${diagnostic.subject}`)
+        .sort();
+    expect(report(conflict)).toEqual(report(reversed));
+  });
+
+  it("refuses a package named twice even when both entries pick the same branch", () => {
+    // Uniqueness is not about the two entries disagreeing: a second entry is not a
+    // second decision either way, and the check does not need a decision list to run.
+    const audit = auditLocalDevConfiguration({
+      extensionChoices: [tanstackSubstitute, { ...tanstackSubstitute }],
+    });
+    expect(audit.diagnostics.map(diagnostic => diagnostic.code)).toEqual([
+      "local-dev-extension-choice-duplicated",
+    ]);
+  });
+
+  it("refuses duplicates in the guard too, not only in the audit", () => {
+    expect(() =>
+      assertLocalDevExtensionChoicesAreDeclared([tanstackSubstitute, tanstackRealRuntimeOnly]),
+    ).toThrow(/more than one local choice/);
+
+    let caught: unknown;
+    try {
+      assertLocalDevExtensionChoicesAreDeclared([tanstackSubstitute, tanstackRealRuntimeOnly]);
+    } catch (error) {
+      caught = error;
+    }
+    expect((caught as LocalDevRuntimeContractError).code).toBe("extension-choice-duplicated");
+    // A single choice for a package is still accepted, so the guard has not simply
+    // become stricter about everything.
+    expect(() => assertLocalDevExtensionChoicesAreDeclared([tanstackSubstitute])).not.toThrow();
   });
 
   it("claims the inline strategy as the strongest local case", () => {
@@ -909,6 +1072,13 @@ describe("the diagnostic vocabulary", () => {
         decisions: [extensionDecision],
         extensionChoices: [tanstackRealRuntimeOnly],
       }),
+      // A declared entry that is not a decision, and a package that carries two.
+      auditLocalDevConfiguration({
+        extensionChoices: [null as unknown as LocalDevExtensionChoice],
+      }),
+      auditLocalDevConfiguration({
+        extensionChoices: [tanstackSubstitute, tanstackRealRuntimeOnly],
+      }),
       auditLocalDevConfiguration({ mockBindings: mockBindings(["Permissions"]) }),
       auditLocalDevConfiguration({ referencedSpecifiers: ["dayjs"] }),
       // A row the project cannot stand in for locally.
@@ -1018,28 +1188,41 @@ describe("the diagnostic vocabulary", () => {
   });
 
   // The promise is about the whole function, not only the guards it calls on purpose.
-  it("never throws, whatever the configuration", () => {
+  //
+  // The re-review's note on the previous version of this test: it already passed two
+  // choices for one package and asserted only "does not throw", so it exercised the
+  // order-dependent duplicate without noticing it. Asserting the findings here is what
+  // turns the sweep into a check rather than a demonstration.
+  it("never throws, whatever the configuration — and still reports what it found", () => {
     const brokenAtOnce: LocalDevModuleResolution[] = [
       ...LOCAL_DEV_MODULE_RESOLUTIONS.filter(resolution => resolution.specifier !== "antd"),
       orphanRow,
       orphanRow,
     ];
 
-    expect(() =>
-      auditLocalDevConfiguration({
-        resolutions: brokenAtOnce,
-        decisions: [extensionDecision],
-        extensionChoices: [tanstackSubstitute, tanstackRealRuntimeOnly],
-        installedVersions: { react: "0.0.0" },
-        mockBindings: mockBindings(["Permissions"]),
-        referencedSpecifiers: ["dayjs", "echarts", "unmapped"],
-      }),
-    ).not.toThrow();
+    const everythingWrong = {
+      resolutions: brokenAtOnce,
+      decisions: [extensionDecision],
+      extensionChoices: [
+        tanstackSubstitute,
+        tanstackRealRuntimeOnly,
+        null as unknown as LocalDevExtensionChoice,
+      ],
+      installedVersions: { react: "0.0.0" },
+      mockBindings: mockBindings(["Permissions"]),
+      referencedSpecifiers: ["dayjs", "echarts", "unmapped"],
+    };
+    const run = () => auditLocalDevConfiguration(everythingWrong);
+    expect(run).not.toThrow();
 
-    const audit = auditLocalDevConfiguration({ resolutions: brokenAtOnce });
-    expect(audit.diagnostics.map(diagnostic => diagnostic.code)).toContain(
-      "local-dev-mapping-coverage",
-    );
+    const audit = run();
+    const codes = audit.diagnostics.map(diagnostic => diagnostic.code);
+    expect(codes).toContain("local-dev-mapping-coverage");
+    expect(codes).toContain("local-dev-extension-choice-duplicated");
+    expect(codes).toContain("local-dev-extension-choice-malformed");
+    // Neither extension branch was selected, so no part of the result depends on the
+    // order the choices arrived in.
+    expect(audit.realRuntimeOnly).toEqual([]);
   });
 
   it("reads a bridge row without throwing, unlike the guard-facing accessor", () => {
