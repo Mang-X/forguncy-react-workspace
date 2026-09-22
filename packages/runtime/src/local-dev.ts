@@ -582,6 +582,39 @@ export const LOCAL_DEV_HOST_RESOLUTION_MODEL = {
 } as const;
 
 /**
+ * Whether a value is shaped like a row the local helpers can read.
+ *
+ * The lists a caller supplies reach this module through a cast from a JSON config,
+ * so a member can be anything at all. Each predicate below asks the same question —
+ * "does this member carry the one field the reader is about to touch?" — because the
+ * alternative, reading first and discovering afterwards, is what turns a
+ * configuration the audit was supposed to *describe* into a stack trace.
+ *
+ * A member that fails this is not reported as a finding. It cannot be: it is not a
+ * row, so it is not a row the table failed to cover, and there is no statement about
+ * it more specific than "this is not a row" — a statement the guard already makes,
+ * because the guard sees the list as it was given and throws with the row's own
+ * detail. What a malformed member must not do is take the rest of the audit with it.
+ */
+function isHostBridgeMapping(value: unknown): value is HostBridgeMapping {
+  return typeof value === "object" && value !== null && typeof (value as { specifier?: unknown }).specifier === "string";
+}
+
+function isLocalDevModuleResolution(value: unknown): value is LocalDevModuleResolution {
+  return typeof value === "object" && value !== null && typeof (value as { specifier?: unknown }).specifier === "string";
+}
+
+/**
+ * A dependency decision with a strategy the audit can compare.
+ *
+ * `extension` is the only strategy this module acts on, so a member whose strategy
+ * is not a string cannot be an `extension` decision and has no local half to check.
+ */
+function isDependencyDecision(value: unknown): value is DependencyDecision {
+  return typeof value === "object" && value !== null && typeof (value as { strategy?: unknown }).strategy === "string";
+}
+
+/**
  * The bridge row a local resolution projects, or `undefined`.
  *
  * The non-throwing half of {@link localDevModuleIdsOf}, and the split is the
@@ -600,7 +633,7 @@ export function findLocalDevBridgeRow(
   specifier: string,
   mappings: readonly HostBridgeMapping[] = HOST_BRIDGE_MAPPINGS,
 ): HostBridgeMapping | undefined {
-  return mappings.find(candidate => candidate.specifier === specifier);
+  return mappings.find(candidate => isHostBridgeMapping(candidate) && candidate.specifier === specifier);
 }
 
 /** Every module id a resolution row covers, read from the bridge table. */
@@ -714,6 +747,7 @@ export function localDevResolvableModuleIds(
   mappings: readonly HostBridgeMapping[] = HOST_BRIDGE_MAPPINGS,
 ): readonly string[] {
   return resolutions
+    .filter(isLocalDevModuleResolution)
     .filter(resolution => resolution.resolution !== "unsupported")
     .flatMap(resolution => moduleIdsOfExistingRow(resolution.specifier, mappings));
 }
@@ -724,6 +758,7 @@ export function localDevUnsupportedModuleIds(
   mappings: readonly HostBridgeMapping[] = HOST_BRIDGE_MAPPINGS,
 ): readonly string[] {
   return resolutions
+    .filter(isLocalDevModuleResolution)
     .filter(resolution => resolution.resolution === "unsupported")
     .flatMap(resolution => moduleIdsOfExistingRow(resolution.specifier, mappings));
 }
@@ -732,7 +767,7 @@ export function localDevUnsupportedModuleIds(
 export function localDevAlignmentChecks(
   resolutions: readonly LocalDevModuleResolution[] = LOCAL_DEV_MODULE_RESOLUTIONS,
 ): readonly LocalDevAlignmentExpectation[] {
-  return resolutions.flatMap(resolution =>
+  return resolutions.filter(isLocalDevModuleResolution).flatMap(resolution =>
     resolution.checkedVersionField === undefined || resolution.localPackage === undefined
       ? []
       : [
@@ -1404,6 +1439,7 @@ export const LOCAL_DEV_DIAGNOSTIC_CODES = [
   "local-dev-deferred-host-module",
   "local-dev-extension-choice-malformed",
   "local-dev-extension-choice-duplicated",
+  "local-dev-extension-choice-unmatched",
   "local-dev-extension-needs-substitute",
   "local-dev-extension-real-runtime-only",
   "local-dev-host-version-mismatch",
@@ -1478,6 +1514,15 @@ export const LOCAL_DEV_DIAGNOSTIC_RULES: Readonly<Record<LocalDevDiagnosticCode,
       "Keep exactly one entry and delete the rest. A package has one decision, so a second entry is not a second decision: with both present, the branch that applies would depend on their order in the list, and reversing the list would move the package between `substitute` and `real-runtime-only` without anyone editing a decision. Neither entry is used, because picking one would be the harness deciding something the project stated twice.",
     fixOwner: "dependency-decision",
     blocksLocalDevelopment: true,
+  },
+  "local-dev-extension-choice-unmatched": {
+    code: "local-dev-extension-choice-unmatched",
+    label: "A declared `extension` choice matches no `extension` decision",
+    states: "A choice names a package the supplied decision list does not carry as `extension`.",
+    remediation:
+      "Delete the entry, or restore the decision it described. A choice is the local half of a dependency decision, so when a package moves to another strategy — `extension` to `inline`, say — its choice is left describing a decision that no longer exists. Both directions are checked for the same reason the local resolution table is: `every extension decision has a choice` and `every choice has an extension decision` are different statements, and a check that asks only the first reports a pass for a record that disagrees with itself. Only asked when the caller supplied the decisions; with none, the audit has nothing to match against and abstains.",
+    fixOwner: "dependency-decision",
+    blocksLocalDevelopment: false,
   },
   "local-dev-extension-needs-substitute": {
     code: "local-dev-extension-needs-substitute",
@@ -1617,14 +1662,21 @@ export interface LocalDevAudit {
  * through `localDevModuleIdsOf`. A report that throws while describing a problem has
  * replaced its own diagnostic with a stack trace.
  *
- * The scope of that promise, since it is easy to over-read: it covers the *members*
- * of every caller-supplied list, because those arrive from a JSON config through a
- * cast and none of them is read before it is inspected — `localDevExtensionChoiceProblem`
- * takes `unknown` for exactly this reason, and a `packageName` that is a number is a
- * finding rather than a `TypeError`. It does not cover the containers themselves: a
- * value whose declared type is violated outright — a list that is not a list, a record
- * that is not an object — is the declared type's job, here and on `resolutions` and
- * `decisions` alike.
+ * The scope of that promise, stated exactly, because two earlier wordings claimed
+ * more than the code did. It covers the **members** of every caller-supplied list.
+ * Those lists arrive from a JSON config through a cast, so a member can be anything:
+ * `extensionChoices` members go through `localDevExtensionChoiceProblem`, which takes
+ * `unknown` and answers with a finding; `resolutions` and `mappings` members are put
+ * through a shape predicate before any helper reads a field off them; `decisions` and
+ * `referencedSpecifiers` members are skipped when they do not carry the one field the
+ * reader touches, since a value that is not a decision or not a specifier cannot
+ * answer the question being asked of it.
+ *
+ * What it does not cover is a **container** whose own declared type is violated —
+ * `extensionChoices: 42`, `resolutions: null`, `installedVersions: null` — where
+ * iteration or indexing fails before there is any member to inspect. That boundary is
+ * the declared type's job, and the audit names it rather than pretending to a totality
+ * it could only have by re-declaring every input as `unknown`.
  */
 export function auditLocalDevConfiguration(input: LocalDevAuditInput = {}): LocalDevAudit {
   const resolutions = input.resolutions ?? LOCAL_DEV_MODULE_RESOLUTIONS;
@@ -1659,6 +1711,11 @@ export function auditLocalDevConfiguration(input: LocalDevAuditInput = {}): Loca
   // resolution failing.
   const deferred = localDevDeferredHostModules();
   for (const specifier of input.referencedSpecifiers ?? []) {
+    // A member that is not a string is not a specifier, so it cannot be a deferred
+    // module either: the question this loop asks has the answer "no" for it, and
+    // saying so by skipping is the only reading that neither throws nor invents a
+    // finding about a value the audit has no vocabulary for.
+    if (typeof specifier !== "string") continue;
     const packageName = specifier.startsWith("@")
       ? specifier.split("/").slice(0, 2).join("/")
       : (specifier.split("/")[0] ?? specifier);
@@ -1723,8 +1780,40 @@ export function auditLocalDevConfiguration(input: LocalDevAuditInput = {}): Loca
     declaredChoices.set(choice.packageName, choice);
   }
 
+  // The other direction of the same coverage question, and only when the caller
+  // stated the decisions at all: a choice whose package the decision list does not
+  // carry as `extension` is the local half of a decision that no longer exists —
+  // what is left behind when a package moves from `extension` to `inline`. Checked as
+  // a pair with the loop below, for the reason the resolution table is checked both
+  // ways: "every extension decision has a choice" and "every choice has an extension
+  // decision" are different statements, and asking only the first reads as a pass for
+  // a record that disagrees with itself. No `decisions` means the caller did not say,
+  // so the cross-check abstains rather than guessing.
+  if (input.decisions !== undefined) {
+    const extensionDecisions = new Set(
+      input.decisions
+        .filter(isDependencyDecision)
+        .filter(decision => decision.strategy === "extension")
+        .map(decision => decision.packageName),
+    );
+    for (const choice of declaredChoices.values()) {
+      if (extensionDecisions.has(choice.packageName)) continue;
+      diagnostics.push(
+        createLocalDevDiagnostic(
+          "local-dev-extension-choice-unmatched",
+          choice.packageName,
+          "A choice is the local half of a dependency decision, and no decision in the supplied list carries this package as an `extension` — the decision moved to another strategy, or it is gone. The entry is used for nothing and nothing else would report it, so it is surfaced here rather than left for someone to trust later.",
+        ),
+      );
+    }
+  }
+
   const realRuntimeOnly: string[] = [];
   for (const decision of input.decisions ?? []) {
+    // A member whose strategy is not a string cannot be an `extension` decision, so
+    // it has no local half to check and nothing to contribute to the coverage
+    // question. Same reading as a non-string specifier above.
+    if (!isDependencyDecision(decision)) continue;
     if (decision.strategy !== "extension") continue;
     // The package already carries a finding about the choice it declared, so saying
     // "no choice is declared" next to it would be a second finding for one mistake.

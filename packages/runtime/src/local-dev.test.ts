@@ -17,7 +17,7 @@ import {
   hostBridgeModuleIds,
   RUNTIME_CONTRACT_TARGET,
 } from "@forguncy-react-workspace/core";
-import type { DependencyDecision } from "@forguncy-react-workspace/core";
+import type { DependencyDecision, HostBridgeMapping } from "@forguncy-react-workspace/core";
 
 import type { RuntimeFacadeHostBindings, RuntimeFacadeProvider } from "./contract";
 import {
@@ -124,6 +124,19 @@ const extensionDecision: DependencyDecision = {
   packageName: "@tanstack/react-query",
   libraryId: "00000000-0000-0000-0000-000000000000",
   globalName: "TanStackQueryReact",
+};
+
+/**
+ * The same package after its decision moved off `extension`.
+ *
+ * The fixture for the drift the reverse coverage check exists to catch: the choice
+ * written while the package was an `extension` stays in the config afterwards, and
+ * without the check nothing reports that its record now describes a decision that
+ * does not exist.
+ */
+const inlineDecision: DependencyDecision = {
+  strategy: "inline",
+  packageName: "@tanstack/react-query",
 };
 
 const tanstackSubstitute: LocalDevExtensionChoice = {
@@ -933,6 +946,149 @@ describe("dependency decisions under local development", () => {
     expect(() => assertLocalDevExtensionChoicesAreDeclared([tanstackSubstitute])).not.toThrow();
   });
 
+  // The re-review's second finding: coverage was asked in one direction only. A choice
+  // whose package the decision list no longer carries as `extension` is well formed, so
+  // it passed every list check, and then went unused and unreported — the record left
+  // behind when a package moves from `extension` to `inline`.
+  it("reports a choice whose decision is no longer an extension", () => {
+    const audit = auditLocalDevConfiguration({
+      decisions: [inlineDecision],
+      extensionChoices: [tanstackSubstitute],
+    });
+    const codes = audit.diagnostics.map(diagnostic => diagnostic.code);
+
+    expect(codes).toContain("local-dev-extension-choice-unmatched");
+    // The decision is `inline`, not an `extension` decision that is missing a choice, so
+    // the two directions have to stay distinguishable.
+    expect(codes).not.toContain("local-dev-extension-needs-substitute");
+    // The stale choice selects no branch either.
+    expect(audit.realRuntimeOnly).toEqual([]);
+
+    const finding = audit.diagnostics.find(
+      diagnostic => diagnostic.code === "local-dev-extension-choice-unmatched",
+    );
+    expect(finding?.subject).toBe("@tanstack/react-query");
+  });
+
+  it("reports a choice for a package the decision list does not carry at all", () => {
+    const audit = auditLocalDevConfiguration({
+      decisions: [{ strategy: "inline", packageName: "something-else" }],
+      extensionChoices: [tanstackSubstitute],
+    });
+    expect(audit.diagnostics.map(diagnostic => diagnostic.code)).toEqual([
+      "local-dev-extension-choice-unmatched",
+    ]);
+  });
+
+  it("reports a declared choice as unmatched when the decision list is empty", () => {
+    // `decisions: []` is the caller stating the project has none, which is not the same
+    // as not stating them — so this is not the abstention case below.
+    const audit = auditLocalDevConfiguration({
+      decisions: [],
+      extensionChoices: [tanstackSubstitute],
+    });
+    expect(audit.diagnostics.map(diagnostic => diagnostic.code)).toEqual([
+      "local-dev-extension-choice-unmatched",
+    ]);
+  });
+
+  it("abstains from the cross-check when the caller did not supply decisions", () => {
+    // Nothing to match against, so the audit says nothing rather than reporting every
+    // choice as stale.
+    const audit = auditLocalDevConfiguration({ extensionChoices: [tanstackSubstitute] });
+    expect(audit.diagnostics).toEqual([]);
+  });
+
+  it("keeps the two coverage directions on their own codes", () => {
+    // A decision with no choice and a choice with no decision, in one configuration:
+    // both findings, each naming its own package, and neither read as the other.
+    const audit = auditLocalDevConfiguration({
+      decisions: [
+        extensionDecision,
+        { strategy: "extension", packageName: "@other/pkg", libraryId: "id", globalName: "Other" },
+      ],
+      extensionChoices: [
+        // Covers `extensionDecision`, so only `@other/pkg` is an unmet decision.
+        tanstackSubstitute,
+        // Covered by no decision at all.
+        { ...tanstackSubstitute, packageName: "@stale/pkg" },
+      ],
+    });
+    expect(audit.diagnostics.map(diagnostic => diagnostic.code).sort()).toEqual([
+      "local-dev-extension-choice-unmatched",
+      "local-dev-extension-needs-substitute",
+    ]);
+    expect(
+      audit.diagnostics
+        .filter(diagnostic => diagnostic.code === "local-dev-extension-needs-substitute")
+        .map(diagnostic => diagnostic.subject),
+    ).toEqual(["@other/pkg"]);
+    expect(
+      audit.diagnostics
+        .filter(diagnostic => diagnostic.code === "local-dev-extension-choice-unmatched")
+        .map(diagnostic => diagnostic.subject),
+    ).toEqual(["@stale/pkg"]);
+  });
+
+  // The re-review's first finding: the no-throw promise named every caller-supplied
+  // list, but only `extensionChoices` members were inspected before being read. These
+  // are members that were read first and inspected never.
+  it("answers for a malformed member of every caller-supplied list", () => {
+    const audits = [
+      () => auditLocalDevConfiguration({ referencedSpecifiers: [42 as unknown as string] }),
+      () => auditLocalDevConfiguration({ decisions: [null as unknown as DependencyDecision] }),
+      () => auditLocalDevConfiguration({ decisions: [42 as unknown as DependencyDecision] }),
+      () => auditLocalDevConfiguration({ referencedSpecifiers: [null as unknown as string] }),
+      () =>
+        auditLocalDevConfiguration({
+          resolutions: [...LOCAL_DEV_MODULE_RESOLUTIONS, null as unknown as LocalDevModuleResolution],
+        }),
+      () =>
+        auditLocalDevConfiguration({
+          mappings: [null as unknown as HostBridgeMapping, ...HOST_BRIDGE_MAPPINGS],
+        }),
+      // Everything at once, since a caller with one malformed member usually has more.
+      () =>
+        auditLocalDevConfiguration({
+          resolutions: [42 as unknown as LocalDevModuleResolution],
+          mappings: [null as unknown as HostBridgeMapping],
+          decisions: [{ packageName: "no-strategy" } as unknown as DependencyDecision],
+          referencedSpecifiers: [null as unknown as string],
+          extensionChoices: [null as unknown as LocalDevExtensionChoice],
+        }),
+    ];
+
+    for (const [index, run] of audits.entries()) {
+      expect(run, `audit ${index}`).not.toThrow();
+    }
+  });
+
+  it("still reports the table as broken when a malformed row is added to it", () => {
+    // Skipping what a helper cannot read is not the same as hiding it: the guard sees
+    // the list as it was given, so a malformed row is still a finding.
+    const audit = auditLocalDevConfiguration({
+      resolutions: [...LOCAL_DEV_MODULE_RESOLUTIONS, null as unknown as LocalDevModuleResolution],
+    });
+    expect(audit.diagnostics.map(diagnostic => diagnostic.code)).toContain(
+      "local-dev-mapping-coverage",
+    );
+    // And the rows that *are* readable still resolve, so one bad member does not empty
+    // the harness's worklist — which is the failure mode skipping is here to avoid.
+    expect([...audit.resolvable].sort()).toEqual([...hostBridgeInterceptedModuleIds()].sort());
+  });
+
+  it("does not let a malformed decision answer the extension coverage question", () => {
+    const audit = auditLocalDevConfiguration({
+      decisions: [null as unknown as DependencyDecision],
+      extensionChoices: [tanstackSubstitute],
+    });
+    // A member with no strategy is not an `extension` decision, so it does not cover the
+    // choice — and the audit says so instead of throwing on `decision.strategy`.
+    expect(audit.diagnostics.map(diagnostic => diagnostic.code)).toEqual([
+      "local-dev-extension-choice-unmatched",
+    ]);
+  });
+
   it("claims the inline strategy as the strongest local case", () => {
     expect(localDevHandlingForStrategy("inline").localHandling).toBe("bundled-verbatim");
     expect(localDevHandlingForStrategy("inline").localClaim).toMatch(/strongest/);
@@ -1079,6 +1235,11 @@ describe("the diagnostic vocabulary", () => {
       auditLocalDevConfiguration({
         extensionChoices: [tanstackSubstitute, tanstackRealRuntimeOnly],
       }),
+      // A well-formed choice whose package no supplied decision carries as `extension`.
+      auditLocalDevConfiguration({
+        decisions: [inlineDecision],
+        extensionChoices: [tanstackSubstitute],
+      }),
       auditLocalDevConfiguration({ mockBindings: mockBindings(["Permissions"]) }),
       auditLocalDevConfiguration({ referencedSpecifiers: ["dayjs"] }),
       // A row the project cannot stand in for locally.
@@ -1201,8 +1362,11 @@ describe("the diagnostic vocabulary", () => {
     ];
 
     const everythingWrong = {
-      resolutions: brokenAtOnce,
-      decisions: [extensionDecision],
+      // A malformed member in every list the caller supplies, not only the choices:
+      // the promise names them all, so the sweep has to exercise them all.
+      resolutions: [...brokenAtOnce, null as unknown as LocalDevModuleResolution],
+      mappings: [null as unknown as HostBridgeMapping, ...HOST_BRIDGE_MAPPINGS],
+      decisions: [extensionDecision, null as unknown as DependencyDecision],
       extensionChoices: [
         tanstackSubstitute,
         tanstackRealRuntimeOnly,
@@ -1210,7 +1374,7 @@ describe("the diagnostic vocabulary", () => {
       ],
       installedVersions: { react: "0.0.0" },
       mockBindings: mockBindings(["Permissions"]),
-      referencedSpecifiers: ["dayjs", "echarts", "unmapped"],
+      referencedSpecifiers: ["dayjs", "echarts", "unmapped", 42 as unknown as string],
     };
     const run = () => auditLocalDevConfiguration(everythingWrong);
     expect(run).not.toThrow();
