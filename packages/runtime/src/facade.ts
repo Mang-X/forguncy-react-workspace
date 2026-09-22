@@ -93,7 +93,12 @@ import type {
   ServerCommandParameterMap,
   ServerCommandResult,
 } from "./contract";
-import { requireRuntimeFacadeProvider, RuntimeFacadeResolutionError } from "./provider";
+import {
+  refuseAbsence,
+  requireRuntimeFacadeProvider,
+  RuntimeFacadeResolutionError,
+} from "./provider";
+import type { RuntimeFacadeRefusalPathId } from "./provider";
 
 // ---------------------------------------------------------------------------
 // The surface
@@ -408,29 +413,29 @@ function buildRuntimeFacadeSurface(): RuntimeFacadeImplementation {
       // are what is asked about.
       const call = Object.hasOwn(commands, name) ? commands[name] : undefined;
       if (call === undefined) {
-        throw new RuntimeFacadeResolutionError(
+        throw refuseAbsence(
           "server-command-not-configured",
-          `Server command "${name}" is not available to this Cell: #5 records only the names in availableServerCommands as present, so the record has no such key. Add it to the Cell's available commands, or supply it in the mock provider.`,
           name,
+          `Server command "${name}" is not available to this Cell: #5 records only the names in availableServerCommands as present, so the record has no such key. Add it to the Cell's available commands, or supply it in the mock provider.`,
         );
       }
       if (typeof call !== "function") {
-        // `capability-not-supplied`, not `provider-binding-missing`, and the
-        // difference is the whole point of this branch: the key *is* on the record,
-        // so nothing is missing from the provider — what sits behind a confirmed
-        // address is unusable, which is what that code's cause says. Its remediation
-        // fits too: the fix is to supply the command as a function, not to rebuild
-        // the provider.
+        // `refuseAbsence` reads the code *and* the family from the path, which is why
+        // this branch names `server-command-entry-not-callable` rather than choosing
+        // a code: the key is on the record, so nothing is missing from the provider —
+        // what sits behind a declared command is unusable, which is
+        // `capability-not-supplied`, and the address is a command name.
         //
-        // Routing this through `missingBinding` classified it as a provider wiring
-        // fault without anyone deciding — the helper's name and its hard-coded code
-        // are both about an address that is *not there*, and a command entry that is
-        // present but not callable is not that. Review caught it, and the fix is to
-        // stop borrowing the wrong code rather than to widen the row.
-        throw new RuntimeFacadeResolutionError(
-          "capability-not-supplied",
-          `Server command "${name}" is on the record but is not a function, so the call cannot be made: #5 records ServerCommands as a record of command name to async function. The page declared the command but did not supply it in the form the runtime calls.`,
+        // This branch used to borrow `missingBinding`, whose name and hard-coded code
+        // are both about an address that is *not there*. That classified a declared
+        // command as a provider wiring fault, and — because the family was written
+        // down nowhere but in the taxonomy row and the regression's annotation — the
+        // mistake survived two review rounds. The path table is what makes that
+        // impossible rather than merely unlikely.
+        throw refuseAbsence(
+          "server-command-entry-not-callable",
           name,
+          `Server command "${name}" is on the record but is not a function, so the call cannot be made: #5 records ServerCommands as a record of command name to async function. The page declared the command but did not supply it in the form the runtime calls.`,
         );
       }
       // Called *on the record*, not detached from it: #5 confirms the method form
@@ -455,10 +460,10 @@ function buildRuntimeFacadeSurface(): RuntimeFacadeImplementation {
       // `ServerCommandResult`'s deliberate optionality — which exists because #5
       // recorded the keys, not what a given command puts in them.
       if (result === null || typeof result !== "object") {
-        throw new RuntimeFacadeResolutionError(
-          "capability-not-supplied",
-          `Server command "${name}" answered ${answerShape(result)} rather than the result record #5 recorded, so the call cannot be reported as having returned one.`,
+        throw refuseAbsence(
+          "server-command-result-invalid",
           name,
+          `Server command "${name}" answered ${answerShape(result)} rather than the result record #5 recorded, so the call cannot be reported as having returned one.`,
         );
       }
       return result as ServerCommandResult;
@@ -468,7 +473,11 @@ function buildRuntimeFacadeSurface(): RuntimeFacadeImplementation {
       const provider = requireRuntimeFacadeProvider();
       const binding = portBinding(provider, "useDataSource");
       if (typeof binding !== "function") {
-        throw missingBinding(RUNTIME_FACADE_PORT_HOOK_NAME, "the provider carries no data-source binding");
+        throw missingInjection(
+          "data-source-hook-not-supplied",
+          RUNTIME_FACADE_PORT_HOOK_NAME,
+          "the provider carries no data-source binding",
+        );
       }
       // No undeclared-name check here, and that is deliberate: #5 records an
       // undeclared data source as an error *state* on the result, so passing the
@@ -513,10 +522,10 @@ function buildRuntimeFacadeSurface(): RuntimeFacadeImplementation {
       // answered a string, and returning `false` for an unobserved shape would be
       // the guess #29's fifth acceptance criterion forbids.
       if (typeof granted !== "boolean") {
-        throw new RuntimeFacadeResolutionError(
-          "capability-not-supplied",
-          `props.Forguncy.hasPermission("${permissionName}") answered ${answerShape(granted)} rather than the boolean #5 recorded, so the check's result cannot be reported as one.`,
+        throw refuseAbsence(
+          "called-member-answered-wrong-shape",
           permissionName,
+          `props.Forguncy.hasPermission("${permissionName}") answered ${answerShape(granted)} rather than the boolean #5 recorded, so the check's result cannot be reported as one.`,
         );
       }
       return granted;
@@ -535,7 +544,7 @@ function buildRuntimeFacadeSurface(): RuntimeFacadeImplementation {
       // so treating `undefined` as an error would refuse a state the target
       // allows. The caller declared the shape; an absent key cannot be declared
       // away.
-      return ownValue(portBinding(provider, "cellProps"), confirmed, confirmed);
+      return ownValue(portBinding(provider, "cellProps"), confirmed, confirmed, "base-prop-not-supplied");
     },
 
     forguncyMember: member => {
@@ -554,9 +563,18 @@ function buildRuntimeFacadeSurface(): RuntimeFacadeImplementation {
  * claims and only one of them is a remediation.
  */
 function serverCommandRecord(provider: RuntimeFacadeProvider): Record<string, unknown> {
-  const commands = ownValue(portBinding(provider, "cellProps"), "ServerCommands", "ServerCommands");
+  const commands = ownValue(
+    portBinding(provider, "cellProps"),
+    "ServerCommands",
+    "ServerCommands",
+    "base-prop-not-supplied",
+  );
   if (commands === null || typeof commands !== "object") {
-    throw missingBinding("ServerCommands", "the value is not the record of commands the host injects");
+    throw missingInjection(
+      "base-prop-not-supplied",
+      "ServerCommands",
+      "the value is not the record of commands the host injects",
+    );
   }
   return commands as Record<string, unknown>;
 }
@@ -569,9 +587,14 @@ function serverCommandRecord(provider: RuntimeFacadeProvider): Record<string, un
  * Duplicating it would let the two drift over the part they agree about.
  */
 function forguncyHandle(provider: RuntimeFacadeProvider): Record<string, unknown> {
-  const handle = ownValue(portBinding(provider, "cellProps"), "Forguncy", "Forguncy");
+  const handle = ownValue(
+    portBinding(provider, "cellProps"),
+    "Forguncy",
+    "Forguncy",
+    "handle-not-supplied",
+  );
   if (handle === null || typeof handle !== "object") {
-    throw missingBinding("Forguncy", "the value is not the handle the host injects");
+    throw missingInjection("handle-not-supplied", "Forguncy", "the value is not the handle the host injects");
   }
   return handle as Record<string, unknown>;
 }
@@ -598,7 +621,7 @@ function forguncyHandle(provider: RuntimeFacadeProvider): Record<string, unknown
  */
 function hostHandleMember(provider: RuntimeFacadeProvider, member: ForguncyPropMember): unknown {
   const handle = forguncyHandle(provider);
-  const value = ownValue(handle, member, member);
+  const value = ownValue(handle, member, member, "handle-member-not-supplied");
   return typeof value === "function"
     ? (value as (...args: readonly unknown[]) => unknown).bind(handle)
     : value;
@@ -625,12 +648,12 @@ function hostHandleMethod(
   member: ForguncyPropMember,
 ): (...args: readonly unknown[]) => unknown {
   const handle = forguncyHandle(provider);
-  const value = ownValue(handle, member, member);
+  const value = ownValue(handle, member, member, "handle-member-not-supplied");
   if (typeof value !== "function") {
-    throw new RuntimeFacadeResolutionError(
-      "capability-not-supplied",
-      `props.Forguncy.${member} is not callable, so the ${member} capability was not supplied. Configure it in the designer, or supply it in the mock provider.`,
+    throw refuseAbsence(
+      "called-member-not-callable",
       member,
+      `props.Forguncy.${member} is not callable, so the ${member} capability was not supplied. Configure it in the designer, or supply it in the mock provider.`,
     );
   }
   return (value as (...args: readonly unknown[]) => unknown).bind(handle);
@@ -702,10 +725,10 @@ function answerShape(value: unknown): string {
  */
 function permissionMap(value: unknown): Readonly<Partial<Record<string, boolean>>> {
   const refuse = (clause: string): never => {
-    throw new RuntimeFacadeResolutionError(
-      "capability-not-supplied",
-      `props.Forguncy.getPermissions() answered ${clause} rather than the permission map #5 recorded.`,
+    throw refuseAbsence(
+      "called-member-answered-wrong-shape",
       "getPermissions",
+      `props.Forguncy.getPermissions() answered ${clause} rather than the permission map #5 recorded.`,
     );
   };
 
@@ -771,17 +794,17 @@ export function runtimeFacadeSurface(): RuntimeFacade {
  */
 function claimCellPropAddress(accessor: RuntimeFacadeSurfaceMemberId, key: string): ExposedCellPropKey {
   if (!(CELL_PROPS_BASE_KEYS as readonly string[]).includes(key)) {
-    throw new RuntimeFacadeResolutionError(
-      "host-binding-not-confirmed",
-      `"${key}" is not a base prop #5 verified on a ReactCellType Cell, so the façade has no address for it: ${CELL_PROPS_BASE_KEYS.join(", ")} are the ones it observed.`,
+    throw refuseAbsence(
+      "base-prop-not-confirmed",
       key,
+      `"${key}" is not a base prop #5 verified on a ReactCellType Cell, so the façade has no address for it: ${CELL_PROPS_BASE_KEYS.join(", ")} are the ones it observed.`,
     );
   }
   if (!(RUNTIME_FACADE_CELL_PROP_ADDRESSES as readonly string[]).includes(key)) {
-    throw new RuntimeFacadeResolutionError(
-      "binding-not-exposed",
-      `"${key}" is a confirmed base prop but "${accessor}" is not the member that exposes it — an address reached through two members is a second way for the façade to be wrong. Use the member the capability registry names for it.`,
+    throw refuseAbsence(
+      "base-prop-not-exposed",
       key,
+      `"${key}" is a confirmed base prop but "${accessor}" is not the member that exposes it — an address reached through two members is a second way for the façade to be wrong. Use the member the capability registry names for it.`,
     );
   }
   return key as ExposedCellPropKey;
@@ -792,17 +815,17 @@ function claimForguncyMemberAddress(
   member: string,
 ): ExposedForguncyMember {
   if (!(CELL_FORGUNCY_PROP_KEYS as readonly string[]).includes(member)) {
-    throw new RuntimeFacadeResolutionError(
-      "host-binding-not-confirmed",
-      `"${member}" is not a member of props.Forguncy that #5 verified, so the façade has no address for it.`,
+    throw refuseAbsence(
+      "handle-member-not-confirmed",
       member,
+      `"${member}" is not a member of props.Forguncy that #5 verified, so the façade has no address for it.`,
     );
   }
   if (!(RUNTIME_FACADE_FORGUNCY_MEMBER_ADDRESSES as readonly string[]).includes(member)) {
-    throw new RuntimeFacadeResolutionError(
-      "binding-not-exposed",
-      `"${member}" is a confirmed handle member but "${accessor}" is not the member that exposes it: ${handleAddressOwner(member)}`,
+    throw refuseAbsence(
+      "handle-member-not-exposed",
       member,
+      `"${member}" is a confirmed handle member but "${accessor}" is not the member that exposes it: ${handleAddressOwner(member)}`,
     );
   }
   return member as ExposedForguncyMember;
@@ -848,7 +871,11 @@ function portBinding(
 ): unknown {
   const bindings = (provider as unknown as { readonly bindings?: Record<string, unknown> }).bindings;
   if (bindings === null || typeof bindings !== "object") {
-    throw missingBinding(String(member), "the provider carries no bindings at all");
+    throw missingInjection(
+      "provider-carries-no-bindings",
+      String(member),
+      "the provider carries no bindings at all",
+    );
   }
   return bindings[member];
 }
@@ -861,41 +888,56 @@ function portBinding(
  * `undefined`" is not the same statement: #5 pins the *keys* the runtime
  * injects, so a missing key is the target's own contract being violated.
  */
-function ownValue(record: unknown, key: string, address: string): unknown {
+function ownValue(
+  record: unknown,
+  key: string,
+  address: string,
+  path: RuntimeFacadeInjectionPathId,
+): unknown {
   if (record === null || typeof record !== "object" || !Object.hasOwn(record, key)) {
-    throw missingBinding(address, `the provider does not carry "${key}"`);
+    throw missingInjection(path, address, `the provider does not carry "${key}"`);
   }
   return (record as Record<string, unknown>)[key];
 }
 
 /**
+ * The paths an *injected* address can fail on — the addresses the runtime supplies
+ * on every Cell, whatever the page says.
+ *
+ * Extracted from the path union rather than written out, so it cannot fall behind
+ * the table, and so `missingInjection` below can be handed only paths whose
+ * remediation is "build the provider from the Cell's own props". An address a *page*
+ * was supposed to supply — a server command name — is not one of these, which is the
+ * distinction that a helper named `missingBinding` with one hard-coded code used to
+ * erase.
+ */
+type RuntimeFacadeInjectionPathId = Extract<
+  RuntimeFacadeRefusalPathId,
+  | "provider-carries-no-bindings"
+  | "base-prop-not-supplied"
+  | "handle-not-supplied"
+  | "handle-member-not-supplied"
+  | "data-source-hook-not-supplied"
+>;
+
+/**
  * A refusal for an address the runtime was supposed to inject and did not.
  *
- * The scope is written down because borrowing this helper for the wrong situation
- * is a mistake this package has already made once, and the helper's hard-coded code
- * is what hid it. It covers two things, and they share a remediation rather than
- * just a shape:
- *
- * - an address that is **not there** — a key `ownValue` could not find, or a
- *   bindings record that is missing altogether;
- * - an address whose value is not the shape the runtime injects — a handle that is
- *   not the handle, `ServerCommands` that is not the record of commands, a
- *   `useDataSource` binding that is not callable.
- *
- * Every one of those is fixed by building the provider from the Cell's own props,
- * which is why it is one code.
- *
- * It does **not** cover an address that resolved to something a *page* was supposed
- * to supply and did not, in a usable form. A server command name is the case that
- * matters: the record carries the key, so the command was declared and the fix is on
- * the page — which is why `invokeServerCommand` refuses a non-callable entry with
- * `capability-not-supplied` directly, rather than through here.
+ * Takes a path, so the code and the family come from the table, and its parameter
+ * type admits only the injected addresses. Both are deliberate: this helper has
+ * already been borrowed once for a failure that was neither — a declared command that
+ * was not callable — and the borrowing was invisible because the helper chose the
+ * code itself and the family was written down elsewhere.
  */
-function missingBinding(address: string, reason: string): RuntimeFacadeResolutionError {
-  return new RuntimeFacadeResolutionError(
-    "provider-binding-missing",
-    `The installed provider does not carry "${address}": ${reason}. A base prop or handle member is injected by the ReactCellType runtime on every Cell, so this is a wiring fault — build the provider from the Cell's own props, or from a mock that fills them.`,
+function missingInjection(
+  path: RuntimeFacadeInjectionPathId,
+  address: string,
+  detail: string,
+): RuntimeFacadeResolutionError {
+  return refuseAbsence(
+    path,
     address,
+    `The installed provider does not supply "${address}": ${detail}. A base prop, the handle, a handle member and the useDataSource hook are all injected by the ReactCellType runtime on every Cell, so this is a wiring fault — build the provider from the Cell's own props, or from a mock that fills them.`,
   );
 }
 

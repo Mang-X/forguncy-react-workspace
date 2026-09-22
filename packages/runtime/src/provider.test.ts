@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { CELL_FORGUNCY_PROP_KEYS, CELL_PROPS_BASE_KEYS } from "@forguncy-react-workspace/core";
+
 import type { DataSourceBinding, RuntimeFacadeProvider } from "./contract";
 import { RUNTIME_FACADE_PORT_CHANNEL_MEMBERS } from "./contract";
 import { runtimeFacade } from "./facade";
@@ -7,17 +9,20 @@ import { createHostRuntimeFacadeProvider, RUNTIME_FACADE_HOST_BINDING_CHANNELS }
 import { createMockRuntimeFacadeProvider } from "./mock-provider";
 import {
   findRuntimeFacadeAbsenceMode,
+  findRuntimeFacadeAbsencePath,
   installRuntimeFacadeProvider,
   RUNTIME_FACADE_ABSENCE_MODES,
+  RUNTIME_FACADE_ABSENCE_PATHS,
   RUNTIME_FACADE_ABSENCE_SHAPES,
   RUNTIME_FACADE_ADDRESS_KINDS,
+  RUNTIME_FACADE_REFUSAL_PATHS,
   RUNTIME_FACADE_RESOLUTION_ERROR_CODES,
   RuntimeFacadeResolutionError,
   runtimeFacadeProviderState,
   throwingRuntimeFacadeAbsenceCodes,
   uninstallRuntimeFacadeProvider,
 } from "./provider";
-import type { RuntimeFacadeAbsenceId, RuntimeFacadeAddressKind } from "./provider";
+import type { RuntimeFacadeAbsencePathId } from "./provider";
 
 const noSuchSource: DataSourceBinding = name => ({
   data: [],
@@ -127,14 +132,14 @@ describe("the provider slot", () => {
 });
 
 /**
- * One real call, and the address family whose lookup is the one that fails.
+ * One real call, and the address that call names.
  *
- * `addressKind` is written rather than derived on purpose: it is the independent
- * statement that the façade's own choice of code is checked against.
+ * There is no `code` and no `addressKind` field, and that is the correction this round
+ * needed: those were hand-written annotations sitting beside a hand-written taxonomy, so
+ * the two could agree with each other and both be wrong. The path id is the key here,
+ * the path table says what that path means, and the run is asked what it actually got.
  */
-interface AbsenceProducer {
-  readonly code: RuntimeFacadeAbsenceId;
-  readonly addressKind: RuntimeFacadeAddressKind;
+interface AbsencePathProducer {
   /** The address the call names, asserted against the error's own field. */
   readonly address: string | undefined;
   /** Which lookup fails, in words — the label a failing assertion prints. */
@@ -203,27 +208,23 @@ describe("the absence taxonomy", () => {
   });
 
   /**
-   * One real call per (code, address family) pair the module can produce.
+   * One real call per failure *path*, and the address that call names.
    *
-   * A *list* rather than a record keyed by code, and that shape is the point: a code
-   * that can be raised about two families has to appear twice, so the second family
-   * is written down rather than absorbed. A record keyed by code forces one family
-   * per code, which is what the taxonomy used to claim and what review found false —
-   * `capability-not-supplied` was listed as a `forguncy-member` code while
-   * `invokeServerCommand` was already throwing it about a `server-command-name`.
+   * Keyed by the path union, so a path added to `RUNTIME_FACADE_REFUSAL_PATHS` — or to
+   * the one returned-state path — without a producer here **does not compile**. That is
+   * the property the previous two rounds of this regression lacked: the table was a
+   * hand-written list of situations keyed by nothing, so a real throw site nobody listed
+   * stayed green on both sides of the comparison. That is exactly how a
+   * declared-but-uncallable command went unclassified for two rounds.
    *
-   * `addressKind` is written here rather than derived, so the table is an
-   * *independent* statement next to the façade's own choice of code. `address` is
-   * asserted against the error's own field, so a producer cannot exercise a different
-   * address than it says it does. Between them, a code that starts being thrown from
-   * an unlisted family fails here rather than passing as prose — which is the check
-   * "every code can be produced once" could not make, because it only ever asked
-   * whether *some* call produced the code.
+   * `addressKind` is not a field here, deliberately. It used to be, and it was compared
+   * against the taxonomy — two hand-written lists agreeing with each other and both
+   * wrong: the handle read (`Forguncy`, a *base prop*) was annotated as a handle-member
+   * failure. The path decides the family now, the run reports what it actually got, and
+   * the vocabulary check below is what catches a family that contradicts `core`.
    */
-  const producers: readonly AbsenceProducer[] = [
-    {
-      code: "provider-not-installed",
-      addressKind: "provider",
+  const producers: Readonly<Record<RuntimeFacadeAbsencePathId, AbsencePathProducer>> = {
+    "provider-not-installed": {
       // Carries no address, and that is right: nothing resolved, so the failure is
       // about the slot rather than about anything the call named.
       address: undefined,
@@ -233,9 +234,7 @@ describe("the absence taxonomy", () => {
         return runtimeFacade().cellProp("Permissions");
       },
     },
-    {
-      code: "provider-kind-conflict",
-      addressKind: "provider",
+    "provider-kind-conflict": {
       // The incoming provider's kind, which is what the refusal names — the kind that
       // *would* have been installed, not the one already there.
       address: "mock",
@@ -245,9 +244,7 @@ describe("the absence taxonomy", () => {
         return installRuntimeFacadeProvider(createMockRuntimeFacadeProvider());
       },
     },
-    {
-      code: "host-binding-not-confirmed",
-      addressKind: "cell-prop",
+    "base-prop-not-confirmed": {
       address: "NotABaseProp",
       note: "a base prop name #5 never observed — reachable from JavaScript, and from a cast in TypeScript",
       produce: async () => {
@@ -255,9 +252,7 @@ describe("the absence taxonomy", () => {
         return runtimeFacade().cellProp("NotABaseProp" as never);
       },
     },
-    {
-      code: "host-binding-not-confirmed",
-      addressKind: "forguncy-member",
+    "handle-member-not-confirmed": {
       address: "NotAMember",
       note: "the same rule applied to a handle member #5 never observed",
       produce: async () => {
@@ -265,9 +260,7 @@ describe("the absence taxonomy", () => {
         return runtimeFacade().forguncyMember("NotAMember" as never);
       },
     },
-    {
-      code: "binding-not-exposed",
-      addressKind: "cell-prop",
+    "base-prop-not-exposed": {
       address: "ServerCommands",
       note: "a confirmed base prop reached through the wrong accessor",
       produce: async () => {
@@ -275,9 +268,7 @@ describe("the absence taxonomy", () => {
         return runtimeFacade().cellProp("ServerCommands" as never);
       },
     },
-    {
-      code: "binding-not-exposed",
-      addressKind: "forguncy-member",
+    "handle-member-not-exposed": {
       address: "hasPermission",
       note: "a confirmed handle member reached through the wrong accessor",
       produce: async () => {
@@ -285,9 +276,7 @@ describe("the absence taxonomy", () => {
         return runtimeFacade().forguncyMember("hasPermission" as never);
       },
     },
-    {
-      code: "provider-binding-missing",
-      addressKind: "provider",
+    "provider-carries-no-bindings": {
       address: "cellProps",
       note: "a provider carrying no bindings record at all",
       produce: async () => {
@@ -295,9 +284,7 @@ describe("the absence taxonomy", () => {
         return runtimeFacade().cellProp("Permissions");
       },
     },
-    {
-      code: "provider-binding-missing",
-      addressKind: "cell-prop",
+    "base-prop-not-supplied": {
       address: "Permissions",
       note: "a bindings record that carries the handle but not a base prop",
       produce: async () => {
@@ -308,9 +295,18 @@ describe("the absence taxonomy", () => {
         return runtimeFacade().cellProp("Permissions");
       },
     },
-    {
-      code: "provider-binding-missing",
-      addressKind: "forguncy-member",
+    "handle-not-supplied": {
+      address: "Forguncy",
+      note: "the handle itself is not there — and `Forguncy` is a *base prop*, which is the annotation review caught calling this a handle-member failure",
+      produce: async () => {
+        installRuntimeFacadeProvider({
+          kind: "mock",
+          bindings: { cellProps: {}, useDataSource: noSuchSource } as never,
+        });
+        return runtimeFacade().hasPermission("ProbePermission");
+      },
+    },
+    "handle-member-not-supplied": {
       address: "hasPermission",
       note: "a handle that carries none of the members #5 recorded",
       produce: async () => {
@@ -321,22 +317,7 @@ describe("the absence taxonomy", () => {
         return runtimeFacade().hasPermission("ProbePermission");
       },
     },
-    {
-      code: "provider-binding-missing",
-      addressKind: "forguncy-member",
-      address: "Forguncy",
-      note: "a handle that is present but is not the handle the runtime injects — the other half of this row's claim, which is about the shape as much as about presence",
-      produce: async () => {
-        installRuntimeFacadeProvider({
-          kind: "mock",
-          bindings: { cellProps: { Forguncy: "not-the-handle" }, useDataSource: noSuchSource } as never,
-        });
-        return runtimeFacade().hasPermission("ProbePermission");
-      },
-    },
-    {
-      code: "provider-binding-missing",
-      addressKind: "cell-hook",
+    "data-source-hook-not-supplied": {
       address: "useDataSource",
       note: "a provider carrying no data-source hook, which is the wrapper-local binding",
       produce: async () => {
@@ -347,9 +328,7 @@ describe("the absence taxonomy", () => {
         return runtimeFacade().useDataSource("Sales");
       },
     },
-    {
-      code: "capability-not-supplied",
-      addressKind: "forguncy-member",
+    "called-member-not-callable": {
       address: "hasPermission",
       note: "a mock that fills the handle's keys and supplies none of them: present, not callable",
       produce: async () => {
@@ -357,44 +336,43 @@ describe("the absence taxonomy", () => {
         return runtimeFacade().hasPermission("ProbePermission");
       },
     },
-    {
-      code: "capability-not-supplied",
-      addressKind: "server-command-name",
-      address: "GetSalesData",
-      note: "a command that resolved to something other than the result record #5 recorded",
+    "called-member-answered-wrong-shape": {
+      address: "getPermissions",
+      note: "a called member that answered a shape #5 did not record",
       produce: async () => {
         installRuntimeFacadeProvider(
-          createMockRuntimeFacadeProvider<{ GetSalesData: [] }>({
-            // `as never` because the mock's type asks for a `ServerCommandCall`, and
-            // the whole point of the fixture is to answer something that type does
-            // not describe.
-            serverCommands: { GetSalesData: (async () => undefined) as never },
+          createMockRuntimeFacadeProvider({
+            forguncyMembers: { getPermissions: async () => ({ ProbePermission: true }) },
           }),
         );
-        return runtimeFacade<{ GetSalesData: [] }>().invokeServerCommand("GetSalesData");
+        return runtimeFacade().getPermissions();
       },
     },
-    {
-      code: "capability-not-supplied",
-      addressKind: "server-command-name",
+    "server-command-entry-not-callable": {
       address: "GetSalesData",
       note: "a command declared on the record whose entry is not callable — present, so nothing is missing, and unusable, so not a right answer either",
       produce: async () => {
         installRuntimeFacadeProvider(
           createMockRuntimeFacadeProvider<{ GetSalesData: [] }>({
-            // A string where a command function belongs. The record carries the key,
-            // which is exactly what separates this from `server-command-not-configured`
-            // — and what review caught this site being wrongly classified as
-            // `provider-binding-missing` for.
             serverCommands: { GetSalesData: "declared, but not callable" as never },
           }),
         );
         return runtimeFacade<{ GetSalesData: [] }>().invokeServerCommand("GetSalesData");
       },
     },
-    {
-      code: "server-command-not-configured",
-      addressKind: "server-command-name",
+    "server-command-result-invalid": {
+      address: "GetSalesData",
+      note: "a command that resolved to something other than the result record #5 recorded",
+      produce: async () => {
+        installRuntimeFacadeProvider(
+          createMockRuntimeFacadeProvider<{ GetSalesData: [] }>({
+            serverCommands: { GetSalesData: (async () => undefined) as never },
+          }),
+        );
+        return runtimeFacade<{ GetSalesData: [] }>().invokeServerCommand("GetSalesData");
+      },
+    },
+    "server-command-not-configured": {
       address: "CreateOrder",
       note: "a command the project declared but the page did not configure",
       produce: async () => {
@@ -402,30 +380,24 @@ describe("the absence taxonomy", () => {
         return runtimeFacade<{ CreateOrder: [] }>().invokeServerCommand("CreateOrder");
       },
     },
-    {
-      code: "undeclared-data-source",
-      addressKind: "data-source-name",
+    "undeclared-data-source": {
       address: "NoSuchSource",
-      note: "the non-error row: the host's own error state, returned rather than thrown",
+      note: "the one path that returns rather than throws: the host's own error state",
       produce: async () => {
         installRuntimeFacadeProvider(createMockRuntimeFacadeProvider());
         return runtimeFacade().useDataSource("NoSuchSource");
       },
     },
-  ];
+  };
 
-  it("can produce every declared code from a real call", async () => {
-    // Every row has at least one producer, and no producer names an id the taxonomy
-    // does not admit. Compared against the whole taxonomy rather than the error codes,
-    // because the non-error row is produced here too — its *shape* is what
-    // distinguishes it, and the loop below asserts that.
-    expect([...new Set(producers.map(entry => entry.code))].sort()).toEqual(
-      RUNTIME_FACADE_ABSENCE_MODES.map(mode => mode.id).sort(),
-    );
-
-    for (const entry of producers) {
+  it("can produce every declared path from a real call", async () => {
+    for (const [pathId, entry] of Object.entries(producers) as [
+      RuntimeFacadeAbsencePathId,
+      AbsencePathProducer,
+    ][]) {
+      const path = findRuntimeFacadeAbsencePath(pathId);
       uninstallRuntimeFacadeProvider();
-      if (findRuntimeFacadeAbsenceMode(entry.code).shape === "returns-the-hosts-error-state") {
+      if (findRuntimeFacadeAbsenceMode(path.code).shape === "returns-the-hosts-error-state") {
         const state = (await entry.produce()) as { error?: unknown };
         expect(String(state?.error), entry.note).toContain(entry.address);
         continue;
@@ -438,38 +410,77 @@ describe("the absence taxonomy", () => {
       }
       expect(caught, entry.note).toBeInstanceOf(RuntimeFacadeResolutionError);
       const error = caught as RuntimeFacadeResolutionError;
-      expect(error.code, entry.note).toBe(entry.code);
-      // The address, not just the code: a producer that fails somewhere else would
-      // otherwise still look like a producer for the family it claims.
+      // Observed, not declared: the error says which code and which family it was, and
+      // both have to be what the path table says this path means. A refusal that named
+      // the wrong path, or reached for a code some other way, fails here.
+      expect(error.code, entry.note).toBe(path.code);
+      expect(error.addressKind, entry.note).toBe(path.addressKind);
       expect(error.address, entry.note).toBe(entry.address);
-      // And the family is asked of the *observed* error, not of the entry's own
-      // declaration. Both sides of that comparison are hand-written, so comparing them
-      // to each other only proves they agree with each other: the run is what has to
-      // support the annotation. A site that throws an existing code about a family its
-      // row does not list fails here — which is the drift review found, and it is this
-      // assertion rather than the set comparison below that catches it.
-      expect(
-        findRuntimeFacadeAbsenceMode(error.code).addressKinds,
-        `${entry.note} — ${error.code} must list the family it was raised about`,
-      ).toContain(entry.addressKind);
+    }
+  });
+
+  it("keeps the refusal paths and the error-code vocabulary the same set", () => {
+    expect([...new Set(RUNTIME_FACADE_REFUSAL_PATHS.map(path => path.code))].sort()).toEqual(
+      [...RUNTIME_FACADE_RESOLUTION_ERROR_CODES].sort(),
+    );
+    // And the ids are unique, so a copy-paste cannot silently shadow a path and leave
+    // the producer that covered it pointing at the copy.
+    expect(new Set(RUNTIME_FACADE_REFUSAL_PATHS.map(path => path.id)).size).toBe(
+      RUNTIME_FACADE_REFUSAL_PATHS.length,
+    );
+  });
+
+  it("lists no address family that nothing produces", () => {
+    for (const mode of RUNTIME_FACADE_ABSENCE_MODES) {
+      const produced = new Set(
+        RUNTIME_FACADE_ABSENCE_PATHS.filter(path => path.code === mode.id).map(
+          path => path.addressKind,
+        ),
+      );
+      for (const kind of mode.addressKinds) {
+        expect(produced, `${mode.id} lists ${kind} but nothing produces it`).toContain(kind);
+      }
     }
   });
 
   /**
-   * The other direction: a family a row lists has to be a family something produces.
+   * The one check on the address family that does not come from this package's own two
+   * hands.
    *
-   * Soundness — a produced family the row omits — is checked in the driving test above,
-   * against the observed error rather than against this table. This one checks the
-   * remaining half, and it is the half that keeps a plural field from becoming a place
-   * to list families "just in case": a listed family nothing produces fails too.
+   * A path's family is a judgement, and every other assertion about it compares it
+   * against something else I wrote. `core`'s vocabularies do not: a name in
+   * `CELL_PROPS_BASE_KEYS` is a base prop and a name in `CELL_FORGUNCY_PROP_KEYS` is a
+   * handle member, by #5's record rather than by my opinion — so an address that belongs
+   * to one of those vocabularies pins the family it can be raised about.
+   *
+   * This is the check that would have caught review's counter-example. `Forguncy` is the
+   * first entry of `CELL_PROPS_BASE_KEYS`, so a path about it cannot be a
+   * `forguncy-member` failure — and it was one, and nothing failed.
    */
-  it("lists no address family that nothing produces", () => {
-    for (const mode of RUNTIME_FACADE_ABSENCE_MODES) {
-      const produced = new Set(
-        producers.filter(entry => entry.code === mode.id).map(entry => entry.addressKind),
-      );
-      for (const kind of mode.addressKinds) {
-        expect(produced, `${mode.id} lists ${kind} but nothing produces it`).toContain(kind);
+  it("names each address in the family core's vocabulary puts it in", () => {
+    for (const [pathId, entry] of Object.entries(producers) as [
+      RuntimeFacadeAbsencePathId,
+      AbsencePathProducer,
+    ][]) {
+      if (entry.address === undefined) continue;
+      const { addressKind } = findRuntimeFacadeAbsencePath(pathId);
+      // Each direction is guarded by exclusivity, because the two vocabularies are not
+      // disjoint: `Permissions` is a base prop key *and* one of the handle's members
+      // (#5 lists it on `props.Forguncy` as well as on the Cell), so that one name does
+      // not pin a family on its own. Every other name does.
+      const isBaseProp = (CELL_PROPS_BASE_KEYS as readonly string[]).includes(entry.address);
+      const isHandleMember = (CELL_FORGUNCY_PROP_KEYS as readonly string[]).includes(entry.address);
+      if (isBaseProp && !isHandleMember) {
+        expect(
+          addressKind,
+          `"${entry.address}" is a base prop and not a handle member, so this path cannot be a ${addressKind} failure`,
+        ).toBe("cell-prop");
+      }
+      if (isHandleMember && !isBaseProp) {
+        expect(
+          addressKind,
+          `"${entry.address}" is a handle member and not a base prop, so this path cannot be a ${addressKind} failure`,
+        ).toBe("forguncy-member");
       }
     }
   });
