@@ -703,15 +703,43 @@ function standsInForModuleId(resolution: LocalDevModuleResolution): boolean {
 }
 
 /**
- * Why a row that declares a stand-in cannot name one, or `undefined` when it names it.
+ * Why a row's kind and its substitution fields disagree, or `undefined` when they agree.
  *
- * The guard's half of {@link standsInForModuleId}, spelled with the same accessor so the
- * refusal and the worklist cannot answer one question two ways.
+ * One question — what does this row say stands in for the module id it names? — with the two
+ * ways a row can contradict its own answer. Both were review findings, in successive rounds:
+ *
+ * - it declares a stand-in and names none, so there is nothing to resolve;
+ * - it declares none (`unsupported`) and carries a substitution's fields anyway, which are
+ *   then read by nothing. Leaving them unread is not neutral: a project that names a package
+ *   on such a row expects the local loop to use it, and the one reader that did pick them up
+ *   derived a comparison the row's kind denies — the audit printed `Declared without a local
+ *   stand-in: react` beside `Version checks: react===19.2.7`, and a mismatching
+ *   `installedVersions.react` produced a `local-dev-host-version-mismatch` for a package
+ *   nothing stands in for.
+ *
+ * {@link standsInForModuleId} is the same question asked positively, which is why the guard
+ * and the derivations share {@link localDevResolutionTarget} rather than each reading
+ * `localPackage` for itself.
  */
-function localDevMissingTargetProblem(resolution: LocalDevModuleResolution): string | undefined {
-  return localDevResolutionTarget(resolution) === undefined
-    ? `is "${resolution.resolution}" and names no package, so there is nothing to resolve`
-    : undefined;
+function localDevSubstitutionProblem(resolution: LocalDevModuleResolution): string | undefined {
+  const target = localDevResolutionTarget(resolution);
+
+  if (resolution.resolution !== "unsupported") {
+    return target === undefined
+      ? `is "${resolution.resolution}" and names no package, so there is nothing to resolve`
+      : undefined;
+  }
+
+  const stale = [
+    target === undefined ? undefined : `localPackage "${target}"`,
+    resolution.checkedVersionField === undefined
+      ? undefined
+      : `checkedVersionField "${resolution.checkedVersionField}"`,
+  ].filter((field): field is string => field !== undefined);
+
+  return stale.length === 0
+    ? undefined
+    : `is "unsupported", so nothing stands in for it, and still carries ${stale.join(" and ")} — fields that are read by nothing, because there is no substitution to resolve or to compare`;
 }
 
 /**
@@ -906,14 +934,15 @@ export function assertLocalDevResolutionsCoverHostBridge(
       covered.add(moduleId);
     }
 
-    if (resolution.resolution !== "unsupported") {
-      const noTarget = localDevMissingTargetProblem(resolution);
-      if (noTarget !== undefined) {
-        throw new LocalDevRuntimeContractError(
-          "mapping-coverage",
-          `Local resolution "${resolution.specifier}" ${noTarget}.`,
-        );
-      }
+    // What the row says stands in for its module id, and whether its own fields agree with
+    // that answer. Both ways of disagreeing stop the run, because both leave the harness
+    // without an answer it can act on.
+    const substitution = localDevSubstitutionProblem(resolution);
+    if (substitution !== undefined) {
+      throw new LocalDevRuntimeContractError(
+        "mapping-coverage",
+        `Local resolution "${resolution.specifier}" ${substitution}.`,
+      );
     }
 
     if (resolution.checkedVersionField === undefined && resolution.alignmentUnchecked === undefined) {
@@ -986,22 +1015,42 @@ export function localDevUnsupportedModuleIds(
     .flatMap(resolution => moduleIdsOfExistingRow(resolution.specifier, mappings));
 }
 
-/** The bridge rows whose local substitution carries a version check. */
+/**
+ * The bridge rows whose local substitution carries a version check.
+ *
+ * A substitution is what makes the comparison mean anything, which is why the filter is
+ * {@link standsInForModuleId} and not `checkedVersionField` alone. A row that declares
+ * `unsupported` has no local substitution, and a row can carry both fields anyway — the
+ * guard skips the missing-target rule for `unsupported`, and the version-field-or-reason
+ * rule is satisfied by a field nothing should read. Asking for the comparison then makes a
+ * claim the row denies: the audit printed `Declared without a local stand-in: react` beside
+ * `Version checks: react===19.2.7`, and, given a differing `installedVersions.react`, a
+ * `local-dev-host-version-mismatch` about a package its own row says the local loop does not
+ * stand in for.
+ *
+ * The expected values are still read off #5's pinned target and never stored, and the
+ * substitution's package comes from {@link localDevResolutionTarget}, so the expectation
+ * names the thing the row actually stands in with rather than a field beside it.
+ */
 export function localDevAlignmentChecks(
   resolutions: readonly LocalDevModuleResolution[] = LOCAL_DEV_MODULE_RESOLUTIONS,
 ): readonly LocalDevAlignmentExpectation[] {
-  return resolutions.filter(canReadResolutionRow).flatMap(resolution =>
-    resolution.checkedVersionField === undefined || resolution.localPackage === undefined
-      ? []
-      : [
-          {
-            specifier: resolution.specifier,
-            localPackage: resolution.localPackage,
-            field: resolution.checkedVersionField,
-            expected: localDevRecordedVersion(resolution.checkedVersionField),
-          },
-        ],
-  );
+  return resolutions
+    .filter(canReadResolutionRow)
+    .filter(standsInForModuleId)
+    .flatMap(resolution => {
+      const field = resolution.checkedVersionField;
+      const target = localDevResolutionTarget(resolution);
+      if (field === undefined || target === undefined) return [];
+      return [
+        {
+          specifier: resolution.specifier,
+          localPackage: target,
+          field,
+          expected: localDevRecordedVersion(field),
+        },
+      ];
+    });
 }
 
 export interface LocalDevAlignmentExpectation {

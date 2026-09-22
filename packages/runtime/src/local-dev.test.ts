@@ -1541,6 +1541,50 @@ describe("the diagnostic vocabulary", () => {
     // And the refused row is still reported in the same report.
     expect(report).toMatch(/local-dev-mapping-coverage/);
   });
+
+  // The fifth re-review's finding, and the third of this family: a positive derived claim is
+  // bounded by what the row *says*, not by which of its fields happen to be readable. A row
+  // can declare `unsupported` — no local stand-in — and still carry `localPackage` and
+  // `checkedVersionField`, and the guard used to let it through: the missing-target rule was
+  // skipped for `unsupported`, and the version-field-or-reason rule was satisfied by a field
+  // nothing should read. The alignment derivation then asked the harness to compare the
+  // installed version of a package the row says it does not stand in for.
+  //
+  // Both halves are asserted, because either half alone is incomplete: the guard refusal makes
+  // the contradiction impossible, and the bounded claim is what holds for a table the guard
+  // refused — the audit catches that refusal and carries on, so a derivation is still reached
+  // with the row in hand.
+  it("does not ask for a version check on a row that declares no local stand-in", () => {
+    const declaredUnsupported: LocalDevModuleResolution[] = [
+      {
+        specifier: "react",
+        resolution: "unsupported",
+        localPackage: "react",
+        checkedVersionField: "hostReactVersion",
+        note: "fixture: declares no stand-in while carrying a stand-in's fields",
+      },
+      ...LOCAL_DEV_MODULE_RESOLUTIONS.filter(row => row.specifier !== "react"),
+    ];
+
+    expect(() => assertLocalDevResolutionsCoverHostBridge(declaredUnsupported)).toThrow(
+      /is "unsupported", so nothing stands in for it, and still carries localPackage "react" and checkedVersionField "hostReactVersion"/,
+    );
+
+    const audit = auditLocalDevConfiguration({
+      resolutions: declaredUnsupported,
+      installedVersions: { react: "18.0.0" },
+    });
+
+    // The row's own statement is the one that counts...
+    expect(audit.unresolved).toContain("react");
+    // ...so there is nothing to compare, and no finding about a package the same row says the
+    // local loop does not stand in for.
+    expect(audit.alignment.map(entry => entry.localPackage)).not.toContain("react");
+    expect(audit.diagnostics.map(diagnostic => diagnostic.code)).not.toContain("local-dev-host-version-mismatch");
+    // The rows that do substitute still carry their checks, and the stale fields are a finding.
+    expect(audit.alignment.map(entry => entry.localPackage)).toEqual(["react-dom"]);
+    expect(audit.diagnostics.map(diagnostic => diagnostic.code)).toContain("local-dev-mapping-coverage");
+  });
 });
 
 describe("authoring patterns the local loop must not reward", () => {
