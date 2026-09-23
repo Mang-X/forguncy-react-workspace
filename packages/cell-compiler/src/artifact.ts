@@ -67,7 +67,7 @@ import type {
   WorkspaceSourceAudit,
   WorkspaceSourceDiagnostic,
 } from "./workspace-source";
-import { auditWorkspaceSource } from "./workspace-source";
+import { auditWorkspaceSource, formatWorkspaceSourceAudit } from "./workspace-source";
 
 // ---------------------------------------------------------------------------
 // The finalized public interfaces
@@ -205,14 +205,22 @@ export interface CellResolveRequest {
 export interface CellBundlerPort {
   readonly bundle: (request: CellBundlingRequest) => Promise<BundledCellModule>;
   /**
-   * The entry's bare specifiers, resolved but not built.
+   * The entry's bare specifiers, resolved but not built. **Optional.**
    *
-   * Required rather than optional: a port without it cannot support the pre-bundle
-   * refusal #14 asks for, and an optional method would let the compiler silently
-   * fall back to auditing after the build — which is the defect this exists to fix.
-   * A fixture port answers it with the specifiers its fixture bundle stands for.
+   * It exists for one caller: a compile that was given a workspace graph, where
+   * #14's two fatal findings have to be observable *before* anything is built — see
+   * {@link compileCell}. Without a graph there is no workspace audit to run, so a
+   * port that only implements `bundle` is complete for every #6 caller, and
+   * requiring the method would have changed that public boundary for no runtime
+   * benefit.
+   *
+   * Optional is not a licence to fall back silently. When a graph *is* supplied and
+   * this method is absent, {@link compileCell} refuses the compile with
+   * `bundler-failure` rather than auditing after the build: the pre-bundle guarantee
+   * is mandatory exactly when a workspace graph makes it meaningful, and a quiet
+   * fallback would reintroduce the defect the split exists to prevent.
    */
-  readonly resolveEntrySpecifiers: (request: CellResolveRequest) => Promise<readonly string[]>;
+  readonly resolveEntrySpecifiers?: (request: CellResolveRequest) => Promise<readonly string[]>;
 }
 
 /**
@@ -830,17 +838,48 @@ export function serializeCompileCellResult(artifact: CompileCellResult): string 
   return `${JSON.stringify(canonical, null, 2)}\n`;
 }
 
-/** A report block for a CI log or a PR body, including which promises remain unproven. */
+/**
+ * A report block for a CI log or a PR body, including which promises remain unproven.
+ *
+ * ## Why the workspace audit is printed here
+ *
+ * A workspace rejection carries `diagnostics: []` **by design** — #14's vocabulary is
+ * not #6's, so a cycle or an intercepting decision is reported through `workspace`
+ * rather than restated as a `CellArtifactDiagnostic`. That decision is only useful if
+ * the finding reaches a reader, and this function is the package's standard reporting
+ * path. Formatting `outcome.diagnostics` alone printed
+ * `Compilation rejected with 0 diagnostic(s):` — the structured diagnostic existed in
+ * memory and reached nobody, which would have undermined the very path this seam
+ * adds.
+ *
+ * So whenever a workspace audit is present it is printed in full, on both outcomes.
+ * On a *compiled* outcome that is the point rather than a bonus: the non-fatal
+ * findings (`workspace-package-in-frontend-libraries`, a transitive dependency with
+ * no decision) are exactly the ones a reader has to act on, and an artifact that
+ * compiles is where they are easiest to miss.
+ *
+ * A `WorkspaceSourceAudit` with nothing wrong still prints its summary lines, which is
+ * `formatWorkspaceSourceAudit`'s own contract — "no diagnostics" must not be readable
+ * as "the declared sharing was verified".
+ */
 export function formatCompileCellOutcome(outcome: CompileCellOutcome): string {
+  const workspace = outcome.workspace === undefined ? [] : ["", formatWorkspaceSourceAudit(outcome.workspace)];
+
   if (outcome.status === "compiled") {
     const ids = frontendLibraryIds(outcome.artifact.frontendLibraries);
     return [
       `Compiled Cell artifact: ${outcome.artifact.code.length} characters, entry shape "${outcome.entryKind}".`,
       `${FRONTEND_LIBRARIES_FIELD_NAME}: ${ids.join(", ") || "(none)"}`,
       "Real Forguncy runtime validation is not established by a local compile.",
+      ...workspace,
     ].join("\n");
   }
-  return `Compilation rejected with ${outcome.diagnostics.length} diagnostic(s):\n${formatCellArtifactDiagnostics(outcome.diagnostics)}`;
+
+  // The counts are reported per vocabulary rather than summed, because they are not
+  // the same kind of finding and a caller branching on either needs to see which one
+  // stopped the build. #6's diagnostics are empty on a pre-bundle rejection by design.
+  const artifactDiagnostics = `Compilation rejected with ${outcome.diagnostics.length} diagnostic(s):\n${formatCellArtifactDiagnostics(outcome.diagnostics)}`;
+  return [artifactDiagnostics, ...workspace].join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -909,14 +948,30 @@ export async function compileCell(
   // for one purpose: making #14's two fatal findings observable before anything is
   // built. With no graph there is no workspace audit to run and nothing for the
   // preflight to decide — so a graph-less #6 compile takes exactly the path it took
-  // before this seam existed, one `bundle()` and no analysis pass. Resolving
-  // specifiers anyway would charge every ordinary compile for work whose result it
-  // discards, and would add a failure path through a port method the caller never
-  // needed.
+  // before this seam existed: one `bundle()` and no analysis pass.
   let entrySpecifiers: readonly string[] | undefined;
   if (options.workspace !== undefined) {
+    const resolveEntrySpecifiers = options.bundler.resolveEntrySpecifiers;
+    // A graph was supplied, so the pre-bundle guarantee is mandatory — and a port
+    // without the capability is refused rather than quietly audited after the build.
+    // That is the bound on the method being optional: optional preserves the
+    // graph-less boundary, and this makes the guarantee binding exactly when a
+    // workspace graph makes it meaningful. Falling back here would restore the defect
+    // the split exists to prevent — a cycle discovered only after Rolldown bundled.
+    if (resolveEntrySpecifiers === undefined) {
+      return {
+        status: "rejected",
+        diagnostics: [
+          createCellArtifactDiagnostic("bundler-failure", input.entry, {
+            detail:
+              "A workspace graph was supplied, so the entry's specifiers must be resolved before bundling — but this bundler port implements no `resolveEntrySpecifiers`. #14 requires a reachable workspace cycle to fail before bundling, which cannot be decided without it. Use a port that provides the method, or omit `workspace`.",
+          }),
+        ],
+      };
+    }
+
     try {
-      entrySpecifiers = await options.bundler.resolveEntrySpecifiers({
+      entrySpecifiers = await resolveEntrySpecifiers({
         entry: input.entry,
         dependencies: input.dependencies,
       });

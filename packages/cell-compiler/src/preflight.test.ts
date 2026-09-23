@@ -21,7 +21,7 @@ import { rolldown } from "rolldown";
 import { scan } from "rolldown/experimental";
 import { afterAll, describe, expect, it } from "vitest";
 
-import { compileCell } from "./artifact";
+import { compileCell, formatCompileCellOutcome } from "./artifact";
 import type { BundledCellModule, CellBundlerPort, CompileCellOutcome } from "./artifact";
 import { createRolldownCellBundler } from "./rolldown-bundler";
 import { loadPnpmWorkspaceGraph } from "./workspace-graph";
@@ -32,6 +32,18 @@ const exampleRoot = join(repositoryRoot, "examples", "workspace-package");
 const packageSourceDirectory = dirname(fileURLToPath(import.meta.url));
 
 const scratchRoots: string[] = [];
+
+/** A graph-less fixture: `resolveEntrySpecifiers` must never be reached for it. */
+const TRIVIAL_WORKSPACE_FREE_BUNDLER: CellBundlerPort = {
+  resolveEntrySpecifiers: async () => {
+    throw new Error("a graph-less compile must not run the preflight");
+  },
+  bundle: async (): Promise<BundledCellModule> => ({
+    code: `function App() { return null; }`,
+    externalImports: [],
+    inlinedPackages: [],
+  }),
+};
 
 /** A throwaway project: a cell importing `name` from a locally installed package. */
 function projectImporting(name: string, source: string): string {
@@ -304,11 +316,17 @@ describe("the concrete bundler's preflight is an analysis pass", () => {
     // deciding about a graph the artifact does not have — and, as the review noted,
     // a fix wired into one path and not the other is exactly how that happens.
     const bundler = createRolldownCellBundler({ dir: exampleRoot });
+    const resolveEntrySpecifiers = bundler.resolveEntrySpecifiers;
+    // The concrete port always provides it; the type is optional for ports that do
+    // not, and this test is about the concrete one.
+    expect(resolveEntrySpecifiers).toBeDefined();
+    if (resolveEntrySpecifiers === undefined) return;
+
     const decisions: readonly DependencyDecision[] = [
       { strategy: "host", packageName: "react", globalName: "React" },
     ];
 
-    const preflight = await bundler.resolveEntrySpecifiers({ entry: "src/App.tsx", dependencies: decisions });
+    const preflight = await resolveEntrySpecifiers({ entry: "src/App.tsx", dependencies: decisions });
     const built = await bundler.bundle({
       entry: "src/App.tsx",
       dependencies: decisions,
@@ -316,6 +334,63 @@ describe("the concrete bundler's preflight is an analysis pass", () => {
     });
 
     expect(preflight).toEqual(built.referencedSpecifiers);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A graph without a port that can resolve it
+// ---------------------------------------------------------------------------
+
+describe("a workspace graph supplied to a port with no preflight capability", () => {
+  it("refuses the compile rather than auditing after the build", async () => {
+    // The bound on `resolveEntrySpecifiers` being optional. Optional keeps the
+    // graph-less #6 boundary unchanged — a port that implements only `bundle` stays
+    // complete for every caller who supplies no graph — but it must not become a
+    // silent fallback: with a graph supplied, the pre-bundle guarantee is exactly
+    // what makes #14's fatal findings observable, and auditing afterwards would
+    // restore the defect the split exists to prevent.
+    let buildCalls = 0;
+    const bundlerWithoutPreflight: CellBundlerPort = {
+      bundle: async (): Promise<BundledCellModule> => {
+        buildCalls += 1;
+        return { code: `function App() { return null; }`, externalImports: [], inlinedPackages: [] };
+      },
+    };
+
+    const outcome = await compileCell(
+      { entry: "src/App.tsx", dependencies: [] },
+      { bundler: bundlerWithoutPreflight, workspace: { packages: [] } },
+    );
+
+    expect(outcome.status).toBe("rejected");
+    // Nothing was built: the refusal is the point, not a late finding.
+    expect(buildCalls).toBe(0);
+    if (outcome.status !== "rejected") return;
+    expect(outcome.diagnostics.map(diagnostic => diagnostic.code)).toEqual(["bundler-failure"]);
+    // The message names the missing capability and the two ways out, because
+    // "the bundler failed" alone would not tell a caller what to change.
+    expect(outcome.diagnostics[0]?.message).toContain("resolveEntrySpecifiers");
+    expect(outcome.diagnostics[0]?.message).toContain("omit `workspace`");
+  });
+
+  it("compiles the same port when no graph is supplied", async () => {
+    // The other half, and the reason the method can be optional at all: the identical
+    // port is complete for a graph-less compile.
+    const outcome = await compileCell(
+      { entry: "src/App.tsx", dependencies: [] },
+      {
+        bundler: {
+          bundle: async (): Promise<BundledCellModule> => ({
+            code: `function App() { return null; }`,
+            externalImports: [],
+            inlinedPackages: [],
+          }),
+        },
+      },
+    );
+
+    expect(outcome.status).toBe("compiled");
+    expect(outcome.workspace).toBeUndefined();
   });
 });
 
@@ -376,5 +451,92 @@ describe("a compile with no workspace graph", () => {
     if (outcome.status !== "rejected") return;
     expect(outcome.diagnostics.map(diagnostic => diagnostic.code)).toEqual(["bundler-failure"]);
     expect(outcome.diagnostics[0]?.message).toContain("ENOENT");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The canonical report surfaces the workspace vocabulary
+// ---------------------------------------------------------------------------
+
+describe("formatCompileCellOutcome on a workspace finding", () => {
+  it("prints a preflight cycle rejection's chain, not '0 diagnostic(s)'", async () => {
+    // The review's finding: the rejection carries `diagnostics: []` by design — #14's
+    // vocabulary is not #6's — so a formatter that read only `outcome.diagnostics`
+    // printed `Compilation rejected with 0 diagnostic(s):` and dropped the cycle
+    // entirely. The structured diagnostic existed and reached nobody, which is worse
+    // than not having it: the CI log would read as a clean rejection with no cause.
+    const bundler: CellBundlerPort = {
+      resolveEntrySpecifiers: async () => ["@cyc/a"],
+      bundle: async (): Promise<BundledCellModule> => ({
+        code: `function App() { return null; }`,
+        externalImports: [],
+        inlinedPackages: [],
+      }),
+    };
+
+    const outcome = await compileCell(
+      { entry: "src/App.tsx", dependencies: [] },
+      {
+        bundler,
+        workspace: {
+          packages: [
+            { name: "@cyc/a", directory: "packages/a", imports: ["@cyc/b"] },
+            { name: "@cyc/b", directory: "packages/b", imports: ["@cyc/a"] },
+          ],
+        },
+      },
+    );
+
+    expect(outcome.status).toBe("rejected");
+    const report = formatCompileCellOutcome(outcome);
+
+    // The code, the chain, and the fix owner — the three things a reader acts on.
+    expect(report).toContain("circular-workspace-dependency");
+    expect(report).toContain("@cyc/a → @cyc/b → @cyc/a");
+    expect(report).toContain("Fix (workspace-graph)");
+    // And the artifact vocabulary is still reported, honestly, as empty.
+    expect(report).toContain("Compilation rejected with 0 diagnostic(s):");
+  });
+
+  it("prints a workspace-package decision rejection's finding", async () => {
+    // The other fatal workspace code, which takes the interception path rather than
+    // the cycle path — a fix that special-cased cycles in the formatter would pass
+    // the test above and fail this one.
+    const dir = projectImporting("antd", `exports.Button = function Button() { return "local"; };\n`);
+    const outcome = await compileCell(
+      { entry: "src/App.tsx", dependencies: [{ strategy: "host", packageName: "antd", globalName: "antd" }] },
+      { bundler: createRolldownCellBundler({ dir }), workspace: { packages: [{ name: "antd", directory: "packages/antd", imports: [] }] } },
+    );
+
+    const report = formatCompileCellOutcome(outcome);
+    expect(report).toContain("workspace-package-decided-as-dependency");
+    expect(report).toContain("Fix (dependency-decision)");
+  });
+
+  it("prints the workspace summary on a compiled outcome, so a clean audit is visible as one", async () => {
+    // The bound on printing it: a compiled compile with a graph still reports the
+    // workspace summary, because `formatWorkspaceSourceAudit`'s contract is that
+    // "no diagnostics" must not be readable as "the declared sharing was verified".
+    // Without this, the formatter's workspace block would appear only on failures and
+    // a reader would learn to read its absence as success.
+    const graph = await loadPnpmWorkspaceGraph({ root: repositoryRoot });
+    const outcome = await compileCell(
+      { entry: "src/App.tsx", dependencies: [{ strategy: "host", packageName: "react", globalName: "React" }] },
+      { bundler: createRolldownCellBundler({ dir: exampleRoot }), workspace: graph.graph },
+    );
+
+    expect(outcome.status).toBe("compiled");
+    const report = formatCompileCellOutcome(outcome);
+    expect(report).toContain("Compiled Cell artifact:");
+    expect(report).toContain("Workspace graph: stated");
+    expect(report).toContain("No workspace source diagnostics.");
+  });
+
+  it("prints no workspace block when no graph was supplied", async () => {
+    // The other bound: without a graph there is no audit, and the report must not
+    // imply one ran. This is the pre-existing behaviour for every #6 caller.
+    const outcome = await compileCell({ entry: "src/App.tsx", dependencies: [] }, { bundler: TRIVIAL_WORKSPACE_FREE_BUNDLER });
+    const report = formatCompileCellOutcome(outcome);
+    expect(report).not.toContain("Workspace graph:");
   });
 });
