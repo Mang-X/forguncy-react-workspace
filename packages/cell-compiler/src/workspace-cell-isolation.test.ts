@@ -212,15 +212,27 @@ describe("each Cell's Context object is a different object", () => {
     // this would be `true`.
     expect(registry["cell-b-matches-cell-a"]).toBe(false);
     // And Cell A really did publish, so the `false` is a comparison rather than an
-    // absent key.
-    expect("cell-a" in registry).toBe(true);
+    // absent key. The comparator's ability to answer `true` is the sibling test's
+    // job — a `false` alone would be consistent with a comparator that never says
+    // otherwise.
+    expect("cell-a-published" in registry).toBe(true);
   });
 
-  it("reports a match when the two Cells are handed the same module instance", async () => {
-    // The bound on the assertion above, and the mutation this file's earlier drafts
-    // needed: if the two Cells *did* share a Context object, the probe must say so.
-    // Simulated by giving both evaluations one sandbox, so both artifacts see one
-    // `@app/session` module — the condition the anti-claim denies.
+  it("sharing a sandbox does not share the inlined module instance", async () => {
+    // A boundary note rather than a positive control, and it records the mistake of
+    // its own first draft: the test was named "reports a match when the two Cells are
+    // handed the same module instance" and asserted `false`, with a comment claiming
+    // both artifacts "see one `@app/session` module". They do not. Putting two
+    // artifacts that each inlined their own copy into one `vm` context shares the
+    // *sandbox* — `globalThis`, and nothing else. Each artifact's `createContext()`
+    // ran inside its own closure when its script was evaluated, so neither a shared
+    // global nor a shared `window` can merge the two module instances.
+    //
+    // The assertion is therefore the natural outcome of this setup, and it is worth
+    // stating for exactly that reason: it is the property that makes the sibling-Cell
+    // result trustworthy. If a shared sandbox *could* merge the module instances, the
+    // two artifacts on a page might share one too, and the real-page `false` would
+    // prove nothing.
     const sharedWindow: Record<string, unknown> = {};
     const sharedSandbox: Record<string, unknown> = { React, console, window: sharedWindow };
     sharedSandbox.globalThis = sharedSandbox;
@@ -235,10 +247,49 @@ describe("each Cell's Context object is a different object", () => {
     }
 
     const registry = sharedWindow["__fgcContextIdentity"] as Record<string, unknown>;
-    // Both artifacts were evaluated in ONE context, so both read the same module
-    // registry... but each artifact carries its own inlined copy, so they still differ.
-    // This is the honest result and it is worth asserting rather than assuming: the
-    // probe measures the *artifact's* module, not the sandbox's.
+    expect(registry["cell-b-matches-cell-a"]).toBe(false);
+  });
+
+  it("discriminates: the same reference answers true, a different one answers false", async () => {
+    // The positive control the previous test is not, and the reason the pair is an
+    // experiment rather than a one-sided claim.
+    //
+    // Cell A publishes two rows from the same code path the page runs: its own
+    // reference, and `Object.is(own, own)`. Cell B compares A's reference against its
+    // own. Read together:
+    //
+    // | row | comparison | meaning |
+    // | --- | --- | --- |
+    // | `cell-a-self-match` | A against A | **`true`** — the comparator *can* answer true |
+    // | `cell-b-matches-cell-a` | B against A | **`false`** — the two artifacts differ |
+    //
+    // Either row alone proves nothing: `false` alone is consistent with a comparator
+    // that always says false, and `true` alone says nothing about the two Cells. This
+    // is the assertion the review asked for, driven through the artifacts rather than
+    // through a reimplementation of the comparison.
+    const sharedWindow: Record<string, unknown> = {};
+
+    const renderEntry = async (entry: string): Promise<void> => {
+      const code = await compileCellEntry(entry);
+      const sandbox: Record<string, unknown> = { React, console, window: sharedWindow };
+      sandbox.globalThis = sandbox;
+      new Script(code, { filename: "cell-artifact.js" }).runInContext(createContext(sandbox));
+      const Component = sandbox[CELL_ENTRY_COMPONENT_BINDING];
+      if (typeof Component !== "function") throw new Error("no component bound");
+      renderToString((Component as () => unknown)() as never);
+    };
+
+    // A publishes first, as it does on the page.
+    await renderEntry("src/cells/cell-a.tsx");
+    await renderEntry("src/cells/cell-b.tsx");
+
+    const registry = sharedWindow["__fgcContextIdentity"] as Record<string, unknown>;
+    // A's reference really was published, so neither row below is comparing against
+    // an absent key.
+    expect(registry["cell-a-published"]).toBeDefined();
+    // The control: the comparator answers `true` for one and the same object.
+    expect(registry["cell-a-self-match"]).toBe(true);
+    // The claim: the two artifacts created different Context objects.
     expect(registry["cell-b-matches-cell-a"]).toBe(false);
   });
 });

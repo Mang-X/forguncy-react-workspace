@@ -15,17 +15,20 @@
  * - **It writes under a different label.** The module-scope `Map` is what carries the
  *   anti-claim: each Cell's `seenLabels()` must name only its own label.
  *
- * ## The identity probe
+ * ## The identity comparison
  *
- * Cell A published its Context reference under `__fgcContextIdentity["cell-a"]`. This
- * Cell compares that entry against its **own** reference with `Object.is` and reports
- * the answer on `window.__fgcContextIdentity["cell-b-matches-cell-a"]` — so the page
- * answers the question the rendered Provider/Consumer pair cannot: did the two
- * artifacts create one Context object, or two?
+ * Cell A published its Context reference under `__fgcContextIdentity["cell-a-published"]`
+ * and recorded a self-comparison under `"cell-a-self-match"`. This Cell compares A's
+ * published reference against its **own** with `Object.is` and reports the answer under
+ * `"cell-b-matches-cell-a"`.
  *
- * `undefined` (the key is absent) means Cell A had not published when this ran, which
- * is a sequencing fact rather than an answer, and is reported as such rather than as
- * `false`.
+ * Read together the two rows are a discriminating experiment rather than a one-sided
+ * one: A's self-comparison is `true`, so the comparator does answer `true` when the
+ * objects are the same; B's comparison is `false`, so the two artifacts hold different
+ * objects. Either row alone would be consistent with a broken comparator.
+ *
+ * `undefined` (the key is absent) means Cell A had not published when this ran — a
+ * sequencing fact, reported as such rather than as `false`.
  */
 
 import { SessionProbe, sessionContextIdentity } from "@app/session";
@@ -41,7 +44,8 @@ export function App() {
     >;
     // `in` rather than a truthiness test: the published value is an object reference,
     // and "Cell A has not run yet" must not be confused with "the identities differ".
-    registry["cell-b-matches-cell-a"] = "cell-a" in registry ? Object.is(registry["cell-a"], sessionContextIdentity()) : undefined;
+    registry["cell-b-matches-cell-a"] =
+      "cell-a-published" in registry ? Object.is(registry["cell-a-published"], sessionContextIdentity()) : undefined;
   }
 
   return <SessionProbe label="cell-b" />;
