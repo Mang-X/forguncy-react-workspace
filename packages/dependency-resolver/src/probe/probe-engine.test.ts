@@ -218,6 +218,58 @@ describe("runDependencyProbe: node-only package", () => {
     // The step succeeded at observing — a rejection is not a step failure.
     expect(validationByStep(report).get("node-builtin-scan")).toBe("passed");
   });
+
+  it("detects a Node-only transitive dep nested only under the candidate", async () => {
+    // `disk-reader` is installed solely under `clean-wrapper/node_modules/`;
+    // the project root cannot resolve it. The scan must still walk it via
+    // Node resolution from the candidate's directory.
+    const { report, assessment } = await probe("nested-node-only", "clean-wrapper");
+
+    const finding = report.rejectionFindings.find(
+      entry => entry.signal === "node-filesystem-process-or-native-addon",
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.evidence).toContain("package:disk-reader@1.0.0");
+    expect(report.facts.some(fact => fact.name === "signal.no-node-builtins" && fact.value === true)).toBe(false);
+
+    const scanned = report.facts.find(fact => fact.name === "graph.packages-scanned")?.value;
+    expect(scanned).toContain("disk-reader@1.0.0");
+    expect(assessment.status).toBe("supports-rejection-only");
+  });
+
+  it("scans both installed versions of a same-named transitive package", async () => {
+    // `shared-util@1.0.0` (clean) under branch-a and `shared-util@2.0.0`
+    // (node-only) under branch-b: deduping by package *name* would skip the
+    // second and miss the rejection.
+    const { report } = await probe("multi-version-shared", "dual-branch");
+
+    const scanned = report.facts.find(fact => fact.name === "graph.packages-scanned")?.value ?? [];
+    expect(scanned).toContain("shared-util@1.0.0");
+    expect(scanned).toContain("shared-util@2.0.0");
+
+    const finding = report.rejectionFindings.find(
+      entry => entry.signal === "node-filesystem-process-or-native-addon",
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.evidence).toContain("package:shared-util@2.0.0");
+    expect(finding?.evidence).not.toContain("package:shared-util@1.0.0");
+  });
+
+  it("keeps a dependency whose package.json is not exported in the graph", async () => {
+    // `sealed-package` uses a strict `exports` map without `./package.json`:
+    // resolving the bare entry returns `lib/entry.js`, and appending
+    // `package.json` to that path would silently drop the package.
+    const { report } = await probe("strict-exports", "app-with-sealed");
+
+    const scanned = report.facts.find(fact => fact.name === "graph.packages-scanned")?.value ?? [];
+    expect(scanned).toContain("sealed-package@1.0.0");
+
+    const finding = report.rejectionFindings.find(
+      entry => entry.signal === "node-filesystem-process-or-native-addon",
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.evidence).toContain("package:sealed-package@1.0.0");
+  });
 });
 
 describe("runDependencyProbe: broken build", () => {
@@ -324,6 +376,72 @@ describe("runDependencyProbe: cache", () => {
     const second = await runDependencyProbe({ projectRoot, packageName: "tiny-math" });
     expect(second.fromCache).toBe(false);
     expect(serializeProbeReport(second.report)).toBe(serializeProbeReport(first.report));
+  });
+
+  it("re-probes when a runtime-smoke hook is supplied over a cached hookless report", async () => {
+    const projectRoot = fixture("pure-esm-utility");
+    await rm(join(projectRoot, ".fgc"), { recursive: true, force: true });
+
+    const first = await runDependencyProbe({ projectRoot, packageName: "tiny-math" });
+    expect(first.fromCache).toBe(false);
+    expect(first.report.validation.find(entry => entry.step === "runtime-smoke")?.outcome).toBe("skipped");
+
+    let hookRan = false;
+    const second = await runDependencyProbe({
+      projectRoot,
+      packageName: "tiny-math",
+      runtimeSmoke: () => {
+        hookRan = true;
+        return { facts: [{ name: "smoke.ran", value: true }] };
+      },
+    });
+
+    expect(hookRan).toBe(true);
+    expect(second.fromCache).toBe(false);
+    expect(second.report.validation.find(entry => entry.step === "runtime-smoke")?.outcome).toBe("passed");
+    expect(second.report.facts.some(fact => fact.name === "smoke.ran")).toBe(true);
+  });
+
+  it("re-probes when the toolchain differs from the cached report", async () => {
+    const projectRoot = fixture("pure-esm-utility");
+    await rm(join(projectRoot, ".fgc"), { recursive: true, force: true });
+
+    const first = await runDependencyProbe({
+      projectRoot,
+      packageName: "tiny-math",
+      toolchain: { vitePlus: "0.0.1" },
+    });
+    expect(first.fromCache).toBe(false);
+    expect(first.report.environment.toolchain.vitePlus).toBe("0.0.1");
+
+    // Same fingerprint (toolchain is excluded from the lock fingerprint), but
+    // the cached environment must not answer a different toolchain.
+    const second = await runDependencyProbe({
+      projectRoot,
+      packageName: "tiny-math",
+      toolchain: { vitePlus: "9.9.9" },
+    });
+    expect(second.fingerprint).toBe(first.fingerprint);
+    expect(second.fromCache).toBe(false);
+    expect(second.report.environment.toolchain.vitePlus).toBe("9.9.9");
+  });
+
+  it("re-probes when the target differs from the cached report", async () => {
+    const projectRoot = fixture("pure-esm-utility");
+    await rm(join(projectRoot, ".fgc"), { recursive: true, force: true });
+
+    const first = await runDependencyProbe({ projectRoot, packageName: "tiny-math" });
+    expect(first.fromCache).toBe(false);
+
+    const otherTarget = { ...forguncyTargetIdentity(RUNTIME_CONTRACT_TARGET), productBuild: "other" };
+    const second = await runDependencyProbe({
+      projectRoot,
+      packageName: "tiny-math",
+      target: otherTarget,
+    });
+    expect(second.fingerprint).toBe(first.fingerprint);
+    expect(second.fromCache).toBe(false);
+    expect(second.report.environment.target?.productBuild).toBe("other");
   });
 });
 

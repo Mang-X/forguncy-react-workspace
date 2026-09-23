@@ -71,11 +71,49 @@ function describeIdentityFailure(packageName: string, reason: ProbeIdentityReaso
   }
 }
 
-interface Manifest {
+/** Where a manifest lives on disk, plus the fields every consumer reads from it. */
+export interface LocatedManifest {
   readonly name: string;
   readonly version: string | undefined;
   readonly directory: string;
   readonly raw: Record<string, unknown>;
+}
+
+async function resolveManifest(require: NodeJS.Require, request: string): Promise<LocatedManifest | null> {
+  for (const candidate of [`${request}/package.json`, request]) {
+    let entry: string;
+    try {
+      entry = require.resolve(candidate);
+    } catch {
+      continue;
+    }
+    if (!isAbsolute(entry)) {
+      continue;
+    }
+    // The direct `<name>/package.json` attempt lands on the manifest itself;
+    // walking from its directory still finds it (it declares `name`) and keeps
+    // one code path for both attempts. The bare attempt normally returns an
+    // entry *file* under a strict `exports` map that does not export
+    // `./package.json`; climbing from that file to the owning named manifest is
+    // what keeps such packages in the graph instead of silently dropping them.
+    const manifest = await nearestNamedManifest(dirname(entry));
+    if (manifest !== null) {
+      return manifest;
+    }
+  }
+  return null;
+}
+
+/**
+ * Resolve `request` the way Node would from `require`'s anchor, returning the
+ * owning named manifest or null when nothing installed answers.
+ *
+ * Shared by `package-identity` and `node-builtin-scan` so both walk the same
+ * two-attempt path (subpath manifest, then bare entry climbed to a named
+ * manifest) and neither invents a private variant of resolution.
+ */
+export async function locateManifest(require: NodeJS.Require, request: string): Promise<LocatedManifest | null> {
+  return resolveManifest(require, request);
 }
 
 /**
@@ -87,7 +125,7 @@ interface Manifest {
  * package tree declares none), and refuse to walk out of a package into the
  * project — which would report the project itself as a name mismatch.
  */
-async function nearestNamedManifest(startDirectory: string): Promise<Manifest | null> {
+async function nearestNamedManifest(startDirectory: string): Promise<LocatedManifest | null> {
   let directory = startDirectory;
   for (;;) {
     if (parsePath(directory).base === "node_modules") {
@@ -119,28 +157,6 @@ async function nearestNamedManifest(startDirectory: string): Promise<Manifest | 
     }
     directory = parent;
   }
-}
-
-async function resolveManifest(require: NodeJS.Require, request: string): Promise<Manifest | null> {
-  for (const candidate of [`${request}/package.json`, request]) {
-    let entry: string;
-    try {
-      entry = require.resolve(candidate);
-    } catch {
-      continue;
-    }
-    if (!isAbsolute(entry)) {
-      continue;
-    }
-    // The direct `<name>/package.json` attempt lands on the manifest itself;
-    // walking from its directory still finds it (it declares `name`) and keeps
-    // one code path for both attempts.
-    const manifest = await nearestNamedManifest(dirname(entry));
-    if (manifest !== null) {
-      return manifest;
-    }
-  }
-  return null;
 }
 
 /**

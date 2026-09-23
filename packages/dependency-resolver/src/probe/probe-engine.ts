@@ -66,6 +66,7 @@ import {
   assertProbeReport,
   canonicalizeProbeReport,
   lockProbeStatusForAssessment,
+  matchesForguncyTargetIdentity,
   PROBE_REPORT_SCHEMA_VERSION,
   PROBE_STEP_IDS,
   probeStepOrder,
@@ -231,6 +232,40 @@ function smokeSkipReason(hookPresent: boolean, failedEarlier: boolean): string {
   return "No runtime-smoke hook was supplied for this run; #16 asks for a runtime result where needed, and this toolchain ran the static steps only.";
 }
 
+/**
+ * Whether a cached report may answer *this* run.
+ *
+ * The lock fingerprint deliberately excludes package version, toolchain and
+ * target (#8 tracks those staleness dimensions separately), so the cache cannot
+ * inherit that exclusion: a hit under the same fingerprint still has to describe
+ * the artifact and environment now in front of the engine. A supplied
+ * `runtime-smoke` hook additionally means this run asked for evidence the
+ * cached report may never have collected — a hookless skip must not prevent the
+ * hook from executing.
+ */
+function cacheHitAnswersThisRun(
+  cached: ProbeReport,
+  identity: ResolvedPackageIdentity,
+  toolchain: ToolchainIdentity,
+  target: ForguncyTargetIdentity | null,
+  runtimeSmokeRequested: boolean,
+): boolean {
+  if (runtimeSmokeRequested) {
+    return false;
+  }
+  if (cached.environment.packageVersion !== identity.packageVersion) {
+    return false;
+  }
+  if (cached.environment.toolchain.vitePlus !== toolchain.vitePlus) {
+    return false;
+  }
+  const cachedTarget = cached.environment.target;
+  if (target === null || cachedTarget === null) {
+    return cachedTarget === target;
+  }
+  return matchesForguncyTargetIdentity(cachedTarget, target);
+}
+
 // ---------------------------------------------------------------------------
 // The engine
 // ---------------------------------------------------------------------------
@@ -258,12 +293,16 @@ export async function runDependencyProbe(options: RunDependencyProbeOptions): Pr
 
   if (cache !== null) {
     const cachedReport = await cache.get(fingerprint);
-    // The package version is deliberately *not* in the fingerprint (see
-    // `fingerprint.ts` — it has its own staleness reason on the lock record), so
-    // a hit is only trusted when the stored report describes the artifact that
-    // is installed right now. Otherwise an upgrade would serve yesterday's
-    // evidence under today's install.
-    if (cachedReport !== null && cachedReport.environment.packageVersion === identity.packageVersion) {
+    // Version, toolchain, target and smoke mode are deliberately *not* in the
+    // lock fingerprint (see `fingerprint.ts` — #8 tracks those dimensions on the
+    // record), so a hit under one fingerprint is only trusted when the stored
+    // report still describes this artifact, this environment and this run mode.
+    // Otherwise an upgrade, a toolchain bump, a different target or a newly
+    // supplied smoke hook would be answered with yesterday's evidence.
+    if (
+      cachedReport !== null &&
+      cacheHitAnswersThisRun(cachedReport, identity, toolchain, target, options.runtimeSmoke !== undefined)
+    ) {
       const assessment = assessProbeReport(cachedReport);
       return {
         report: cachedReport,

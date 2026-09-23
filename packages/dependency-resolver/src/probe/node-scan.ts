@@ -35,11 +35,12 @@
 
 import { readFile, readdir } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { isAbsolute, join } from "node:path";
+import { join } from "node:path";
 
 import type { ProbeFact, ProbeRejectionFinding, ProbeRisk, ProbeValidationEntry } from "@forguncy-react-workspace/core";
 
 import type { ResolvedPackageIdentity } from "./identity";
+import { locateManifest } from "./identity";
 import { compareStrings, walkPackageSourceFiles } from "./scan-utils";
 
 /**
@@ -201,44 +202,38 @@ interface GraphPackage {
   readonly depth: number;
 }
 
-function manifestNameAndVersion(manifest: Readonly<Record<string, unknown>>): { readonly name: string; readonly version: string | null } | null {
-  if (typeof manifest["name"] !== "string") {
-    return null;
-  }
-  return {
-    name: manifest["name"],
-    version: typeof manifest["version"] === "string" ? manifest["version"] : null,
-  };
-}
-
 /**
  * The package's dependency graph as installed: itself plus dependencies,
  * optionalDependencies and peerDependencies that actually resolve.
  *
- * Resolution reuses `resolveInstalledVersions`-style require from the *root*
- * project (the same graph the bundler will read), not from the package directory,
- * so a hoisted layout and a nested one answer the same. Packages are keyed by
- * name+version so a diamond dependency is scanned once, and the queue is sorted
- * so the walk order is stable.
+ * Each edge resolves from the *requiring package's* directory — the same
+ * anchors Node's algorithm uses — so a nested install under the candidate (or
+ * under any intermediate package) is visible even when the project root cannot
+ * see it, and a package only installed on one branch of the graph is not
+ * skipped because another branch already asked for the same *name*. Packages
+ * are keyed by their resolved directory (identity + path), so two installed
+ * versions of one name are both scanned while a diamond dependency is scanned
+ * once. The queue is sorted so the walk order is stable.
  */
-async function collectGraph(projectRoot: string, identity: ResolvedPackageIdentity): Promise<readonly GraphPackage[]> {
-  const require = createRequire(join(projectRoot, "package.json"));
-  const byKey = new Map<string, GraphPackage>();
-  const rootKey = `${identity.packageName}@${identity.packageVersion}`;
-  byKey.set(rootKey, {
+async function collectGraph(identity: ResolvedPackageIdentity): Promise<readonly GraphPackage[]> {
+  const byDirectory = new Map<string, GraphPackage>();
+  const root: GraphPackage = {
     name: identity.packageName,
     version: identity.packageVersion,
     directory: identity.directory,
     manifest: identity.manifest,
     depth: 0,
-  });
+  };
+  byDirectory.set(root.directory, root);
 
-  let frontier: GraphPackage[] = [byKey.get(rootKey)!];
-  const requested = new Set<string>([rootKey]);
+  let frontier: GraphPackage[] = [root];
 
   while (frontier.length > 0) {
     const next: GraphPackage[] = [];
     for (const current of frontier) {
+      // Node resolution for a package's own dependencies walks from that
+      // package's location upward, not from the project root.
+      const requireFromCurrent = createRequire(join(current.directory, "package.json"));
       const depNames: string[] = [];
       for (const field of ["dependencies", "optionalDependencies", "peerDependencies"] as const) {
         const deps = current.manifest[field];
@@ -247,59 +242,34 @@ async function collectGraph(projectRoot: string, identity: ResolvedPackageIdenti
         }
       }
       for (const depName of [...new Set(depNames)].sort(compareStrings)) {
-        if (requested.has(depName)) {
+        // Two-attempt + climb-to-named-manifest: a strict `exports` map that
+        // does not export `./package.json` resolves the bare entry to a file,
+        // and the owning manifest is found by walking up from that file rather
+        // than appending `package.json` to the entry path.
+        const located = await locateManifest(requireFromCurrent, depName);
+        if (located === null) {
+          // Not installed (optional peer, platform-skipped): absence is not
+          // evidence either way, so it is simply not in the graph.
           continue;
         }
-        requested.add(depName);
-        let entry: string;
-        try {
-          entry = require.resolve(`${depName}/package.json`);
-        } catch {
-          try {
-            entry = require.resolve(depName);
-          } catch {
-            // Not installed (optional peer, platform-skipped): absence is not
-            // evidence either way, so it is simply not in the graph.
-            continue;
-          }
-        }
-        if (!isAbsolute(entry)) {
+        if (byDirectory.has(located.directory)) {
           continue;
         }
-        try {
-          const text = await readFile(entry.endsWith("package.json") ? entry : join(entry, "package.json"), "utf8");
-          const parsed: unknown = JSON.parse(text);
-          if (parsed === null || typeof parsed !== "object") {
-            continue;
-          }
-          const manifest = parsed as Record<string, unknown>;
-          const named = manifestNameAndVersion(manifest);
-          if (named === null) {
-            continue;
-          }
-          const directory = entry.endsWith("package.json") ? join(entry, "..") : join(entry, "..");
-          const key = `${named.name}@${named.version ?? "?"}`;
-          if (byKey.has(key)) {
-            continue;
-          }
-          const package_: GraphPackage = {
-            name: named.name,
-            version: named.version,
-            directory: directory,
-            manifest,
-            depth: current.depth + 1,
-          };
-          byKey.set(key, package_);
-          next.push(package_);
-        } catch {
-          // Unreadable or non-JSON dependency manifest: contributes nothing.
-        }
+        const package_: GraphPackage = {
+          name: located.name,
+          version: located.version ?? null,
+          directory: located.directory,
+          manifest: located.raw,
+          depth: current.depth + 1,
+        };
+        byDirectory.set(located.directory, package_);
+        next.push(package_);
       }
     }
     frontier = next;
   }
 
-  return [...byKey.values()].sort(
+  return [...byDirectory.values()].sort(
     (a, b) => a.depth - b.depth || compareStrings(a.name, b.name) || compareStrings(a.version ?? "", b.version ?? ""),
   );
 }
@@ -322,7 +292,7 @@ export async function observeNodeBuiltins(
 ): Promise<NodeScanObservation> {
   const facts: ProbeFact[] = [];
   const rejectionFindings: ProbeRejectionFinding[] = [];
-  const graph = await collectGraph(projectRoot, identity);
+  const graph = await collectGraph(identity);
 
   const builtinHits = new Map<string, Set<string>>(); // specifier -> package evidence set
   const nativeHits = new Set<string>();
@@ -390,10 +360,21 @@ export async function observeNodeBuiltins(
   }
 
   if (builtinSpecifiers.length > 0 || nativeIndicators.length > 0) {
+    // Name every package that contributed a hit, not just the probed root:
+    // the review regression is a *nested* dependency reaching a builtin, and
+    // evidence that only says the root's name hides which graph member did it.
+    const contributingPackages = new Set<string>([
+      `package:${identity.packageName}@${identity.packageVersion}`,
+    ]);
+    for (const packagesForSpecifier of builtinHits.values()) {
+      for (const packageEvidence of packagesForSpecifier) {
+        contributingPackages.add(packageEvidence);
+      }
+    }
     const evidence: string[] = [
       ...builtinSpecifiers.map(portableEvidence),
       ...nativeIndicators.map(indicator => `native:${indicator}`),
-      `package:${identity.packageName}@${identity.packageVersion}`,
+      ...[...contributingPackages].sort(compareStrings),
     ];
     rejectionFindings.push({
       signal: "node-filesystem-process-or-native-addon",
