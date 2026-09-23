@@ -55,11 +55,16 @@
 import { realpathSync, statSync } from "node:fs";
 import path from "node:path";
 
-import type { ExtensionExternalDiagnostic } from "@forguncy-react-workspace/core";
+import type { DependencyDecision, ExtensionExternalDiagnostic } from "@forguncy-react-workspace/core";
 import { rolldown, type OutputAsset, type OutputChunk } from "rolldown";
+// `scan` is Rolldown's analysis-only entry: it runs the resolve and transform
+// stages and stops, with no `renderChunk` and no `generateBundle`. That is the
+// whole point of using it here rather than `rolldown()` + `generate()` — see
+// {@link resolveEntrySpecifiersWithRolldown}.
+import { scan } from "rolldown/experimental";
 
-import type { BundledCellModule, CellBundlerPort, CellBundlingRequest } from "./artifact";
-import { findDependencyDecision, packageNameOfSpecifier } from "./artifact";
+import type { BundledCellModule, CellBundlerPort, CellBundlingRequest, CellResolveRequest } from "./artifact";
+import { findDependencyDecision, packageNameOfSpecifier } from "./specifier";
 import type { CellArtifactDiagnostic } from "./diagnostics";
 import { createCellArtifactDiagnostic, dedupeCellArtifactDiagnostics } from "./diagnostics";
 import type { ExtensionExternalsPlan } from "./extension-externals";
@@ -92,7 +97,190 @@ export interface CreateRolldownCellBundlerOptions {
 export function createRolldownCellBundler(options: CreateRolldownCellBundlerOptions): CellBundlerPort {
   return {
     bundle: request => bundleWithRolldown(options.dir, request),
+    resolveEntrySpecifiers: request => resolveEntrySpecifiersWithRolldown(options.dir, request),
   };
+}
+
+/**
+ * The interception machinery, shared by the pre-bundle pass and the build.
+ *
+ * Extracted rather than duplicated because the two must agree exactly: the
+ * preflight's whole claim is that the specifiers it audits are the specifiers the
+ * build resolves. Two copies of this logic would eventually disagree — and the
+ * disagreement would be invisible, because each copy is self-consistent.
+ *
+ * The plan caches and finding maps are per-call state, so one build cannot see
+ * another's interceptions. `referencedSpecifiers` is the set the report needs; the
+ * caller reads it after the pass that populated it.
+ */
+function createInterceptionResolver(decisions: readonly DependencyDecision[]): {
+  readonly interceptionFor: (specifier: string) => { readonly id: string; readonly source: string } | undefined;
+  readonly referencedSpecifiers: Set<string>;
+  readonly referencedPackages: Set<string>;
+  readonly fallThroughResolutions: Map<string, string>;
+  readonly hostFindings: Map<string, HostBridgeDiagnostic>;
+  readonly extensionFindings: Map<string, ExtensionExternalDiagnostic>;
+  /** Consulted once with no references, so a plan-level finding cannot hide. */
+  readonly primeDiagnostics: () => void;
+} {
+  // Every bare specifier resolved at all, intercepted or not. This is the set #14's
+  // workspace audit traces its closure from, so it must include the ones the plans
+  // *did* intercept — a workspace package the host bridge claimed is still a module
+  // the cell imports, and omitting it would make the closure smaller than reality.
+  const referencedSpecifiers = new Set<string>();
+  // Every bare specifier that fell through interception, paired with the resolved
+  // module id Rolldown would have used anyway. Provenance so the report can name
+  // the real bare specifier (`sneaky-dep/subpath`) instead of the folded package
+  // root (`sneaky-dep`), preserving exact-subpath decision precedence.
+  const fallThroughResolutions = new Map<string, string>();
+  const referencedPackages = new Set<string>();
+  const hostFindings = new Map<string, HostBridgeDiagnostic>();
+  const extensionFindings = new Map<string, ExtensionExternalDiagnostic>();
+  const hostPlans = new Map<string, HostBridgePlan>();
+  const extensionPlans = new Map<string, ExtensionExternalsPlan>();
+
+  function consultHostPlan(referencedSpecifiers: readonly string[]): HostBridgePlan {
+    const plan = planHostBridge({ decisions, referencedSpecifiers });
+    for (const finding of plan.diagnostics) hostFindings.set(`${finding.code} ${finding.specifier}`, finding);
+    return plan;
+  }
+
+  function consultExtensionPlan(referencedSpecifiers: readonly string[]): ExtensionExternalsPlan {
+    const plan = planExtensionExternals({ decisions, referencedSpecifiers });
+    for (const finding of plan.diagnostics) extensionFindings.set(`${finding.code} ${finding.subject}`, finding);
+    return plan;
+  }
+
+  function interceptionFor(specifier: string): { readonly id: string; readonly source: string } | undefined {
+    referencedPackages.add(packageNameOfSpecifier(specifier));
+    referencedSpecifiers.add(specifier);
+
+    let hostPlan = hostPlans.get(specifier);
+    if (hostPlan === undefined) {
+      hostPlan = consultHostPlan([specifier]);
+      hostPlans.set(specifier, hostPlan);
+    }
+    // The page's own modules first: a host row and an extension row naming the same
+    // specifier must resolve to the page object, never to a second copy behind an
+    // extension global.
+    if (hostPlan.activation === "stated") {
+      const host = hostPlan.interceptions.find(candidate => candidate.moduleId === specifier);
+      if (host !== undefined) return { id: `${HOST_VIRTUAL_PREFIX}${specifier}`, source: host.source };
+    }
+
+    let extensionPlan = extensionPlans.get(specifier);
+    if (extensionPlan === undefined) {
+      extensionPlan = consultExtensionPlan([specifier]);
+      extensionPlans.set(specifier, extensionPlan);
+    }
+    // `wireable` rather than merely `stated`: a decision that contradicts the mapping
+    // row must not be interposed behind a global the row does not agree on — the
+    // import stays ordinary, the plan's finding travels through `diagnostics`, and
+    // the artifact is refused in the same vocabulary an unwired extension import is.
+    if (extensionPlan.activation === "stated" && extensionPlan.wireable) {
+      const extension = extensionPlan.interceptions.find(candidate => candidate.moduleId === specifier);
+      if (extension !== undefined) return { id: `${EXTENSION_VIRTUAL_PREFIX}${specifier}`, source: extension.source };
+    }
+    return undefined;
+  }
+
+  return {
+    interceptionFor,
+    referencedSpecifiers,
+    referencedPackages,
+    fallThroughResolutions,
+    hostFindings,
+    extensionFindings,
+    primeDiagnostics: () => {
+      // Consulted once with no references: decision-vs-mapping contradictions are
+      // reported even when the entry imports nothing bare, so a broken decision
+      // cannot hide behind an entry that never exercises it.
+      consultHostPlan([]);
+      consultExtensionPlan([]);
+    },
+  };
+}
+
+/**
+ * The entry's bare specifiers, analysed through the same resolver the build uses
+ * and **without generating any code**.
+ *
+ * This is a preflight, and both halves of that sentence are load-bearing.
+ *
+ * **No code generation.** `rolldown()` + `generate()` was the first implementation
+ * and it was wrong: `generate()` renders chunks and bundles them, which is exactly
+ * the work the preflight exists to avoid. A stage probe makes the difference
+ * explicit — `scan` runs `resolve` and `transform`; `generate` additionally runs
+ * `renderChunk` and `generateBundle`. So a `generate()`-based pass would mean the
+ * cycle was still discovered *after* Rolldown had bundled once, and a failure from
+ * that pass would return `bundler-failure` before the structured cycle diagnostic
+ * could be emitted. `scan` is the analysis-only entry, and it is what makes the
+ * refusal genuinely pre-bundling rather than merely pre-`bundle()`.
+ *
+ * **The same resolver.** Correctness depends on running the same interception
+ * machinery as the build — see {@link createInterceptionResolver}. With the
+ * decisions applied, a `host`-decided package resolves to the plan's virtual module,
+ * so the local source is not traversed and an uninstalled host package does not fail
+ * resolution. Without them the pass would walk real `node_modules`, report a
+ * superset, and refuse compiles the build would have completed.
+ *
+ * `scan` returns nothing, so the specifiers are collected from the plugin hooks it
+ * does run. `resolveId` sees every specifier the graph asks for, bare ones
+ * included, which is the set #14's audit traces its closure from.
+ */
+async function resolveEntrySpecifiersWithRolldown(
+  dir: string,
+  request: CellResolveRequest,
+): Promise<readonly string[]> {
+  const resolvedEntry = path.resolve(dir, request.entry);
+  if (!isRegularFile(resolvedEntry)) {
+    throw new Error(`The entry "${request.entry}" does not exist at ${resolvedEntry}.`);
+  }
+
+  const resolver = createInterceptionResolver(request.dependencies);
+  const virtualModules = new Map<string, string>();
+
+  try {
+    await scan({
+      input: resolvedEntry,
+      transform: { jsx: "react-jsx" },
+      experimental: { attachDebugInfo: "none" },
+      plugins: [
+        {
+          name: "cell-compiler-entry-specifier-scan",
+          async resolveId(source, importer, options) {
+            if (!isBareSpecifier(source)) return null;
+            const interception = resolver.interceptionFor(source);
+            if (interception === undefined) {
+              // Record where Rolldown's own resolution lands, so a specifier that
+              // simply is not installed is still reported as referenced rather than
+              // dropped — the audit decides what that means, not this pass.
+              const resolved = await this.resolve(source, importer, { ...options, skipSelf: true });
+              if (resolved !== null && resolved.external !== true) {
+                resolver.fallThroughResolutions.set(source, resolved.id);
+              }
+              return null;
+            }
+            virtualModules.set(interception.id, interception.source);
+            return { id: interception.id, moduleType: "commonjs" };
+          },
+          load(id) {
+            const source = virtualModules.get(id);
+            return source === undefined ? null : source;
+          },
+        },
+      ],
+    });
+  } catch (error) {
+    // The same reduction the build path applies, and for the same reason: this
+    // message becomes a `bundler-failure` diagnostic's `detail`, which lands in CI
+    // logs that get diffed, so Rolldown's ANSI framing and source frames must not
+    // travel with it.
+    throw new Error(describeBuildFailure(error));
+  }
+
+  // Sorted so the audit's input is deterministic like every other report field.
+  return [...resolver.referencedSpecifiers].sort();
 }
 
 // ---------------------------------------------------------------------------
@@ -458,75 +646,14 @@ async function bundleWithRolldown(dir: string, request: CellBundlingRequest): Pr
   const shimSource = renderEntryShim(resolvedEntry);
   const logs: CapturedLog[] = [];
   const virtualModules = new Map<string, string>();
-  // Every bare specifier that fell through interception, paired with the
-  // resolved module id Rolldown would have used anyway. Provenance so the
-  // report can name the real bare specifier (`sneaky-dep/subpath`) instead of
-  // the folded package root (`sneaky-dep`), preserving exact-subpath decision
-  // precedence.
-  const fallThroughResolutions = new Map<string, string>();
-  // Every bare specifier the entry asked the plans about — the "in play" set
-  // the host translation uses to keep mapping findings artifact-true.
-  const referencedPackages = new Set<string>();
-
-  const hostFindings = new Map<string, HostBridgeDiagnostic>();
-  const extensionFindings = new Map<string, ExtensionExternalDiagnostic>();
-  const hostPlans = new Map<string, HostBridgePlan>();
-  const extensionPlans = new Map<string, ExtensionExternalsPlan>();
-
-  function consultHostPlan(referencedSpecifiers: readonly string[]): HostBridgePlan {
-    const plan = planHostBridge({ decisions, referencedSpecifiers });
-    for (const finding of plan.diagnostics) {
-      hostFindings.set(`${finding.code} ${finding.specifier}`, finding);
-    }
-    return plan;
-  }
-
-  function consultExtensionPlan(referencedSpecifiers: readonly string[]): ExtensionExternalsPlan {
-    const plan = planExtensionExternals({ decisions, referencedSpecifiers });
-    for (const finding of plan.diagnostics) {
-      extensionFindings.set(`${finding.code} ${finding.subject}`, finding);
-    }
-    return plan;
-  }
-
-  function interceptionFor(specifier: string): { readonly id: string; readonly source: string } | undefined {
-    referencedPackages.add(packageNameOfSpecifier(specifier));
-    let hostPlan = hostPlans.get(specifier);
-    if (hostPlan === undefined) {
-      hostPlan = consultHostPlan([specifier]);
-      hostPlans.set(specifier, hostPlan);
-    }
-    // The page's own modules first: a host row and an extension row naming the
-    // same specifier must resolve to the page object, never to a second copy
-    // behind an extension global.
-    if (hostPlan.activation === "stated") {
-      const host = hostPlan.interceptions.find(candidate => candidate.moduleId === specifier);
-      if (host !== undefined) return { id: `${HOST_VIRTUAL_PREFIX}${specifier}`, source: host.source };
-    }
-
-    let extensionPlan = extensionPlans.get(specifier);
-    if (extensionPlan === undefined) {
-      extensionPlan = consultExtensionPlan([specifier]);
-      extensionPlans.set(specifier, extensionPlan);
-    }
-    // `wireable` rather than merely `stated`: a decision that contradicts the
-    // mapping row must not be interposed behind a global the row does not agree
-    // on — the import stays ordinary, the plan's finding travels through
-    // `diagnostics`, and the artifact is refused in the same vocabulary an
-    // unwired extension import would be.
-    if (extensionPlan.activation === "stated" && extensionPlan.wireable) {
-      const extension = extensionPlan.interceptions.find(candidate => candidate.moduleId === specifier);
-      if (extension !== undefined) return { id: `${EXTENSION_VIRTUAL_PREFIX}${specifier}`, source: extension.source };
-    }
-    return undefined;
-  }
-
-  // Consulted once with no references: decision-vs-mapping contradictions are
-  // reported even when the entry imports nothing bare, so a broken decision
-  // cannot hide behind an entry that never exercises it. Per-specifier plans
-  // below add the reference-route findings and activation.
-  consultHostPlan([]);
-  consultExtensionPlan([]);
+  // One resolver, shared with the pre-bundle specifier pass, so the two cannot
+  // disagree about what the entry imports — see `createInterceptionResolver`.
+  const resolver = createInterceptionResolver(request.dependencies);
+  const fallThroughResolutions = resolver.fallThroughResolutions;
+  const referencedPackages = resolver.referencedPackages;
+  const hostFindings = resolver.hostFindings;
+  const extensionFindings = resolver.extensionFindings;
+  resolver.primeDiagnostics();
 
   let build: Awaited<ReturnType<typeof rolldown>> | undefined;
   let output: (OutputChunk | OutputAsset)[];
@@ -546,7 +673,7 @@ async function bundleWithRolldown(dir: string, request: CellBundlingRequest): Pr
           async resolveId(source, importer, options) {
             if (source === CELL_ENTRY_SHIM_ID) return CELL_ENTRY_SHIM_ID;
             if (!isBareSpecifier(source)) return null;
-            const interception = interceptionFor(source);
+            const interception = resolver.interceptionFor(source);
             if (interception === undefined) {
               // Not intercepted: record where Rolldown's own resolution lands
               // so the report can attribute the bundled module to this exact
@@ -651,6 +778,11 @@ async function bundleWithRolldown(dir: string, request: CellBundlingRequest): Pr
     inlinedPackages,
     inlinedSpecifiers,
     emittedAssets,
+    // Sorted for a byte-stable report, like every other list here: #7's determinism
+    // criterion covers the whole result, and #14's audit orders a closure from this
+    // set, so an unordered report would not change the verdict while an unordered
+    // *list* would still be a report that differs between runs.
+    referencedSpecifiers: [...resolver.referencedSpecifiers].sort(),
     diagnostics,
   };
 }

@@ -1,0 +1,14 @@
+{
+  "name": "@fixture/b",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "//dependencies": [
+    "Closes the cycle `@fixture/a` opens. Canonical order puts `@fixture/a` first",
+    "in the reported chain, which is checked in `workspace-package-poc.test.ts` —",
+    "the rotation is what makes one cycle one answer however the walk enters it."
+  ],
+  "dependencies": {
+    "@fixture/a": "workspace:*"
+  }
+}

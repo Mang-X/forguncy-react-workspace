@@ -189,6 +189,8 @@ const TRIVIAL_BUNDLE = [
   "})();",
 ].join("\n");
 
+// No `resolveEntrySpecifiers`: no workspace graph is supplied, so `bundle` alone is
+// a complete port for this fixture.
 const bundler: CellBundlerPort = { bundle: async () => ({ code: TRIVIAL_BUNDLE, inlinedPackages: [] }) };
 
 async function compileWith(dependencies: readonly DependencyDecision[]): Promise<CompileCellOutcome> {

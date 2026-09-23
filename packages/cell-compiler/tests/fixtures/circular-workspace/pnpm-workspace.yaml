@@ -1,0 +1,11 @@
+# A two-package workspace whose members import each other — #15's circular-dependency
+# fixture, loaded by the same `loadPnpmWorkspaceGraph` the repository graph uses.
+#
+# A fixture rather than this repository's own graph: a cycle has to be *declared* by
+# a real manifest to be read, and committing a circular dependency into the
+# repository's workspace to test the detector would be a project defect kept for a
+# test's convenience. The loader is not stubbed — it reads this file and the two
+# `package.json` files exactly as it reads the real ones, so what is under test is
+# the same code path that resolved `@app/ui`.
+packages:
+  - packages/*
