@@ -303,9 +303,15 @@ function renderHostBridgeVerifiedMemberView(mapping: HostBridgeGlobalMapping, mo
  * `MangMax/forguncy-react-library` verified and its regression test exists to keep:
  * `jsx(type, props, key)` and `createElement(type, config, children)` disagree
  * about the third parameter, so the key is never forwarded as the third argument
- * and no third argument is passed when there is no key. `core`'s
- * `JSX_RUNTIME_ADAPTER_RULES` is the contract this code implements; the comments
- * here are the *why* for a reader who has the generated file and not the Spec.
+ * and no third argument is passed when there is no key. On top of that, when both
+ * a `props.key` and a third-argument key are present, `props.key` wins: React
+ * 19.2.7's `jsxProd`/`jsxDEVImpl` write the third argument first and overwrite
+ * from `config`, and `createElement` reads `config.key` itself — so the adapter
+ * passes `props` through untouched whenever it owns a key, and only merges the
+ * third argument in when `props.key` is `undefined` (matching `hasValidKey`).
+ * `core`'s `JSX_RUNTIME_ADAPTER_RULES` is the contract this code implements; the
+ * comments here are the *why* for a reader who has the generated file and not the
+ * Spec.
  *
  * Two additions to the verified form, both from #9 rather than from taste:
  *
@@ -316,9 +322,16 @@ function renderHostBridgeVerifiedMemberView(mapping: HostBridgeGlobalMapping, mo
  *   #5 never read `React.Fragment` off the host object, so the bridge checks it on
  *   access instead of binding a possibly-undefined snapshot at module load.
  *
- * `jsxs` and `jsxDEV` share the implementation. The dev-only arguments are accepted
- * and ignored: they carry debugging metadata, and reproducing it would mean
- * reimplementing a React-internal surface.
+ * `jsxs` and `jsxDEV` create elements through the same `jsx` path, so the
+ * key/children rules have one implementation. They add one step `jsx` does not:
+ * marking statically-enumerated (keyless) children validated, because the
+ * reconciler's dev-only key check reads that mark and `createElement` never sets
+ * it for a `children` array — without it, every static children array trips a
+ * false `unique "key"` warning under a development host React (`jsxs-shares-jsx`).
+ * `jsx`'s dynamic children are left unmarked on purpose: a keyless map has to
+ * keep warning, because that warning is how a dropped key is seen. `jsxDEV`
+ * applies the mark only when its `isStaticChildren` argument is truthy; `source`
+ * and `self` stay ignored (`jsxDEV-ignores-dev-only-arguments`).
  *
  * `moduleId` is the id the source actually imported. Both runtime ids share this
  * adapter, so it is what makes a failure from a dev build name
@@ -363,18 +376,60 @@ export function renderHostBridgeAdapterModule(mapping: HostBridgeAdapterMapping,
     `// third argument sets children to the key and drops the key.`,
     `function __fgcHostBridgeJsx(type, props, key) {`,
     `  var React = __fgcHostBridgeReact();`,
-    `  if (key === undefined) {`,
-    `    // Exactly two arguments: an explicit undefined third one would take`,
-    `    // createElement's children branch and overwrite props.children.`,
+    `  if (key === undefined || (props && props.key !== undefined)) {`,
+    `    // Exactly two arguments when the third is undefined: an explicit undefined`,
+    `    // third one would take createElement's children branch and overwrite`,
+    `    // props.children. When config owns a key, React's own jsx and jsxDEV both`,
+    `    // let it win over the third argument (jsxProd writes maybeKey first, then`,
+    `    // overwrites from config; jsxDEVImpl does the same via hasValidKey), and`,
+    `    // createElement reads and strips config.key itself — so passing props`,
+    `    // through untouched reproduces that precedence. The third argument is only`,
+    `    // merged in when config has no key (key: undefined is invalid, so a`,
+    `    // declared key then wins, matching hasValidKey).`,
     `    return React.${createElement}(type, props);`,
     `  }`,
     `  return React.${createElement}(type, Object.assign({}, props, { key: key }));`,
     `}`,
     ``,
+    `// The mark React's own jsxs puts on statically-enumerated children. The`,
+    `// reconciler's dev-only key check skips a child whose _store.validated is set;`,
+    `// createElement never sets it for a children array, so static keyless children`,
+    `// would otherwise warn under a development host React.`,
+    `function __fgcHostBridgeMarkValidated(child) {`,
+    `  if (child !== null && typeof child === "object" && child._store) {`,
+    `    child._store.validated = 1;`,
+    `  }`,
+    `}`,
+    `function __fgcHostBridgeMarkStatic(children) {`,
+    `  if (children === null || typeof children !== "object") {`,
+    `    return;`,
+    `  }`,
+    `  if (Array.isArray(children)) {`,
+    `    for (var i = 0; i < children.length; i++) {`,
+    `      __fgcHostBridgeMarkValidated(children[i]);`,
+    `    }`,
+    `    return;`,
+    `  }`,
+    `  __fgcHostBridgeMarkValidated(children);`,
+    `}`,
+    ``,
+    `function __fgcHostBridgeJsxs(type, props, key) {`,
+    `  if (props) {`,
+    `    __fgcHostBridgeMarkStatic(props.children);`,
+    `  }`,
+    `  return __fgcHostBridgeJsx(type, props, key);`,
+    `}`,
+    `function __fgcHostBridgeJsxDEV(type, props, key, isStaticChildren) {`,
+    `  if (isStaticChildren && props) {`,
+    `    __fgcHostBridgeMarkStatic(props.children);`,
+    `  }`,
+    `  return __fgcHostBridgeJsx(type, props, key);`,
+    `}`,
+    ``,
     `module.exports = {`,
     `  jsx: __fgcHostBridgeJsx,`,
-    `  jsxs: __fgcHostBridgeJsx,`,
-    `  jsxDEV: __fgcHostBridgeJsx,`,
+    `  jsxs: __fgcHostBridgeJsxs,`,
+    `  jsxDEV: __fgcHostBridgeJsxDEV,`,
     `};`,
   ];
 

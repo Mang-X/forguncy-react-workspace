@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import { Script, createContext } from "node:vm";
+import { format } from "node:util";
 
 import { describe, expect, it } from "vitest";
 
@@ -302,6 +303,84 @@ describe("generated JSX runtime adapter", () => {
     expect(keyedWithChildren.props.children).toEqual(["x", "y"]);
   });
 
+  // PR #62 review round: when both a props.key and a third-argument key are
+  // present, React 19.2.7's jsxProd/jsxDEVImpl write the third argument first
+  // and overwrite from config, so props.key wins — and the adapter's
+  // createElement delegate reads config.key with that same precedence. Pinned
+  // to the real jsx/jsxs/jsxDEV rather than to hardcoded strings, so the
+  // contract is "matches React", and the critical case is also asserted
+  // literally so a matching drift on both sides cannot pass silently.
+  it("matches React 19.2.7 key precedence for every props.key / third-argument combination", () => {
+    const runtime = evaluateModule(source(), { React });
+    type Element = { key: unknown };
+    type Jsx = (type: unknown, props?: unknown, key?: unknown) => Element;
+    type JsxDEV = (
+      type: unknown,
+      props?: unknown,
+      key?: unknown,
+      isStaticChildren?: boolean,
+      source?: unknown,
+      self?: unknown,
+    ) => Element;
+
+    const adapterJsx = runtime.jsx as Jsx;
+    const adapterJsxs = runtime.jsxs as Jsx;
+    const adapterJsxDEV = runtime.jsxDEV as JsxDEV;
+
+    const hostJsxRuntime = require("react/jsx-runtime") as {
+      jsx: Jsx;
+      jsxs: Jsx;
+    };
+    const hostJsxDevRuntime = require("react/jsx-dev-runtime") as {
+      jsxDEV: JsxDEV;
+    };
+
+    const Child = () => null;
+    const cases = [
+      { label: "both sources present", props: { key: "from-props", label: "a" }, key: "from-third", hasThird: true },
+      { label: "third argument only", props: { label: "a" }, key: "from-third", hasThird: true },
+      { label: "props.key only", props: { key: "from-props", label: "a" }, key: undefined, hasThird: false },
+      { label: "props.key undefined, third present", props: { key: undefined, label: "a" }, key: "from-third", hasThird: true },
+      { label: "props.key null, third present", props: { key: null, label: "a" }, key: "from-third", hasThird: true },
+      { label: "numeric props.key, third present", props: { key: 0, label: "a" }, key: "from-third", hasThird: true },
+      { label: "no key anywhere", props: { label: "a" }, key: undefined, hasThird: false },
+    ] as const;
+
+    // Real jsx/jsxDEV warn when a props object owning `key` is spread into
+    // JSX (React's key-spread diagnostic). The adapter delegates to
+    // createElement, which does not emit it; capture the warnings so only
+    // these assertions decide the outcome.
+    const warnings: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => {
+      warnings.push(format(...args));
+    };
+
+    try {
+      for (const testCase of cases) {
+        const call = <T extends Jsx | JsxDEV>(fn: T): Element =>
+          testCase.hasThird
+            ? (fn as Jsx)(Child, testCase.props, testCase.key)
+            : (fn as Jsx)(Child, testCase.props);
+
+        const expected = call(hostJsxRuntime.jsx).key;
+        expect(call(adapterJsx).key, testCase.label).toBe(expected);
+        expect(call(adapterJsxs).key, testCase.label).toBe(expected);
+        expect(call(hostJsxDevRuntime.jsxDEV).key, testCase.label).toBe(expected);
+        expect(call(adapterJsxDEV).key, testCase.label).toBe(expected);
+      }
+
+      // The review's literal case: props wins over the third argument.
+      expect(adapterJsx(Child, { key: "from-props", label: "a" }, "from-third").key).toBe("from-props");
+      expect(adapterJsxDEV(Child, { key: "from-props", label: "a" }, "from-third", false, undefined, undefined).key).toBe("from-props");
+      // …and the third argument still wins when config has no valid key.
+      expect(adapterJsx(Child, { key: undefined, label: "a" }, "from-third").key).toBe("from-third");
+      expect(adapterJsx(Child, { label: "a" }, "from-third").key).toBe("from-third");
+    } finally {
+      console.error = originalError;
+    }
+  });
+
   it("gives every child in a jsxs list its own key", () => {
     const runtime = evaluateModule(source(), { React });
     const jsx = runtime.jsx as (type: unknown, props: unknown, key?: unknown) => unknown;
@@ -319,7 +398,7 @@ describe("generated JSX runtime adapter", () => {
     expect(list.props.children.map(child => child.key)).toEqual(["k-a", "k-b", "k-c"]);
   });
 
-  it("ignores the dev-only arguments of jsxDEV", () => {
+  it("accepts jsxDEV's dev-only arguments without letting them touch key or children", () => {
     const runtime = evaluateModule(source(), { React });
     const jsxDEV = runtime.jsxDEV as (
       type: unknown,
@@ -333,6 +412,77 @@ describe("generated JSX runtime adapter", () => {
     const element = jsxDEV("div", { children: "text" }, "k-dev", false, undefined, undefined);
     expect(element.key).toBe("k-dev");
     expect(element.props.children).toBe("text");
+  });
+
+  // #11's PoC regression, at unit level. Static keyless children must be marked
+  // validated (the way React's own jsxs marks them) or every multi-child JSX
+  // warns under a development host React — and that false positive is visually
+  // identical to the real signal: a keyless map through jsx must still warn,
+  // because that warning is how a dropped key is seen.
+  it("marks static children validated, and keeps a keyless map warning as the key-loss signal", () => {
+    const runtime = evaluateModule(source(), { React });
+    const jsx = runtime.jsx as (type: unknown, props: unknown, key?: unknown) => unknown;
+    const jsxs = runtime.jsxs as (type: unknown, props: unknown) => unknown;
+    const jsxDEV = runtime.jsxDEV as (
+      type: unknown,
+      props: unknown,
+      key?: unknown,
+      isStaticChildren?: boolean,
+      source?: unknown,
+      self?: unknown,
+    ) => unknown;
+
+    const warnings: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => {
+      warnings.push(format(...args));
+    };
+    const keyWarnings = () => warnings.filter(message => /unique "key" prop/.test(message));
+    const render = (element: unknown) => {
+      warnings.length = 0;
+      renderToString(element);
+    };
+
+    try {
+      render(
+        jsxs("section", {
+          children: [jsx("h1", { children: "a" }), jsx("h2", { children: "b" })],
+        }),
+      );
+      expect(keyWarnings()).toEqual([]);
+
+      render(
+        jsxDEV(
+          "section",
+          { children: [jsx("h1", { children: "a" }), jsx("h2", { children: "b" })] },
+          undefined,
+          true,
+          undefined,
+          undefined,
+        ),
+      );
+      expect(keyWarnings()).toEqual([]);
+
+      render(
+        jsx("ul", {
+          children: [jsx("li", { children: "x" }), jsx("li", { children: "y" })],
+        }),
+      );
+      expect(keyWarnings().length).toBeGreaterThan(0);
+
+      const rows = [
+        { key: "row-alpha", label: "alpha" },
+        { key: "row-beta", label: "beta" },
+      ];
+      render(
+        jsxs("ul", {
+          children: rows.map(row => jsx("li", { children: row.label }, row.key)),
+        }),
+      );
+      expect(keyWarnings()).toEqual([]);
+    } finally {
+      console.error = originalError;
+    }
   });
 
   // The whole reason the adapter exists: an element it produced has to be a real

@@ -561,7 +561,7 @@ export type JsxRuntimeAdapterExport = (typeof JSX_RUNTIME_ADAPTER_EXPORTS)[numbe
 export const JSX_RUNTIME_ADAPTER_RULE_IDS = [
   "key-is-not-children",
   "no-third-argument-without-a-key",
-  "declared-key-wins-over-props-key",
+  "props-key-wins-over-declared-key",
   "children-live-in-props",
   "jsxs-shares-jsx",
   "jsxDEV-ignores-dev-only-arguments",
@@ -617,12 +617,13 @@ export const JSX_RUNTIME_ADAPTER_RULES: readonly JsxRuntimeAdapterRule[] = [
     establishedBy: "Same adapter and regression as `key-is-not-children`.",
   },
   {
-    id: "declared-key-wins-over-props-key",
+    id: "props-key-wins-over-declared-key",
     statement:
-      "A defined third parameter wins over `props.key` and does not remain in the props passed to the delegate.",
+      "When both a `props.key` and a third-argument key are defined, `props.key` wins: the props are passed to the delegate untouched so the delegate reads `props.key` itself. The third argument is merged in only when `props.key` is undefined.",
     why:
-      "The delegate reads the key out of its config argument, so a key the automatic runtime passed separately has to be merged in — and a `key` left in props is a second address for the same value, which is the state where the two can disagree.",
-    establishedBy: "Same adapter and regression as `key-is-not-children`.",
+      "React 19.2.7's `jsx` assigns the third argument (`maybeKey`) first and then overwrites it with a defined `config.key`, so the real runtime resolves the both-defined shape to `props.key`. The shape appears whenever a spread carries a key into props while the transform still passes one as the third argument; resolving it the other way gives the element a different reconciliation key than the same call gets under `react/jsx-runtime` — list identity then follows the wrong key while every test that passes only one of the two sources still succeeds.",
+    establishedBy:
+      "React 19.2.7 itself, measured against the host's version in PR #62's review: `jsxProd` assigns `\"\" + maybeKey` then lets `\"\" + config.key` overwrite (`react-jsx-runtime.production.js` lines 16–17), and `jsxDEVImpl` does the same through `hasValidKey(config)` (`react-jsx-runtime.development.js` lines 241–245). The earlier third-argument-wins statement recorded the adapter implementation rather than the runtime it has to match.",
   },
   {
     id: "children-live-in-props",
@@ -634,19 +635,21 @@ export const JSX_RUNTIME_ADAPTER_RULES: readonly JsxRuntimeAdapterRule[] = [
   },
   {
     id: "jsxs-shares-jsx",
-    statement: "`jsxs` is the same implementation as `jsx`.",
+    statement:
+      "`jsxs` creates elements through `jsx`'s path — one implementation of the key/children rules — and additionally marks its statically-enumerated children validated, the way the real `jsxs` does.",
     why:
-      "The two differ only in static-children metadata that the element factory does not observe; giving them separate implementations creates a second place for the key/children rule to be got wrong.",
-    establishedBy: "`MangMax/forguncy-react-library` `tooling/pack-tools/src/esbuild-host-react.js`.",
+      "Sharing the creation path keeps the key/children rules in one place. The static-children mark is separate from that path and *is* observed: the reconciler's dev-only key check reads `_store.validated` on each child, and `createElement` never sets it for a `children` array. Without the mark, every static (keyless) children array trips a false `unique \"key\"` warning under a development host React, while a keyed list stays silent — a false positive visually identical to a real key loss, so it cannot be told apart from the failure the keyed-list regression exists to catch.",
+    establishedBy:
+      "#11's PoC regression (`packages/cell-compiler/src/host-antd-poc.test.ts`) against react 19.2.7's development build; React's own `jsxWithValidation` marks exactly the statically-enumerated children in `react/jsx-runtime.development.js` (`validateChildKeys`).",
   },
   {
     id: "jsxDEV-ignores-dev-only-arguments",
     statement:
-      "`jsxDEV` accepts and ignores the dev-only arguments (`isStaticChildren`, `source`, `self`), so `react/jsx-dev-runtime` uses the same adapter.",
+      "`jsxDEV` accepts the dev-only arguments: `source` and `self` are ignored, while `isStaticChildren` selects the same static-children mark `jsxs` applies, so `react/jsx-dev-runtime` uses the same adapter.",
     why:
-      "The dev arguments carry debugging metadata, not element semantics. Ignoring them is what allows one adapter to serve both runtime ids, which #9 asks for by naming both ids in one bullet.",
+      "`source` and `self` are debugging metadata, and reproducing them is a stated non-goal — ignoring them is what lets one adapter serve both runtime ids, which #9 asks for by naming both ids in one bullet. `isStaticChildren` is not metadata: it is the static/dynamic selection signal (true means the children were enumerated the way `jsxs` receives them), so honoring it is what keeps a dev build's static children from tripping the false key warning `jsxs-shares-jsx` describes.",
     establishedBy:
-      "`MangMax/forguncy-react-library` (the adapter binds both runtime ids to one source), recorded as a deliberate simplification rather than an unimplemented feature.",
+      "`MangMax/forguncy-react-library` (the adapter binds both runtime ids to one source) for the shared-adapter form; React's own `jsxDEV` signature for `isStaticChildren` selecting the static-children branch.",
   },
   {
     id: "fragment-is-the-host-fragment",
@@ -720,13 +723,27 @@ export const JSX_RUNTIME_ADAPTER_CASES: readonly JsxRuntimeAdapterCase[] = [
     id: "keyed-list-via-jsxs",
     call: "jsxs('ul', { children: [jsx(Child, props, 'k-a'), jsx(Child, props, 'k-b')] })",
     expectation: "Every child element carries its own key, and rendering the list produces no unique-key warning.",
-    covers: ["jsxs-shares-jsx", "declared-key-wins-over-props-key"],
+    covers: ["jsxs-shares-jsx"],
+  },
+  {
+    id: "both-key-sources-present",
+    call: "jsx(Child, { key: 'k-props', label: 'a' }, 'k-third')",
+    expectation:
+      "The element's key is `k-props`: a defined `props.key` wins over the third argument, exactly as React 19.2.7's `jsx`/`jsxDEV` resolve the same call — the adapter must not merge the third argument over a key already in props.",
+    covers: ["props-key-wins-over-declared-key"],
   },
   {
     id: "dev-runtime-call-shape",
     call: "jsxDEV('div', { children: 'text' }, 'k-dev', false, undefined, undefined)",
-    expectation: "Same result as the two-argument `jsx` call with the same key; the dev-only arguments are ignored.",
+    expectation: "Same result as the two-argument `jsx` call with the same key; `source` and `self` are ignored and a false `isStaticChildren` adds no mark.",
     covers: ["jsxDEV-ignores-dev-only-arguments"],
+  },
+  {
+    id: "static-children-keyless-no-warning",
+    call: "renderToString(jsxs('section', { children: [jsx('h1', { children: 'a' }), jsx('h2', { children: 'b' })] }))",
+    expectation:
+      "Rendering static, keyless children produces no `unique \"key\"` warning (they carry the mark the real `jsxs` sets), while a keyless map through `jsx` still warns — the mark must not blind the regression that catches a dropped key.",
+    covers: ["jsxs-shares-jsx"],
   },
   {
     id: "fragment-identity",
