@@ -206,16 +206,15 @@ describe("each Cell's Context object is a different object", () => {
     const registry = sharedWindow["__fgcContextIdentity"] as Record<string, unknown>;
     expect(registry).toBeDefined();
 
-    // The assertion: the two artifacts created **different** Context objects, so Cell
-    // B's comparison against Cell A's reference is false. If a bundler hoisted the
+    // The harness does the comparison, not either Cell: both artifacts published a
+    // reference, and this is where the two are compared. If a bundler hoisted the
     // package into one shared module instance, both Cells would hold one object and
     // this would be `true`.
-    expect(registry["cell-b-matches-cell-a"]).toBe(false);
-    // And Cell A really did publish, so the `false` is a comparison rather than an
-    // absent key. The comparator's ability to answer `true` is the sibling test's
-    // job — a `false` alone would be consistent with a comparator that never says
-    // otherwise.
-    expect("cell-a-published" in registry).toBe(true);
+    const referenceA = registry["cell-a-published"];
+    const referenceB = registry["cell-b-published"];
+    expect(referenceA).toBeDefined();
+    expect(referenceB).toBeDefined();
+    expect(Object.is(referenceA, referenceB)).toBe(false);
   });
 
   it("sharing a sandbox does not share the inlined module instance", async () => {
@@ -246,27 +245,27 @@ describe("each Cell's Context object is a different object", () => {
       renderToString((Component as () => unknown)() as never);
     }
 
+    // The same comparison the harness makes elsewhere, run over artifacts that shared
+    // a sandbox: still false, because the sandbox did not merge their module instances.
     const registry = sharedWindow["__fgcContextIdentity"] as Record<string, unknown>;
-    expect(registry["cell-b-matches-cell-a"]).toBe(false);
+    expect(Object.is(registry["cell-a-published"], registry["cell-b-published"])).toBe(false);
   });
 
-  it("discriminates: the same reference answers true, a different one answers false", async () => {
-    // The positive control the previous test is not, and the reason the pair is an
-    // experiment rather than a one-sided claim.
+  it("discriminates: one comparator answers true for one reference and false for two", async () => {
+    // The positive control, and *where* it lives is what the reviews turned on.
     //
-    // Cell A publishes two rows from the same code path the page runs: its own
-    // reference, and `Object.is(own, own)`. Cell B compares A's reference against its
-    // own. Read together:
+    // Two earlier designs failed here, both with the same fault in different clothes:
     //
-    // | row | comparison | meaning |
-    // | --- | --- | --- |
-    // | `cell-a-self-match` | A against A | **`true`** — the comparator *can* answer true |
-    // | `cell-b-matches-cell-a` | B against A | **`false`** — the two artifacts differ |
+    // - the control ran in Cell A and the claim in Cell B, so a defect confined to B's
+    //   reporting branch was invisible to it;
+    // - the control and the claim were then two separate `Object.is` expressions inside
+    //   B, so hardcoding the verdict to `false` still left every test green — confirmed
+    //   by mutation, which is how this design was rejected.
     //
-    // Either row alone proves nothing: `false` alone is consistent with a comparator
-    // that always says false, and `true` alone says nothing about the two Cells. This
-    // is the assertion the review asked for, driven through the artifacts rather than
-    // through a reimplementation of the comparison.
+    // Neither Cell compares anything now: each publishes a reference, and this harness
+    // runs **one** comparator over both pairs. There is no verdict inside an artifact
+    // for a defect to falsify, and a comparator that always answered `false` would fail
+    // the self row.
     const sharedWindow: Record<string, unknown> = {};
 
     const renderEntry = async (entry: string): Promise<void> => {
@@ -279,17 +278,28 @@ describe("each Cell's Context object is a different object", () => {
       renderToString((Component as () => unknown)() as never);
     };
 
-    // A publishes first, as it does on the page.
     await renderEntry("src/cells/cell-a.tsx");
     await renderEntry("src/cells/cell-b.tsx");
 
     const registry = sharedWindow["__fgcContextIdentity"] as Record<string, unknown>;
-    // A's reference really was published, so neither row below is comparing against
-    // an absent key.
-    expect(registry["cell-a-published"]).toBeDefined();
-    // The control: the comparator answers `true` for one and the same object.
-    expect(registry["cell-a-self-match"]).toBe(true);
-    // The claim: the two artifacts created different Context objects.
-    expect(registry["cell-b-matches-cell-a"]).toBe(false);
+    const referenceA = registry["cell-a-published"];
+    const referenceB = registry["cell-b-published"];
+    // Both references were published, so neither row compares against an absent key.
+    expect(referenceA).toBeDefined();
+    expect(referenceB).toBeDefined();
+
+    // One comparator, two pairs — the discriminating experiment:
+    //
+    // | comparison | expected | meaning |
+    // | --- | --- | --- |
+    // | `same(referenceA, referenceA)` | `true` | the comparator *can* answer true |
+    // | `same(referenceA, referenceB)` | `false` | the two artifacts differ |
+    //
+    // Written as one call used twice rather than two literals, so the control exercises
+    // the same code path as the claim — which is exactly what the earlier designs did
+    // not do.
+    const same = (left: unknown, right: unknown): boolean => Object.is(left, right);
+    expect(same(referenceA, referenceA)).toBe(true);
+    expect(same(referenceA, referenceB)).toBe(false);
   });
 });

@@ -26,31 +26,27 @@
  * Consumer in another **even when both roots share one Context object**. Cell B
  * reading the default proves only that no Provider is mounted in B's tree.
  *
- * ## The identity probe, and why this Cell compares too
+ * ## The identity probe: both Cells publish, the harness compares
  *
  * Object identity has to be observed by comparing the objects, which needs a channel
  * both Cells can reach. `window` is that channel — and it is *this file's* choice
  * rather than the package's: `@app/session` exposes its Context reference and reaches
  * no global itself.
  *
- * This Cell publishes its reference **and compares two references**, which is what
- * makes the pair of Cells a discriminating experiment rather than a one-sided one:
+ * Neither Cell compares anything. Each publishes its own reference under
+ * `__fgcContextIdentity["cell-a-published"]`, and the **harness** — the local test, or the browser
+ * check on the page — does `Object.is` between the two published values and its own
+ * control.
  *
- * | key | comparison | expected |
- * | --- | --- | --- |
- * | `cell-a-published` | — | A's own reference |
- * | `cell-a-self-match` | A's reference against itself | **`true`** |
- * | `cell-b-matches-cell-a` (Cell B) | B's reference against A's | **`false`** |
+ * That division is deliberate, and it replaced a design that did not survive a
+ * mutation test. An earlier version had Cell B compare and report a verdict, with a
+ * self-comparison as its positive control. Hardcoding that verdict to `false` left
+ * every test green: the control and the claim were two separate expressions, so
+ * breaking one did not break the other. Moving the comparison into the harness removes
+ * the artifact-side reporting branch entirely — there is no verdict in a Cell that a
+ * defect could falsify, only two references — and the harness is where a control and
+ * its claim can genuinely share one comparator.
  *
- * The first row is the positive control the pair needs: a comparator that always
- * answered `false` would make Cell B's result meaningless, and this rules it out from
- * the same code path the page runs. Together the two rows say the comparison
- * *discriminates* — same object `true`, different objects `false` — which is what
- * turns Cell B's `false` into evidence that the two artifacts created two Context
- * objects.
- *
- * `typeof window === "undefined"` is guarded because the same entry is compiled and
- * rendered by local tests, where there is no page.
  */
 
 import { SessionProbe, sessionContextIdentity } from "@app/session";
@@ -64,12 +60,8 @@ export function App() {
       string,
       unknown
     >;
-    const own = sessionContextIdentity();
-    // Publish this Cell's reference for the other Cell to compare against.
-    registry["cell-a-published"] = own;
-    // And compare it against itself, which must be `true`. Without this row, Cell B's
-    // `false` would be consistent with a comparator that never answers `true`.
-    registry["cell-a-self-match"] = Object.is(own, own);
+    // Pure data: this Cell's own Context reference, published for comparison.
+    registry["cell-a-published"] = sessionContextIdentity();
   }
 
   return <SessionProbe label="cell-a" provides="cell-a" />;

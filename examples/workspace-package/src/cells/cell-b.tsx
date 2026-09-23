@@ -15,20 +15,19 @@
  * - **It writes under a different label.** The module-scope `Map` is what carries the
  *   anti-claim: each Cell's `seenLabels()` must name only its own label.
  *
- * ## The identity comparison
+ * ## The identity probe: both Cells publish, the harness compares
  *
- * Cell A published its Context reference under `__fgcContextIdentity["cell-a-published"]`
- * and recorded a self-comparison under `"cell-a-self-match"`. This Cell compares A's
- * published reference against its **own** with `Object.is` and reports the answer under
- * `"cell-b-matches-cell-a"`.
+ * This Cell publishes its Context reference under `__fgcContextIdentity["cell-b-published"]`,
+ * exactly as Cell A publishes under `"cell-a-published"`, and compares nothing.
  *
- * Read together the two rows are a discriminating experiment rather than a one-sided
- * one: A's self-comparison is `true`, so the comparator does answer `true` when the
- * objects are the same; B's comparison is `false`, so the two artifacts hold different
- * objects. Either row alone would be consistent with a broken comparator.
- *
- * `undefined` (the key is absent) means Cell A had not published when this ran — a
- * sequencing fact, reported as such rather than as `false`.
+ * **The harness** — the local test, or the browser check on the page — reads both
+ * references and does the comparison and its control itself. That division replaced a
+ * design that did not survive a mutation test: an earlier version had this Cell compare
+ * and report a verdict, with a self-comparison as its positive control, and hardcoding
+ * that verdict to `false` left every test green, because the control and the claim were
+ * two separate expressions. With the comparison in the harness there is no verdict in
+ * any Cell for a defect to falsify — only two references — and the harness is where a
+ * control and its claim can share one comparator.
  */
 
 import { SessionProbe, sessionContextIdentity } from "@app/session";
@@ -42,10 +41,9 @@ export function App() {
       string,
       unknown
     >;
-    // `in` rather than a truthiness test: the published value is an object reference,
-    // and "Cell A has not run yet" must not be confused with "the identities differ".
-    registry["cell-b-matches-cell-a"] =
-      "cell-a-published" in registry ? Object.is(registry["cell-a-published"], sessionContextIdentity()) : undefined;
+
+    // Pure data, exactly like Cell A: this Cell's own Context reference.
+    registry["cell-b-published"] = sessionContextIdentity();
   }
 
   return <SessionProbe label="cell-b" />;
