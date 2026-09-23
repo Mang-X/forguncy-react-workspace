@@ -1,4 +1,9 @@
 node_modules/
+# Probe fixtures are miniature install graphs (#17): their `node_modules` trees
+# are the fixture and must be committed. Git cannot re-include a path beneath an
+# excluded directory, so the fixture directory chain is re-included explicitly.
+!packages/dependency-resolver/src/__fixtures__/probe/**/node_modules/
+!packages/dependency-resolver/src/__fixtures__/probe/**/node_modules/**
 dist/
 coverage/
 .vite/

@@ -4,8 +4,16 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@forguncy-react-workspace/core": "workspace:*"
+    "@forguncy-react-workspace/core": "workspace:*",
+    "rolldown": "1.2.9"
   },
+  "//dependencies": [
+    "`rolldown` is the bundler the Cell compiler uses (#7), pinned to the version",
+    "this toolchain installs (`vite-plus@0.3.2`). The probe engine's `build` step",
+    "runs the candidate fixture through the same Vite+/Rolldown stack Cell",
+    "compilation uses (#17), so a probe result is evidence about the artifact the",
+    "cell would actually ship rather than about a different bundler's output."
+  ],
   "exports": {
     ".": "./src/index.ts"
   }
