@@ -22,21 +22,20 @@
  *   measurement into a record instead of replacing the record (`decision-recording`);
  * - conformance auditing against the facts a lock cannot contain — the target's
  *   host globals (#9) and the verified extension catalog (#12)
- *   (`decision-conformance`).
+ *   (`decision-conformance`);
+ * - the deterministic dependency probe engine that produces the evidence a
+ *   lock record cites (`probe/*`): nine protocol steps, one canonical
+ *   `ProbeReport`, a recomputable fingerprint and a file cache under
+ *   `.fgc/probe-cache/` (#17).
  *
  * The decision model, its validation, its canonical form, its migration chain and
  * its freshness rules are re-exported from `core` so a consumer of this package
  * gets the whole `fgc.lock.json` contract without reaching into a second import.
  *
- * What is *not* implemented here: the empirical probe that produces the evidence
- * a record cites (`Implement: deterministic dependency probe engine` #17) and the
- * Agent-driven library selection that decides a strategy in the first place
- * (`Implement: Forguncy React dependency-selection Agent Skill` #18). Neither is
- * a non-goal of #8; both are downstream of it. Composing a probe fingerprint is
- * #17's, which is why this package only compares the values it is given. The
- * host-bridge table this package audits `host` records against is #9's, and #9
- * delivers it in `core`; `DEFAULT_HOST_BRIDGE_MANIFEST` is now a projection of it
- * rather than the placeholder it used to be.
+ * What is *not* implemented here: the Agent-driven library selection that decides
+ * a strategy in the first place (`Implement: Forguncy React dependency-selection
+ * Agent Skill` #18). Composing a probe fingerprint is #17's; selecting a package
+ * from a probe's assessment remains the Agent's job.
  */
 
 import type { DependencyDecision } from "@forguncy-react-workspace/core";
@@ -159,6 +158,62 @@ export type {
   PresetProvidedGlobal,
   VerifiedExtensionMapping,
 } from "./decision-conformance";
+
+// ---------------------------------------------------------------------------
+// The dependency probe engine (#17)
+// ---------------------------------------------------------------------------
+
+export {
+  probeLockEnvironment,
+  probeRunLockEvidence,
+  ProbeIdentityError,
+  runDependencyProbe,
+} from "./probe/probe-engine";
+export type {
+  DependencyProbeResult,
+  ProbeLockEnvironmentOptions,
+  PreSmokeReport,
+  RuntimeSmokeHook,
+  RuntimeSmokeResult,
+  ResolvedPackageIdentity,
+  RunDependencyProbeOptions,
+} from "./probe/probe-engine";
+
+export { composeProbeFingerprint } from "./probe/fingerprint";
+export type { ComposedProbeFingerprint, ComposeProbeFingerprintInput } from "./probe/fingerprint";
+
+export { createFileProbeCache, PROBE_CACHE_DIRECTORY, probeCacheRelativePath } from "./probe/cache";
+export type { ProbeCache } from "./probe/cache";
+
+export { BUILD_CONFIGURATION_FINGERPRINT, probeEntryPath, runCandidateBuild } from "./probe/build";
+export type { CandidateBuildOptions, CandidateBuildResult } from "./probe/build";
+
+export { findNodeOnlySpecifiers, observeNodeBuiltins } from "./probe/node-scan";
+export type { NodeScanObservation } from "./probe/node-scan";
+
+export { observeExportMetadata } from "./probe/export-metadata";
+export type { ExportMetadataObservation } from "./probe/export-metadata";
+
+export { observeArtifact } from "./probe/artifact-scan";
+export type { ArtifactScanObservation } from "./probe/artifact-scan";
+
+export { observeAssets } from "./probe/asset-inventory";
+export type { AssetInventoryObservation } from "./probe/asset-inventory";
+
+export { observeRuntimePatterns } from "./probe/runtime-pattern-scan";
+export type { RuntimePatternObservation } from "./probe/runtime-pattern-scan";
+
+export { measureArtifactSize, observeSize } from "./probe/size";
+export type { ArtifactSize, SizeObservation } from "./probe/size";
+
+export {
+  buildProbeEnvironment,
+  defaultProbeTarget,
+  normalizeSourceReference,
+  resolvePackageIdentity,
+} from "./probe/identity";
+
+export { describeBuildFailureLines, portableText, stripAnsi } from "./probe/scan-utils";
 
 export interface ResolveDependencyInput {
   packageName: string;
