@@ -1,0 +1,68 @@
+{
+  "name": "@examples/dev-harness",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "//dependencies": [
+    "The harness is a workspace dependency because this example *is* its end-to-end case:",
+    "`vp dev` here runs the real plugin against a real `forguncy.config.ts`, which is what makes",
+    "it evidence rather than an illustration.",
+    "",
+    "`@forguncy-react-workspace/runtime` is the façade the Cell's authored source imports by name.",
+    "It is a *source* dependency rather than a deployed module: the compiler flattens it into the",
+    "artifact like any other source file (#14), and the dev server resolves it as source through",
+    "this workspace link. Its being flattened per Cell is also what makes the façade's single",
+    "per-Cell provider slot correct — see `RUNTIME_FACADE_PACKAGING_POLICY`.",
+    "",
+    "`@forguncy-react-workspace/core` is not a dependency: nothing in `src/` imports it, and the",
+    "config file's `defineForguncyConfig` is the only use — which arrives through the workspace",
+    "root's resolution. Nothing in the Cell's own module graph reaches `core`, which is the point",
+    "of the Cell's source importing only the façade.",
+    "",
+    "`react` is deliberately NOT a dependency, for the rule `examples/host-antd/package.json`",
+    "records at length: `react` is decided `host`, the bridge intercepts the specifier before node",
+    "resolution, and installing it would be a silent escape hatch for a broken interception. Under",
+    "`vp dev` the harness supplies the substitution from its own pinned dependency instead, which",
+    "is the arrangement that keeps this example's `package.json` honest about what the page owns."
+  ],
+  "//scripts": [
+    "`vp run dev` is the local loop for this example, and the `--configLoader runner` flag is not",
+    "optional — it is the difference between a working harness and a config that cannot load.",
+    "",
+    "Vite's default config loader (`bundle`) externalizes every import in `vite.config.ts` that",
+    "resolves into node_modules, and this repository's workspace packages are *source*: they are",
+    "linked into node_modules but their `exports` point at `.ts` files with extensionless relative",
+    "imports. A bundled-then-node-loaded config therefore dies with `ERR_MODULE_NOT_FOUND: Cannot",
+    "find module .../packages/core/src/ownership`, because node ESM requires the extension and the",
+    "config bundler deliberately did not rewrite it.",
+    "",
+    "`runner` loads the config through Vite's own module runner instead, so the same resolution the",
+    "rest of the toolchain uses applies to the config file too. Verified both ways on a real dev",
+    "server: plain `vp dev` fails with that ERR_MODULE_NOT_FOUND, `vp run dev` serves the Cell.",
+    "",
+    "This is a script rather than a bare `vp dev` because Vite reads `configLoader` *before* it can",
+    "read the config file, so it cannot be set from inside `vite.config.ts` — and `vp dev` is a",
+    "built-in command that a `package.json` script cannot override. `vp run dev` is Vite+'s own",
+    "documented way to reach a project's dev script; see its guide, 'Built-in Commands vs Scripts'."
+  ],
+  "scripts": {
+    "dev": "vp dev --configLoader runner"
+  },
+  "dependencies": {
+    "@forguncy-react-workspace/dev-harness": "workspace:*",
+    "@forguncy-react-workspace/runtime": "workspace:*"
+  },
+  "//devDependencies": [
+    "`@forguncy-react-workspace/core` is a devDependency rather than a dependency because its only",
+    "use is `defineForguncyConfig` in the committed config, which Vite loads itself. The Cell's",
+    "module graph never reaches it — asserted in the example's own test, which checks that the",
+    "compiled artifact carries no copy of it.",
+    "",
+    "`vite-plus` is what `vp` resolves `defineConfig` from, and the example's `vite.config.ts`",
+    "imports it directly."
+  ],
+  "devDependencies": {
+    "@forguncy-react-workspace/core": "workspace:*",
+    "vite-plus": "0.3.2"
+  }
+}

@@ -3,7 +3,18 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "//exports": [
+    "`./browser` is the browser-safe projection of this package's surface: the same",
+    "decisions, on a graph with no `node:` builtin in it (see `src/browser.ts`). It",
+    "exists because a barrel re-export is not a declaration — importing one name from",
+    "`.` evaluated `cell-registry` and `config-loader` too, and their module-scope",
+    "`node:fs`/`node:path` destructuring broke both a browser dev graph and a compiled",
+    "Cell artifact. `cell-registry` and `config-loader` are genuinely node-side and are",
+    "deliberately absent from it; `browser.test.ts` asserts that, and asserts the two",
+    "surfaces agree in both directions rather than letting this entry grow its own API."
+  ],
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./browser": "./src/browser.ts"
   }
 }

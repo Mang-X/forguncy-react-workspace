@@ -3,6 +3,19 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "//": [
+    "`src/` imports `@forguncy-react-workspace/core/browser`, never bare `core`. That is not a",
+    "style choice: bare `core` re-exports `cell-registry` and `config-loader`, which read the",
+    "project off disk, so importing any name from it evaluates `node:fs`/`node:path`/`node:crypto`",
+    "at module scope. This package is the façade that Cell source calls (#27), so it has to be",
+    "loadable in a browser and flattenable into a Cell artifact — and with the bare import it was",
+    "neither: Vite's browser-external stub threw during module init, and `compileCell` refused the",
+    "artifact with four `unresolved-dependency-decision` diagnostics for `node:*`.",
+    "",
+    "A reviewer tempted to collapse the two back into one should read `core`'s `src/browser.ts`",
+    "first: `browser.test.ts` asserts the projection's module list and its `node:`-free graph,",
+    "which is what keeps this claim from being a comment."
+  ],
   "dependencies": {
     "@forguncy-react-workspace/core": "workspace:*"
   },
