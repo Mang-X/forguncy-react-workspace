@@ -198,8 +198,9 @@ describe("each Cell's Context object is a different object", () => {
       renderToString((Component as () => unknown)() as never);
     };
 
-    // Cell A publishes its Context reference; Cell B compares against its own. Both
-    // are given the same `window`, which is what a page provides.
+    // Both Cells publish their own Context reference and compare nothing; the harness
+    // below does the comparison. Both are given the same `window`, which is what a
+    // page provides.
     await evaluateWith("src/cells/cell-a.tsx", sharedWindow);
     await evaluateWith("src/cells/cell-b.tsx", sharedWindow);
 
