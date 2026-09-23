@@ -36,7 +36,9 @@
  *   the fingerprint composed from declared inputs (no version, target or
  *   toolchain — see `fingerprint.ts`), and only then consulted against the cache.
  *   `fromCache: true` means an identical report was already stored under this
- *   fingerprint; it never means "close enough".
+ *   fingerprint; it never means "close enough". A hook-bearing report is never
+ *   written: smoke mode is not in the fingerprint, so storing one would let a
+ *   later hookless run inherit runtime evidence it did not request.
  *
  * The engine throws only for identity failure (`ProbeIdentityError`): a probe of
  * something that is not installed has no artifact to describe, and reporting
@@ -238,10 +240,15 @@ function smokeSkipReason(hookPresent: boolean, failedEarlier: boolean): string {
  * The lock fingerprint deliberately excludes package version, toolchain and
  * target (#8 tracks those staleness dimensions separately), so the cache cannot
  * inherit that exclusion: a hit under the same fingerprint still has to describe
- * the artifact and environment now in front of the engine. A supplied
- * `runtime-smoke` hook additionally means this run asked for evidence the
- * cached report may never have collected — a hookless skip must not prevent the
- * hook from executing.
+ * the artifact and environment now in front of the engine. `entry` is part of
+ * the fingerprint but is overridable, so two packages can share one fingerprint
+ * — the cached environment must still name *this* package before it answers.
+ *
+ * Smoke mode is checked in both directions: a supplied hook always re-probes
+ * (the cached report may never have collected runtime evidence), and a hookless
+ * run only accepts a cached report whose `runtime-smoke` is `skipped` — a
+ * hook-bearing report would otherwise leak runtime facts/risks/rejections into
+ * a run that explicitly did not perform runtime smoke.
  */
 function cacheHitAnswersThisRun(
   cached: ProbeReport,
@@ -253,10 +260,17 @@ function cacheHitAnswersThisRun(
   if (runtimeSmokeRequested) {
     return false;
   }
+  if (cached.environment.packageName !== identity.packageName) {
+    return false;
+  }
   if (cached.environment.packageVersion !== identity.packageVersion) {
     return false;
   }
   if (cached.environment.toolchain.vitePlus !== toolchain.vitePlus) {
+    return false;
+  }
+  const cachedSmoke = cached.validation.find(entry => entry.step === "runtime-smoke");
+  if (cachedSmoke?.outcome !== "skipped") {
     return false;
   }
   const cachedTarget = cached.environment.target;
@@ -293,12 +307,13 @@ export async function runDependencyProbe(options: RunDependencyProbeOptions): Pr
 
   if (cache !== null) {
     const cachedReport = await cache.get(fingerprint);
-    // Version, toolchain, target and smoke mode are deliberately *not* in the
-    // lock fingerprint (see `fingerprint.ts` — #8 tracks those dimensions on the
-    // record), so a hit under one fingerprint is only trusted when the stored
-    // report still describes this artifact, this environment and this run mode.
-    // Otherwise an upgrade, a toolchain bump, a different target or a newly
-    // supplied smoke hook would be answered with yesterday's evidence.
+    // Package identity, version, toolchain, target and smoke mode are
+    // deliberately *not* in the lock fingerprint (see `fingerprint.ts` — #8
+    // tracks those dimensions on the record), so a hit under one fingerprint is
+    // only trusted when the stored report still describes this artifact, this
+    // environment and this run mode. Otherwise an upgrade, a different package
+    // sharing an overridden `entry`, a toolchain bump, a different target or a
+    // smoke-mode change would be answered with yesterday's evidence.
     if (
       cachedReport !== null &&
       cacheHitAnswersThisRun(cachedReport, identity, toolchain, target, options.runtimeSmoke !== undefined)
@@ -382,7 +397,11 @@ export async function runDependencyProbe(options: RunDependencyProbeOptions): Pr
   // steps above, and surfacing it here keeps every consumer on the valid path.
   assertProbeReport(canonical);
 
-  if (cache !== null) {
+  // Smoke mode is not in the fingerprint, so a hook-bearing report must not be
+  // written under the shared key — a later hookless run would otherwise inherit
+  // runtime facts/risks/rejections it never requested. Hookless reports (whose
+  // `runtime-smoke` is always `skipped`) are the only cacheable shape.
+  if (cache !== null && options.runtimeSmoke === undefined) {
     await cache.set(fingerprint, canonical);
   }
 

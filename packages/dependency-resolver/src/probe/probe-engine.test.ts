@@ -402,6 +402,63 @@ describe("runDependencyProbe: cache", () => {
     expect(second.report.facts.some(fact => fact.name === "smoke.ran")).toBe(true);
   });
 
+  it("does not let a hooked run answer a later hookless run", async () => {
+    // Smoke mode is not in the fingerprint. A hooked report must never be
+    // written under the shared key, or the hookless run would inherit
+    // runtime-smoke: passed plus any hook-added findings it never requested.
+    const projectRoot = fixture("pure-esm-utility");
+    await rm(join(projectRoot, ".fgc"), { recursive: true, force: true });
+
+    const hooked = await runDependencyProbe({
+      projectRoot,
+      packageName: "tiny-math",
+      runtimeSmoke: () => ({
+        facts: [{ name: "smoke.ran", value: true }],
+        rejectionFindings: [
+          {
+            signal: "host-module-identity-mismatch-observed",
+            summary: "Hook-only rejection that must not leak.",
+            evidence: ["runtime-smoke"],
+          },
+        ],
+      }),
+    });
+    expect(hooked.fromCache).toBe(false);
+    expect(hooked.report.validation.find(entry => entry.step === "runtime-smoke")?.outcome).toBe("passed");
+
+    const hookless = await runDependencyProbe({ projectRoot, packageName: "tiny-math" });
+    expect(hookless.fromCache).toBe(false);
+    expect(hookless.report.validation.find(entry => entry.step === "runtime-smoke")?.outcome).toBe("skipped");
+    expect(hookless.report.facts.some(fact => fact.name === "smoke.ran")).toBe(false);
+    expect(hookless.report.rejectionFindings.some(finding => finding.summary.includes("Hook-only"))).toBe(false);
+  });
+
+  it("re-probes when a different package shares the fingerprint via a custom entry", async () => {
+    // `entry` is overridable and part of the fingerprint, so two same-version
+    // packages can collide on one key. The cached environment must name this
+    // package before it answers.
+    const projectRoot = fixture("pure-esm-utility");
+    await rm(join(projectRoot, ".fgc"), { recursive: true, force: true });
+
+    const first = await runDependencyProbe({
+      projectRoot,
+      packageName: "tiny-math",
+      entry: "shared-probe-entry",
+    });
+    expect(first.fromCache).toBe(false);
+    expect(first.report.environment.packageName).toBe("tiny-math");
+
+    const second = await runDependencyProbe({
+      projectRoot,
+      packageName: "tiny-strings",
+      entry: "shared-probe-entry",
+    });
+    expect(second.fingerprint).toBe(first.fingerprint);
+    expect(second.fromCache).toBe(false);
+    expect(second.report.environment.packageName).toBe("tiny-strings");
+    expect(second.report.environment.packageVersion).toBe("1.0.0");
+  });
+
   it("re-probes when the toolchain differs from the cached report", async () => {
     const projectRoot = fixture("pure-esm-utility");
     await rm(join(projectRoot, ".fgc"), { recursive: true, force: true });
