@@ -119,7 +119,12 @@ import type {
   FrontendLibraryReference,
 } from "@forguncy-react-workspace/core";
 
-import { dependencyDecisionsFor, findDependencyDecision, isSourceSpecifier, packageNameOfSpecifier } from "./artifact";
+import {
+  dependencyDecisionsFor,
+  findDependencyDecision,
+  isSourceSpecifier,
+  packageNameOfSpecifier,
+} from "./specifier";
 import type { CellArtifactFixOwner } from "./diagnostics";
 
 // ---------------------------------------------------------------------------

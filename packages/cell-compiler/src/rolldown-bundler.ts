@@ -59,7 +59,7 @@ import type { ExtensionExternalDiagnostic } from "@forguncy-react-workspace/core
 import { rolldown, type OutputAsset, type OutputChunk } from "rolldown";
 
 import type { BundledCellModule, CellBundlerPort, CellBundlingRequest } from "./artifact";
-import { findDependencyDecision, packageNameOfSpecifier } from "./artifact";
+import { findDependencyDecision, packageNameOfSpecifier } from "./specifier";
 import type { CellArtifactDiagnostic } from "./diagnostics";
 import { createCellArtifactDiagnostic, dedupeCellArtifactDiagnostics } from "./diagnostics";
 import type { ExtensionExternalsPlan } from "./extension-externals";
@@ -467,6 +467,12 @@ async function bundleWithRolldown(dir: string, request: CellBundlingRequest): Pr
   // Every bare specifier the entry asked the plans about — the "in play" set
   // the host translation uses to keep mapping findings artifact-true.
   const referencedPackages = new Set<string>();
+  // Every bare specifier the module graph contained, intercepted or not. This is
+  // the set #14's workspace audit traces a source closure from (`referencedSpecifiers`),
+  // so it has to include the ones the plans *did* intercept — a workspace package
+  // the host bridge happened to claim is still a module the cell imports, and
+  // omitting it would make the closure smaller than the cell's real imports.
+  const referencedSpecifiers = new Set<string>();
 
   const hostFindings = new Map<string, HostBridgeDiagnostic>();
   const extensionFindings = new Map<string, ExtensionExternalDiagnostic>();
@@ -491,6 +497,7 @@ async function bundleWithRolldown(dir: string, request: CellBundlingRequest): Pr
 
   function interceptionFor(specifier: string): { readonly id: string; readonly source: string } | undefined {
     referencedPackages.add(packageNameOfSpecifier(specifier));
+    referencedSpecifiers.add(specifier);
     let hostPlan = hostPlans.get(specifier);
     if (hostPlan === undefined) {
       hostPlan = consultHostPlan([specifier]);
@@ -651,6 +658,11 @@ async function bundleWithRolldown(dir: string, request: CellBundlingRequest): Pr
     inlinedPackages,
     inlinedSpecifiers,
     emittedAssets,
+    // Sorted for a byte-stable report, like every other list here: #7's determinism
+    // criterion covers the whole result, and #14's audit orders a closure from this
+    // set, so an unordered report would not change the verdict while an unordered
+    // *list* would still be a report that differs between runs.
+    referencedSpecifiers: [...referencedSpecifiers].sort(),
     diagnostics,
   };
 }

@@ -72,7 +72,7 @@ import type {
   JSX_RUNTIME_ADAPTER_EXPORTS,
 } from "@forguncy-react-workspace/core";
 
-import { findDependencyDecision } from "./artifact";
+import { findDependencyDecision } from "./specifier";
 
 // ---------------------------------------------------------------------------
 // The generated-module banner

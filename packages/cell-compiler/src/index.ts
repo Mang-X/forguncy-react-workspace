@@ -250,18 +250,14 @@ export type {
 // The workspace graph loader (#15): the pnpm/Vite+ graph #14 takes as an argument,
 // read from the real `pnpm-workspace.yaml` and member manifests.
 export { loadPnpmWorkspaceGraph, PNPM_WORKSPACE_FILE } from "./workspace-graph";
-export type { LoadWorkspaceGraphOptions } from "./workspace-graph";
+export type { LoadedWorkspaceGraph, LoadWorkspaceGraphOptions } from "./workspace-graph";
 
 // The boundary
 export {
   assembleCellArtifact,
   CELL_ARTIFACT_BANNER,
   compileCell,
-  dependencyDecisionsFor,
-  findDependencyDecision,
   formatCompileCellOutcome,
-  isSourceSpecifier,
-  packageNameOfSpecifier,
   serializeCompileCellResult,
   verifyCellArtifact,
 } from "./artifact";
@@ -275,6 +271,16 @@ export type {
   CompileCellOutcome,
   CompileCellResult,
 } from "./artifact";
+
+// The specifier and decision-lookup primitives the artifact boundary and the
+// workspace contract both answer with (#6 / #14 / #15). Re-exported from the
+// boundary so a caller that imported them there keeps working.
+export {
+  dependencyDecisionsFor,
+  findDependencyDecision,
+  isSourceSpecifier,
+  packageNameOfSpecifier,
+} from "./specifier";
 
 // The Rolldown-backed bundler port (#7): the concrete `CellBundlerPort`
 export { createRolldownCellBundler } from "./rolldown-bundler";

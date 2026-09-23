@@ -22,11 +22,13 @@
  *
  * | criterion | where |
  * | --- | --- |
- * | normal workspace imports, no path rewriting | `reads the package names...`, and the source-shape test below |
- * | generated Cell has no runtime dependency on another workspace package | `flattens...` (no external import, no `frontendLibraries`, no workspace name in code) |
+ * | normal workspace imports, no path rewriting | `authors ordinary workspace imports...` |
+ * | a real compile through the workspace graph | `compiles *through* the workspace graph...` (the production seam, not two separate calls) |
+ * | generated Cell has no runtime dependency on another workspace package | `flattens the workspace source...` (no external import, no `frontendLibraries`, no workspace name in code) |
  * | transitive third-party dependencies honor the decision system | `routes a workspace package's react import through the decision system` |
- * | circular dependencies surface a useful diagnostic | `reports a real circular workspace dependency` (a fixture workspace) |
- * | a shared React component renders in a real runtime | `runs the flattened component...` |
+ * | circular dependencies surface a useful diagnostic | `rejects the build when the graph declares a cycle...` and `reads a cycle out of a real fixture workspace...` |
+ * | tree-shaking removes unused workspace exports | `tree-shakes the workspace exports the Cell does not use` |
+ * | a shared React component renders in a real runtime | `runs the flattened shared component against a real React` |
  *
  * ## What is deliberately *not* claimed here
  *
@@ -89,7 +91,33 @@ const workspaceIndex = workspaceGraph.index;
  */
 const DECISIONS: readonly DependencyDecision[] = [{ strategy: "host", packageName: "react", globalName: "React" }];
 
+/**
+ * Compiles the example *through* the workspace graph, by the production seam.
+ *
+ * `options.workspace` is the graph `loadPnpmWorkspaceGraph` read from the project's
+ * own manifest, so this is #15's first criterion taken literally: a real compile in
+ * which the compiler holds the real Vite+/pnpm graph. Passing it is what makes the
+ * artifact question and the project question one call rather than two — a test that
+ * compiled and then audited separately would be exercising the contract's input
+ * type, which is the thing #14 moved here rather than left behind.
+ */
 function compileExample(dependencies: readonly DependencyDecision[] = DECISIONS): Promise<CompileCellOutcome> {
+  return compileCell(
+    { entry, dependencies },
+    { bundler: createRolldownCellBundler({ dir: exampleRoot }), workspace: workspaceGraph.graph },
+  );
+}
+
+/**
+ * The same compile with **no** graph, for the control cases.
+ *
+ * The seam has to be provably additive: with the graph absent the audit abstains
+ * and the artifact is byte-identical, which is what makes "the graph never resolves
+ * anything" an assertion rather than a claim.
+ */
+function compileWithoutGraph(
+  dependencies: readonly DependencyDecision[] = DECISIONS,
+): Promise<CompileCellOutcome> {
   return compileCell({ entry, dependencies }, { bundler: createRolldownCellBundler({ dir: exampleRoot }) });
 }
 
@@ -303,71 +331,149 @@ describe("workspace package flattening PoC (#15)", () => {
     expect(code).not.toContain("react.element");
   });
 
-  it("routes a workspace package's react import through the decision system", async () => {
-    // Criterion 3, as an executed check rather than a description: `react` is only
-    // reached through `@app/ui`, and the audit walks the real graph to find it.
-    const closure = traceWorkspaceSourceClosure(workspaceIndex, ["@app/ui"]);
-    const reached = closure.externalModules.map(entry => entry.moduleId);
-    expect(reached).toContain("react");
+  it("compiles *through* the workspace graph, and reports the audit on the outcome", async () => {
+    // #15's first criterion, as the seam rather than two separate calls: the compile
+    // is handed the real graph and `outcome.workspace` is #14's audit of that same
+    // build. A test that compiled and then audited by hand would be exercising the
+    // contract's input type, which is what #14 moved here rather than left behind.
+    const outcome = compiledArtifactOf(await compileExample());
 
-    const declared = auditWorkspaceSource({
-      workspace: { packages: [...workspaceIndex.packages] },
-      dependencies: DECISIONS,
-      entryModuleIds: ["@app/ui", "@app/tokens"],
-    });
-    // With `react` decided, the transitive check is satisfied.
-    expect(declared.diagnostics).toEqual([]);
+    // The audit ran, and it saw the cell's real imports — taken from the bundler's
+    // module graph, not restated by this test.
+    expect(outcome.workspace).toBeDefined();
+    const workspace = outcome.workspace;
+    if (workspace === undefined) return;
+
+    expect(workspace.graphActivation).toBe("stated");
+    expect(workspace.usage).toBe("stated");
+    expect(workspace.packages).toContain("@app/ui");
+    // No workspace package was left external and none reached `frontendLibraries`,
+    // so the flattened artifact satisfies #14 with nothing to report.
+    expect(workspace.diagnostics).toEqual([]);
+
+    // The closure is the artifact's real one: both workspace packages, and `react`
+    // as the published dependency they bring with them.
+    expect(workspace.closure?.packages).toEqual(["@app/tokens", "@app/ui"]);
+    expect(workspace.closure?.externalModules).toEqual([{ moduleId: "react", importedBy: ["@app/ui"] }]);
+    expect(workspace.closure?.cycles).toEqual([]);
+  });
+
+  it("is additive: the graph audits the artifact without changing a byte of it", async () => {
+    // "The graph is an input to an audit, never a second resolver" (#6 forbids one),
+    // stated as a property a test can check rather than as a claim in a comment. If
+    // the graph ever started redirecting resolution, this is where it would show.
+    const withGraph = compiledArtifactOf(await compileExample());
+    const withoutGraph = compiledArtifactOf(await compileWithoutGraph());
+
+    expect(withGraph.artifact.code).toBe(withoutGraph.artifact.code);
+    expect(withGraph.artifact.frontendLibraries).toEqual(withoutGraph.artifact.frontendLibraries);
+
+    // And the control really did abstain, rather than happening to agree: no graph
+    // means no workspace field, which is #14's "an absent input is not an empty one".
+    // Otherwise the assertion above would pass for two runs of the same code.
+    expect(withoutGraph.workspace).toBeUndefined();
+    expect(withGraph.workspace?.usage).toBe("stated");
+  });
+
+  it("rejects the build when the graph declares a cycle the entry reaches", async () => {
+    // #14 requires a circular workspace dependency to "fail before bundling rather
+    // than be resolved by whichever traversal happens to run first", so this is the
+    // one workspace finding that stops a compile — and it is the *only* one, because
+    // every other workspace runtime-link finding already has an artifact-side
+    // counterpart that rejects it (see `compileCell`'s header).
+    //
+    // What is real here and what is constructed, stated exactly: the compile is real
+    // (the same entry, the same bundler, a real artifact), and the cycle detector is
+    // production code running through the production seam. The graph is the real one
+    // with a single edge added — `@app/tokens` importing `@app/ui`, closing a loop —
+    // because a genuinely cyclic graph cannot be committed to this repository's own
+    // workspace without making the repository defective.
+    const packages = workspaceGraph.graph.packages.map(record =>
+      record.name === "@app/tokens" ? { ...record, imports: [...(record.imports ?? []), "@app/ui"] } : record,
+    );
+    const outcome = await compileCell(
+      { entry, dependencies: DECISIONS },
+      { bundler: createRolldownCellBundler({ dir: exampleRoot }), workspace: { packages } },
+    );
+
+    expect(outcome.status).toBe("rejected");
+    if (outcome.status !== "rejected") return;
+
+    // Reported through #14's vocabulary, not restated as an artifact diagnostic:
+    // the artifact is fine, the *project's declarations* are not.
+    expect(outcome.diagnostics).toEqual([]);
+    const cycles = (outcome.workspace?.diagnostics ?? []).filter(
+      diagnostic => diagnostic.code === "circular-workspace-dependency",
+    );
+    expect(cycles).toHaveLength(1);
+    expect(cycles[0]?.message).toContain("@app/tokens → @app/ui → @app/tokens");
+    expect(cycles[0]?.fixOwner).toBe("workspace-graph");
+    // The rest of the audit still ran and is readable, so a caller does not have to
+    // re-run anything to see the whole picture.
+    expect(outcome.workspace?.closure?.packages).toEqual(["@app/tokens", "@app/ui"]);
+  });
+
+  it("routes a workspace package's react import through the decision system", async () => {
+    // Criterion 3, through the seam: `react` is only reached through `@app/ui`, and
+    // the audit that walks the real graph is the one `compileCell` ran.
+    const decided = compiledArtifactOf(await compileExample());
+    const reached = decided.workspace?.closure?.externalModules.map(entry => entry.moduleId) ?? [];
+    expect(reached).toContain("react");
+    // With `react` decided `host`, the transitive check is satisfied.
+    expect(decided.workspace?.diagnostics).toEqual([]);
 
     // The negative half, which is what makes the positive one meaningful: with the
     // decision list *empty* the same trace reports `react` as undecided, naming the
-    // workspace package that reaches it. That is "the transitive dependency went
-    // through the pipeline" rather than "nothing ever complained".
-    const undecided = auditWorkspaceSource({
-      workspace: { packages: [...workspaceIndex.packages] },
-      dependencies: [],
-      entryModuleIds: ["@app/ui", "@app/tokens"],
-    });
-    const reported = undecided.diagnostics.filter(
+    // workspace package that reaches it — and the bundler then inlines React into
+    // the artifact, which the artifact audits refuse. Both reports are present, each
+    // in its own vocabulary.
+    const undecided = await compileExample([]);
+    const reported = (undecided.workspace?.diagnostics ?? []).filter(
       diagnostic => diagnostic.code === "unresolved-workspace-transitive-dependency",
     );
     expect(reported.map(diagnostic => diagnostic.subject)).toEqual(["react"]);
     expect(reported[0]?.message).toContain("@app/ui");
   });
 
-  it("refuses a dependency decision that names a workspace package", () => {
-    // #14's rule, executed: a workspace package is source, so a decision about one
-    // is an error in *either* direction — and `frontendLibraries` likewise. The
-    // `react` decision is included so the negative half below is meaningful: the
-    // audit has to report the workspace findings *without* also flagging the
-    // published dependency that is correctly decided.
-    const audit = auditWorkspaceSource({
-      workspace: { packages: [...workspaceIndex.packages] },
-      dependencies: [...DECISIONS, { strategy: "inline", packageName: "@app/ui" }],
-      entryModuleIds: ["@app/ui"],
-      frontendLibraries: [{ libraryId: "@app/ui" }],
-      externalImports: ["@app/ui"],
-    });
+  it("refuses a dependency decision or a library entry that names a workspace package", async () => {
+    // #14's rule, through the seam: a workspace package is source, so a decision
+    // about one is an error in *either* direction, and a `frontendLibraries` entry
+    // is the same mistake wearing metadata. The audit reports these without a second
+    // fatal list existing, which is why a compile carrying them still produced an
+    // artifact above rather than rejecting.
+    const outcome = await compileExample([...DECISIONS, { strategy: "inline", packageName: "@app/ui" }]);
+    const codes = (outcome.workspace?.diagnostics ?? []).map(diagnostic => diagnostic.code);
 
-    const codes = audit.diagnostics.map(diagnostic => diagnostic.code);
     expect(codes).toContain("workspace-package-decided-as-dependency");
-    expect(codes).toContain("workspace-package-in-frontend-libraries");
-    expect(codes).toContain("workspace-source-left-external");
     // None of them is about the published dependency that *is* decided correctly.
-    expect(audit.diagnostics.some(diagnostic => diagnostic.subject === "react")).toBe(false);
+    expect(
+      (outcome.workspace?.diagnostics ?? []).some(diagnostic => diagnostic.subject === "react"),
+    ).toBe(false);
   });
 
-  it("reports a real circular workspace dependency as a structured diagnostic", async () => {
-    // A cycle has to be *declared* by two real packages to be read from a manifest,
-    // so this one is a fixture workspace rather than the repository: adding a
-    // circular dependency to this repository's own graph to test the detector would
-    // be a project defect committed for a test. The graph is still loaded from a
-    // real `pnpm-workspace.yaml` and real `package.json` files by the same loader.
+  it("reads a cycle out of a real fixture workspace, so the detector is not the test's doing", async () => {
+    // The cycle above is *constructed* on top of the real graph, and this is the
+    // non-constructed counterpart: two manifests that genuinely import each other,
+    // loaded by the same production loader from a real `pnpm-workspace.yaml`. Without
+    // it, "the detector works" would rest entirely on a graph this test assembled.
+    //
+    // A fixture rather than this repository's own workspace because a circular
+    // dependency committed into it would be a project defect kept for a test's
+    // convenience — the fixture is a separate root, so the loader is not stubbed and
+    // nothing here is.
     const fixtureRoot = join(packageRoot, "tests", "fixtures", "circular-workspace");
     const fixture = await loadPnpmWorkspaceGraph({ root: fixtureRoot });
     expect(fixture.diagnostics).toEqual([]);
 
+    // The loader carried the declared edges, which is what makes the cycle findable.
+    expect(workspacePackageFor(fixture.index, "@fixture/a")?.imports).toEqual(["@fixture/b"]);
+    expect(workspacePackageFor(fixture.index, "@fixture/b")?.imports).toEqual(["@fixture/a"]);
+
+    const closure = traceWorkspaceSourceClosure(fixture.index, ["@fixture/a"]);
+    expect(closure.cycles).toEqual([{ chain: ["@fixture/a", "@fixture/b", "@fixture/a"] }]);
+
     const audit = auditWorkspaceSource({
-      workspace: { packages: [...fixture.index.packages] },
+      workspace: fixture.graph,
       dependencies: [],
       entryModuleIds: ["@fixture/a"],
     });
@@ -379,10 +485,6 @@ describe("workspace package flattening PoC (#15)", () => {
     expect(cycle[0]?.message).toContain("@fixture/a → @fixture/b → @fixture/a");
     expect(cycle[0]?.fixOwner).toBe("workspace-graph");
     expect(cycle[0]?.remediation.length ?? 0).toBeGreaterThan(0);
-    // And it is reachable as a closure result too, not only as a diagnostic.
-    expect(traceWorkspaceSourceClosure(fixture.index, ["@fixture/a"]).cycles).toEqual([
-      { chain: ["@fixture/a", "@fixture/b", "@fixture/a"] },
-    ]);
   });
 
   it("runs the flattened shared component against a real React", async () => {

@@ -17,8 +17,9 @@
  *    prove the parser works on input chosen to suit it.
  * 2. **Abstentions and refusals.** A missing manifest, malformed YAML and an
  *    unsupported glob form must fail loudly rather than produce a smaller graph —
- *    an omitted workspace package makes a *published* dependency look like local
- *    source, which silently changes what the compiler reports.
+ *    an omitted workspace package stops resolving to workspace source, so a *local*
+ *    package is classified as a published one, which silently changes what the
+ *    compiler reports.
  * 3. **The `workspace:` protocol is not a version.** The odd-looking assertion that
  *    a `workspace:*` range never reaches the graph is the load-bearing one: a
  *    protocol range is not a module id, and one leaked into `imports` would make
@@ -177,28 +178,37 @@ describe("the workspace graph loader's refusals", () => {
     await expect(loadPnpmWorkspaceGraph({ root })).rejects.toThrow(/Cannot parse/);
   });
 
-  it("refuses a glob form it does not implement instead of guessing", async () => {
-    // A `**` glob is the case that matters: expanding it wrongly would *omit* a
-    // package, and an omitted package makes a published dependency look like local
-    // source. A loud failure is the only safe answer.
-    const root = await fixtureRoot({ [PNPM_WORKSPACE_FILE]: "packages:\n  - packages/**\n" });
-
-    await expect(loadPnpmWorkspaceGraph({ root })).rejects.toThrow(/does not implement/);
-  });
-
-  it("refuses every wildcard shape that would expand to nothing silently", async () => {
-    // Each of these is a glob pnpm/fast-glob accept and a literal-path read would
-    // resolve to *nothing*: no error, no members, and every workspace package
-    // reclassified as a published dependency. The trailing-`/*` form is the one
-    // supported case, so it must not appear here.
+  it("refuses every glob shape it does not implement, in one authoritative list", async () => {
+    // One list rather than three overlapping ones, so a new pattern has one place to
+    // go and a reader can see the whole supported/unsupported boundary at once.
+    //
+    // Every entry here is a glob pnpm and `fast-glob` accept. A literal-path read of
+    // any of them resolves to *nothing*: no error, no members, and every workspace
+    // package reclassified as a published dependency — which is the silent failure
+    // the refusal exists to prevent. The two supported forms (a literal directory,
+    // and one trailing `/*`) are deliberately absent from this list.
+    //
+    // The extglob entries are the ones a guard built by enumerating remembered
+    // syntax misses: `+(a|b)` and `@(a)` contain no star, no `?` and no brace, so a
+    // check for those alone accepts them.
     for (const pattern of [
+      // A star that is not the single permitted trailing one.
       "packages/*/src",
-      "packages/?",
+      "packages/*/*",
       "pkg-*",
+      "*/packages",
+      // Double star, in both positions.
+      "packages/**",
+      "packages/**/nested",
+      // Single-character and character-class wildcards.
+      "packages/?",
+      "packages/[ab]",
+      // Brace expansion and negation.
       "packages/{a,b}",
       "!packages/excluded",
-      "packages/[ab]",
-      "packages/**/nested",
+      // Extglob groups: no star, no brace, still glob syntax.
+      "examples/+(app|lib)",
+      "examples/@(app)",
     ]) {
       const root = await fixtureRoot({ [PNPM_WORKSPACE_FILE]: `packages:\n  - "${pattern}"\n` });
       await expect(loadPnpmWorkspaceGraph({ root }), pattern).rejects.toThrow(/does not implement/);
@@ -239,11 +249,32 @@ describe("the workspace graph loader's refusals", () => {
     expect(classifyWorkspaceModule(index, "@fixture/padded")).toBe("workspace-package");
   });
 
-  it("refuses a brace and a negation pattern for the same reason", async () => {
-    for (const pattern of ["packages/{a,b}", "!packages/excluded"]) {
-      const root = await fixtureRoot({ [PNPM_WORKSPACE_FILE]: `packages:\n  - "${pattern}"\n` });
-      await expect(loadPnpmWorkspaceGraph({ root })).rejects.toThrow(/does not implement/);
-    }
+  it("trims a dependency key the same way, so the edge matches the member it names", async () => {
+    // The symmetric case of the test above, and the one that is easier to miss: a
+    // padded *dependency key* is stored as an id no member can match, so
+    // `workspacePackageFor` misses it and the audit reports a bogus unresolved
+    // transitive dependency for a workspace package that is in the graph.
+    const root = await fixtureRoot({
+      [PNPM_WORKSPACE_FILE]: "packages:\n  - packages/*\n",
+      "packages/a/package.json": manifest({
+        name: "@fixture/a",
+        dependencies: { "  @fixture/b  ": "workspace:*", "": "1.0.0", "   ": "1.0.0" },
+      }),
+      "packages/b/package.json": manifest({ name: "@fixture/b" }),
+    });
+
+    const { index } = await loadPnpmWorkspaceGraph({ root });
+    expect(workspacePackageFor(index, "@fixture/a")?.imports).toEqual(["@fixture/b"]);
+
+    // And the edge resolves, so the audit reports a closure of two packages with no
+    // unresolved transitive dependency.
+    const audit = auditWorkspaceSource({
+      workspace: { packages: [...index.packages] },
+      dependencies: [],
+      entryModuleIds: ["@fixture/a"],
+    });
+    expect(audit.closure?.packages).toEqual(["@fixture/a", "@fixture/b"]);
+    expect(audit.diagnostics).toEqual([]);
   });
 
   it("refuses a malformed `packages` key rather than reading it as an empty graph", async () => {
@@ -282,17 +313,6 @@ describe("the workspace graph loader's refusals", () => {
     const root = await fixtureRoot({ [PNPM_WORKSPACE_FILE]: "- a\n- b\n" });
 
     await expect(loadPnpmWorkspaceGraph({ root })).rejects.toThrow(/does not parse as a mapping/);
-  });
-
-  it("refuses a star that is not the single trailing one, so nothing is silently omitted", async () => {
-    // The silent case this refusal exists for: `packages/*/src` contains a `*`,
-    // ends in neither `/*` nor `**`, and would otherwise be read as the literal
-    // directory `packages/*/src` — which does not exist, so the pattern would
-    // expand to nothing and a whole subtree of members would vanish with no error.
-    for (const pattern of ["packages/*/src", "packages/**", "*/packages", "packages/*/*"]) {
-      const root = await fixtureRoot({ [PNPM_WORKSPACE_FILE]: `packages:\n  - "${pattern}"\n` });
-      await expect(loadPnpmWorkspaceGraph({ root }), pattern).rejects.toThrow(/does not implement/);
-    }
   });
 
   it("reads a literal member entry, not only a child glob", async () => {
@@ -351,6 +371,31 @@ describe("the workspace graph loader's refusals", () => {
     const { index, diagnostics } = await loadPnpmWorkspaceGraph({ root });
     expect(diagnostics.map(diagnostic => diagnostic.code)).toEqual(["workspace-graph-conflict"]);
     expect(index.packages.map(record => record.name)).toEqual(["@fixture/dup"]);
+  });
+
+  it("returns the raw graph beside the index, so a graph finding survives a re-audit", async () => {
+    // The two views exist for two consumers, and this is the property that makes the
+    // distinction load-bearing: `compileCell`'s `workspace` option takes the *raw*
+    // graph because the audit indexes its input itself. Handing the audit the
+    // deduped `index.packages` would re-index a list the duplicate is no longer in,
+    // and the `workspace-graph-conflict` this project actually has would vanish —
+    // which is exactly what the assertion below demonstrates.
+    const root = await fixtureRoot({
+      [PNPM_WORKSPACE_FILE]: "packages:\n  - packages/*\n",
+      "packages/a/package.json": manifest({ name: "@fixture/dup" }),
+      "packages/b/package.json": manifest({ name: "@fixture/dup" }),
+    });
+
+    const loaded = await loadPnpmWorkspaceGraph({ root });
+    expect(loaded.graph.packages).toHaveLength(2);
+    expect(loaded.index.packages).toHaveLength(1);
+
+    // Through the raw graph the conflict is reported; through the index's records it
+    // is not, because there is nothing left to conflict.
+    const raw = auditWorkspaceSource({ workspace: loaded.graph, dependencies: [] });
+    expect(raw.diagnostics.map(diagnostic => diagnostic.code)).toEqual(["workspace-graph-conflict"]);
+    const deduped = auditWorkspaceSource({ workspace: { packages: [...loaded.index.packages] }, dependencies: [] });
+    expect(deduped.diagnostics).toEqual([]);
   });
 
   it("throws when a member manifest cannot be read", async () => {

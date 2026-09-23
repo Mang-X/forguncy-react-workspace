@@ -84,7 +84,11 @@ import path from "node:path";
 
 import { parse as parseYaml } from "yaml";
 
-import type { WorkspaceGraphIndexResult, WorkspacePackageRecord } from "./workspace-source";
+import type {
+  WorkspaceGraph,
+  WorkspaceGraphIndexResult,
+  WorkspacePackageRecord,
+} from "./workspace-source";
 import { indexWorkspaceGraph } from "./workspace-source";
 
 /** The manifest pnpm reads its member globs from. */
@@ -93,18 +97,29 @@ export const PNPM_WORKSPACE_FILE = "pnpm-workspace.yaml";
 /**
  * Keys under which a member declares a dependency that can reach a compiled artifact.
  *
- * These three, and deliberately **not** `devDependencies`. A package's own tests and
- * build tooling are dev dependencies: nothing they name is ever flattened into a
- * consuming Cell, so an edge from one would make the audit report a transitive
- * dependency that cannot exist. This repository is the worked example — the
- * compiler's own `react` and `react-dom` are dev dependencies used by its host-bridge
- * regression, and carrying them into the graph would have the audit demand a
- * dependency decision for a module no artifact contains.
+ * `dependencies`, `peerDependencies` and `optionalDependencies` — and deliberately
+ * **not** `devDependencies`, which is a difference of kind rather than of degree.
  *
- * `peerDependencies` is included for the opposite reason: a peer is a dependency the
- * package's *source* imports and expects the consumer to provide, which is exactly a
- * host mapping. Leaving it out would hide the one edge the decision layer most needs
- * to see.
+ * A dev dependency is never shipped: it exists for the package's own tests and build,
+ * so nothing it names can be flattened into a consuming Cell, and an edge from one
+ * would make the audit report a transitive dependency that cannot exist. This
+ * repository is the worked example — the compiler's own `react` and `react-dom` are
+ * dev dependencies used by its host-bridge regression, and carrying them here would
+ * have the audit demand a dependency decision for a module no artifact contains.
+ *
+ * An *optional* dependency is the opposite: it is part of the shipped package, simply
+ * allowed to fail installation, and a package whose source guards an import of one is
+ * still importing it. Excluding it would be unsound in the direction that matters —
+ * the audit would go silent about a module the bundler may well inline — so it stays.
+ * Every manifest-derived edge can over-report relative to the imports that actually
+ * exist in source; #14 records that as this contract's stated caveat, and it is the
+ * accepted cost of a graph that does not parse source. `devDependencies` is excluded
+ * not because it can over-report but because it is categorically outside the artifact.
+ *
+ * `peerDependencies` is included for the same reason: a peer is a dependency the
+ * package's *source* imports and expects the consumer to provide, which is exactly
+ * what a host mapping is for. Leaving it out would hide the one edge the decision
+ * layer most needs to see.
  */
 const DEPENDENCY_FIELDS = ["dependencies", "peerDependencies", "optionalDependencies"] as const;
 
@@ -124,11 +139,16 @@ function readString(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-/** The `packages:` globs of a workspace document, in the order it declares them. */
-function readWorkspacePatterns(document: unknown, workspaceFile: string): readonly string[] {
+/**
+ * The `packages:` globs of a workspace document, in the order it declares them.
+ *
+ * `fileName` rather than a path: it is used only in messages, and a message carrying
+ * an absolute path would leak this machine's checkout location (see {@link forMessage}).
+ */
+function readWorkspacePatterns(document: unknown, fileName: string): readonly string[] {
   if (!isRecord(document)) {
     throw new Error(
-      `"${workspaceFile}" does not parse as a mapping, so its workspace members cannot be read. A pnpm workspace manifest is a YAML mapping with a \`packages\` key.`,
+      `"${fileName}" does not parse as a mapping, so its workspace members cannot be read. A pnpm workspace manifest is a YAML mapping with a \`packages\` key.`,
     );
   }
 
@@ -136,75 +156,72 @@ function readWorkspacePatterns(document: unknown, workspaceFile: string): readon
   // Absent is a legitimate pnpm state: a workspace file with no `packages` key
   // declares the root as its only member, which is an empty member list for this
   // loader. Present-but-malformed is not, and is refused rather than read as
-  // empty — an empty member list makes every local package look like a published
-  // one, which is the failure this loader's refusals exist to prevent.
+  // empty — an empty member list makes every workspace package look like a published
+  // dependency, which is the failure this loader's refusals exist to prevent.
   if (patterns === undefined) return [];
   if (!Array.isArray(patterns)) {
     throw new Error(
-      `The \`packages\` key in "${workspaceFile}" is not a list, so the workspace members cannot be read. It is refused rather than treated as empty: an empty member list makes every workspace package look like a published dependency.`,
+      `The \`packages\` key in "${fileName}" is not a list, so the workspace members cannot be read. It is refused rather than treated as empty: an empty member list makes every workspace package look like a published dependency.`,
     );
   }
 
   const invalid = patterns.filter(pattern => readString(pattern) === undefined);
   if (invalid.length > 0) {
     throw new Error(
-      `The \`packages\` list in "${workspaceFile}" contains ${invalid.length} entr(ies) that are not non-empty strings, so the workspace members cannot be read. Refused rather than skipped for the same reason: a skipped member makes a workspace package look like a published dependency.`,
+      `The \`packages\` list in "${fileName}" contains ${invalid.length} entr(ies) that are not non-empty strings, so the workspace members cannot be read. Refused rather than skipped for the same reason: a skipped member makes a workspace package look like a published dependency.`,
     );
   }
   return patterns.map(pattern => readString(pattern) as string);
 }
 
 /**
+ * Every character that gives a glob its meaning, as one list.
+ *
+ * A single complete set rather than the handful of cases that came to mind, because
+ * the failure mode of a partial list is *silent*: pattern syntax the guard does not
+ * recognize is read as a literal path, resolves to nothing, and drops members with
+ * no error. The extglob groups are the ones easiest to miss — `packages/+(app|lib)`
+ * contains no star and no brace, so a guard built by enumerating `*`, `?`, `**`,
+ * `{}`, `[]` and `!` accepts it, `existsSync` answers `false` for the literal path,
+ * and the whole subtree of members vanishes.
+ *
+ * `@` is deliberately absent: it is ordinary in a path (`@app/ui`) and only
+ * meaningful as `@(…)` when followed by a parenthesis, which this list already
+ * refuses.
+ */
+const GLOB_METACHARACTERS = /[*?{}[\]!()+|]/;
+
+/**
  * Expands one member glob to the directories that declare a manifest.
  *
- * Only two shapes are supported, and each unsupported one is refused by name
- * rather than approximated, because a glob this loader guessed at would silently
- * omit a workspace package — and an omitted package makes a published dependency
- * look like local source, which changes what the compiler reports. A loud failure
- * at load is #15's own criterion: a structured failure, not a wrong answer.
+ * Only two shapes are supported, and each unsupported one is refused by name rather
+ * than approximated, because a glob this loader guessed at would silently omit a
+ * workspace package — and an omitted package stops resolving to workspace source, so
+ * a *local* package is classified `external-package` and the audit demands a
+ * dependency decision for it. A loud failure at load is #15's own criterion: a
+ * structured failure, not a wrong answer.
  *
  * - a literal directory that declares `package.json` (a single-member entry);
  * - one trailing `/*`, the pnpm and lerna convention this repository uses.
  *
- * Everything else throws: a double star, a brace, a character class, a negation,
- * and — the case easiest to miss — a wildcard that is not that one trailing star,
- * such as a `packages` + one-star + `/src` pattern, or one carrying a `?`. Each of
- * those names a glob pnpm and `fast-glob` accept, so a loader that read them as
- * literal paths would resolve them to nothing and drop a whole subtree of members
- * silently.
+ * Everything else throws. The test is applied to the pattern with that one permitted
+ * `/*` removed, so the rule is "no glob syntax anywhere except the single trailing
+ * star" rather than "none of the syntax I remembered".
  */
 async function expandWorkspacePattern(root: string, pattern: string): Promise<readonly string[]> {
   const trimmed = pattern.replace(/\/+$/, "");
   if (trimmed.length === 0) return [];
 
   const isChildGlob = trimmed.endsWith("/*");
-  // A star anywhere other than that one trailing occurrence is a glob shape this
-  // loader does not implement, and it is refused rather than read as a literal
-  // directory. The refusal matters for the *silent* case: a deeper star pattern
-  // contains a star, ends in neither `/*` nor a double star, and would otherwise be
-  // treated as a literal path — which does not exist, so the pattern would expand
-  // to nothing and a whole subtree of members would vanish with no error.
-  const starCount = [...trimmed].filter(character => character === "*").length;
-  const unsupportedStar = isChildGlob ? starCount !== 1 : starCount > 0;
+  const body = isChildGlob ? trimmed.slice(0, -2) : trimmed;
 
-  // A `?` is glob syntax too (one character), and it fails the same silent way: it
-  // has no star, so the count above does not see it, and `existsSync` then answers
-  // `false` for a path containing a literal `?`. Refused here rather than left to a
-  // filesystem that would report "missing" instead of "unsupported".
-  const unsupportedQuestionMark = trimmed.includes("?");
-
-  if (
-    unsupportedStar ||
-    unsupportedQuestionMark ||
-    trimmed.includes("**") ||
-    /[{}[\]!]/.test(trimmed)
-  ) {
+  if (GLOB_METACHARACTERS.test(body)) {
     throw new Error(
-      `The workspace pattern "${pattern}" uses a glob form this loader does not implement (only a literal directory and one trailing "/*" are supported). It is refused rather than approximated: expanding it wrongly would omit a workspace package, and an omitted package makes a published dependency look like local source.`,
+      `The workspace pattern "${pattern}" uses a glob form this loader does not implement (only a literal directory and one trailing "/*" are supported). It is refused rather than approximated: a glob read as a literal path resolves to nothing, and a missing member stops resolving to workspace source, so a local package would be reported as a published dependency.`,
     );
   }
 
-  const baseDirectory = path.resolve(root, isChildGlob ? trimmed.slice(0, -2) : trimmed);
+  const baseDirectory = path.resolve(root, body);
 
   if (!isChildGlob) {
     return existsSync(path.join(baseDirectory, "package.json")) ? [baseDirectory] : [];
@@ -223,7 +240,21 @@ async function expandWorkspacePattern(root: string, pattern: string): Promise<re
 }
 
 /**
- * A member manifest as a record, or `undefined` when it declares no `name` at all.
+ * A file or directory as a *message* spells it: relative to the workspace root.
+ *
+ * The same portability rule the records obey, applied to the errors. A thrown
+ * message ends up in a CI log and in a pasted diagnostic, so an absolute path here
+ * would carry this machine's user name and checkout location out of the repository
+ * — which is exactly the leak `workspace-source.ts` reports a graph record for. A
+ * path outside the root is written relative anyway rather than hidden: `../../x` is
+ * still recognizable to the person who passed the wrong root, which is the reader
+ * this message is for.
+ */
+function forMessage(root: string, target: string): string {
+  return workspaceRelativeDirectory(root, target);
+}
+
+/** A member manifest as a record, or `undefined` when it declares no `name` at all.
  *
  * The two cases are different problems and are answered differently:
  *
@@ -239,9 +270,10 @@ async function expandWorkspacePattern(root: string, pattern: string): Promise<re
  *   reader to the graph instead of to the file that is broken.
  */
 function readPackageRecord(manifest: unknown, directory: string, root: string): WorkspacePackageRecord | undefined {
+  const where = forMessage(root, directory);
   if (!isRecord(manifest)) {
     throw new Error(
-      `The workspace member at "${directory}" has a package.json that is not a JSON object, so it cannot be read as a workspace package.`,
+      `The workspace member at "${where}" has a package.json that is not a JSON object, so it cannot be read as a workspace package.`,
     );
   }
   if (!("name" in manifest)) return undefined;
@@ -249,7 +281,7 @@ function readPackageRecord(manifest: unknown, directory: string, root: string): 
   const name = readString(manifest["name"]);
   if (name === undefined) {
     throw new Error(
-      `The workspace member at "${directory}" declares a "name" that is not a non-empty string, so it cannot be a workspace package. This is a malformed manifest rather than an unresolvable graph entry.`,
+      `The workspace member at "${where}" declares a "name" that is not a non-empty string, so it cannot be a workspace package. This is a malformed manifest rather than an unresolvable graph entry.`,
     );
   }
 
@@ -265,7 +297,15 @@ function readPackageRecord(manifest: unknown, directory: string, root: string): 
       // still in the graph, only one of its edges is absent, and #14's contract
       // already reports "the caller did not state these edges" distinctly.
       if (typeof specifier !== "string") continue;
-      imports.add(dependencyName);
+
+      // The *same* normalisation the `name` field gets, and for the same reason:
+      // a key of `" @app/tokens "` stored verbatim is an id no member can match, so
+      // `workspacePackageFor` misses it and the audit reports a bogus unresolved
+      // transitive dependency for a workspace package that is right there. A key
+      // that normalises to nothing is not a module id at all, so it is skipped.
+      const moduleId = readString(dependencyName);
+      if (moduleId === undefined) continue;
+      imports.add(moduleId);
     }
   }
 
@@ -289,12 +329,15 @@ function workspaceRelativeDirectory(root: string, directory: string): string {
   return relative.length === 0 ? "." : relative;
 }
 
-async function readJson(file: string): Promise<unknown> {
+async function readJson(file: string, root: string): Promise<unknown> {
   try {
     return JSON.parse(await readFile(file, "utf8")) as unknown;
   } catch (error) {
+    // Relative, not `file`: a thrown message travels into CI logs and pasted
+    // diagnostics, and an absolute path would carry this machine's user name and
+    // checkout location with it.
     throw new Error(
-      `Cannot read the workspace manifest "${file}": ${error instanceof Error ? error.message : String(error)}`,
+      `Cannot read the workspace manifest "${forMessage(root, file)}": ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 }
@@ -307,13 +350,35 @@ export interface LoadWorkspaceGraphOptions {
 }
 
 /**
+ * What the loader returns: the graph it read, the index of it, and the findings.
+ *
+ * All three, because two different consumers need two different views and neither
+ * can be recovered from the other:
+ *
+ * - `index` is what a caller that wants to *look packages up* uses
+ *   (`workspacePackageFor`, `classifyWorkspaceModule`). One record per name, with
+ *   duplicates already resolved.
+ * - `graph` is what `compileCell`'s `workspace` option takes, and it has to be the
+ *   raw records rather than the index's. The audit indexes its input itself, so
+ *   handing it the *deduped* list would re-index a list that no longer has the
+ *   duplicate in it — and the `workspace-graph-conflict` finding the project
+ *   actually has would vanish from the report. Passing the raw graph is what keeps
+ *   "the graph is incoherent" reportable through the compile seam.
+ *
+ * `diagnostics` are the index's, so a caller that only wants to look things up does
+ * not have to know the raw form exists.
+ */
+export interface LoadedWorkspaceGraph extends WorkspaceGraphIndexResult {
+  /** The records as read, before indexing: what `compileCell`'s `workspace` option takes. */
+  readonly graph: WorkspaceGraph;
+}
+
+/**
  * Reads the pnpm workspace graph from a real project root.
  *
- * The result is the *index* rather than the bare graph, because the two are always
- * wanted together: a caller that wants the graph wants `byName` or `packages`, and
- * both arrive with the diagnostics the graph's own coherence produced. Returning a
- * `WorkspaceGraph` would make every caller re-run `indexWorkspaceGraph`, and one of
- * them would eventually forget to.
+ * The result carries the raw graph *and* its index, for the reason
+ * {@link LoadedWorkspaceGraph} gives: the two are different views and the audit
+ * needs the raw one to keep a graph-coherence finding reportable.
  *
  * Throws only for an unreadable or unsupported *input* — a missing workspace file,
  * malformed YAML, an unsupported glob form. A graph that is merely incoherent (a
@@ -323,14 +388,14 @@ export interface LoadWorkspaceGraphOptions {
  */
 export async function loadPnpmWorkspaceGraph(
   options: LoadWorkspaceGraphOptions,
-): Promise<WorkspaceGraphIndexResult> {
+): Promise<LoadedWorkspaceGraph> {
   const root = path.resolve(options.root);
   const fileName = options.fileName ?? PNPM_WORKSPACE_FILE;
   const workspaceFile = path.join(root, fileName);
 
   if (!existsSync(workspaceFile)) {
     throw new Error(
-      `No "${fileName}" at "${root}", so the workspace graph cannot be read. Pass the directory that holds the workspace manifest.`,
+      `No "${fileName}" at the workspace root, so the workspace graph cannot be read. Pass the directory that holds the workspace manifest.`,
     );
   }
 
@@ -338,26 +403,31 @@ export async function loadPnpmWorkspaceGraph(
   try {
     document = parseYaml(await readFile(workspaceFile, "utf8"));
   } catch (error) {
-    throw new Error(`Cannot parse "${workspaceFile}": ${error instanceof Error ? error.message : String(error)}`);
+    // Only the file's *name*, not its path: this message travels into CI logs, and
+    // the root the caller passed is the one thing it already knows.
+    throw new Error(
+      `Cannot parse "${fileName}": ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 
-  const memberDirectories: string[] = [];
+  // A `Set` for membership and a sort for ordering. The array alone was used as a
+  // set here, making this quadratic in member count — which a real monorepo with a
+  // few thousand members would notice before it noticed the reads.
+  const memberSet = new Set<string>();
   const patternResults = await Promise.all(
-    readWorkspacePatterns(document, workspaceFile).map(pattern => expandWorkspacePattern(root, pattern)),
+    readWorkspacePatterns(document, fileName).map(pattern => expandWorkspacePattern(root, pattern)),
   );
   for (const directories of patternResults) {
-    for (const directory of directories) {
-      if (!memberDirectories.includes(directory)) memberDirectories.push(directory);
-    }
+    for (const directory of directories) memberSet.add(directory);
   }
-  memberDirectories.sort();
+  const memberDirectories = [...memberSet].sort();
 
   // Read in parallel over the *already sorted* list, so the ordering is a property
   // of this code rather than of which read finishes first. Determinism does not
   // depend on the sequencing — `indexWorkspaceGraph` re-sorts by content — and a
   // large monorepo should not pay one stat-and-read round trip per member.
   const manifests = await Promise.all(
-    memberDirectories.map(directory => readJson(path.join(directory, "package.json"))),
+    memberDirectories.map(directory => readJson(path.join(directory, "package.json"), root)),
   );
 
   const packages: WorkspacePackageRecord[] = [];
@@ -368,5 +438,6 @@ export async function loadPnpmWorkspaceGraph(
     if (record !== undefined) packages.push(record);
   }
 
-  return indexWorkspaceGraph({ packages });
+  const graph: WorkspaceGraph = { packages };
+  return { graph, ...indexWorkspaceGraph(graph) };
 }
