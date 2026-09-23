@@ -22,6 +22,7 @@
   ],
   "dependencies": {
     "@app/tokens": "workspace:*",
-    "@app/ui": "workspace:*"
+    "@app/ui": "workspace:*",
+    "@app/session": "workspace:*"
   }
 }

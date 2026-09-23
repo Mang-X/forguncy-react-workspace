@@ -1,0 +1,23 @@
+{
+  "name": "@app/session",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "//sideEffects": [
+    "Deliberately *not* `false`, and this is the one package here that must not be:",
+    "it holds module-scope state on purpose, so declaring the module side-effect-free",
+    "would invite a bundler to drop the very thing the package exists to demonstrate.",
+    "",
+    "#14's reuse-class table calls module-scope mutable state `delegated-required` —",
+    "correct only if the state is one instance for the whole page. This package is the",
+    "counter-example: its state is per-Cell by construction, so nothing here relies on",
+    "cross-Cell identity, and `moduleIdentity` is left absent (which #14's type defines",
+    "as `cell-local`)."
+  ],
+  "dependencies": {
+    "react": "19.2.7"
+  },
+  "exports": {
+    ".": "./src/index.tsx"
+  }
+}
