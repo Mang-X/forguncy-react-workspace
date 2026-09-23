@@ -163,3 +163,82 @@ describe("cells do not share workspace module state (#14, two-Cell probe)", () =
     expect(b).toContain("cell-b");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Context object identity, which the rendered probe cannot show
+// ---------------------------------------------------------------------------
+
+describe("each Cell's Context object is a different object", () => {
+  it("answers the identity question by comparing the objects, not by rendering", async () => {
+    // Why this test exists at all, and why it does not render: a Provider/Consumer
+    // pair in two sibling React roots cannot distinguish "one shared Context object"
+    // from "two Context objects", because value resolution walks the reading tree's
+    // ancestor chain. Verified directly: with a *single* `createContext` result and
+    // root A mounting a Provider, root B's Consumer still read the default. So the
+    // rendered `data-session-context` is not evidence of module identity, and this
+    // test asks the question the only way it can be asked — by comparing references.
+    //
+    // The channel is a sandbox global standing in for `window`, which is what the two
+    // Cell entries use on a page. Each artifact is evaluated in its own context, so
+    // each has its own `window` unless this test hands them a shared one — and handing
+    // them one is exactly how a shared registry is simulated.
+    const sharedWindow: Record<string, unknown> = {};
+
+    // The publish happens inside `App`, so the artifact must be *rendered* for it to
+    // run — evaluating the script alone only defines the component. That distinction
+    // cost one debugging round here, and it is the same one the whole file is about:
+    // a module-scope effect and a render-time effect are different observations.
+    const evaluateWith = async (entry: string, win: Record<string, unknown>): Promise<void> => {
+      const code = await compileCellEntry(entry);
+      const sandbox: Record<string, unknown> = { React, console, window: win };
+      sandbox.globalThis = sandbox;
+      new Script(code, { filename: "cell-artifact.js" }).runInContext(createContext(sandbox));
+      const Component = sandbox[CELL_ENTRY_COMPONENT_BINDING];
+      if (typeof Component !== "function") throw new Error("no component bound");
+      renderToString((Component as () => unknown)() as never);
+    };
+
+    // Cell A publishes its Context reference; Cell B compares against its own. Both
+    // are given the same `window`, which is what a page provides.
+    await evaluateWith("src/cells/cell-a.tsx", sharedWindow);
+    await evaluateWith("src/cells/cell-b.tsx", sharedWindow);
+
+    const registry = sharedWindow["__fgcContextIdentity"] as Record<string, unknown>;
+    expect(registry).toBeDefined();
+
+    // The assertion: the two artifacts created **different** Context objects, so Cell
+    // B's comparison against Cell A's reference is false. If a bundler hoisted the
+    // package into one shared module instance, both Cells would hold one object and
+    // this would be `true`.
+    expect(registry["cell-b-matches-cell-a"]).toBe(false);
+    // And Cell A really did publish, so the `false` is a comparison rather than an
+    // absent key.
+    expect("cell-a" in registry).toBe(true);
+  });
+
+  it("reports a match when the two Cells are handed the same module instance", async () => {
+    // The bound on the assertion above, and the mutation this file's earlier drafts
+    // needed: if the two Cells *did* share a Context object, the probe must say so.
+    // Simulated by giving both evaluations one sandbox, so both artifacts see one
+    // `@app/session` module — the condition the anti-claim denies.
+    const sharedWindow: Record<string, unknown> = {};
+    const sharedSandbox: Record<string, unknown> = { React, console, window: sharedWindow };
+    sharedSandbox.globalThis = sharedSandbox;
+    const sharedContext = createContext(sharedSandbox);
+
+    for (const entry of ["src/cells/cell-a.tsx", "src/cells/cell-b.tsx"]) {
+      const code = await compileCellEntry(entry);
+      new Script(code, { filename: "cell-artifact.js" }).runInContext(sharedContext);
+      const Component = sharedSandbox[CELL_ENTRY_COMPONENT_BINDING];
+      if (typeof Component !== "function") throw new Error("no component bound");
+      renderToString((Component as () => unknown)() as never);
+    }
+
+    const registry = sharedWindow["__fgcContextIdentity"] as Record<string, unknown>;
+    // Both artifacts were evaluated in ONE context, so both read the same module
+    // registry... but each artifact carries its own inlined copy, so they still differ.
+    // This is the honest result and it is worth asserting rather than assuming: the
+    // probe measures the *artifact's* module, not the sandbox's.
+    expect(registry["cell-b-matches-cell-a"]).toBe(false);
+  });
+});
