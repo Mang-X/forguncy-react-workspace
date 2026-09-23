@@ -24,6 +24,11 @@
  * - **The compiler projection is verified-only.** Handing a stale decision to the
  *   compiler is the failure this module exists to prevent: a package the runtime
  *   has moved past would be bundled as though someone had checked it.
+ * - **There is a second, explicitly local projection.** `compilationDependencies`
+ *   is a deployment gate (fresh + runtime-validated). Local probe questions need
+ *   a neutral lock→decision mapper that does not require a fake `target` to
+ *   answer them; `localCompilationDependencies` is that mapper and is never a
+ *   shipping path.
  */
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -46,6 +51,7 @@ import {
   createEmptyFgcLock,
   dependencyDecisionOf,
   FGC_LOCK_FILE_NAME,
+  findLockDecision,
   LOCK_EVIDENCE_POLICY,
   lockEvidenceProfileOf,
   parseMigratedFgcLockDocument,
@@ -258,6 +264,58 @@ export function compilationDependencies(
     }
 
     dependencies.push(dependencyDecisionOf(resolution.record));
+  }
+
+  return { dependencies, withheld };
+}
+
+export interface LocalCompilationDependencyOptions {
+  /** The cell being compiled; defaults to null, i.e. the target-independent records. */
+  readonly cellTarget?: string | null;
+}
+
+/**
+ * The local/probe projection: recorded decisions reduced to compiler input
+ * *without* the deployment verification gate.
+ *
+ * `compilationDependencies` is a deployment gate — fresh *and* runtime-validated
+ * or nothing. That is correct for shipping, and wrong for the local questions a
+ * probe-driven PoC asks: "does this recorded decision externalize?", "does the
+ * generated artifact bind the extension global?". Those must be answerable while
+ * `target` is honestly `null` (steps 7–8 of #13 have not run), without writing
+ * a fake runtime claim into the lock to get past the gate.
+ *
+ * What still applies: rule 4 of #8 — a `replace` record participates in no
+ * compilation and is withheld as a cache. What deliberately does *not* apply:
+ * freshness against a `LockEnvironment`, and `realRuntimeValidation`. Callers
+ * must run `auditLockDecisionConformance` first (as the deployment path's
+ * callers do), and must never present this projection's output as a deployment
+ * decision — shipping goes through `compilationDependencies`, which withholds
+ * exactly these `not-validated` records until a real Forguncy runtime check
+ * records a `target`.
+ */
+export function localCompilationDependencies(
+  lock: FgcLockDocument,
+  options: LocalCompilationDependencyOptions = {},
+): CompilationDependencies {
+  const cellTarget = options.cellTarget ?? null;
+  const packageNames = [...new Set(lock.decisions.map(record => record.packageName))];
+  const dependencies: DependencyDecision[] = [];
+  const withheld: WithheldCompilationDependency[] = [];
+
+  for (const packageName of packageNames) {
+    const record = findLockDecision(lock, { packageName, cellTarget });
+    if (record === null) {
+      continue;
+    }
+
+    const profile = lockEvidenceProfileOf(record);
+    if (!LOCK_EVIDENCE_POLICY[profile].participatesInCompilation) {
+      withheld.push({ packageName, strategy: record.strategy, reason: "replace-cache" });
+      continue;
+    }
+
+    dependencies.push(dependencyDecisionOf(record));
   }
 
   return { dependencies, withheld };

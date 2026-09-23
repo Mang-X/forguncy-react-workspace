@@ -21,6 +21,7 @@ import {
 import {
   compilationDependencies,
   fgcLockPath,
+  localCompilationDependencies,
   readFgcLock,
   removeLockDecision,
   upsertLockDecision,
@@ -377,5 +378,72 @@ describe("compiler projection", () => {
     const empty: FgcLockDocument = { schemaVersion: FGC_LOCK_SCHEMA_VERSION, decisions: [] };
 
     expect(compilationDependencies(empty, fixtureEnvironment())).toEqual({ dependencies: [], withheld: [] });
+    expect(localCompilationDependencies(empty)).toEqual({ dependencies: [], withheld: [] });
+  });
+});
+
+describe("local compilation projection", () => {
+  // The deployment gate withholds a locally probed record (target: null) as
+  // not-validated. The local projection must still hand it to the compiler —
+  // that is the whole point: local PoC questions are answerable without a
+  // fake runtime claim in the lock.
+  it("projects a not-validated record the deployment gate would withhold", async () => {
+    const locallyProbed: LockedDependencyDecision = {
+      ...inlineRecord,
+      target: null,
+      probe: { status: "passed", fingerprint: CELL_FINGERPRINT, versionIndependent: false },
+    };
+    const lock: FgcLockDocument = { schemaVersion: FGC_LOCK_SCHEMA_VERSION, decisions: [locallyProbed] };
+    const environment = fixtureEnvironment({ probeFingerprints: { dayjs: CELL_FINGERPRINT } });
+
+    const gated = compilationDependencies(lock, environment);
+    expect(gated.dependencies).toEqual([]);
+    expect(gated.withheld).toEqual([
+      {
+        packageName: "dayjs",
+        strategy: "inline",
+        reason: "not-verified",
+        stalenessReasons: [],
+        realRuntimeValidation: "not-validated",
+      },
+    ]);
+
+    const local = localCompilationDependencies(lock);
+    expect(local.withheld).toEqual([]);
+    expect(local.dependencies).toEqual([{ strategy: "inline", packageName: "dayjs" }]);
+  });
+
+  it("still withholds replace as a cache — rule 4 of #8 applies locally too", async () => {
+    const lock = await readFixture();
+
+    const { dependencies, withheld } = localCompilationDependencies(lock);
+
+    expect(withheld).toEqual([
+      { packageName: "react-router-dom", strategy: "replace", reason: "replace-cache" },
+      { packageName: "some-amd-package", strategy: "replace", reason: "replace-cache" },
+    ]);
+    expect(dependencies.map(decision => decision.packageName)).toEqual([
+      "@tanstack/react-query",
+      "es-toolkit",
+      "react",
+    ]);
+  });
+
+  it("hands the compiler #4's decision model, same shape as the gate", async () => {
+    const lock = await readFixture();
+
+    const { dependencies } = localCompilationDependencies(lock);
+
+    expect(dependencies[0]).toEqual({
+      strategy: "extension",
+      packageName: "@tanstack/react-query",
+      libraryId: "tanstack-query",
+      globalName: "TanStackQuery",
+    });
+    for (const decision of dependencies) {
+      expect(Object.keys(decision)).not.toContain("probe");
+      expect(Object.keys(decision)).not.toContain("evidence");
+      expect(Object.keys(decision)).not.toContain("target");
+    }
   });
 });

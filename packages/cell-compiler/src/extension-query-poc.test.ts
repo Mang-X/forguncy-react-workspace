@@ -9,28 +9,34 @@
  * #13's steps 1–6 are what this file executes: the example carries a real
  * `@tanstack/react-query` source dependency (for authored-source types and the
  * editor), one recorded `extension` decision — read from the example's own
- * `fgc.lock.json`, projected through `compilationDependencies` after the
- * conformance audit — maps it to `libraryId: tanstack-query` / global
- * `TanStackQuery`, the compiler externalizes every import of it to the
- * generated extension module, `frontendLibraries` is derived from that decision
- * rather than written by hand, and the artifact is asserted — several ways — to
- * contain no npm implementation of the package. The example's own self-check
+ * `fgc.lock.json`, conformance-audited, then projected — maps it to
+ * `libraryId: tanstack-query` / global `TanStackQuery`, the compiler
+ * externalizes every import of it to the generated extension module,
+ * `frontendLibraries` is derived from that decision rather than written by
+ * hand, and the artifact is asserted — several ways — to contain no npm
+ * implementation of the package. The example's own self-check
  * (`client=pass | provider=pass | query=pass`) is what turns "the wiring works"
  * into an assertion: every verdict is computed from the objects the *page
  * global* handed the cell, so a cell that bundled its own copy, resolved the
  * wrong identity, or silently read `undefined` renders `fail`.
  *
- * The lock chain, not a hand-written constant (PR review of #61): every
- * compile path reads `examples/extension-query/fgc.lock.json` through
- * `readFgcLock`, checks it against the verified extension catalog, projects it
- * onto `dependencies` via `compilationDependencies` with a real
- * `LockEnvironment` (install-graph versions, recomposed probe fingerprint,
- * installed extension version), and only then calls `compileCell`. Version
- * alignment — the package.json pin, the install graph, the lock record and the
- * environment's extension version — is asserted equal; a stale environment
- * (simulated extension upgrade) withholds the decision and the compile is
- * rejected `unresolved-dependency-decision`, which is the fail-closed path the
- * lock exists to enforce.
+ * Two projections, two questions (PR review of #61, P1): the committed lock
+ * records `target: null` because #13 steps 7–8 have not run — a real Forguncy
+ * runtime validation has not happened, and faking a target would make the
+ * deployment gate treat a local probe as runtime evidence. So:
+ *
+ * - The **deployment gate** (`compilationDependencies`) is asserted to
+ *   *withhold* this record with `realRuntimeValidation: "not-validated"` —
+ *   both when the environment is otherwise fresh and when the installed
+ *   extension has moved (`extension-version-changed`). Shipping stays blocked
+ *   until a real-page check records a target.
+ * - The **local projection** (`localCompilationDependencies`, after the same
+ *   conformance audit) is what feeds `compileCell`, so "recorded decision →
+ *   externalization" is still proven end-to-end without borrowing the gate or
+ *   writing runtime evidence into the lock.
+ *
+ * Version alignment — the package.json pin, the install graph, the lock record
+ * and the environment's extension version — is asserted equal on `5.102.8`.
  *
  * Shared identity — #13's reason this package is `extension` and not `inline` —
  * is tested explicitly rather than inferred: the last test compiles the example
@@ -60,6 +66,7 @@ import {
   compilationDependencies,
   composeProbeFingerprint,
   conformanceErrors,
+  localCompilationDependencies,
   readFgcLock,
   recordedPackageNames,
   resolveInstalledVersions,
@@ -123,18 +130,35 @@ async function environmentFor(overrides: Partial<LockEnvironment> = {}): Promise
   };
 }
 
-/**
- * The example's dependencies, projected from the lock exactly as a real
- * compile would: read → conformance → environment → `compilationDependencies`.
- */
-async function dependenciesFromLock(
-  environment?: LockEnvironment,
-): Promise<{ dependencies: readonly DependencyDecision[]; withheld: readonly WithheldCompilationDependency[] }> {
+/** Read + conformance-audit the example's lock, asserting no conformance errors. */
+async function conformedLock() {
   const lock = await readFgcLock(exampleRoot);
-
   const diagnostics = auditLockDecisionConformance(lock, { extensionCatalog: EXTENSION_CATALOG });
   expect(conformanceErrors(diagnostics).map(diagnostic => diagnostic.code)).toEqual([]);
+  return lock;
+}
 
+/**
+ * The local/probe projection the PoC compiles through: conformance-audited
+ * lock → `localCompilationDependencies` → `compileCell`. Explicitly *not* the
+ * deployment gate — see the gate tests below.
+ */
+async function dependenciesFromLock(): Promise<{
+  dependencies: readonly DependencyDecision[];
+  withheld: readonly WithheldCompilationDependency[];
+}> {
+  return localCompilationDependencies(await conformedLock());
+}
+
+/**
+ * The deployment gate a real ship path runs: conformance-audited lock +
+ * environment → `compilationDependencies`. Withholds while `target` is null.
+ */
+async function deploymentGate(environment?: LockEnvironment): Promise<{
+  dependencies: readonly DependencyDecision[];
+  withheld: readonly WithheldCompilationDependency[];
+}> {
+  const lock = await conformedLock();
   return compilationDependencies(lock, environment ?? (await environmentFor()));
 }
 
@@ -362,33 +386,46 @@ describe("extension tanstack-query PoC (#13)", () => {
     expect(environment.extensionVersions["tanstack-query"]).toBe(EXPECTED_VERSION);
   });
 
-  it("withholds the decision and refuses to compile when the installed extension moves", async () => {
-    // PR review of #61 point 2: freshness is what gates compilation. A page
-    // whose installed extension is no longer the one the probe validated
-    // against reports a different `extensionVersions` entry; the projection
-    // must withhold, and the compile must then be rejected rather than
-    // externalizing against an unverified decision.
-    const lock = await readFgcLock(exampleRoot);
-    const environment = await environmentFor({
-      extensionVersions: { "tanstack-query": "5.103.0" },
-    });
+  it("withholds the decision from the deployment gate until a real runtime check records a target", async () => {
+    // PR review of #61 P1: `target: null` is the honest state while #13 steps
+    // 7–8 have not run. The deployment gate must withhold on
+    // `realRuntimeValidation: "not-validated"` — not let a local probe through
+    // by borrowing a fake runtime claim.
+    const { dependencies, withheld } = await deploymentGate();
 
-    const projected = compilationDependencies(lock, environment);
-    expect(projected.dependencies).toEqual([]);
-    expect(projected.withheld).toContainEqual({
+    expect(dependencies).toEqual([]);
+    expect(withheld).toContainEqual({
       packageName: PACKAGE_NAME,
       strategy: "extension",
       reason: "not-verified",
-      stalenessReasons: ["extension-version-changed"],
-      realRuntimeValidation: "validated",
+      stalenessReasons: [],
+      realRuntimeValidation: "not-validated",
     });
 
-    const outcome = await compileWith(projected.dependencies);
+    const outcome = await compileWith(dependencies);
     expect(outcome.status).toBe("rejected");
     if (outcome.status !== "rejected") return;
     expect(outcome.diagnostics.map(diagnostic => diagnostic.code)).toContain(
       "unresolved-dependency-decision",
     );
+  });
+
+  it("still reports extension-version drift on the deployment gate, alongside not-validated", async () => {
+    // Freshness and runtime validation are separate axes (#8): a moved
+    // extension is a staleness reason *and* the record remains not-validated.
+    const environment = await environmentFor({
+      extensionVersions: { "tanstack-query": "5.103.0" },
+    });
+
+    const { dependencies, withheld } = await deploymentGate(environment);
+    expect(dependencies).toEqual([]);
+    expect(withheld).toContainEqual({
+      packageName: PACKAGE_NAME,
+      strategy: "extension",
+      reason: "not-verified",
+      stalenessReasons: ["extension-version-changed"],
+      realRuntimeValidation: "not-validated",
+    });
   });
 
   it("emits exactly one tanstack-query reference and no bundled npm implementation", async () => {
