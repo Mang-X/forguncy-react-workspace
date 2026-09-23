@@ -344,6 +344,40 @@ describe("runDependencyProbe: builtins named only in comments", () => {
  * are unused while the walk, which applies no tree-shaking, still reaches it — so a finding has
  * to be bounded by the artifact. These cases pin that bound and its bookkeeping fact.
  */
+describe("runDependencyProbe: files the build loaded by a path the root entry misses", () => {
+  it("scans a dependency's exports-subpath file, which the artifact contains", async () => {
+    // Reached only through `import "subpath-dep/sub"`: the dependency's own root entry resolves
+    // to `clean.js`, so a walk from that entry never sees `native.js`. The artifact does contain
+    // it, though, and `process.dlopen` is a call rather than an import — rolldown neither
+    // resolves nor fails on it, so nothing else would have caught this. Measured before the
+    // fix: `supports-deployment` with no rejection for an artifact that carries a `dlopen`.
+    const { report, assessment } = await probe("dependency-subpath-native", "subpath-host");
+
+    const finding = report.rejectionFindings.find(
+      entry => entry.signal === "node-filesystem-process-or-native-addon",
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.evidence.some(item => item.includes("native.js"))).toBe(true);
+    expect(assessment.status).toBe("supports-rejection-only");
+    // The file is in the artifact, so it is not miscounted as dropped.
+    expect(report.facts.find(fact => fact.name === "graph.files-shaken-out")?.value).toBe(0);
+  });
+
+  it("follows a `browser` redirect to the shim the build actually loads", async () => {
+    // `{"browser": {"fs": "./fs-shim.js"}}` means the browser build loads the shim, not `fs`.
+    // Treating the specifier as merely "redirected away" left the shim unscanned, and the
+    // `node:fs` it imports was never seen — measured as `supports-rejection-only` with an
+    // empty `rejectionFindings`, the state that justifies neither deployment nor a refusal.
+    const { report, assessment } = await probe("browser-redirect-native", "redirect-host");
+
+    const finding = report.rejectionFindings.find(
+      entry => entry.signal === "node-filesystem-process-or-native-addon",
+    );
+    expect(finding).toBeDefined();
+    expect(assessment.status).toBe("supports-rejection-only");
+  });
+});
+
 describe("runDependencyProbe: the artifact bound's path tests", () => {
   it("keeps a real package directory named `.fgc` inside the bound", async () => {
     // The bound's containment test must not special-case `.fgc` by name. The probe's scratch

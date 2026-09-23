@@ -571,9 +571,18 @@ export function selfReferenceResolver(manifest: Readonly<Record<string, unknown>
   const imports = manifest["imports"];
   const hasImportsMap = imports !== null && typeof imports === "object" && !Array.isArray(imports);
 
-  // Nothing to resolve: no `exports` to self-reference through and no `imports` map.
+  // A `browser` map redirects bare specifiers to files in this package, which is a third
+  // independent reason the walk needs a resolver — and one an earlier version missed: gating on
+  // `exports`/`imports` alone returned `null` here, so a `{"browser":{"fs":"./fs-shim.js"}}`
+  // package never had its redirect followed. Measured: the build failed on the `node:fs` the
+  // shim imports while the report filed no rejection.
+  const browser = manifest["browser"];
+  const hasBrowserMap = browser !== null && typeof browser === "object" && !Array.isArray(browser);
+
+  // Nothing to resolve: no `exports` to self-reference through, no `imports` map and no
+  // `browser` map.
   const hasExports = "exports" in manifest;
-  if (!hasExports && !hasImportsMap) {
+  if (!hasExports && !hasImportsMap && !hasBrowserMap) {
     return null;
   }
 
@@ -606,6 +615,20 @@ export function selfReferenceResolver(manifest: Readonly<Record<string, unknown>
         : packageName === null
           ? []
           : resolveSelfReferenceSubpath(manifest, packageName, subpath);
+    },
+    redirectedSpecifier(specifier: string): string | null {
+      const browser = manifest["browser"];
+      if (browser === null || typeof browser !== "object" || Array.isArray(browser)) {
+        return null;
+      }
+      const replacement = (browser as Record<string, unknown>)[specifier];
+      // A string is a redirect to another module; `false` is an exclusion, which is not a file
+      // to follow. Anything else (a nested map) is not a target this walk can name.
+      if (typeof replacement !== "string") {
+        return null;
+      }
+      const normalized = normalizeTarget(replacement);
+      return normalized === UNUSABLE_TARGET ? null : normalized;
     },
   };
 }

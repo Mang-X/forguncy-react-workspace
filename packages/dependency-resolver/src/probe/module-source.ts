@@ -530,7 +530,7 @@ async function resolveFileLike(candidate: string): Promise<string | undefined> {
  * was never filed — while rolldown bundled it. A file named `..d/x.js` or `...triple.js` has
  * the same shape.
  */
-function isInside(directory: string, candidate: string): boolean {
+export function isInside(directory: string, candidate: string): boolean {
   const path = relative(directory, candidate);
   if (path.length === 0) {
     return true;
@@ -658,6 +658,26 @@ async function resolveReference(
     return [resolved];
   }
 
+  // A `browser` map may redirect a **bare specifier** to a module in this package
+  // (`{"browser": {"fs": "./fs-shim.js"}}`). The redirect target is a file the browser build
+  // loads, so the walk has to follow it: treating the specifier as merely "redirected away"
+  // left the target unscanned, and the artifact's `node:fs` — imported by the shim itself —
+  // was never seen. Measured: the build failed on that builtin while the report was
+  // `supports-rejection-only` with no rejection finding, the state that tells a consumer
+  // nothing.
+  //
+  // Checked before the self-reference branch because a redirect is the more specific answer:
+  // the manifest names this specifier explicitly.
+  const redirected = selfReference === null ? null : selfReference.redirectedSpecifier(specifier);
+  if (redirected !== null) {
+    const candidate = join(packageDirectory, ...redirected.split("/"));
+    if (!isInside(packageDirectory, candidate)) {
+      return [];
+    }
+    const file = await resolveFileLike(candidate);
+    return file === undefined ? [] : [file];
+  }
+
   // A package may import itself by name, and a bundler resolves that through the
   // package's own `exports` map exactly as it resolves a consumer's import. Not
   // following it makes this walk disagree with the bundler — measured on a package
@@ -737,6 +757,11 @@ export interface SelfReferenceResolver {
   subpathOf(specifier: string): string | null;
   /** The package-relative files that subpath publishes — every browser-resolvable alternative, or none. */
   resolveSubpath(subpath: string): readonly string[];
+  /**
+   * The package-relative file a `browser` map redirects this **bare specifier** to, or `null`
+   * when the map does not mention it (or excludes it with `false`, which is not a file).
+   */
+  redirectedSpecifier(specifier: string): string | null;
 }
 
 /**
@@ -805,6 +830,40 @@ export interface ReachableSourceResult {
  * the tree": those are opposite answers, and conflating them is the defect this
  * function exists to prevent.
  */
+/**
+ * Reads one file into a {@link PackageSourceFile}, or `undefined` when it cannot be read.
+ *
+ * Exported because reachability is not the only way a file enters a scan: the artifact's own
+ * file list is the *positive* source for a file the build reached through a path the package's
+ * root entry does not lead to (a dependency's `exports` subpath, a `browser` specifier
+ * redirect). A caller holding such a path needs the same read/parse/mask treatment, and a
+ * second implementation of it would be a second answer to "what does this file say".
+ */
+export async function readSourceFile(
+  packageDirectory: string,
+  absolutePath: string,
+): Promise<PackageSourceFile | undefined> {
+  let source: string;
+  try {
+    source = await readFile(absolutePath, "utf8");
+  } catch {
+    return undefined;
+  }
+  const analysis = analyzeModuleSource(source);
+  return {
+    absolutePath,
+    relativePath: toPortableRelative(packageDirectory, absolutePath),
+    source,
+    // Masked on both paths, so the field means what its name says. Leaving it raw on the
+    // unparseable path would let `runtime-pattern-scan` — which reads this field — see comment
+    // text for that one file, undoing the masking exactly where the parse could not supply
+    // ranges. `sourceWithoutCommentsLenient` needs no parse, so the two paths differ only in
+    // how the ranges were found.
+    masked: sourceWithoutCommentsLenient(source),
+    analysis,
+  };
+}
+
 export async function collectReachableSourceFiles(
   packageDirectory: string,
   entries: readonly string[],
@@ -855,26 +914,12 @@ export async function collectReachableSourceFiles(
         continue;
       }
 
-      let source: string;
-      try {
-        source = await readFile(file, "utf8");
-      } catch {
+      const read = await readSourceFile(packageDirectory, file);
+      if (read === undefined) {
         continue;
       }
-
-      const analysis = analyzeModuleSource(source);
-      byAbsolutePath.set(file, {
-        absolutePath: file,
-        relativePath: toPortableRelative(packageDirectory, file),
-        source,
-        // Masked on both paths, so the field means what its name says. Leaving it raw on
-        // the unparseable path made `runtime-pattern-scan` — which reads this field — see
-        // comment text for that one file, undoing the masking exactly where the parse could
-        // not supply ranges. `sourceWithoutCommentsLenient` needs no parse, so the two
-        // paths differ only in how the ranges were found.
-        masked: sourceWithoutCommentsLenient(source),
-        analysis,
-      });
+      const { analysis } = read;
+      byAbsolutePath.set(file, read);
 
       if (analysis === undefined) {
         // Unparseable: the file is part of the graph but its imports are unknowable,

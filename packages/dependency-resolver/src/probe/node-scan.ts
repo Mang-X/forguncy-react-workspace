@@ -69,7 +69,7 @@ import {
 import type { ResolvedPackageIdentity } from "./identity";
 import { locateManifest } from "./identity";
 import type { PackageSourceFile } from "./module-source";
-import { collectReachableSourceFiles, sourceWithoutCommentsLenient } from "./module-source";
+import { collectReachableSourceFiles, isInside, readSourceFile, sourceWithoutCommentsLenient } from "./module-source";
 import { compareStrings } from "./scan-utils";
 
 /**
@@ -389,6 +389,41 @@ function portableEvidence(specifier: string): string {
  * rolldown descends into the module and fails on the builtin itself, which is why the
  * asymmetry is easy to miss.
  */
+/**
+ * The files of one graph member to scan for findings.
+ *
+ * With an artifact: the package's files that the build **actually included**, taken from the
+ * bundler's own module list rather than from a walk. That is what makes a dependency's
+ * `exports`-subpath file and a `browser`-redirect target visible to the scan — measured, both
+ * were missed while the scan walked only from the package's root entry.
+ *
+ * Without an artifact (a failed build): the reachable set, which is the honest answer when
+ * there is nothing to bound by.
+ *
+ * Either way the files are attributed to the package whose directory contains them, so a file
+ * the bundler pulled in from somewhere else is not reported under this package's name.
+ */
+async function filesToScan(
+  package_: GraphPackage,
+  reachableFiles: readonly PackageSourceFile[],
+  bundledFiles: ReadonlySet<string> | undefined,
+): Promise<readonly PackageSourceFile[]> {
+  if (bundledFiles === undefined) {
+    return reachableFiles;
+  }
+  const fromArtifact: PackageSourceFile[] = [];
+  for (const absolutePath of bundledFiles) {
+    if (!isInside(package_.directory, absolutePath)) {
+      continue;
+    }
+    const file = await readSourceFile(package_.directory, absolutePath);
+    if (file !== undefined) {
+      fromArtifact.push(file);
+    }
+  }
+  return fromArtifact.sort((left, right) => compareStrings(left.relativePath, right.relativePath));
+}
+
 export async function observeNodeBuiltins(
   projectRoot: string,
   identity: ResolvedPackageIdentity,
@@ -441,16 +476,27 @@ export async function observeNodeBuiltins(
 
     reachableFileCount += reachable.files.length;
 
-    // Bound **every** graph member by the artifact. The set holds absolute paths, so it answers
-    // the question for a transitive dependency as readily as for the probed package — and it
-    // has to: a dependency is bundled or dropped by the same build, and bounding only the root
-    // left a shaken-out dependency's `dlopen` producing a rejection (measured). That is the
-    // same false rejection this bound exists to remove, one level of graph indirection out.
-    for (const file of reachable.files) {
-      if (bundledFiles !== undefined && !bundledFiles.has(file.absolutePath)) {
-        skippedShakenOut += 1;
-        continue;
-      }
+    // The files this package actually contributes to the artifact.
+    //
+    // Reachability from the package's **own root entry** is not the same set, and using it as
+    // the scan source loses a file the build genuinely loaded. Two measured shapes:
+    //
+    // - a dependency's `exports` subpath (`import "dep/sub"` where `.` resolves to a clean file
+    //   and `./sub` to a native one) — rolldown bundles `dep/native.js`, but a walk from `dep`'s
+    //   root entry only ever sees `clean.js`, so the `dlopen` in `native.js` was never scanned
+    //   and the package reported `supports-deployment`;
+    // - a `browser` field redirecting a bare specifier to a module that itself needs `node:fs`
+    //   — the redirect target is loaded by the build but is not reachable from the root entry
+    //   either, so the report said `supports-rejection-only` with **no** rejection finding.
+    //
+    // So when a build ran, the artifact's own file list is the **positive** source for this
+    // package: those files exist in the artifact by definition, so a finding drawn from one is
+    // a statement about the artifact. Reachability still supplies the files for the
+    // no-artifact case, and still bounds *which* of a package's files can be attributed to it.
+    const scanned = await filesToScan(package_, reachable.files, bundledFiles);
+    skippedShakenOut += Math.max(0, reachable.files.length - scanned.length);
+
+    for (const file of scanned) {
       for (const specifier of nodeOnlySpecifiersOf(file, package_.manifest)) {
         let set = builtinHits.get(specifier);
         if (set === undefined) {

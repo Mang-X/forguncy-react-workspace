@@ -52,12 +52,21 @@ importers:
 
   examples/workspace-package:
     dependencies:
+      '@app/session':
+        specifier: workspace:*
+        version: link:packages/session
       '@app/tokens':
         specifier: workspace:*
         version: link:packages/tokens
       '@app/ui':
         specifier: workspace:*
         version: link:packages/ui
+
+  examples/workspace-package/packages/session:
+    dependencies:
+      react:
+        specifier: 19.2.7
+        version: 19.2.7
 
   examples/workspace-package/packages/tokens: {}
 

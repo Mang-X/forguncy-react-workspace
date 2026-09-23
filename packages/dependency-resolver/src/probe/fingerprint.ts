@@ -110,8 +110,12 @@ function stableScalar(value: string): string {
  *   and the bound applies to **every** graph member. Each of those three was a false negative:
  *   a bundled `src/.fgc/x.js` or `..helper.js` lost its rejection, and a shaken-out dependency
  *   kept one.
+ * - `7` — a build's own file list is the **positive** scan source per graph member, not only a
+ *   filter on what the package's root entry reaches, and the walk follows a `browser` map's
+ *   bare-specifier redirect. Changes findings for a dependency reached through an `exports`
+ *   subpath and for a redirect target — measured, both lost a rejection the artifact justified.
  */
-export const PROBE_ANALYSIS_REVISION = 6;
+export const PROBE_ANALYSIS_REVISION = 7;
 
 export interface ComposeProbeFingerprintInput {
   /** Which probe ran, e.g. `inline-bundle`. */
