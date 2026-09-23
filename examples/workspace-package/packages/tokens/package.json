@@ -1,0 +1,16 @@
+{
+  "name": "@app/tokens",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "//sideEffects": [
+    "Declared so the bundler is allowed to drop this package's unused exports.",
+    "#15's tree-shaking criterion is asserted against a compiled artifact, so the",
+    "package has to state the fact the bundler reads rather than rely on a",
+    "default it happens to get."
+  ],
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

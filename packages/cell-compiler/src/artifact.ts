@@ -53,6 +53,21 @@ import {
   frontendLibraryIds,
 } from "./frontend-libraries";
 import { auditCellSource } from "./source-guard";
+// The shared specifier/decision primitives. Imported for this module's own use *and*
+// re-exported below: the extraction to a leaf module is an internal restructuring, so
+// every existing caller of the boundary keeps working.
+import {
+  dependencyDecisionsFor,
+  findDependencyDecision,
+  isSourceSpecifier,
+  packageNameOfSpecifier,
+} from "./specifier";
+import type {
+  WorkspaceGraph,
+  WorkspaceSourceAudit,
+  WorkspaceSourceDiagnostic,
+} from "./workspace-source";
+import { auditWorkspaceSource, formatWorkspaceSourceAudit } from "./workspace-source";
 
 // ---------------------------------------------------------------------------
 // The finalized public interfaces
@@ -106,6 +121,23 @@ export interface BundledCellModule {
   /** Files the bundler emitted next to `code`. Any entry breaks the single-artifact contract. */
   readonly emittedAssets?: readonly string[];
   /**
+   * The bare specifiers the build's module graph actually contained.
+   *
+   * What #14's workspace audit calls the entry's module ids: the set it traces a
+   * source closure from. A *superset* of the entry file's own imports is safe and
+   * deliberate here — the bundler reports every bare specifier some module in the
+   * graph asked for, and every such module is reachable from the entry (otherwise
+   * it would not be in the graph), so the closure over this set is the entry's
+   * closure. Reporting only the entry file's imports would instead require the
+   * bundler to attribute an import to a module, which is a different question the
+   * artifact contract has no use for.
+   *
+   * Optional because a fixture bundler has no module graph to report, and the audit
+   * then abstains (`usage: "unstated"`) rather than claiming the cell imports
+   * nothing — #14's rule that an absent input is not an empty one.
+   */
+  readonly referencedSpecifiers?: readonly string[];
+  /**
    * Findings in #6's vocabulary that only the build could observe.
    *
    * Optional because the report fields above cover most artifact violations on
@@ -137,6 +169,32 @@ export interface CellBundlingRequest {
 }
 
 /**
+ * The bare specifiers the entry's module graph contains, without generating code.
+ *
+ * A separate call from {@link CellBundlerPort.bundle} because of *when* it is needed
+ * rather than what it computes: #14 requires a reachable workspace cycle to fail
+ * "before bundling rather than to be resolved by whichever traversal happens to run
+ * first", and the cycle is only visible once the entry's imports are known. Asking
+ * the bundler for the graph first is what lets that refusal happen before any code
+ * is generated — a bundler that could only answer after building would make the
+ * ordering requirement unsatisfiable, not merely slower.
+ *
+ * `dependencies` is carried, and that is not a convenience: interception *is* a
+ * resolution decision. A `host`- or `extension`-decided package resolves to the
+ * plan's virtual module instead of to `node_modules`, which both keeps the local
+ * source from being traversed and keeps an uninstalled host package from failing
+ * resolution. A pass without the decisions would report a different specifier set
+ * than the build — the exact disagreement this preflight exists to avoid.
+ *
+ * `componentBinding` is the one field genuinely absent, because nothing is bound:
+ * binding is what `bundle` does.
+ */
+export interface CellResolveRequest {
+  readonly entry: string;
+  readonly dependencies: readonly DependencyDecision[];
+}
+
+/**
  * The module-resolution and code-generation half of the pipeline.
  *
  * A port rather than a concrete dependency because #6 mandates Vite+/Rolldown
@@ -146,6 +204,23 @@ export interface CellBundlingRequest {
  */
 export interface CellBundlerPort {
   readonly bundle: (request: CellBundlingRequest) => Promise<BundledCellModule>;
+  /**
+   * The entry's bare specifiers, resolved but not built. **Optional.**
+   *
+   * It exists for one caller: a compile that was given a workspace graph, where
+   * #14's two fatal findings have to be observable *before* anything is built — see
+   * {@link compileCell}. Without a graph there is no workspace audit to run, so a
+   * port that only implements `bundle` is complete for every #6 caller, and
+   * requiring the method would have changed that public boundary for no runtime
+   * benefit.
+   *
+   * Optional is not a licence to fall back silently. When a graph *is* supplied and
+   * this method is absent, {@link compileCell} refuses the compile with
+   * `bundler-failure` rather than auditing after the build: the pre-bundle guarantee
+   * is mandatory exactly when a workspace graph makes it meaningful, and a quiet
+   * fallback would reintroduce the defect the split exists to prevent.
+   */
+  readonly resolveEntrySpecifiers?: (request: CellResolveRequest) => Promise<readonly string[]>;
 }
 
 /**
@@ -182,6 +257,27 @@ export interface CompileCellOptions {
    * belongs to the budget Issue.
    */
   readonly codeBudgetCharacters?: number;
+  /**
+   * The workspace graph this compile resolves against, when the project has one.
+   *
+   * Take it from {@link loadPnpmWorkspaceGraph} — `(await loadPnpmWorkspaceGraph({ root })).graph` —
+   * which reads it from the project's own `pnpm-workspace.yaml` and member manifests.
+   * The parameter's whole point is that the compiler is handed the *real* Vite+/pnpm
+   * graph rather than a hand-written one, which is the criterion #14 moved to #15.
+   *
+   * Pass the **raw graph**, not the loader's index: the audit indexes it itself, so
+   * a graph whose own coherence is broken (a duplicated name, a machine-specific
+   * directory) reports that finding as part of the same result instead of having it
+   * silently dropped. The loader returns both together for exactly this reason.
+   *
+   * Absent means "the caller did not state a graph", and the workspace audit then
+   * abstains exactly as #14 requires — no claim is made about workspace packages,
+   * which is the #6 behaviour rather than a claim that none are involved. Passing
+   * the graph does **not** change how modules resolve: the bundler still resolves
+   * through `node_modules`, and this option adds an *audit* of the result, never a
+   * second resolver (#6 forbids one).
+   */
+  readonly workspace?: WorkspaceGraph;
 }
 
 /**
@@ -190,10 +286,38 @@ export interface CompileCellOptions {
  * Not `CompileCellResult | diagnostics`: a caller that has to test whether
  * `code` is present will eventually forget, and the failure mode of forgetting is
  * writing an empty cell.
+ *
+ * `workspace` is present only when the caller supplied a graph *and* the audit ran
+ * to completion. It is a separate field rather than more `CellArtifactDiagnostic`s
+ * because #14's vocabulary is a different one and the two must not be collapsed:
+ * `workspace-source.ts` states that wiring the audit into artifact assembly would
+ * "decide by accident" how the two vocabularies compose, and the answer chosen here
+ * is that they do not — an artifact diagnostic says the *artifact* breaks a #6
+ * guarantee, while a workspace diagnostic says something about the *project's*
+ * declarations. A caller reading one report sees both without one being restated in
+ * the other's terms.
  */
 export type CompileCellOutcome =
-  | { readonly status: "compiled"; readonly artifact: CompileCellResult; readonly entryKind: CellEntryKind }
-  | { readonly status: "rejected"; readonly diagnostics: readonly CellArtifactDiagnostic[] };
+  | {
+      readonly status: "compiled";
+      readonly artifact: CompileCellResult;
+      readonly entryKind: CellEntryKind;
+      /** #14's audit of the graph this compile was given, when one was given. */
+      readonly workspace?: WorkspaceSourceAudit;
+    }
+  | {
+      readonly status: "rejected";
+      readonly diagnostics: readonly CellArtifactDiagnostic[];
+      /**
+       * The workspace audit that caused the rejection, when one did.
+       *
+       * Set on the paths #14 requires to fail *before* bundling. Present so a caller
+       * does not have to re-run the audit to read the finding that stopped the
+       * build; absent when the rejection came from the artifact audits, which keep
+       * using the artifact vocabulary alone.
+       */
+      readonly workspace?: WorkspaceSourceAudit;
+    };
 
 /**
  * The first line of every artifact.
@@ -206,35 +330,25 @@ export type CompileCellOutcome =
 export const CELL_ARTIFACT_BANNER =
   "/* Generated by @forguncy-react-workspace/cell-compiler. Do not edit: repository source is authoritative, this is deployment output. */";
 
-/** The package a bare or scoped specifier resolves to, so decisions can be matched by package. */
-export function packageNameOfSpecifier(specifier: string): string {
-  if (specifier.startsWith(".") || specifier.startsWith("/")) return specifier;
-  const segments = specifier.split("/");
-  if (specifier.startsWith("@")) return segments.slice(0, 2).join("/");
-  return segments[0] ?? specifier;
-}
-
 /**
- * True when a specifier names a file rather than a module id.
+ * The specifier and decision-lookup primitives, re-exported from their own module.
  *
- * Exported because two layers have to give the same answer: this one decides between
- * "a leftover import" and "an unresolved decision" with it, and the workspace
- * contract (#14) decides between "workspace source" and "a published dependency"
- * with the same test. Restating it in the second place would be two answers to one
- * question, which is the shape #9's fourth review round found in `findDecision`.
+ * They live in `specifier.ts` because this boundary now *consumes* #14's workspace
+ * audit, and the workspace contract imports these same four functions — importing
+ * the audit here while they stayed defined here would have made the two modules a
+ * cycle. See that module's header for why a cycle was not acceptable even though it
+ * turned out to be survivable.
  *
- * Exact for relative and absolute paths, which is the whole claim: a *named*
- * workspace package (`@scope/ui`) is indistinguishable here from a published one,
- * because the artifact layer has no workspace manifest — #14's workspace contract
- * asks that question with `workspacePackageFor` instead, which is what holding a
- * manifest buys. A specifier the bundler resolves through an alias (`#internal`, a
- * `resolve.alias` target) is outside this test in either direction: it is not a
- * path, so both layers treat it as a module id, which is why a graph that carries
- * one has to carry the id the bundler actually resolves rather than the alias.
+ * Re-exported rather than merely moved so this package's public surface and every
+ * existing caller are unchanged: the extraction is an internal restructuring, and a
+ * caller that imported `packageNameOfSpecifier` from here keeps working.
  */
-export function isSourceSpecifier(specifier: string): boolean {
-  return specifier.startsWith(".") || specifier.startsWith("/");
-}
+export {
+  dependencyDecisionsFor,
+  findDependencyDecision,
+  isSourceSpecifier,
+  packageNameOfSpecifier,
+} from "./specifier";
 
 /**
  * The bindings a `host` dependency may be mapped onto.
@@ -445,55 +559,6 @@ function auditHostGlobalClaims(dependencies: readonly DependencyDecision[]): rea
 // ---------------------------------------------------------------------------
 // Bundler report audit
 // ---------------------------------------------------------------------------
-
-/**
- * Every decision at the level that governs a specifier: the exact records, else the
- * package's.
- *
- * The whole point of returning a list rather than one record: a lock can hold more
- * than one record for one module, and a caller that needs to know whether there is a
- * *single* provider has to be able to see the conflict instead of being handed
- * whichever record came first. `auditDependencyDecisions` above already refuses such a
- * list as `unresolved-dependency-decision`; this is how a downstream audit asks the
- * same question without restating the precedence.
- *
- * The precedence is structural, not positional. A package id and one of its subpath ids
- * are distinct records that can both be present with *different* strategies, and the
- * lock's canonical order puts the package first — so a single pass matching "either"
- * would let canonical ordering select the package record and silently ignore an explicit
- * subpath decision. Exact first, then the package fallback, never "whichever comes
- * first".
- */
-export function dependencyDecisionsFor(
-  dependencies: readonly DependencyDecision[],
-  specifier: string,
-): readonly DependencyDecision[] {
-  const exact = dependencies.filter(decision => decision.packageName === specifier);
-  if (exact.length > 0) return exact;
-
-  const packageName = packageNameOfSpecifier(specifier);
-  // A bare package name or a source path is its own package name, so there is no
-  // fallback record left to look for.
-  if (packageName === specifier) return [];
-
-  return dependencies.filter(decision => decision.packageName === packageName);
-}
-
-/**
- * The decision that governs a specifier: the first of the exact ones, else the first of
- * the package's.
- *
- * Defined through {@link dependencyDecisionsFor} so there is one implementation of the
- * precedence. For a caller that only needs the record, and for a caller auditing a lock
- * whose records are known to be unique; a caller that has to be sure there is *one*
- * provider uses the list.
- */
-export function findDependencyDecision(
-  dependencies: readonly DependencyDecision[],
-  specifier: string,
-): DependencyDecision | undefined {
-  return dependencyDecisionsFor(dependencies, specifier)[0];
-}
 
 /**
  * Reports every specifier the bundler left external.
@@ -773,17 +838,48 @@ export function serializeCompileCellResult(artifact: CompileCellResult): string 
   return `${JSON.stringify(canonical, null, 2)}\n`;
 }
 
-/** A report block for a CI log or a PR body, including which promises remain unproven. */
+/**
+ * A report block for a CI log or a PR body, including which promises remain unproven.
+ *
+ * ## Why the workspace audit is printed here
+ *
+ * A workspace rejection carries `diagnostics: []` **by design** — #14's vocabulary is
+ * not #6's, so a cycle or an intercepting decision is reported through `workspace`
+ * rather than restated as a `CellArtifactDiagnostic`. That decision is only useful if
+ * the finding reaches a reader, and this function is the package's standard reporting
+ * path. Formatting `outcome.diagnostics` alone printed
+ * `Compilation rejected with 0 diagnostic(s):` — the structured diagnostic existed in
+ * memory and reached nobody, which would have undermined the very path this seam
+ * adds.
+ *
+ * So whenever a workspace audit is present it is printed in full, on both outcomes.
+ * On a *compiled* outcome that is the point rather than a bonus: the non-fatal
+ * findings (`workspace-package-in-frontend-libraries`, a transitive dependency with
+ * no decision) are exactly the ones a reader has to act on, and an artifact that
+ * compiles is where they are easiest to miss.
+ *
+ * A `WorkspaceSourceAudit` with nothing wrong still prints its summary lines, which is
+ * `formatWorkspaceSourceAudit`'s own contract — "no diagnostics" must not be readable
+ * as "the declared sharing was verified".
+ */
 export function formatCompileCellOutcome(outcome: CompileCellOutcome): string {
+  const workspace = outcome.workspace === undefined ? [] : ["", formatWorkspaceSourceAudit(outcome.workspace)];
+
   if (outcome.status === "compiled") {
     const ids = frontendLibraryIds(outcome.artifact.frontendLibraries);
     return [
       `Compiled Cell artifact: ${outcome.artifact.code.length} characters, entry shape "${outcome.entryKind}".`,
       `${FRONTEND_LIBRARIES_FIELD_NAME}: ${ids.join(", ") || "(none)"}`,
       "Real Forguncy runtime validation is not established by a local compile.",
+      ...workspace,
     ].join("\n");
   }
-  return `Compilation rejected with ${outcome.diagnostics.length} diagnostic(s):\n${formatCellArtifactDiagnostics(outcome.diagnostics)}`;
+
+  // The counts are reported per vocabulary rather than summed, because they are not
+  // the same kind of finding and a caller branching on either needs to see which one
+  // stopped the build. #6's diagnostics are empty on a pre-bundle rejection by design.
+  const artifactDiagnostics = `Compilation rejected with ${outcome.diagnostics.length} diagnostic(s):\n${formatCellArtifactDiagnostics(outcome.diagnostics)}`;
+  return [artifactDiagnostics, ...workspace].join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -800,11 +896,121 @@ function describeThrown(error: unknown): string {
  * Bundler failure is converted into a diagnostic rather than rethrown: #6's error
  * model exists so a caller never has to interpret an opaque build string, and an
  * escaping exception is exactly that string.
+ *
+ * ## The workspace seam (#14 / #15)
+ *
+ * When the caller supplies `options.workspace`, `#14`'s audit runs over this compile
+ * and its result rides on the outcome as `workspace`. The seam has three parts, and
+ * the *order* is the part that matters.
+ *
+ * **1. A pre-bundle pass establishes what the cell imports.** The entry's specifiers
+ * are resolved but not built (`CellBundlerPort.resolveEntrySpecifiers`), and the
+ * audit's user-facing checks run against them. This happens *first* because two of
+ * the findings below have to stop the compile before any code is generated.
+ *
+ * **2. Two findings are fatal, and both are fatal before bundling.**
+ *
+ * - *A reachable workspace cycle.* #14 requires it to fail "before bundling rather
+ *   than to be resolved by whichever traversal happens to run first". The bundler
+ *   will happily inline a cyclic graph — ESM permits cycles — so the output looks
+ *   fine and the ordering it picked is invisible in the result. Nothing downstream
+ *   can catch it, and a bundler failure racing it could hide the structured
+ *   diagnostic entirely.
+ * - *A dependency decision that can intercept workspace source.* This one is
+ *   subtle enough to spell out. The bundler consults the host-bridge and
+ *   extension-externals plans *during resolution*, so a decision naming a module id
+ *   that a mapping also claims lets `interceptionFor` replace the import with a
+ *   virtual runtime module **before** Rolldown ever resolves the local source. The
+ *   artifact then contains no workspace import and no inlined workspace package, so
+ *   every artifact-side audit passes — while the local package the cell actually
+ *   imported was silently discarded. A local package named `antd` beside a `host`
+ *   decision for `antd` is the working example. #14's output semantics are exactly
+ *   what that violates, and only a check made *before* resolution can see it.
+ *
+ * **3. Everything else is reported, not fatal.** The remaining workspace findings
+ * that mean "this artifact has a runtime dependency on another workspace package"
+ * are already fatal from the output side: a workspace import the bundler left
+ * external reaches `auditExternalImports` as an unresolved decision, and a workspace
+ * package named in `frontendLibraries` trips that audit directly. Reporting those
+ * twice as two rejections would state one condition in two vocabularies, which is
+ * what `workspace-source.ts` records as the thing to avoid.
+ *
+ * **The audit still never resolves anything.** The graph is an *input to an audit*,
+ * not a second resolver: modules resolve through the bundler and `node_modules`, and
+ * removing the option changes no artifact byte. #6 forbids a second module resolver,
+ * and a graph that quietly redirected resolution would be exactly that.
  */
 export async function compileCell(
   input: CompileCellInput,
   options: CompileCellOptions,
 ): Promise<CompileCellOutcome> {
+  // The pre-bundle pass runs **only** when a graph was supplied, because it exists
+  // for one purpose: making #14's two fatal findings observable before anything is
+  // built. With no graph there is no workspace audit to run and nothing for the
+  // preflight to decide — so a graph-less #6 compile takes exactly the path it took
+  // before this seam existed: one `bundle()` and no analysis pass.
+  let entrySpecifiers: readonly string[] | undefined;
+  if (options.workspace !== undefined) {
+    const resolveEntrySpecifiers = options.bundler.resolveEntrySpecifiers;
+    // A graph was supplied, so the pre-bundle guarantee is mandatory — and a port
+    // without the capability is refused rather than quietly audited after the build.
+    // That is the bound on the method being optional: optional preserves the
+    // graph-less boundary, and this makes the guarantee binding exactly when a
+    // workspace graph makes it meaningful. Falling back here would restore the defect
+    // the split exists to prevent — a cycle discovered only after Rolldown bundled.
+    if (resolveEntrySpecifiers === undefined) {
+      return {
+        status: "rejected",
+        diagnostics: [
+          createCellArtifactDiagnostic("bundler-failure", input.entry, {
+            detail:
+              "A workspace graph was supplied, so the entry's specifiers must be resolved before bundling — but this bundler port implements no `resolveEntrySpecifiers`. #14 requires a reachable workspace cycle to fail before bundling, which cannot be decided without it. Use a port that provides the method, or omit `workspace`.",
+          }),
+        ],
+      };
+    }
+
+    try {
+      entrySpecifiers = await resolveEntrySpecifiers({
+        entry: input.entry,
+        dependencies: input.dependencies,
+      });
+    } catch (error) {
+      return {
+        status: "rejected",
+        diagnostics: [
+          createCellArtifactDiagnostic("bundler-failure", input.entry, {
+            detail: `The bundler could not resolve the entry: ${describeThrown(error)}`,
+          }),
+        ],
+      };
+    }
+
+    const preflight = auditWorkspaceSource({
+      workspace: options.workspace,
+      dependencies: input.dependencies,
+      entryModuleIds: entrySpecifiers,
+      frontendLibraries: collectFrontendLibraries(input.dependencies).libraries,
+    });
+
+    if (preflight.diagnostics.some(isPreBundleFatalWorkspaceDiagnostic)) {
+      return {
+        status: "rejected",
+        // Empty on purpose: #14's vocabulary is not #6's, so a workspace finding is
+        // reported through `workspace` rather than restated as a
+        // `CellArtifactDiagnostic` whose `breaksGuarantees` would have to name a #6
+        // guarantee it is not about. Nothing was built, so there is nothing for the
+        // artifact vocabulary to describe either.
+        diagnostics: [],
+        // The whole audit, not only the fatal findings: a caller reading a rejection
+        // should see everything wrong with the graph, not just the one thing that
+        // stopped it. This is the audit the post-build step would have produced, minus
+        // the two inputs only the output can supply.
+        workspace: preflight,
+      };
+    }
+  }
+
   let module: BundledCellModule;
   try {
     module = await options.bundler.bundle({
@@ -825,12 +1031,81 @@ export async function compileCell(
     };
   }
 
-  return assembleCellArtifact({
+  // The post-build audit, over the same graph, now with what the build actually
+  // produced. It re-runs the preflight checks (they cannot newly fail) and adds the
+  // two that need the output: what the bundler left external, and the metadata that
+  // will be written.
+  //
+  // `entrySpecifiers` is defined whenever `options.workspace` is — the pre-bundle
+  // block above sets both together — so the pair is read from one narrowing rather
+  // than two independent `undefined` checks that could drift apart.
+  const workspace =
+    options.workspace === undefined || entrySpecifiers === undefined
+      ? undefined
+      : auditWorkspaceForCompile(input, options.workspace, module, entrySpecifiers);
+
+  const outcome = assembleCellArtifact({
     module,
     dependencies: input.dependencies,
     ...(options.entryKind === undefined ? {} : { entryKind: options.entryKind }),
     ...(options.codeBudgetCharacters === undefined
       ? {}
       : { codeBudgetCharacters: options.codeBudgetCharacters }),
+  });
+
+  return workspace === undefined ? outcome : { ...outcome, workspace };
+}
+
+/**
+ * The workspace findings that stop a compile *before* any code is generated.
+ *
+ * Two codes, and each is here because nothing downstream can catch it — see
+ * `compileCell`'s header for the full argument. `circular-workspace-dependency` is
+ * #14's own "fail before bundling" requirement; a decision that can intercept
+ * workspace source is invisible the moment resolution replaces the import, so the
+ * artifact audits that would otherwise be the safety net cannot see it at all.
+ *
+ * A named predicate rather than an inline list so a future fatal code has one place
+ * to be added, and so the *reason* each is fatal is documented where it is enforced.
+ */
+function isPreBundleFatalWorkspaceDiagnostic(diagnostic: WorkspaceSourceDiagnostic): boolean {
+  return (
+    diagnostic.code === "circular-workspace-dependency" ||
+    diagnostic.code === "workspace-package-decided-as-dependency"
+  );
+}
+
+/**
+ * `#14`'s audit, with this compile's inputs.
+ *
+ * Every input is taken from something the build already established rather than
+ * asked of the caller a second time:
+ *
+ * - the graph is the caller's `options.workspace`, read from the project's own
+ *   manifest by `loadPnpmWorkspaceGraph`;
+ * - the entry's module ids are the bundler's, from the pre-bundle pass;
+ * - the external imports are the bundler's own report, so the audit sees what
+ *   actually survived rather than what was authored;
+ * - `frontendLibraries` is derived from the decisions by the same function assembly
+ *   uses, so the metadata the audit checks and the metadata the artifact carries are
+ *   one computation.
+ *
+ * The graph is handed over *raw* rather than pre-indexed, which is deliberate: the
+ * audit indexes it itself, so a graph whose own coherence is broken (a duplicated
+ * name, a machine-specific directory) reports that as part of this same result.
+ * Passing an already-indexed graph would silently drop exactly those findings.
+ */
+function auditWorkspaceForCompile(
+  input: CompileCellInput,
+  workspace: WorkspaceGraph,
+  module: BundledCellModule,
+  entrySpecifiers: readonly string[],
+): WorkspaceSourceAudit {
+  return auditWorkspaceSource({
+    workspace,
+    dependencies: input.dependencies,
+    externalImports: module.externalImports ?? [],
+    frontendLibraries: collectFrontendLibraries(input.dependencies).libraries,
+    entryModuleIds: entrySpecifiers,
   });
 }

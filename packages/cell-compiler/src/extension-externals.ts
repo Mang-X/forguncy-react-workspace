@@ -71,7 +71,7 @@ import type {
   FrontendLibraryReference,
 } from "@forguncy-react-workspace/core";
 
-import { findDependencyDecision } from "./artifact";
+import { findDependencyDecision } from "./specifier";
 import {
   collectFrontendLibraries,
   FRONTEND_LIBRARIES_FIELD_NAME,

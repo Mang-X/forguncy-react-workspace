@@ -18,6 +18,10 @@ import {
   ARTIFACT_CONTRACT_DECISION_REFERENCE,
   COMPILER_GOVERNING_DECISIONS,
   COMPILER_GOVERNING_SPEC_REFERENCE_LINE,
+  WORKSPACE_GRAPH_CITATION_PATTERNS,
+  WORKSPACE_GRAPH_IMPLEMENTATION,
+  WORKSPACE_GRAPH_IMPLEMENTATION_REFERENCE,
+  WORKSPACE_SOURCE_DECISION,
 } from "./provenance";
 
 const packageSourceDirectory = dirname(fileURLToPath(import.meta.url));
@@ -75,6 +79,25 @@ describe("artifact contract provenance", () => {
     expect(citesDecision("blocked by #60 and #61", ARTIFACT_CONTRACT_DECISION)).toBe(false);
     expect(citesDecision("#482", ARTIFACT_CONTRACT_DECISION)).toBe(false);
     expect(citesDecision("https://github.com/other-org/other-repo/issues/6", ARTIFACT_CONTRACT_DECISION)).toBe(false);
+  });
+
+  // #15's record, checked with the same rigour as #6's above rather than merely
+  // exported: `#15` is a prefix of `#150`, `#151`, … so a substring match would read
+  // an unrelated Issue as this one, and the loader's citation test depends on these
+  // patterns being exact.
+  it("detects the workspace graph implementation Issue by reference or URL", () => {
+    expect(WORKSPACE_GRAPH_IMPLEMENTATION.issue).toBe(15);
+    expect(WORKSPACE_GRAPH_IMPLEMENTATION_REFERENCE).toBe("#15");
+    expect(WORKSPACE_GRAPH_CITATION_PATTERNS).toHaveLength(3);
+    expect(citesDecision("#15", WORKSPACE_GRAPH_IMPLEMENTATION)).toBe(true);
+    expect(citesDecision("(#15)", WORKSPACE_GRAPH_IMPLEMENTATION)).toBe(true);
+    expect(citesDecision(WORKSPACE_GRAPH_IMPLEMENTATION.url, WORKSPACE_GRAPH_IMPLEMENTATION)).toBe(true);
+
+    expect(citesDecision("blocked by #150 and #151", WORKSPACE_GRAPH_IMPLEMENTATION)).toBe(false);
+    expect(citesDecision("#14", WORKSPACE_GRAPH_IMPLEMENTATION)).toBe(false);
+    // The two records are distinct Issues, so neither pattern answers for the other
+    // — which is what keeps the loader's citation test from passing on #14 alone.
+    expect(citesDecision(WORKSPACE_SOURCE_DECISION.url, WORKSPACE_GRAPH_IMPLEMENTATION)).toBe(false);
   });
 });
 

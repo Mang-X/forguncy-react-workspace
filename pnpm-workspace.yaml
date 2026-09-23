@@ -1,6 +1,11 @@
 packages:
   - packages/*
   - examples/*
+  # The workspace-package PoC (#15) ships its own shared packages, so the graph
+  # the compiler resolves through is the same one `pnpm install` links. A second
+  # glob here rather than one more entry in `examples/*` keeps the PoC's shared
+  # source inside the PoC that consumes it.
+  - examples/workspace-package/packages/*
 
 allowBuilds:
   esbuild: true

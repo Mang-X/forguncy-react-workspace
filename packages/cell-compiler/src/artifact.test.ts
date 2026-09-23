@@ -43,6 +43,9 @@ const TRIVIAL_BUNDLE = [
  * own contents are asserted separately, so the fixture does not need to prove
  * anything about them.
  */
+// No `resolveEntrySpecifiers`: these fixtures supply no workspace graph, so the
+// preflight never runs and `bundle` alone is a complete port — which is the point of
+// the method being optional.
 const bundlerOf = (module: BundledCellModule): CellBundlerPort => ({ bundle: async () => module });
 
 const TRIVIAL_BUNDLER = bundlerOf({ code: TRIVIAL_BUNDLE, inlinedPackages: [] });
