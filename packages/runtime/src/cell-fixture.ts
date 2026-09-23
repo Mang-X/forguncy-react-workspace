@@ -166,7 +166,11 @@ export function resolveCellFixtureOptions(
 ): MockRuntimeFacadeOptions {
   const subject = describeSubject(context);
 
-  if (defaultExport === undefined || defaultExport === null) {
+  // Only `undefined` is "absent": no default export at all, or the Cell
+  // declaring no fixture in the first place. `export default null` *is* a
+  // default export — present but of the wrong shape — so it falls through to
+  // `fixture-not-consumable`, where `describeValue` already names it `null`.
+  if (defaultExport === undefined) {
     throw new CellFixtureError(
       "fixture-absent",
       `${subject} has no default export. Declare \`export default\` (options object or factory), or remove the fixture so the harness reports its absence instead of consuming it.`,
@@ -190,6 +194,15 @@ export function resolveCellFixtureOptions(
   }
 
   if (isThenable(candidate)) {
+    // Consume the promise's own rejection before refusing it synchronously: an
+    // async factory that throws returns a *rejected* Promise (the throw never
+    // reaches the try/catch above — async functions don't throw synchronously),
+    // and refusing without a handler would let that rejection surface as
+    // `unhandledRejection` on the next tick — a second, uncontrolled error
+    // channel beside this named diagnostic. The refusal below stays the only
+    // error the contract reports; the promise's own reason is deliberately
+    // dropped, because the fixture was refused on shape, not on contents.
+    void Promise.resolve(candidate).catch(() => {});
     throw new CellFixtureError(
       "fixture-not-consumable",
       `${subject} resolved to a Promise. A fixture factory must return its options synchronously: the harness installs the provider before the first render, and waiting would make fixture availability a race the host never has.`,

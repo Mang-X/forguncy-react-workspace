@@ -90,6 +90,16 @@ describe("the fixture module export contract", () => {
     expect(error.message).toContain("default export");
   });
 
+  it("reports a null default export as present-but-unconsumable, not as absent", () => {
+    // `export default null` *declares* a default export — absent is `undefined`.
+    // Folding it into `fixture-absent` would send the reader to "declare a
+    // fixture" when the fixture exists and is simply the wrong shape.
+    const error = captureFixtureError(() => resolveCellFixtureOptions(null, { cellId: "orderList" }));
+
+    expect(error.code).toBe("fixture-not-consumable");
+    expect(error.message).toContain("null");
+  });
+
   it("reports a default export that is neither options nor factory", () => {
     const error = captureFixtureError(() => resolveCellFixtureOptions("not a fixture", { cellId: "orderList" }));
 
@@ -106,6 +116,41 @@ describe("the fixture module export contract", () => {
     expect(error.code).toBe("fixture-not-consumable");
     expect(error.message).toContain("Promise");
     expect(error.message).toContain("synchronously");
+  });
+
+  it("consumes a rejected factory promise so the refusal is the only error channel", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      // An async factory that throws: the throw lands *inside* the promise, not
+      // inside the try/catch around the factory call, so the rejection would
+      // otherwise reach the next tick with no handler — a second, uncontrolled
+      // error channel beside the named diagnostic.
+      const fromAsync = captureFixtureError(() =>
+        resolveCellFixtureOptions(async () => {
+          throw new Error("fixture failed");
+        }),
+      );
+      expect(fromAsync.code).toBe("fixture-not-consumable");
+      expect(fromAsync.message).toContain("Promise");
+
+      // A plain factory returning an already-rejected promise takes the same
+      // branch — pre-checking `AsyncFunction` alone would miss this one.
+      const fromPlain = captureFixtureError(() =>
+        resolveCellFixtureOptions(() => Promise.reject(new Error("factory rejected"))),
+      );
+      expect(fromPlain.code).toBe("fixture-not-consumable");
+
+      // `unhandledRejection` is raised once the microtask queue drains, so one
+      // macrotask later a stray rejection would already have fired.
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 
   it("keeps the original error as the cause of a throwing factory", () => {
