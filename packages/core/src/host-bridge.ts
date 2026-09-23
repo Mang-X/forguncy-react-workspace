@@ -634,19 +634,21 @@ export const JSX_RUNTIME_ADAPTER_RULES: readonly JsxRuntimeAdapterRule[] = [
   },
   {
     id: "jsxs-shares-jsx",
-    statement: "`jsxs` is the same implementation as `jsx`.",
+    statement:
+      "`jsxs` creates elements through `jsx`'s path — one implementation of the key/children rules — and additionally marks its statically-enumerated children validated, the way the real `jsxs` does.",
     why:
-      "The two differ only in static-children metadata that the element factory does not observe; giving them separate implementations creates a second place for the key/children rule to be got wrong.",
-    establishedBy: "`MangMax/forguncy-react-library` `tooling/pack-tools/src/esbuild-host-react.js`.",
+      "Sharing the creation path keeps the key/children rules in one place. The static-children mark is separate from that path and *is* observed: the reconciler's dev-only key check reads `_store.validated` on each child, and `createElement` never sets it for a `children` array. Without the mark, every static (keyless) children array trips a false `unique \"key\"` warning under a development host React, while a keyed list stays silent — a false positive visually identical to a real key loss, so it cannot be told apart from the failure the keyed-list regression exists to catch.",
+    establishedBy:
+      "#11's PoC regression (`packages/cell-compiler/src/host-antd-poc.test.ts`) against react 19.2.7's development build; React's own `jsxWithValidation` marks exactly the statically-enumerated children in `react/jsx-runtime.development.js` (`validateChildKeys`).",
   },
   {
     id: "jsxDEV-ignores-dev-only-arguments",
     statement:
-      "`jsxDEV` accepts and ignores the dev-only arguments (`isStaticChildren`, `source`, `self`), so `react/jsx-dev-runtime` uses the same adapter.",
+      "`jsxDEV` accepts the dev-only arguments: `source` and `self` are ignored, while `isStaticChildren` selects the same static-children mark `jsxs` applies, so `react/jsx-dev-runtime` uses the same adapter.",
     why:
-      "The dev arguments carry debugging metadata, not element semantics. Ignoring them is what allows one adapter to serve both runtime ids, which #9 asks for by naming both ids in one bullet.",
+      "`source` and `self` are debugging metadata, and reproducing them is a stated non-goal — ignoring them is what lets one adapter serve both runtime ids, which #9 asks for by naming both ids in one bullet. `isStaticChildren` is not metadata: it is the static/dynamic selection signal (true means the children were enumerated the way `jsxs` receives them), so honoring it is what keeps a dev build's static children from tripping the false key warning `jsxs-shares-jsx` describes.",
     establishedBy:
-      "`MangMax/forguncy-react-library` (the adapter binds both runtime ids to one source), recorded as a deliberate simplification rather than an unimplemented feature.",
+      "`MangMax/forguncy-react-library` (the adapter binds both runtime ids to one source) for the shared-adapter form; React's own `jsxDEV` signature for `isStaticChildren` selecting the static-children branch.",
   },
   {
     id: "fragment-is-the-host-fragment",
@@ -725,8 +727,15 @@ export const JSX_RUNTIME_ADAPTER_CASES: readonly JsxRuntimeAdapterCase[] = [
   {
     id: "dev-runtime-call-shape",
     call: "jsxDEV('div', { children: 'text' }, 'k-dev', false, undefined, undefined)",
-    expectation: "Same result as the two-argument `jsx` call with the same key; the dev-only arguments are ignored.",
+    expectation: "Same result as the two-argument `jsx` call with the same key; `source` and `self` are ignored and a false `isStaticChildren` adds no mark.",
     covers: ["jsxDEV-ignores-dev-only-arguments"],
+  },
+  {
+    id: "static-children-keyless-no-warning",
+    call: "renderToString(jsxs('section', { children: [jsx('h1', { children: 'a' }), jsx('h2', { children: 'b' })] }))",
+    expectation:
+      "Rendering static, keyless children produces no `unique \"key\"` warning (they carry the mark the real `jsxs` sets), while a keyless map through `jsx` still warns — the mark must not blind the regression that catches a dropped key.",
+    covers: ["jsxs-shares-jsx"],
   },
   {
     id: "fragment-identity",

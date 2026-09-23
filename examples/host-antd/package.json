@@ -2,5 +2,17 @@
   "name": "@examples/host-antd",
   "version": "0.0.0",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "//dependencies": [
+    "Deliberately empty: `react` and `antd` are decided `host`, so neither package",
+    "belongs here as a dependency — the host bridge (#9) intercepts both specifiers",
+    "before node resolution and binds them to the page globals `React` and `antd`.",
+    "Installing them would be a silent escape hatch for a broken interception.",
+    "`antd` is not resolvable anywhere in this workspace, so a missed antd",
+    "interception fails the compile instead of quietly inlining the library; `react`",
+    "is resolvable through the compiler's test-only devDependency, so for React the",
+    "proof is the artifact-shape assertions (no implementation fingerprints) plus",
+    "the example's own `identity=pass` self-check, which compares the imported",
+    "object against `globalThis.React` at runtime."
+  ]
 }

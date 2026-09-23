@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import { Script, createContext } from "node:vm";
+import { format } from "node:util";
 
 import { describe, expect, it } from "vitest";
 
@@ -319,7 +320,7 @@ describe("generated JSX runtime adapter", () => {
     expect(list.props.children.map(child => child.key)).toEqual(["k-a", "k-b", "k-c"]);
   });
 
-  it("ignores the dev-only arguments of jsxDEV", () => {
+  it("accepts jsxDEV's dev-only arguments without letting them touch key or children", () => {
     const runtime = evaluateModule(source(), { React });
     const jsxDEV = runtime.jsxDEV as (
       type: unknown,
@@ -333,6 +334,77 @@ describe("generated JSX runtime adapter", () => {
     const element = jsxDEV("div", { children: "text" }, "k-dev", false, undefined, undefined);
     expect(element.key).toBe("k-dev");
     expect(element.props.children).toBe("text");
+  });
+
+  // #11's PoC regression, at unit level. Static keyless children must be marked
+  // validated (the way React's own jsxs marks them) or every multi-child JSX
+  // warns under a development host React — and that false positive is visually
+  // identical to the real signal: a keyless map through jsx must still warn,
+  // because that warning is how a dropped key is seen.
+  it("marks static children validated, and keeps a keyless map warning as the key-loss signal", () => {
+    const runtime = evaluateModule(source(), { React });
+    const jsx = runtime.jsx as (type: unknown, props: unknown, key?: unknown) => unknown;
+    const jsxs = runtime.jsxs as (type: unknown, props: unknown) => unknown;
+    const jsxDEV = runtime.jsxDEV as (
+      type: unknown,
+      props: unknown,
+      key?: unknown,
+      isStaticChildren?: boolean,
+      source?: unknown,
+      self?: unknown,
+    ) => unknown;
+
+    const warnings: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => {
+      warnings.push(format(...args));
+    };
+    const keyWarnings = () => warnings.filter(message => /unique "key" prop/.test(message));
+    const render = (element: unknown) => {
+      warnings.length = 0;
+      renderToString(element);
+    };
+
+    try {
+      render(
+        jsxs("section", {
+          children: [jsx("h1", { children: "a" }), jsx("h2", { children: "b" })],
+        }),
+      );
+      expect(keyWarnings()).toEqual([]);
+
+      render(
+        jsxDEV(
+          "section",
+          { children: [jsx("h1", { children: "a" }), jsx("h2", { children: "b" })] },
+          undefined,
+          true,
+          undefined,
+          undefined,
+        ),
+      );
+      expect(keyWarnings()).toEqual([]);
+
+      render(
+        jsx("ul", {
+          children: [jsx("li", { children: "x" }), jsx("li", { children: "y" })],
+        }),
+      );
+      expect(keyWarnings().length).toBeGreaterThan(0);
+
+      const rows = [
+        { key: "row-alpha", label: "alpha" },
+        { key: "row-beta", label: "beta" },
+      ];
+      render(
+        jsxs("ul", {
+          children: rows.map(row => jsx("li", { children: row.label }, row.key)),
+        }),
+      );
+      expect(keyWarnings()).toEqual([]);
+    } finally {
+      console.error = originalError;
+    }
   });
 
   // The whole reason the adapter exists: an element it produced has to be a real
