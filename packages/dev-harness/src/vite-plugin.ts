@@ -267,44 +267,118 @@ export function harnessHostModulePlan(): {
 /**
  * The host aliases a project has *not* already claimed for itself.
  *
- * Vite merges a plugin's `config()` result over the user's config, so an alias emitted here wins
- * against the project's own — which is wrong for the one case the split exists to support: a
+ * Vite merges a plugin's `config()` result over the user's config, so an alias emitted here can
+ * win against the project's own — which is wrong for the one case the split exists to support: a
  * project deliberately pointing a host package somewhere else (a patched React, a local fork).
- * Dropping the keys the project already named is what turns `harnessHostModulePlan()` from a
+ * Dropping the ids the project already claims is what turns `harnessHostModulePlan()` from a
  * duplicate of this hook into an actual override.
  *
- * Both alias shapes are read, because Vite accepts either and a project may use whichever:
+ * ## Claiming is a *prefix* relation, not equality
  *
- * - **object form** (`{ react: "/path" }`) — the keys are the ids;
- * - **array form** (`[{ find: "react", replacement: "/path" }]`) — `find` may be a string or a
- *   `RegExp`, and only string `find`s can be compared for equality. A `RegExp` is deliberately
- *   *not* treated as claiming anything: it is not possible to decide from here which ids it
- *   matches, and guessing "probably react" would silently drop a substitution the harness needs.
- *   An entry we cannot read therefore leaves our own alias in place, which is the conservative
- *   direction — the project can still remove ours by naming the id as a string.
+ * Vite decides whether an alias entry matches an import with:
  *
- * An `undefined` or unreadable `userAlias` claims nothing, so a bare
- * `devHarness({ config })` with no `resolve.alias` of its own still gets the full plan.
+ * ```js
+ * importee === pattern || importee.startsWith(pattern + "/")
+ * ```
+ *
+ * so naming `react` claims `react/jsx-runtime` and `react/jsx-dev-runtime` as well. Filtering by
+ * exact equality was therefore wrong, and the fix is to reproduce Vite's rule in
+ * {@link isClaimedBy} rather than invent a simpler one.
+ *
+ * ## Why only the array form actually broke, which is worth recording
+ *
+ * The merge order differs by form, so the same bug had different consequences. Measured against
+ * Vite 8.3.0 with a real server, with the harness emitting its own `react/jsx-dev-runtime` entry
+ * beside a project claiming `react`:
+ *
+ * | project's `resolve.alias` | entries, in evaluation order | bare `react` | `react/jsx-dev-runtime` |
+ * | --- | --- | --- | --- |
+ * | object `{ react: "/patched" }` | `[react, react/jsx-dev-runtime]` | project | **project** |
+ * | array `[{ find: "react" }]` | `[react/jsx-dev-runtime, react]` | project | **harness** |
+ *
+ * With the object form Vite produces the project's entry *first*, so its prefix match wins the
+ * subpath and the exact-equality filter was harmless. With the array form the harness's entry
+ * comes first and wins — the project got its patched React for the bare import and the harness's
+ * stock React for every JSX runtime import. That asymmetry is why a resolution-level test is
+ * needed and an alias-list assertion is not enough: in the object case the list looks fine, and in
+ * the array case it also looks fine, because the defect is in evaluation order rather than in
+ * contents.
+ *
+ * ## The three forms, and what changed for RegExps
+ *
+ * - **object form** (`{ react: "/path" }`) — the keys, matched by the prefix rule;
+ * - **array string `find`** — matched by the prefix rule;
+ * - **array `RegExp` `find`** — matched by `pattern.test(importee)`, which is what Vite itself
+ *   does with it. This replaces an earlier conservative version that ignored RegExps, reasoning
+ *   that which ids they match is undecidable. It is decidable: the question is not what the
+ *   expression *means* but whether it matches each of the finite host ids, and `test` answers
+ *   that. Ignoring them was wrong in the direction that matters — a project's `find: /^react$/`
+ *   override would have been beaten by the harness exactly as the array string case was.
+ *
+ * An `undefined` or unreadable `userAlias` claims nothing, so a bare `devHarness({ config })`
+ * with no `resolve.alias` of its own still gets the full plan.
  */
 function unclaimedHostAliases(userAlias: unknown): Record<string, string> {
-  const claimed = new Set<string>();
+  const patterns = readAliasPatterns(userAlias);
 
+  return Object.fromEntries(
+    Object.entries(hostModuleAliases()).filter(([moduleId]) => !patterns.some(pattern => isClaimedBy(pattern, moduleId))),
+  );
+}
+
+/**
+ * Every alias `find` the user's config declares, in either shape.
+ *
+ * Both forms are read because Vite accepts either and a project may use whichever. A member that
+ * is not a usable pattern — an array entry that is not an object, an object key that is empty —
+ * is dropped rather than guessed at; an unreadable pattern claims nothing, which leaves the
+ * harness's alias in place.
+ */
+function readAliasPatterns(userAlias: unknown): readonly unknown[] {
   if (Array.isArray(userAlias)) {
-    for (const entry of userAlias) {
-      if (typeof entry === "object" && entry !== null) {
-        const find = (entry as { find?: unknown }).find;
-        if (typeof find === "string") {
-          claimed.add(find);
-        }
-      }
-    }
-  } else if (typeof userAlias === "object" && userAlias !== null) {
-    for (const key of Object.keys(userAlias)) {
-      claimed.add(key);
-    }
+    return userAlias
+      .filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
+      .map(entry => entry.find)
+      .filter(find => find !== undefined);
   }
 
-  return Object.fromEntries(Object.entries(hostModuleAliases()).filter(([moduleId]) => !claimed.has(moduleId)));
+  if (typeof userAlias === "object" && userAlias !== null) {
+    return Object.keys(userAlias);
+  }
+
+  return [];
+}
+
+/**
+ * Whether one alias pattern claims a module id, by Vite's own rule.
+ *
+ * The regular-expression branch is Vite's too, including `test` (not `match`, and no anchoring of
+ * its own): reproducing the rule is the point, because a filter that decided differently from the
+ * resolver would be a filter that disagrees with the thing it is compensating for — which is how
+ * the equality bug got through. A pattern that matches partially, so that the user's replacement
+ * of `react` would be applied to `react/jsx-dev-runtime` as a *string* concatenation, is still a
+ * claim: Vite will use the user's entry for that id, whoever's replacement it produces.
+ *
+ * The `lastIndex` save/restore is not tidiness. `test` on a `/g` or `/y` pattern is stateful — it
+ * advances `lastIndex` on a match and resets it on a miss — so asking a caller's own RegExp would
+ * make *this* function's call count decide what Vite's later resolution sees: a project writing
+ * `find: /react/g` would get an override that applied on every other import. Restoring the
+ * property leaves the pattern exactly as the project handed it over, which is what a predicate
+ * borrowed from someone else's object owes them.
+ */
+function isClaimedBy(pattern: unknown, moduleId: string): boolean {
+  if (pattern instanceof RegExp) {
+    const { lastIndex } = pattern;
+    try {
+      return pattern.test(moduleId);
+    } finally {
+      pattern.lastIndex = lastIndex;
+    }
+  }
+  if (typeof pattern !== "string" || pattern.length === 0) {
+    return false;
+  }
+  return moduleId === pattern || moduleId.startsWith(`${pattern}/`);
 }
 
 /**

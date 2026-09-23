@@ -25,9 +25,17 @@ import { devHarness, HARNESS_ENTRY_URL_PATH, HARNESS_MOUNT_ELEMENT_ID } from "./
  * 1. **Alias precedence.** The plugin returned every host alias from its `config()` hook while
  *    the example also spread `harnessHostModulePlan()` into its own config, so the example's
  *    documented ability to override an entry was illusory — Vite merges a plugin's `config()`
- *    result *over* the user's, key by key, later value winning. A project pointing `react` at a
- *    patched build got the plugin's path and no diagnostic. The plugin now emits only the ids the
- *    project has not claimed.
+ *    result *over* the user's. A project pointing `react` at a patched build got the plugin's path
+ *    and no diagnostic. The plugin now emits only the ids the project claims.
+ *
+ *    **A second review round found the fix was incomplete**, and the shape of that mistake is the
+ *    most instructive thing in this file: the filter tested ids for equality, while Vite matches
+ *    an alias pattern as `importee === pattern || importee.startsWith(pattern + "/")`. So naming
+ *    `react` claims `react/jsx-runtime` as well, and the harness's own subpath entries survived to
+ *    win a race — but only in the array form, because Vite's merge order differs by form (the
+ *    project's entry comes first for an object, the plugin's for an array). The object-form test
+ *    below passes either way; the array-form one is the guard. The general lesson: assert at the
+ *    level the defect lives at, and the defect lived in *resolution*, not in the alias list.
  * 2. **HTML injection.** The plugin spliced its mount node in with `html.replace("</body>", …)`,
  *    a no-op for a template whose closing body tag is absent, upper-case, or formatted
  *    differently — every one of which is valid HTML. The server started, the page served, and the
@@ -104,6 +112,27 @@ function aliasReplacement(
   return Object.entries((alias ?? {}) as Record<string, string>).find(([find]) => find === moduleId)?.[1];
 }
 
+/**
+ * Where a module id *actually resolves*, through the real resolver.
+ *
+ * The helper the second review round turned out to need. The tests above inspect the alias
+ * entries in the resolved config, which answers "which entries exist" — and that is not the same
+ * question as "which entry wins for this import". The prefix bug lived exactly in the gap: the
+ * harness's own `react/jsx-dev-runtime` entry existed *beside* the project's `react` pattern,
+ * and because Vite evaluates the plugin's aliases first, the harness's won. Nothing about the
+ * entry list looked wrong.
+ *
+ * So this asks `pluginContainer.resolveId`, which is Vite's own resolution — aliases, optimizer
+ * and all — with no knowledge of how the plugin arranged its config.
+ */
+async function resolveModuleId(
+  server: { pluginContainer: { resolveId(id: string): Promise<{ id: string } | null> } },
+  moduleId: string,
+): Promise<string> {
+  const resolved = await server.pluginContainer.resolveId(moduleId);
+  return resolved?.id ?? "(unresolved)";
+}
+
 /** The local URL a listening server reported, or a failure naming the reason. */
 function localUrl(server: { resolvedUrls: { local: string[] } | null }): string {
   const base = server.resolvedUrls?.local[0];
@@ -167,12 +196,14 @@ describe("alias precedence between the project and the plugin's config() hook", 
   /**
    * The array alias form, because Vite accepts either shape and a project may use whichever.
    *
-   * A `find` that is a `RegExp` is deliberately *not* treated as claiming the id: from here it is
-   * impossible to say which ids it matches, and guessing would drop a substitution the harness
-   * needs. An unreadable claim therefore leaves the harness's alias in place — the conservative
-   * direction, and the second assertion below.
+   * A `find` that is a `RegExp` is matched with `test`, which is what Vite itself does with it.
+   * The question is not what the expression *means* but whether it matches each of the finite host
+   * ids, and `test` answers that exactly. An earlier version ignored RegExps as "unreadable",
+   * reasoning that which ids they match is undecidable — but a project's `find: /^react$/`
+   * override was then beaten by the harness in precisely the way the string case was, so ignoring
+   * them was wrong in the direction that matters.
    */
-  it("reads the array form, and treats a RegExp find as claiming nothing", async () => {
+  it("reads the array form for both string and RegExp finds", async () => {
     const server = await createServer({
       root: join(fixturesRoot, "ordinary"),
       configFile: false,
@@ -191,9 +222,130 @@ describe("alias precedence between the project and the plugin's config() hook", 
     try {
       // A string `find`: the project claims the id, so the harness defers.
       expect(aliasReplacement(server, "react")).toBe("/array-owned/react");
-      // A `RegExp` `find`: unreadable as a claim, so the harness's own alias survives rather than
-      // being assumed to cover `react-dom/client` — which the regex does not match anyway.
+      // The `RegExp` `find` anchors to `react-dom` exactly, so it does *not* claim
+      // `react-dom/client` — the harness's own alias for that subpath must therefore survive.
       expect(aliasReplacement(server, "react-dom/client")).toBeDefined();
+    } finally {
+      await server.close();
+    }
+  });
+
+  /**
+   * **The bug the second review round found, and the reason the tests above were not enough.**
+   *
+   * Vite's alias rule is `importee === pattern || importee.startsWith(pattern + "/")`, so a
+   * project naming `react` claims `react/jsx-runtime` and `react/jsx-dev-runtime` as well.
+   * Filtering by exact equality left the harness's own subpath entries in place, and since Vite
+   * merges the plugin's aliases *in front of* the project's, those entries were evaluated first
+   * and won: the project got its patched React for the bare import and the harness's stock React
+   * for every JSX runtime import.
+   *
+   * Asserted through `pluginContainer.resolveId` rather than against the alias list, because the
+   * alias list looked correct in the broken version — the entries simply lost a race the list
+   * could not show.
+   *
+   * **This case would have passed even with the exact-equality bug**, and the reason is worth
+   * keeping: Vite's object-form merge puts the project's `react` entry first, so its prefix match
+   * wins the subpaths on its own. It is kept as the regression test for the *object* form (a
+   * project must keep every id its pattern covers) and as an executable record of which form was
+   * actually broken. The array test below is the one that fails under the bug — see the module
+   * docstring for the merge-order table.
+   */
+  it("lets a project's object-form `react` claim its subpaths, at resolution time", async () => {
+    const server = await serverFor("ordinary", { userAlias: { react: "/project-owned/react" } });
+
+    try {
+      // The bare id is served by the project...
+      expect(await resolveModuleId(server, "react")).toBe("/project-owned/react");
+      // ...and so are the subpaths, which the project's own prefix match covers.
+      expect(await resolveModuleId(server, "react/jsx-runtime")).toBe("/project-owned/react/jsx-runtime");
+      expect(await resolveModuleId(server, "react/jsx-dev-runtime")).toBe(
+        "/project-owned/react/jsx-dev-runtime",
+      );
+    } finally {
+      await server.close();
+    }
+  });
+
+  /**
+   * **The case the second review round found.** The array form is where the bug bit: Vite merges
+   * the harness's entries *before* the project's here, so the harness's exact
+   * `react/jsx-dev-runtime` alias was evaluated first and won the subpath — the project's patched
+   * React applied to the bare import and the harness's stock React to every JSX runtime import.
+   *
+   * Confirmed to fail under the exact-equality filter and to pass under the prefix rule, which is
+   * what makes it a real guard rather than a restatement.
+   */
+  it("lets an array-form `react` find claim its subpaths, at resolution time", async () => {
+    const server = await createServer({
+      root: join(fixturesRoot, "ordinary"),
+      configFile: false,
+      logLevel: "error",
+      appType: "spa",
+      resolve: { alias: [{ find: "react", replacement: "/array-owned/react" }] },
+      plugins: [devHarness({ config }) as never],
+      server: { middlewareMode: true, hmr: false, watch: null },
+    });
+
+    try {
+      expect(await resolveModuleId(server, "react")).toBe("/array-owned/react");
+      expect(await resolveModuleId(server, "react/jsx-dev-runtime")).toBe("/array-owned/react/jsx-dev-runtime");
+    } finally {
+      await server.close();
+    }
+  });
+
+  /**
+   * A RegExp that matches a host subpath claims it too, by Vite's `test`.
+   *
+   * The pattern is written with a lookahead rather than `^react(?:\/.*)?$`, because Vite applies
+   * the alias as `importee.replace(pattern, replacement)` — a pattern that swallows the subpath
+   * produces `/regex-owned/react` for both ids, which would make the assertion below pass without
+   * showing that the subpath survived. The lookahead matches the prefix while leaving the `/...`
+   * tail in place, so the two ids resolve to visibly different paths and the prefix rule is what
+   * the test actually measures.
+   */
+  it("lets a RegExp find that matches a host id claim it, at resolution time", async () => {
+    const server = await createServer({
+      root: join(fixturesRoot, "ordinary"),
+      configFile: false,
+      logLevel: "error",
+      appType: "spa",
+      resolve: { alias: [{ find: /^react(?=\/|$)/, replacement: "/regex-owned/react" }] },
+      plugins: [devHarness({ config }) as never],
+      server: { middlewareMode: true, hmr: false, watch: null },
+    });
+
+    try {
+      expect(await resolveModuleId(server, "react")).toBe("/regex-owned/react");
+      expect(await resolveModuleId(server, "react/jsx-dev-runtime")).toBe("/regex-owned/react/jsx-dev-runtime");
+    } finally {
+      await server.close();
+    }
+  });
+
+  /**
+   * A `/g` pattern must not be left mutated.
+   *
+   * `test` on a global pattern advances `lastIndex`, so a probe that called it would make this
+   * filter's *call count* decide what Vite's later resolution sees — a project writing `find:
+   * /react/g` would get an override that applied on every other import. The filter restores
+   * `lastIndex`; this asserts the expression arrives back exactly as it was handed over.
+   */
+  it("leaves a global RegExp pattern's lastIndex untouched", async () => {
+    const pattern = /react/g;
+    const server = await createServer({
+      root: join(fixturesRoot, "ordinary"),
+      configFile: false,
+      logLevel: "error",
+      appType: "spa",
+      resolve: { alias: [{ find: pattern, replacement: "/g-owned/react" }] },
+      plugins: [devHarness({ config }) as never],
+      server: { middlewareMode: true, hmr: false, watch: null },
+    });
+
+    try {
+      expect(pattern.lastIndex).toBe(0);
     } finally {
       await server.close();
     }
