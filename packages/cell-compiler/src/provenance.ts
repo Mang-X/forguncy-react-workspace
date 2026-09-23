@@ -98,25 +98,51 @@ export const WORKSPACE_SOURCE_DECISION_QUALIFIED_REFERENCE =
   `${WORKSPACE_SOURCE_DECISION.repository}${WORKSPACE_SOURCE_DECISION_REFERENCE}`;
 
 /**
+ * The workspace-graph implementation Issue: the PoC that supplies #14's argument.
+ *
+ * Separate from `WORKSPACE_SOURCE_DECISION` because it is a different kind of record:
+ * #14 *decides* the contract, and #15 *executes* it. The distinction is why this
+ * one is an implementation Issue rather than a Spec, and why the loader exists at
+ * all — #14 recorded that "supplying the graph from those sources is the
+ * project-configuration work (#26, #28)", and #15 is where that work has to land
+ * once #28 enters `main` without it.
+ */
+export const WORKSPACE_GRAPH_IMPLEMENTATION: ArchitectureDecisionSource = {
+  repository: "Mang-X/forguncy-react-workspace",
+  issue: 15,
+  title: "Implement: workspace package flattening PoC",
+  url: "https://github.com/Mang-X/forguncy-react-workspace/issues/15",
+};
+
+/** Short form, e.g. `#15`. */
+export const WORKSPACE_GRAPH_IMPLEMENTATION_REFERENCE = decisionReference(WORKSPACE_GRAPH_IMPLEMENTATION);
+
+/**
  * Every Spec a change to the workspace-source contract has to cite.
  *
  * The architecture decisions first, then the artifact Spec #14 refines, then #14
  * itself — so a report built from this list reads in the order the decisions were
- * taken. #5 is included even though #14's own Dependencies section names only #4
- * and #6, because the compiler is bound by the runtime contract either way and
- * this package's other reference lines already carry it; dropping it here would
- * make one list in one package quietly weaker than the rest.
+ * taken — then #15, which owns the evidence for the two criteria #14 could not
+ * produce. #5 is included even though #14's own Dependencies section names only #4
+ * and #6, because the compiler is bound by the runtime contract either way and this
+ * package's other reference lines already carry it; dropping it here would make one
+ * list in one package quietly weaker than the rest.
  */
 export const WORKSPACE_SOURCE_GOVERNING_DECISIONS: readonly ArchitectureDecisionSource[] = [
   ...GOVERNING_ARCHITECTURE_DECISIONS,
   ARTIFACT_CONTRACT_DECISION,
   WORKSPACE_SOURCE_DECISION,
+  WORKSPACE_GRAPH_IMPLEMENTATION,
 ];
 
 /** The line a PR body, plan or report describing the workspace-source contract carries. */
 export const WORKSPACE_SOURCE_GOVERNING_SPEC_REFERENCE_LINE = formatGoverningSpecReferenceLine(
   WORKSPACE_SOURCE_GOVERNING_DECISIONS,
 );
+
+/** Patterns a document must match to count as citing the workspace-graph implementation Issue (#15). */
+export const WORKSPACE_GRAPH_CITATION_PATTERNS: readonly RegExp[] =
+  citationPatternsFor(WORKSPACE_GRAPH_IMPLEMENTATION);
 
 /** Patterns a document must match to count as citing the workspace-source contract. */
 export const WORKSPACE_SOURCE_CITATION_PATTERNS: readonly RegExp[] =

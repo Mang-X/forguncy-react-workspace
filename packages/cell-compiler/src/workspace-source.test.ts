@@ -8,6 +8,7 @@ import type { DependencyDecision, FrontendLibraryReference } from "@forguncy-rea
 import { citesDecision, citesEveryArchitectureDecision } from "@forguncy-react-workspace/core";
 
 import {
+  WORKSPACE_GRAPH_IMPLEMENTATION,
   WORKSPACE_SOURCE_DECISION,
   WORKSPACE_SOURCE_DECISION_REFERENCE,
   WORKSPACE_SOURCE_GOVERNING_DECISIONS,
@@ -1199,14 +1200,18 @@ describe("workspace source decision provenance", () => {
     expect(WORKSPACE_SOURCE_DECISION.url).toBe(
       "https://github.com/Mang-X/forguncy-react-workspace/issues/14",
     );
+    // #15 is in the list because it is the implementation Issue that supplies the
+    // graph #14 takes as an argument — the contract and the code that feeds it are
+    // bound together, and a report about either has to name both.
     expect(WORKSPACE_SOURCE_GOVERNING_DECISIONS.map(source => `#${source.issue}`)).toEqual([
       "#4",
       "#5",
       "#6",
       "#14",
+      "#15",
     ]);
     expect(WORKSPACE_SOURCE_GOVERNING_SPEC_REFERENCE_LINE).toBe(
-      "Governing architecture Spec Issue(s): #4, #5, #6, #14",
+      "Governing architecture Spec Issue(s): #4, #5, #6, #14, #15",
     );
   });
 
@@ -1225,6 +1230,24 @@ describe("workspace source decision provenance", () => {
     expect(source).not.toMatch(/node:path/);
     expect(source).not.toMatch(/node:module/);
     expect(source).not.toMatch(/require\(/);
+  });
+
+  // #15's answer to the same boundary, and the reason the loader is a *separate*
+  // module rather than an addition to this one: the contract still takes its graph
+  // as an argument and still reads nothing, while something else does the reading.
+  // A loader folded into `workspace-source.ts` would have broken the check above,
+  // which is exactly the drift this pair of tests exists to catch.
+  it("keeps the graph loader out of the contract, and cites #15 where it lives", () => {
+    const loader = readRepositoryFile("packages", "cell-compiler", "src", "workspace-graph.ts");
+    expect(loader).toMatch(/node:fs/);
+    expect(citesDecision(loader, WORKSPACE_GRAPH_IMPLEMENTATION)).toBe(true);
+    expect(citesEveryArchitectureDecision(loader)).toBe(true);
+    // The loader consumes the contract rather than restating it: the index and the
+    // record type come from `workspace-source`, so there is no second definition of
+    // what a workspace package is.
+    expect(loader).toMatch(/from "\.\/workspace-source"/);
+    expect(loader).not.toMatch(/interface WorkspacePackageRecord/);
+    expect(loader).not.toMatch(/function indexWorkspaceGraph/);
   });
 
   // #14's acceptance criterion 5. The sentence is asserted in the repository's agent

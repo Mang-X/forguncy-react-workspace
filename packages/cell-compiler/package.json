@@ -6,7 +6,8 @@
   "dependencies": {
     "@babel/parser": "7.29.8",
     "@forguncy-react-workspace/core": "workspace:*",
-    "rolldown": "1.2.9"
+    "rolldown": "1.2.9",
+    "yaml": "2.9.1"
   },
   "//dependencies": [
     "`rolldown` is the bundler #6 mandates for the compiler's resolution and code",
@@ -21,7 +22,9 @@
     "shapes that fail silently differ only once a consumer's namespace import enumerates",
     "the module, so the regression builds through the real bundler rather than through a",
     "hand-written copy of its runtime helper. The end-to-end tests likewise run authored",
-    "entries through the full `compileCell` path against this exact build."
+    "entries through the full `compileCell` path against this exact build.",
+    "",
+    "yaml is the workspace-manifest parser (#15). It is a build-time dependency for the same reason @babel/parser is: nothing it provides can appear in a generated Cell artifact, so AGENTS.md's host | inline | extension | replace table does not apply to it. It reads pnpm-workspace.yaml so the compiler can be handed a real WorkspaceGraph instead of the contract's input type, which is the criterion #14 moved to #15. Pinned, not floated: a change in what a workspace file means must not arrive silently."
   ],
   "//devDependencies": [
     "Test-only, and pinned to versions measured in this repository rather than to",

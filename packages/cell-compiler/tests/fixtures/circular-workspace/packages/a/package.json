@@ -1,0 +1,16 @@
+{
+  "name": "@fixture/a",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "//dependencies": [
+    "Depends on `@fixture/b`, which depends back on this package: the cycle #15's",
+    "fourth acceptance criterion requires a structured diagnostic for. The",
+    "dependency is real (a manifest field, not a comment) because the loader reads",
+    "declared edges — a cycle that only existed in prose would not be found by the",
+    "code path under test."
+  ],
+  "dependencies": {
+    "@fixture/b": "workspace:*"
+  }
+}

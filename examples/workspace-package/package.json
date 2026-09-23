@@ -2,5 +2,26 @@
   "name": "@examples/workspace-package",
   "version": "0.0.0",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "//dependencies": [
+    "The two `@app/*` packages are workspace packages this Cell imports by name, and",
+    "`react` is deliberately *not* declared here.",
+    "",
+    "The `@app/*` entries are what #15's first acceptance criterion is about: the",
+    "authored source says `import { ThemeScope } from \"@app/ui\"` and the compiler",
+    "flattens that source into this Cell's artifact (#14), so they are source",
+    "dependencies rather than deployed modules. `pnpm install` links them under this",
+    "example's own `node_modules` — which is exactly the real workspace graph the",
+    "compile has to walk rather than a path rewrite invented for the PoC.",
+    "",
+    "`react` is omitted because nothing here may declare it as an installed",
+    "dependency of *this* Cell: `@app/ui` imports it, and the whole point of #9's",
+    "host bridge is that the import resolves to the page's React, not to a copy",
+    "pnpm happened to install for this example. Declaring it would invite the",
+    "mistake the host bridge exists to prevent."
+  ],
+  "dependencies": {
+    "@app/tokens": "workspace:*",
+    "@app/ui": "workspace:*"
+  }
 }
