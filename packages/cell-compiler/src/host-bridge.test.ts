@@ -303,6 +303,84 @@ describe("generated JSX runtime adapter", () => {
     expect(keyedWithChildren.props.children).toEqual(["x", "y"]);
   });
 
+  // PR #62 review round: when both a props.key and a third-argument key are
+  // present, React 19.2.7's jsxProd/jsxDEVImpl write the third argument first
+  // and overwrite from config, so props.key wins — and the adapter's
+  // createElement delegate reads config.key with that same precedence. Pinned
+  // to the real jsx/jsxs/jsxDEV rather than to hardcoded strings, so the
+  // contract is "matches React", and the critical case is also asserted
+  // literally so a matching drift on both sides cannot pass silently.
+  it("matches React 19.2.7 key precedence for every props.key / third-argument combination", () => {
+    const runtime = evaluateModule(source(), { React });
+    type Element = { key: unknown };
+    type Jsx = (type: unknown, props?: unknown, key?: unknown) => Element;
+    type JsxDEV = (
+      type: unknown,
+      props?: unknown,
+      key?: unknown,
+      isStaticChildren?: boolean,
+      source?: unknown,
+      self?: unknown,
+    ) => Element;
+
+    const adapterJsx = runtime.jsx as Jsx;
+    const adapterJsxs = runtime.jsxs as Jsx;
+    const adapterJsxDEV = runtime.jsxDEV as JsxDEV;
+
+    const hostJsxRuntime = require("react/jsx-runtime") as {
+      jsx: Jsx;
+      jsxs: Jsx;
+    };
+    const hostJsxDevRuntime = require("react/jsx-dev-runtime") as {
+      jsxDEV: JsxDEV;
+    };
+
+    const Child = () => null;
+    const cases = [
+      { label: "both sources present", props: { key: "from-props", label: "a" }, key: "from-third", hasThird: true },
+      { label: "third argument only", props: { label: "a" }, key: "from-third", hasThird: true },
+      { label: "props.key only", props: { key: "from-props", label: "a" }, key: undefined, hasThird: false },
+      { label: "props.key undefined, third present", props: { key: undefined, label: "a" }, key: "from-third", hasThird: true },
+      { label: "props.key null, third present", props: { key: null, label: "a" }, key: "from-third", hasThird: true },
+      { label: "numeric props.key, third present", props: { key: 0, label: "a" }, key: "from-third", hasThird: true },
+      { label: "no key anywhere", props: { label: "a" }, key: undefined, hasThird: false },
+    ] as const;
+
+    // Real jsx/jsxDEV warn when a props object owning `key` is spread into
+    // JSX (React's key-spread diagnostic). The adapter delegates to
+    // createElement, which does not emit it; capture the warnings so only
+    // these assertions decide the outcome.
+    const warnings: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => {
+      warnings.push(format(...args));
+    };
+
+    try {
+      for (const testCase of cases) {
+        const call = <T extends Jsx | JsxDEV>(fn: T): Element =>
+          testCase.hasThird
+            ? (fn as Jsx)(Child, testCase.props, testCase.key)
+            : (fn as Jsx)(Child, testCase.props);
+
+        const expected = call(hostJsxRuntime.jsx).key;
+        expect(call(adapterJsx).key, testCase.label).toBe(expected);
+        expect(call(adapterJsxs).key, testCase.label).toBe(expected);
+        expect(call(hostJsxDevRuntime.jsxDEV).key, testCase.label).toBe(expected);
+        expect(call(adapterJsxDEV).key, testCase.label).toBe(expected);
+      }
+
+      // The review's literal case: props wins over the third argument.
+      expect(adapterJsx(Child, { key: "from-props", label: "a" }, "from-third").key).toBe("from-props");
+      expect(adapterJsxDEV(Child, { key: "from-props", label: "a" }, "from-third", false, undefined, undefined).key).toBe("from-props");
+      // …and the third argument still wins when config has no valid key.
+      expect(adapterJsx(Child, { key: undefined, label: "a" }, "from-third").key).toBe("from-third");
+      expect(adapterJsx(Child, { label: "a" }, "from-third").key).toBe("from-third");
+    } finally {
+      console.error = originalError;
+    }
+  });
+
   it("gives every child in a jsxs list its own key", () => {
     const runtime = evaluateModule(source(), { React });
     const jsx = runtime.jsx as (type: unknown, props: unknown, key?: unknown) => unknown;

@@ -303,9 +303,15 @@ function renderHostBridgeVerifiedMemberView(mapping: HostBridgeGlobalMapping, mo
  * `MangMax/forguncy-react-library` verified and its regression test exists to keep:
  * `jsx(type, props, key)` and `createElement(type, config, children)` disagree
  * about the third parameter, so the key is never forwarded as the third argument
- * and no third argument is passed when there is no key. `core`'s
- * `JSX_RUNTIME_ADAPTER_RULES` is the contract this code implements; the comments
- * here are the *why* for a reader who has the generated file and not the Spec.
+ * and no third argument is passed when there is no key. On top of that, when both
+ * a `props.key` and a third-argument key are present, `props.key` wins: React
+ * 19.2.7's `jsxProd`/`jsxDEVImpl` write the third argument first and overwrite
+ * from `config`, and `createElement` reads `config.key` itself — so the adapter
+ * passes `props` through untouched whenever it owns a key, and only merges the
+ * third argument in when `props.key` is `undefined` (matching `hasValidKey`).
+ * `core`'s `JSX_RUNTIME_ADAPTER_RULES` is the contract this code implements; the
+ * comments here are the *why* for a reader who has the generated file and not the
+ * Spec.
  *
  * Two additions to the verified form, both from #9 rather than from taste:
  *
@@ -370,9 +376,16 @@ export function renderHostBridgeAdapterModule(mapping: HostBridgeAdapterMapping,
     `// third argument sets children to the key and drops the key.`,
     `function __fgcHostBridgeJsx(type, props, key) {`,
     `  var React = __fgcHostBridgeReact();`,
-    `  if (key === undefined) {`,
-    `    // Exactly two arguments: an explicit undefined third one would take`,
-    `    // createElement's children branch and overwrite props.children.`,
+    `  if (key === undefined || (props && props.key !== undefined)) {`,
+    `    // Exactly two arguments when the third is undefined: an explicit undefined`,
+    `    // third one would take createElement's children branch and overwrite`,
+    `    // props.children. When config owns a key, React's own jsx and jsxDEV both`,
+    `    // let it win over the third argument (jsxProd writes maybeKey first, then`,
+    `    // overwrites from config; jsxDEVImpl does the same via hasValidKey), and`,
+    `    // createElement reads and strips config.key itself — so passing props`,
+    `    // through untouched reproduces that precedence. The third argument is only`,
+    `    // merged in when config has no key (key: undefined is invalid, so a`,
+    `    // declared key then wins, matching hasValidKey).`,
     `    return React.${createElement}(type, props);`,
     `  }`,
     `  return React.${createElement}(type, Object.assign({}, props, { key: key }));`,

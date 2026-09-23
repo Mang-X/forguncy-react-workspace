@@ -482,6 +482,7 @@ describe("the JSX runtime adapter contract", () => {
     expect(JSX_RUNTIME_ADAPTER_RULE_IDS).toContain("no-third-argument-without-a-key");
     expect(JSX_RUNTIME_ADAPTER_RULE_IDS).toContain("evaluation-must-not-throw");
     expect(JSX_RUNTIME_ADAPTER_RULE_IDS).toContain("adapter-is-not-the-react-object");
+    expect(JSX_RUNTIME_ADAPTER_RULE_IDS).toContain("props-key-wins-over-declared-key");
 
     for (const rule of JSX_RUNTIME_ADAPTER_RULES) {
       expect(rule.statement.length, rule.id).toBeGreaterThan(0);
@@ -503,6 +504,7 @@ describe("the JSX runtime adapter contract", () => {
     expect(ids).toContain("children-only");
     expect(ids).toContain("keyed-list-via-jsxs");
     expect(ids).toContain("explicit-undefined-key");
+    expect(ids).toContain("both-key-sources-present");
   });
 
   it("records the verified source of each rule rather than re-arguing it", () => {
