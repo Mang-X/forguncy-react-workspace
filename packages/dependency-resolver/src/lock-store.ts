@@ -12,7 +12,7 @@
  * `@forguncy-react-workspace/core`; this module owns only the filesystem and the
  * projection onto compilation.
  *
- * Three behaviours are deliberate:
+ * Four behaviours are deliberate:
  *
  * - **A missing file is an empty lock, not an error.** "No decision recorded
  *   yet" is a normal state for a project, and `resolveLockDecision` reports it as
@@ -26,9 +26,8 @@
  *   has moved past would be bundled as though someone had checked it.
  * - **There is a second, explicitly local projection.** `compilationDependencies`
  *   is a deployment gate (fresh + runtime-validated). Local probe questions need
- *   a neutral lock→decision mapper that does not require a fake `target` to
- *   answer them; `localCompilationDependencies` is that mapper and is never a
- *   shipping path.
+ *   the same freshness rules without a fake `target` to answer them;
+ *   `localCompilationDependencies` is freshness-only and is never a shipping path.
  */
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -47,6 +46,7 @@ import type {
 import {
   assertFgcLockDocument,
   assertFgcLockDocumentShape,
+  assessLockDecision,
   canonicalizeFgcLock,
   createEmptyFgcLock,
   dependencyDecisionOf,
@@ -275,27 +275,32 @@ export interface LocalCompilationDependencyOptions {
 }
 
 /**
- * The local/probe projection: recorded decisions reduced to compiler input
- * *without* the deployment verification gate.
+ * The local/probe projection: fresh recorded decisions reduced to compiler
+ * input without the deployment gate's real-runtime validation.
  *
  * `compilationDependencies` is a deployment gate — fresh *and* runtime-validated
- * or nothing. That is correct for shipping, and wrong for the local questions a
- * probe-driven PoC asks: "does this recorded decision externalize?", "does the
- * generated artifact bind the extension global?". Those must be answerable while
- * `target` is honestly `null` (steps 7–8 of #13 have not run), without writing
- * a fake runtime claim into the lock to get past the gate.
+ * or nothing. That is correct for shipping, and too strict for the local
+ * questions a probe-driven PoC asks while `target` is honestly `null` (#13
+ * steps 7–8 have not run): "does this recorded decision externalize?". The two
+ * axes #8 already separates map onto the two projections:
  *
- * What still applies: rule 4 of #8 — a `replace` record participates in no
- * compilation and is withheld as a cache. What deliberately does *not* apply:
- * freshness against a `LockEnvironment`, and `realRuntimeValidation`. Callers
- * must run `auditLockDecisionConformance` first (as the deployment path's
- * callers do), and must never present this projection's output as a deployment
+ * - `compilationDependencies` = freshness + real-runtime validation;
+ * - `localCompilationDependencies` = freshness only.
+ *
+ * Stale evidence is withheld on both paths, with the same `not-verified` +
+ * `stalenessReasons` shape — package version, probe fingerprint, toolchain and
+ * extension version/identity drift all still fail closed here. The *only*
+ * relaxation is `realRuntimeValidation === "not-validated"`. Rule 4 of #8 still
+ * withholds `replace` as a cache once the record is fresh (a stale rejection is
+ * re-probing, not a cache). Callers must run `auditLockDecisionConformance`
+ * first, and must never present this projection's output as a deployment
  * decision — shipping goes through `compilationDependencies`, which withholds
  * exactly these `not-validated` records until a real Forguncy runtime check
  * records a `target`.
  */
 export function localCompilationDependencies(
   lock: FgcLockDocument,
+  environment: LockEnvironment,
   options: LocalCompilationDependencyOptions = {},
 ): CompilationDependencies {
   const cellTarget = options.cellTarget ?? null;
@@ -309,12 +314,26 @@ export function localCompilationDependencies(
       continue;
     }
 
+    const assessment = assessLockDecision(record, environment);
+    if (assessment.freshness !== "fresh") {
+      withheld.push({
+        packageName,
+        strategy: record.strategy,
+        reason: "not-verified",
+        stalenessReasons: assessment.stalenessReasons,
+        realRuntimeValidation: assessment.realRuntimeValidation,
+      });
+      continue;
+    }
+
     const profile = lockEvidenceProfileOf(record);
     if (!LOCK_EVIDENCE_POLICY[profile].participatesInCompilation) {
       withheld.push({ packageName, strategy: record.strategy, reason: "replace-cache" });
       continue;
     }
 
+    // Fresh on every axis; `realRuntimeValidation` is deliberately not checked —
+    // that is the one thing this path exists to relax.
     dependencies.push(dependencyDecisionOf(record));
   }
 

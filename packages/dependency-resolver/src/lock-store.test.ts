@@ -378,15 +378,15 @@ describe("compiler projection", () => {
     const empty: FgcLockDocument = { schemaVersion: FGC_LOCK_SCHEMA_VERSION, decisions: [] };
 
     expect(compilationDependencies(empty, fixtureEnvironment())).toEqual({ dependencies: [], withheld: [] });
-    expect(localCompilationDependencies(empty)).toEqual({ dependencies: [], withheld: [] });
+    expect(localCompilationDependencies(empty, fixtureEnvironment())).toEqual({ dependencies: [], withheld: [] });
   });
 });
 
 describe("local compilation projection", () => {
   // The deployment gate withholds a locally probed record (target: null) as
-  // not-validated. The local projection must still hand it to the compiler —
-  // that is the whole point: local PoC questions are answerable without a
-  // fake runtime claim in the lock.
+  // not-validated. The local projection must still hand it to the compiler when
+  // fresh — that is the whole point: local PoC questions are answerable without
+  // a fake runtime claim in the lock.
   it("projects a not-validated record the deployment gate would withhold", async () => {
     const locallyProbed: LockedDependencyDecision = {
       ...inlineRecord,
@@ -408,15 +408,49 @@ describe("local compilation projection", () => {
       },
     ]);
 
-    const local = localCompilationDependencies(lock);
+    const local = localCompilationDependencies(lock, environment);
     expect(local.withheld).toEqual([]);
     expect(local.dependencies).toEqual([{ strategy: "inline", packageName: "dayjs" }]);
+  });
+
+  // Freshness is NOT relaxed on the local path — only real-runtime validation
+  // is. A moved package version is stale evidence on both projections.
+  it("withholds a package-version drift the same way the deployment gate does", async () => {
+    const lock = await readFixture();
+    const environment = fixtureEnvironment({
+      resolvedVersions: { ...fixtureEnvironment().resolvedVersions, "es-toolkit": "1.40.0" },
+    });
+
+    const local = localCompilationDependencies(lock, environment);
+    expect(local.dependencies.map(decision => decision.packageName)).not.toContain("es-toolkit");
+    expect(local.withheld).toContainEqual({
+      packageName: "es-toolkit",
+      strategy: "inline",
+      reason: "not-verified",
+      stalenessReasons: ["package-version-changed"],
+      realRuntimeValidation: "validated",
+    });
+  });
+
+  it("withholds an extension-version drift on the local path too", async () => {
+    const lock = await readFixture();
+    const environment = fixtureEnvironment({ extensionVersions: { "tanstack-query": "5.91.0" } });
+
+    const local = localCompilationDependencies(lock, environment);
+    expect(local.dependencies.map(decision => decision.packageName)).not.toContain("@tanstack/react-query");
+    expect(local.withheld).toContainEqual({
+      packageName: "@tanstack/react-query",
+      strategy: "extension",
+      reason: "not-verified",
+      stalenessReasons: ["extension-version-changed"],
+      realRuntimeValidation: "validated",
+    });
   });
 
   it("still withholds replace as a cache — rule 4 of #8 applies locally too", async () => {
     const lock = await readFixture();
 
-    const { dependencies, withheld } = localCompilationDependencies(lock);
+    const { dependencies, withheld } = localCompilationDependencies(lock, fixtureEnvironment());
 
     expect(withheld).toEqual([
       { packageName: "react-router-dom", strategy: "replace", reason: "replace-cache" },
@@ -432,7 +466,7 @@ describe("local compilation projection", () => {
   it("hands the compiler #4's decision model, same shape as the gate", async () => {
     const lock = await readFixture();
 
-    const { dependencies } = localCompilationDependencies(lock);
+    const { dependencies } = localCompilationDependencies(lock, fixtureEnvironment());
 
     expect(dependencies[0]).toEqual({
       strategy: "extension",

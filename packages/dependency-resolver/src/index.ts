@@ -16,9 +16,9 @@
  *   remove, exact-key and target-preferring lookup (`lock-store`);
  * - the projection onto compilation, which hands the compiler verified decisions
  *   only (`lock-store`), plus the clearly local-only projection
- *   (`localCompilationDependencies`) that maps recorded decisions to compiler
- *   input without the deployment gate — for probe/PoC questions while `target`
- *   is honestly null, never a shipping path;
+ *   (`localCompilationDependencies`) — freshness enforced, real-runtime
+ *   validation deliberately relaxed while `target` is honestly null, never a
+ *   shipping path;
  * - the exact installed versions the staleness rules compare against, read out of
  *   the workspace install graph (`install-graph`);
  * - the update API an Agent or probe flow records through, which merges a

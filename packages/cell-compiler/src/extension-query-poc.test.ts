@@ -31,9 +31,11 @@
  *   extension has moved (`extension-version-changed`). Shipping stays blocked
  *   until a real-page check records a target.
  * - The **local projection** (`localCompilationDependencies`, after the same
- *   conformance audit) is what feeds `compileCell`, so "recorded decision →
- *   externalization" is still proven end-to-end without borrowing the gate or
- *   writing runtime evidence into the lock.
+ *   conformance audit + a real `LockEnvironment`) is what feeds `compileCell`.
+ *   It enforces freshness on every axis (package/probe/toolchain/extension
+ *   drift still withholds) and only relaxes `realRuntimeValidation`, so
+ *   "recorded decision → externalization" is proven end-to-end without
+ *   borrowing the gate or writing runtime evidence into the lock.
  *
  * Version alignment — the package.json pin, the install graph, the lock record
  * and the environment's extension version — is asserted equal on `5.102.8`.
@@ -140,14 +142,16 @@ async function conformedLock() {
 
 /**
  * The local/probe projection the PoC compiles through: conformance-audited
- * lock → `localCompilationDependencies` → `compileCell`. Explicitly *not* the
- * deployment gate — see the gate tests below.
+ * lock + environment → `localCompilationDependencies` → `compileCell`.
+ * Freshness still gates; only real-runtime validation is relaxed. Explicitly
+ * *not* the deployment gate — see the gate tests below.
  */
-async function dependenciesFromLock(): Promise<{
+async function dependenciesFromLock(environment?: LockEnvironment): Promise<{
   dependencies: readonly DependencyDecision[];
   withheld: readonly WithheldCompilationDependency[];
 }> {
-  return localCompilationDependencies(await conformedLock());
+  const lock = await conformedLock();
+  return localCompilationDependencies(lock, environment ?? (await environmentFor()));
 }
 
 /**
@@ -424,6 +428,26 @@ describe("extension tanstack-query PoC (#13)", () => {
       strategy: "extension",
       reason: "not-verified",
       stalenessReasons: ["extension-version-changed"],
+      realRuntimeValidation: "not-validated",
+    });
+  });
+
+  it("withholds package and extension drift on the local path too — only not-validated is relaxed", async () => {
+    // PR review of #61 P2: the local projection enforces freshness on every
+    // axis; its only relaxation is real-runtime validation. A moved pin or
+    // extension must fail closed here exactly as on the deployment gate.
+    const environment = await environmentFor({
+      resolvedVersions: { ...((await environmentFor()).resolvedVersions), [PACKAGE_NAME]: "5.103.0" },
+      extensionVersions: { "tanstack-query": "5.103.0" },
+    });
+
+    const { dependencies, withheld } = await dependenciesFromLock(environment);
+    expect(dependencies).toEqual([]);
+    expect(withheld).toContainEqual({
+      packageName: PACKAGE_NAME,
+      strategy: "extension",
+      reason: "not-verified",
+      stalenessReasons: ["package-version-changed", "extension-version-changed"],
       realRuntimeValidation: "not-validated",
     });
   });
