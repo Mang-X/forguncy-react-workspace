@@ -2,5 +2,16 @@
   "name": "@examples/inline-es-toolkit",
   "version": "0.0.0",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "//dependencies": [
+    "es-toolkit is pinned to an exact version because #10's PoC measures the",
+    "flattened artifact for *this* version: an `inline` decision compiles the",
+    "package's own code into the Cell, so a range that could resolve differently",
+    "would silently change the evidence. The import in `src/App.tsx` stays an",
+    "ordinary ESM import — no Forguncy extension and no `frontendLibraries`",
+    "reference exists for it, which is exactly the claim this example proves."
+  ],
+  "dependencies": {
+    "es-toolkit": "1.52.0"
+  }
 }
