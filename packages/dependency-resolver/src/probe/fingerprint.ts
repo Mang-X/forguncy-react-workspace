@@ -27,18 +27,41 @@
  * on purpose: a fingerprint appears in lock diffs and in
  * `probe-fingerprint-changed` diagnostics, and an opaque hash would make both
  * unreadable. Sorted JSON for the maps keeps the same inputs composing the same
- * bytes across machines and Node versions.
+ * bytes across machines and Node versions — recursively, so nested `probeConfig`
+ * objects are canonical too. `probeId` and `entry` are JSON-encoded scalars so
+ * caller strings containing `;`/`=` cannot forge or collide with the composed
+ * segments.
  */
 
 import { BUILD_CONFIGURATION_FINGERPRINT } from "./build";
 
-/** Sorted-key JSON: `JSON.stringify` preserves insertion order, which would differ per caller. */
-function stableJson(value: Readonly<Record<string, unknown>>): string {
-  const sorted: Record<string, unknown> = {};
-  for (const key of Object.keys(value).sort()) {
-    sorted[key] = value[key];
+/**
+ * Recursively canonicalize: object keys sorted at every depth, array order
+ * preserved (arrays are ordered data; reordering them would change meaning).
+ */
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(canonicalize);
   }
-  return JSON.stringify(sorted);
+  if (value !== null && typeof value === "object") {
+    const record = value as Readonly<Record<string, unknown>>;
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(record).sort()) {
+      sorted[key] = canonicalize(record[key]);
+    }
+    return sorted;
+  }
+  return value;
+}
+
+/** Recursive sorted-key JSON: `JSON.stringify` preserves insertion order, which would differ per caller. */
+function stableJson(value: Readonly<Record<string, unknown>>): string {
+  return JSON.stringify(canonicalize(value));
+}
+
+/** JSON-encode a scalar segment so `;`/`=` in caller strings cannot break the composition. */
+function stableScalar(value: string): string {
+  return JSON.stringify(value);
 }
 
 export interface ComposeProbeFingerprintInput {
@@ -73,8 +96,8 @@ export function composeProbeFingerprint(input: ComposeProbeFingerprintInput): Co
   const bundlerInput = { ...(input.bundlerInput ?? BUILD_CONFIGURATION_FINGERPRINT) };
 
   const fingerprint = [
-    `probe=${input.probeId}`,
-    `entry=${input.entry}`,
+    `probe=${stableScalar(input.probeId)}`,
+    `entry=${stableScalar(input.entry)}`,
     `config=${stableJson(probeConfig)}`,
     `bundler=${stableJson(bundlerInput)}`,
   ].join(";");

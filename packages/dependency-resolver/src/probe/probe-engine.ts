@@ -122,8 +122,25 @@ export interface RuntimeSmokeResult {
   readonly rejectionFindings?: readonly Omit<ProbeRejectionFinding, "step">[];
 }
 
+/**
+ * What the smoke hook is handed: the eight completed steps, **not** a full
+ * `ProbeReport`. `runtime-smoke` has not been recorded yet, so this value would
+ * correctly fail `validateProbeReport`'s "all nine steps exactly once"
+ * invariant — the type says so instead of claiming a complete report a hook
+ * could pass to protocol helpers and get a surprising validation failure.
+ */
+export interface PreSmokeReport {
+  readonly schemaVersion: typeof PROBE_REPORT_SCHEMA_VERSION;
+  readonly environment: ProbeEnvironment;
+  readonly facts: readonly ProbeFact[];
+  readonly risks: readonly ProbeRisk[];
+  readonly rejectionFindings: readonly ProbeRejectionFinding[];
+  /** `package-identity` through `size` only; the `runtime-smoke` entry is pending. */
+  readonly validation: readonly ProbeValidationEntry[];
+}
+
 export type RuntimeSmokeHook = (input: {
-  readonly report: ProbeReport;
+  readonly report: PreSmokeReport;
   readonly output: readonly (OutputChunk | OutputAsset)[];
 }) => RuntimeSmokeResult | Promise<RuntimeSmokeResult>;
 

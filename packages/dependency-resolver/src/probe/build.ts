@@ -35,6 +35,7 @@
  * facts, not failures: an advisory warning is not evidence the artifact cannot run.
  */
 
+import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -89,8 +90,23 @@ function entrySource(specifier: string): string {
   ].join("\n");
 }
 
+/**
+ * The synthetic entry's path, unique to (package, specifier).
+ *
+ * `entry` is an independent fingerprint input while the path used to be keyed
+ * only by package name: two concurrent probes of one package with different
+ * entries (`pkg/a` vs `pkg/b`) both wrote `.fgc/probe/<pkg>/entry.js`, and one
+ * write could replace the file before the other Rolldown read — building the
+ * wrong candidate under the wrong fingerprint. Hashing the specifier isolates
+ * concurrent builds without giving up the human-readable package directory.
+ */
+export function probeEntryPath(projectRoot: string, packageName: string, specifier: string): string {
+  const entryHash = createHash("sha256").update(specifier, "utf8").digest("hex").slice(0, 16);
+  return join(projectRoot, ".fgc", "probe", safePathSegment(packageName), `${entryHash}.js`);
+}
+
 async function writeEntry(projectRoot: string, packageName: string, specifier: string): Promise<string> {
-  const entryPath = join(projectRoot, ".fgc", "probe", safePathSegment(packageName), "entry.js");
+  const entryPath = probeEntryPath(projectRoot, packageName, specifier);
   await mkdir(dirname(entryPath), { recursive: true });
   await writeFile(entryPath, entrySource(specifier), "utf8");
   return entryPath;

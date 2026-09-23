@@ -26,7 +26,7 @@ describe("composeProbeFingerprint", () => {
     });
 
     expect(composed.fingerprint).toBe(
-      'probe=inline-bundle;entry=es-toolkit;config={"format":"iife"};bundler={"format":"iife","platform":"browser"}',
+      'probe="inline-bundle";entry="es-toolkit";config={"format":"iife"};bundler={"format":"iife","platform":"browser"}',
     );
     expect(composed.probeConfig).toEqual({ format: "iife" });
     expect(composed.bundlerInput).toEqual({ format: "iife", platform: "browser" });
@@ -61,6 +61,63 @@ describe("composeProbeFingerprint", () => {
     });
 
     expect(a.fingerprint).toBe(b.fingerprint);
+  });
+
+  // Nested maps matter as much as top-level ones: a shallow sort left nested
+  // `probeConfig` objects in caller insertion order, so semantically identical
+  // configs composed different fingerprints.
+  it("is independent of nested object key insertion order", () => {
+    const a = composeProbeFingerprint({
+      probeId: "inline-bundle",
+      entry: "es-toolkit",
+      probeConfig: { resolve: { alias: { a: "x", b: "y" } }, jsx: "react-jsx" },
+    });
+    const b = composeProbeFingerprint({
+      probeId: "inline-bundle",
+      entry: "es-toolkit",
+      probeConfig: { jsx: "react-jsx", resolve: { alias: { b: "y", a: "x" } } },
+    });
+
+    expect(a.fingerprint).toBe(b.fingerprint);
+  });
+
+  it("keeps array order significant (arrays are ordered data)", () => {
+    const ab = composeProbeFingerprint({
+      probeId: "inline-bundle",
+      entry: "es-toolkit",
+      probeConfig: { plugins: ["a", "b"] },
+    });
+    const ba = composeProbeFingerprint({
+      probeId: "inline-bundle",
+      entry: "es-toolkit",
+      probeConfig: { plugins: ["b", "a"] },
+    });
+
+    expect(ab.fingerprint).not.toBe(ba.fingerprint);
+  });
+
+  it("JSON-encodes probeId and entry so `;`/`=` cannot forge or collide with segments", () => {
+    const craftedId = composeProbeFingerprint({
+      probeId: 'x";entry="y',
+      entry: "plain",
+    });
+    const plain = composeProbeFingerprint({
+      probeId: "x",
+      entry: "y",
+    });
+    const forged = composeProbeFingerprint({
+      probeId: "a",
+      entry: 'b";config={}',
+    });
+    const different = composeProbeFingerprint({
+      probeId: "a;entry=b",
+      entry: '"{}',
+    });
+
+    expect(craftedId.fingerprint).not.toBe(plain.fingerprint);
+    expect(forged.fingerprint).not.toBe(different.fingerprint);
+    expect(craftedId.fingerprint.startsWith('probe="x\\";entry=\\"y"')).toBe(true);
+    expect(different.fingerprint).not.toContain(";config={};config=");
   });
 
   it("folds a non-null budget into the probe configuration", () => {

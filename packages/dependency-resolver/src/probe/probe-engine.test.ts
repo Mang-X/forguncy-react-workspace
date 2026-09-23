@@ -361,7 +361,7 @@ describe("runDependencyProbe: cache", () => {
     });
 
     expect(changed.fromCache).toBe(false);
-    expect(changed.fingerprint).toContain("probe=amd-detect");
+    expect(changed.fingerprint).toContain('probe="amd-detect"');
   });
 
   it("treats a corrupt cache file as a miss", async () => {
@@ -544,6 +544,23 @@ describe("runDependencyProbe: runtime smoke", () => {
 
     expect(report.facts.some(fact => fact.name === "smoke.async")).toBe(true);
     expect(report.validation.find(entry => entry.step === "runtime-smoke")?.outcome).toBe("passed");
+  });
+
+  it("hands the hook a pre-smoke report: eight steps, not a complete nine-step report", async () => {
+    let seen: { step: string; outcome: string }[] = [];
+    await probe("pure-esm-utility", "tiny-math", {
+      runtimeSmoke: ({ report }) => {
+        seen = report.validation.map(entry => ({ step: entry.step, outcome: entry.outcome }));
+        return {};
+      },
+    });
+
+    expect(seen).toHaveLength(8);
+    expect(seen.map(entry => entry.step)).not.toContain("runtime-smoke");
+    // The eight static steps are already complete when the hook runs.
+    expect(seen.every(entry => entry.outcome === "passed" || entry.outcome === "failed" || entry.outcome === "skipped")).toBe(
+      true,
+    );
   });
 });
 

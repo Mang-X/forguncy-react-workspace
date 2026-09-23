@@ -172,6 +172,7 @@ export {
 export type {
   DependencyProbeResult,
   ProbeLockEnvironmentOptions,
+  PreSmokeReport,
   RuntimeSmokeHook,
   RuntimeSmokeResult,
   ResolvedPackageIdentity,
@@ -184,7 +185,7 @@ export type { ComposedProbeFingerprint, ComposeProbeFingerprintInput } from "./p
 export { createFileProbeCache, PROBE_CACHE_DIRECTORY, probeCacheRelativePath } from "./probe/cache";
 export type { ProbeCache } from "./probe/cache";
 
-export { BUILD_CONFIGURATION_FINGERPRINT, runCandidateBuild } from "./probe/build";
+export { BUILD_CONFIGURATION_FINGERPRINT, probeEntryPath, runCandidateBuild } from "./probe/build";
 export type { CandidateBuildOptions, CandidateBuildResult } from "./probe/build";
 
 export { findNodeOnlySpecifiers, observeNodeBuiltins } from "./probe/node-scan";
