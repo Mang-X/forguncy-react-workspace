@@ -905,38 +905,40 @@ export async function compileCell(
   input: CompileCellInput,
   options: CompileCellOptions,
 ): Promise<CompileCellOutcome> {
-  // The pre-bundle pass. Its result is the entry's module ids for the audit below,
-  // and it is what makes both fatal findings observable before any code exists.
-  let entrySpecifiers: readonly string[];
-  try {
-    entrySpecifiers = await options.bundler.resolveEntrySpecifiers({
-      entry: input.entry,
+  // The pre-bundle pass runs **only** when a graph was supplied, because it exists
+  // for one purpose: making #14's two fatal findings observable before anything is
+  // built. With no graph there is no workspace audit to run and nothing for the
+  // preflight to decide — so a graph-less #6 compile takes exactly the path it took
+  // before this seam existed, one `bundle()` and no analysis pass. Resolving
+  // specifiers anyway would charge every ordinary compile for work whose result it
+  // discards, and would add a failure path through a port method the caller never
+  // needed.
+  let entrySpecifiers: readonly string[] | undefined;
+  if (options.workspace !== undefined) {
+    try {
+      entrySpecifiers = await options.bundler.resolveEntrySpecifiers({
+        entry: input.entry,
+        dependencies: input.dependencies,
+      });
+    } catch (error) {
+      return {
+        status: "rejected",
+        diagnostics: [
+          createCellArtifactDiagnostic("bundler-failure", input.entry, {
+            detail: `The bundler could not resolve the entry: ${describeThrown(error)}`,
+          }),
+        ],
+      };
+    }
+
+    const preflight = auditWorkspaceSource({
+      workspace: options.workspace,
       dependencies: input.dependencies,
+      entryModuleIds: entrySpecifiers,
+      frontendLibraries: collectFrontendLibraries(input.dependencies).libraries,
     });
-  } catch (error) {
-    return {
-      status: "rejected",
-      diagnostics: [
-        createCellArtifactDiagnostic("bundler-failure", input.entry, {
-          detail: `The bundler could not resolve the entry: ${describeThrown(error)}`,
-        }),
-      ],
-    };
-  }
 
-  const preflight =
-    options.workspace === undefined
-      ? undefined
-      : auditWorkspaceSource({
-          workspace: options.workspace,
-          dependencies: input.dependencies,
-          entryModuleIds: entrySpecifiers,
-          frontendLibraries: collectFrontendLibraries(input.dependencies).libraries,
-        });
-
-  if (preflight !== undefined) {
-    const fatal = preflight.diagnostics.filter(isPreBundleFatalWorkspaceDiagnostic);
-    if (fatal.length > 0) {
+    if (preflight.diagnostics.some(isPreBundleFatalWorkspaceDiagnostic)) {
       return {
         status: "rejected",
         // Empty on purpose: #14's vocabulary is not #6's, so a workspace finding is
@@ -945,6 +947,10 @@ export async function compileCell(
         // guarantee it is not about. Nothing was built, so there is nothing for the
         // artifact vocabulary to describe either.
         diagnostics: [],
+        // The whole audit, not only the fatal findings: a caller reading a rejection
+        // should see everything wrong with the graph, not just the one thing that
+        // stopped it. This is the audit the post-build step would have produced, minus
+        // the two inputs only the output can supply.
         workspace: preflight,
       };
     }
@@ -974,8 +980,12 @@ export async function compileCell(
   // produced. It re-runs the preflight checks (they cannot newly fail) and adds the
   // two that need the output: what the bundler left external, and the metadata that
   // will be written.
+  //
+  // `entrySpecifiers` is defined whenever `options.workspace` is — the pre-bundle
+  // block above sets both together — so the pair is read from one narrowing rather
+  // than two independent `undefined` checks that could drift apart.
   const workspace =
-    options.workspace === undefined
+    options.workspace === undefined || entrySpecifiers === undefined
       ? undefined
       : auditWorkspaceForCompile(input, options.workspace, module, entrySpecifiers);
 

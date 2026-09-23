@@ -57,6 +57,11 @@ import path from "node:path";
 
 import type { DependencyDecision, ExtensionExternalDiagnostic } from "@forguncy-react-workspace/core";
 import { rolldown, type OutputAsset, type OutputChunk } from "rolldown";
+// `scan` is Rolldown's analysis-only entry: it runs the resolve and transform
+// stages and stops, with no `renderChunk` and no `generateBundle`. That is the
+// whole point of using it here rather than `rolldown()` + `generate()` — see
+// {@link resolveEntrySpecifiersWithRolldown}.
+import { scan } from "rolldown/experimental";
 
 import type { BundledCellModule, CellBundlerPort, CellBundlingRequest, CellResolveRequest } from "./artifact";
 import { findDependencyDecision, packageNameOfSpecifier } from "./specifier";
@@ -197,21 +202,31 @@ function createInterceptionResolver(decisions: readonly DependencyDecision[]): {
 }
 
 /**
- * The entry's bare specifiers, resolved through the same resolver the build uses
- * but never generated.
+ * The entry's bare specifiers, analysed through the same resolver the build uses
+ * and **without generating any code**.
  *
- * This is a *preflight*, and its correctness depends entirely on running the same
- * interception machinery as the build — see
- * {@link createInterceptionResolver}. With the decisions applied, a `host`-decided
- * package resolves to the plan's virtual module, so the local source is not
- * traversed and an uninstalled host package does not fail resolution. Without them
- * the pass would walk real `node_modules`, report a superset, and refuse compiles
- * the build would have completed.
+ * This is a preflight, and both halves of that sentence are load-bearing.
  *
- * Rolldown builds the module graph during `generate`, so that call is required even
- * though its output is discarded; `rolldown/experimental`'s `scan` runs the same
- * stage more cheaply but returns nothing and would mean keeping a second plugin
- * configuration in step with this one.
+ * **No code generation.** `rolldown()` + `generate()` was the first implementation
+ * and it was wrong: `generate()` renders chunks and bundles them, which is exactly
+ * the work the preflight exists to avoid. A stage probe makes the difference
+ * explicit — `scan` runs `resolve` and `transform`; `generate` additionally runs
+ * `renderChunk` and `generateBundle`. So a `generate()`-based pass would mean the
+ * cycle was still discovered *after* Rolldown had bundled once, and a failure from
+ * that pass would return `bundler-failure` before the structured cycle diagnostic
+ * could be emitted. `scan` is the analysis-only entry, and it is what makes the
+ * refusal genuinely pre-bundling rather than merely pre-`bundle()`.
+ *
+ * **The same resolver.** Correctness depends on running the same interception
+ * machinery as the build — see {@link createInterceptionResolver}. With the
+ * decisions applied, a `host`-decided package resolves to the plan's virtual module,
+ * so the local source is not traversed and an uninstalled host package does not fail
+ * resolution. Without them the pass would walk real `node_modules`, report a
+ * superset, and refuse compiles the build would have completed.
+ *
+ * `scan` returns nothing, so the specifiers are collected from the plugin hooks it
+ * does run. `resolveId` sees every specifier the graph asks for, bare ones
+ * included, which is the set #14's audit traces its closure from.
  */
 async function resolveEntrySpecifiersWithRolldown(
   dir: string,
@@ -225,9 +240,8 @@ async function resolveEntrySpecifiersWithRolldown(
   const resolver = createInterceptionResolver(request.dependencies);
   const virtualModules = new Map<string, string>();
 
-  let build: Awaited<ReturnType<typeof rolldown>> | undefined;
   try {
-    build = await rolldown({
+    await scan({
       input: resolvedEntry,
       transform: { jsx: "react-jsx" },
       experimental: { attachDebugInfo: "none" },
@@ -257,19 +271,12 @@ async function resolveEntrySpecifiersWithRolldown(
         },
       ],
     });
-
-    // `output.name` must be a legal JS identifier even though the output is
-    // discarded — Rolldown validates it before building the graph. A leading double
-    // underscore keeps it out of the way of anything the entry might declare.
-    await build.generate({ format: "iife", name: "__fgcEntrySpecifierScan", codeSplitting: false });
   } catch (error) {
     // The same reduction the build path applies, and for the same reason: this
     // message becomes a `bundler-failure` diagnostic's `detail`, which lands in CI
     // logs that get diffed, so Rolldown's ANSI framing and source frames must not
     // travel with it.
     throw new Error(describeBuildFailure(error));
-  } finally {
-    await build?.close();
   }
 
   // Sorted so the audit's input is deterministic like every other report field.

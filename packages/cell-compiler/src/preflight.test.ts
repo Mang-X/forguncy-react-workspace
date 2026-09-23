@@ -12,11 +12,13 @@
  * exactly what a broken implementation produces, so "it rejects" is the assertion
  * that carries information.
  */
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { DependencyDecision } from "@forguncy-react-workspace/core";
+import { rolldown } from "rolldown";
+import { scan } from "rolldown/experimental";
 import { afterAll, describe, expect, it } from "vitest";
 
 import { compileCell } from "./artifact";
@@ -27,6 +29,7 @@ import { loadPnpmWorkspaceGraph } from "./workspace-graph";
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = join(packageRoot, "..", "..");
 const exampleRoot = join(repositoryRoot, "examples", "workspace-package");
+const packageSourceDirectory = dirname(fileURLToPath(import.meta.url));
 
 const scratchRoots: string[] = [];
 
@@ -221,5 +224,157 @@ describe("a reachable workspace cycle", () => {
       "circular-workspace-dependency",
     );
     expect(outcome.workspace?.closure?.packages).toEqual(["@cyc/standalone"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The preflight is analysis-only, pinned against the *concrete* port
+// ---------------------------------------------------------------------------
+
+describe("the concrete bundler's preflight is an analysis pass", () => {
+  it("uses Rolldown's analysis-only entry, not one that generates code", async () => {
+    // The review's point, and the reason a mock cannot carry this test: a spy that
+    // counts calls to `bundle()` proves only that `CellBundlerPort.bundle` was not
+    // invoked. It says nothing about whether the *concrete* implementation generated
+    // code, and the first version of `resolveEntrySpecifiers` did — it ran
+    // `rolldown()` + `generate()`, which renders chunks and bundles them, merely
+    // discarding the output. So the cycle was still discovered after Rolldown had
+    // bundled once, and a failure from that pass would have won the race against the
+    // structured diagnostic.
+    //
+    // Two assertions, and both are needed. The first establishes the fact the
+    // implementation depends on — that `scan` and `generate` really do run different
+    // stages — by observing them rather than trusting the API's name. The second
+    // pins that the port uses the analysis-only one; it reads the module's source,
+    // the same technique `workspace-source.test.ts` uses for its own "no filesystem"
+    // boundary, because the choice of entry point is not otherwise observable from
+    // outside.
+    const scanStages: string[] = [];
+    const generateStages: string[] = [];
+    const spy = (into: string[]) => ({
+      name: "stage-spy",
+      resolveId(source: string) {
+        into.push("resolve");
+        return source.startsWith(" ") ? null : null;
+      },
+      transform() {
+        into.push("transform");
+        return null;
+      },
+      renderChunk() {
+        into.push("renderChunk");
+        return null;
+      },
+      generateBundle() {
+        into.push("generateBundle");
+      },
+    });
+
+    await scan({ input: join(exampleRoot, "src", "App.tsx"), transform: { jsx: "react-jsx" }, plugins: [spy(scanStages)] });
+
+    const build = await rolldown({ input: join(exampleRoot, "src", "App.tsx"), transform: { jsx: "react-jsx" }, plugins: [spy(generateStages)] });
+    await build.generate({ format: "iife", name: "__stageProbe", codeSplitting: false });
+    await build.close();
+
+    // `scan` stops after transform; `generate` additionally renders and bundles.
+    expect([...new Set(scanStages)]).not.toContain("renderChunk");
+    expect([...new Set(scanStages)]).not.toContain("generateBundle");
+    expect([...new Set(generateStages)]).toContain("renderChunk");
+    expect([...new Set(generateStages)]).toContain("generateBundle");
+
+    // And the concrete port chose the analysis-only entry.
+    const source = readFileSync(join(packageSourceDirectory, "rolldown-bundler.ts"), "utf8");
+    expect(source).toMatch(/import \{ scan \} from "rolldown\/experimental"/);
+    // The preflight's own body must not call `generate` — the defect being fixed was
+    // exactly a `generate()` hidden inside it, and discarding the output was what made
+    // it look harmless. Sliced between the preflight's declaration and the next
+    // function, so the assertion is about that function rather than about the file.
+    const preflightStart = source.indexOf("async function resolveEntrySpecifiersWithRolldown");
+    const preflightBody = source.slice(
+      preflightStart,
+      source.indexOf("\nfunction renderEntryShim", preflightStart),
+    );
+    expect(preflightBody.length).toBeGreaterThan(0);
+    expect(preflightBody).not.toContain(".generate(");
+  });
+
+  it("produces the same specifier set the build resolves", async () => {
+    // The property the whole preflight rests on: the specifiers it audits are the
+    // ones the build resolves. If these two ever disagreed, the audit would be
+    // deciding about a graph the artifact does not have — and, as the review noted,
+    // a fix wired into one path and not the other is exactly how that happens.
+    const bundler = createRolldownCellBundler({ dir: exampleRoot });
+    const decisions: readonly DependencyDecision[] = [
+      { strategy: "host", packageName: "react", globalName: "React" },
+    ];
+
+    const preflight = await bundler.resolveEntrySpecifiers({ entry: "src/App.tsx", dependencies: decisions });
+    const built = await bundler.bundle({
+      entry: "src/App.tsx",
+      dependencies: decisions,
+      componentBinding: "__forguncyCellEntry",
+    });
+
+    expect(preflight).toEqual(built.referencedSpecifiers);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The preflight is conditional on a graph being supplied
+// ---------------------------------------------------------------------------
+
+describe("a compile with no workspace graph", () => {
+  it("never asks the bundler to resolve entry specifiers", async () => {
+    // The review's P2: the preflight ran unconditionally, so every ordinary #6
+    // compile paid for an analysis pass whose result it discarded, and graph-less
+    // callers acquired a failure path through a port method they never needed.
+    // `resolveEntrySpecifiers` exists to make #14's fatal findings observable before
+    // the build; with no graph there is no #14 audit to make observable.
+    let resolveCalls = 0;
+    let buildCalls = 0;
+    const bundler: CellBundlerPort = {
+      resolveEntrySpecifiers: async () => {
+        resolveCalls += 1;
+        return ["@app/ui"];
+      },
+      bundle: async (): Promise<BundledCellModule> => {
+        buildCalls += 1;
+        return { code: `function App() { return null; }`, externalImports: [], inlinedPackages: [] };
+      },
+    };
+
+    const outcome = await compileCell({ entry: "src/App.tsx", dependencies: [] }, { bundler });
+
+    expect(resolveCalls).toBe(0);
+    expect(buildCalls).toBe(1);
+    expect(outcome.status).toBe("compiled");
+    // No graph means no workspace field, which is #14's "an absent input is not an
+    // empty one" — and the reason the preflight has nothing to decide.
+    expect(outcome.workspace).toBeUndefined();
+  });
+
+  it("still reports a bundler failure from bundle() rather than from a resolve pass", async () => {
+    // The other half of the P2: the failure path a graph-less caller sees must be the
+    // one it always had. With the preflight skipped, a broken entry is reported by
+    // `bundle()` — so the diagnostic is the one `compileCell` has always produced for
+    // a graph-less compile, not a new one from a method that caller never chose.
+    let resolveCalls = 0;
+    const bundler: CellBundlerPort = {
+      resolveEntrySpecifiers: async () => {
+        resolveCalls += 1;
+        throw new Error("resolve pass should not have run");
+      },
+      bundle: async () => {
+        throw new Error("ENOENT: src/App.tsx");
+      },
+    };
+
+    const outcome = await compileCell({ entry: "src/App.tsx", dependencies: [] }, { bundler });
+
+    expect(resolveCalls).toBe(0);
+    expect(outcome.status).toBe("rejected");
+    if (outcome.status !== "rejected") return;
+    expect(outcome.diagnostics.map(diagnostic => diagnostic.code)).toEqual(["bundler-failure"]);
+    expect(outcome.diagnostics[0]?.message).toContain("ENOENT");
   });
 });
