@@ -12,7 +12,8 @@
  * exactly what a broken implementation produces, so "it rejects" is the assertion
  * that carries information.
  */
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -45,9 +46,17 @@ const TRIVIAL_WORKSPACE_FREE_BUNDLER: CellBundlerPort = {
   }),
 };
 
-/** A throwaway project: a cell importing `name` from a locally installed package. */
+/**
+ * A throwaway project: a cell importing `name` from a locally installed package.
+ *
+ * `mkdtemp` outside the repository, not a fixed path inside it. Two tests here import
+ * the same package name, so a shared path meant the second overwrote the first while
+ * Rolldown may still have been resolving it — and a scratch directory inside
+ * `packages/` also sits in the workspace this repository's own graph test walks. The
+ * unique-per-call name removes both, and matches `workspace-graph.test.ts`'s helper.
+ */
 function projectImporting(name: string, source: string): string {
-  const dir = join(packageRoot, `preflight-${name.replace(/[^a-z0-9]/gi, "-")}`);
+  const dir = mkdtempSync(join(tmpdir(), "fgc-preflight-"));
   scratchRoots.push(dir);
   mkdirSync(join(dir, "src"), { recursive: true });
   mkdirSync(join(dir, "node_modules", name), { recursive: true });
@@ -267,7 +276,7 @@ describe("the concrete bundler's preflight is an analysis pass", () => {
       name: "stage-spy",
       resolveId(source: string) {
         into.push("resolve");
-        return source.startsWith(" ") ? null : null;
+        return null;
       },
       transform() {
         into.push("transform");
