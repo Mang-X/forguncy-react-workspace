@@ -153,11 +153,11 @@ function readWorkspacePatterns(document: unknown, fileName: string): readonly st
   }
 
   const patterns = document["packages"];
-  // Absent is a legitimate pnpm state: a workspace file with no `packages` key
-  // declares the root as its only member, which is an empty member list for this
-  // loader. Present-but-malformed is not, and is refused rather than read as
-  // empty — an empty member list makes every workspace package look like a published
-  // dependency, which is the failure this loader's refusals exist to prevent.
+  // An absent `packages` key is a legitimate pnpm state — it means the root is the
+  // only member — so the patterns contribute nothing here and the root is seeded
+  // separately by the caller. Present-but-malformed is refused rather than read as
+  // empty: an empty *member list* would make every workspace package look like a
+  // published dependency, which is the failure this loader's refusals exist to prevent.
   if (patterns === undefined) return [];
   if (!Array.isArray(patterns)) {
     throw new Error(
@@ -410,9 +410,20 @@ export async function loadPnpmWorkspaceGraph(
     );
   }
 
-  // A `Set` for membership and a sort for ordering. The array alone was used as a
-  // set here, making this quadratic in member count — which a real monorepo with a
-  // few thousand members would notice before it noticed the reads.
+  // pnpm's own semantics, and the reason the root is considered here rather than
+  // left to the patterns: "The root package is always included, even when custom
+  // location wildcards are used", and with no `packages:` key at all the root is the
+  // *only* member. A loader that returned just what the patterns expanded to would
+  // report a strict subset of the graph pnpm actually links — this repository is the
+  // worked case, where `forguncy-react-workspace` is a real named workspace package
+  // that `pnpm install` links.
+  //
+  // A *candidate*, not an unconditional member, and that distinction is the whole
+  // rule: pnpm includes the root when the root declares a manifest, and a workspace
+  // root with no `package.json` at all is a real layout (a bare aggregator of
+  // members) rather than a broken project. So the root is added only when its
+  // manifest exists, and it is matched against the expanded patterns so a root the
+  // patterns already named is one member rather than two.
   const memberSet = new Set<string>();
   const patternResults = await Promise.all(
     readWorkspacePatterns(document, fileName).map(pattern => expandWorkspacePattern(root, pattern)),
@@ -420,6 +431,7 @@ export async function loadPnpmWorkspaceGraph(
   for (const directories of patternResults) {
     for (const directory of directories) memberSet.add(directory);
   }
+  if (existsSync(path.join(root, "package.json"))) memberSet.add(root);
   const memberDirectories = [...memberSet].sort();
 
   // Read in parallel over the *already sorted* list, so the ordering is a property

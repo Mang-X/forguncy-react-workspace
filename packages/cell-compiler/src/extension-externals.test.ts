@@ -189,7 +189,10 @@ const TRIVIAL_BUNDLE = [
   "})();",
 ].join("\n");
 
-const bundler: CellBundlerPort = { bundle: async () => ({ code: TRIVIAL_BUNDLE, inlinedPackages: [] }) };
+const bundler: CellBundlerPort = {
+  bundle: async () => ({ code: TRIVIAL_BUNDLE, inlinedPackages: [] }),
+  resolveEntrySpecifiers: async () => [],
+};
 
 async function compileWith(dependencies: readonly DependencyDecision[]): Promise<CompileCellOutcome> {
   return compileCell({ entry: "src/App.tsx", dependencies }, { bundler });

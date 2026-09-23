@@ -266,6 +266,7 @@ export type {
   BundledCellModule,
   CellBundlerPort,
   CellBundlingRequest,
+  CellResolveRequest,
   CompileCellInput,
   CompileCellOptions,
   CompileCellOutcome,

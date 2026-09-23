@@ -25,6 +25,7 @@
  *    protocol range is not a module id, and one leaked into `imports` would make
  *    `packageNameOfSpecifier` see `workspace:*` as a package named `workspace:*`.
  */
+import { readFileSync } from "node:fs";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -101,6 +102,34 @@ describe("the workspace graph read from this repository", () => {
     const cellCompiler = workspacePackageFor(index, "@forguncy-react-workspace/cell-compiler");
     expect(cellCompiler?.imports).toContain("rolldown");
     expect(cellCompiler?.imports).toContain("@forguncy-react-workspace/core");
+  });
+
+  it("includes this repository's own root package, as pnpm does", async () => {
+    // The review finding this pins: the loader expanded only the `packages:` globs,
+    // so this repository's root package — a real named workspace package that
+    // `pnpm install` links and that `pnpm-workspace-state` lists as a project — was
+    // absent from the graph. "Resolves through the real pnpm graph" was therefore a
+    // strict subset of the truth, and a member depending on the root would have had
+    // that dependency classified as published rather than as local source.
+    //
+    // pnpm's rule: "The root package is always included, even when custom location
+    // wildcards are used."
+    const { index } = await loadPnpmWorkspaceGraph({ root: repositoryRoot });
+
+    const root = workspacePackageFor(index, "forguncy-react-workspace");
+    expect(root).toBeDefined();
+    // At the workspace root itself, written as "." rather than the empty string
+    // #14's index refuses.
+    expect(root?.directory).toBe(".");
+    expect(classifyWorkspaceModule(index, "forguncy-react-workspace")).toBe("workspace-package");
+
+    // And the graph is not missing any other member: pnpm's own state file is the
+    // independent count, so this fails if the loader ever under- or over-reports.
+    const pnpmProjects = Object.values(
+      JSON.parse(readFileSync(join(repositoryRoot, "node_modules", ".pnpm-workspace-state-v1.json"), "utf8"))
+        .projects as Record<string, { name: string }>,
+    ).map(project => project.name);
+    expect(index.packages.map(record => record.name).sort()).toEqual([...pnpmProjects].sort());
   });
 
   it("never puts a workspace protocol range into the graph", async () => {
@@ -294,19 +323,73 @@ describe("the workspace graph loader's refusals", () => {
     }
   });
 
-  it("treats an absent `packages` key as no members, which is a real pnpm state", async () => {
-    // Distinct from the malformed cases above: a workspace file with no `packages`
-    // key declares the root as its only member, which is an empty member list for
-    // this loader rather than an error. The root's own manifest is not a member
-    // unless a glob matches it.
+  it("treats an absent `packages` key as the root-only workspace pnpm describes", async () => {
+    // pnpm: "If the `packages` field is omitted, only the root package is included
+    // in the workspace." So the root is the one member here — not an empty graph.
     const root = await fixtureRoot({
       [PNPM_WORKSPACE_FILE]: "allowBuilds:\n  esbuild: true\n",
       "package.json": manifest({ name: "root-project" }),
     });
 
     const { index, diagnostics } = await loadPnpmWorkspaceGraph({ root });
-    expect(index.packages).toEqual([]);
+    expect(index.packages.map(record => record.name)).toEqual(["root-project"]);
+    // The root's directory is the workspace root itself, written as "." because the
+    // empty string is what #14's index refuses as not-workspace-relative.
+    expect(index.packages[0]?.directory).toBe(".");
     expect(diagnostics).toEqual([]);
+  });
+
+  it("includes the root as a member even when custom location wildcards are used", async () => {
+    // pnpm: "The root package is always included, even when custom location wildcards
+    // are used." This is the case the loader got wrong: the patterns alone expanded to
+    // a strict subset of the graph `pnpm install` links, so a dependency on the root
+    // package from a member resolved to a *published* dependency instead of to local
+    // source. This repository is the worked example — its root is `forguncy-react-workspace`.
+    const root = await fixtureRoot({
+      [PNPM_WORKSPACE_FILE]: "packages:\n  - packages/*\n",
+      "package.json": manifest({ name: "root-project", dependencies: { "@fixture/child": "workspace:*" } }),
+      "packages/child/package.json": manifest({ name: "@fixture/child" }),
+    });
+
+    const { index, diagnostics } = await loadPnpmWorkspaceGraph({ root });
+    expect(diagnostics).toEqual([]);
+    expect(index.packages.map(record => record.name).sort()).toEqual(["@fixture/child", "root-project"]);
+
+    // The point of including it: the root is now resolvable by name, so an import of
+    // it is classified as workspace source rather than as a published dependency —
+    // and the root's own edge to its child is in the graph.
+    expect(workspacePackageFor(index, "root-project")?.imports).toEqual(["@fixture/child"]);
+    expect(classifyWorkspaceModule(index, "root-project")).toBe("workspace-package");
+  });
+
+  it("does not invent a root member when the root declares no manifest", async () => {
+    // A workspace root with no `package.json` is a real layout — a bare aggregator of
+    // members — so the root is a *candidate*: it joins the graph only when it declares
+    // a manifest. Without this, seeding the root unconditionally made a missing root
+    // manifest a hard failure, which would refuse a legitimate project.
+    const root = await fixtureRoot({
+      [PNPM_WORKSPACE_FILE]: "packages:\n  - packages/*\n",
+      "packages/child/package.json": manifest({ name: "@fixture/child" }),
+    });
+
+    const { index, diagnostics } = await loadPnpmWorkspaceGraph({ root });
+    expect(index.packages.map(record => record.name)).toEqual(["@fixture/child"]);
+    expect(diagnostics).toEqual([]);
+  });
+
+  it("counts the root once when a pattern already names it", async () => {
+    // `packages: ["."]` makes the root explicit. The root is then both pattern-matched
+    // and seeded, so this asserts the deduplication rather than a second record — which
+    // would be reported as a `workspace-graph-conflict` against the project itself.
+    const root = await fixtureRoot({
+      [PNPM_WORKSPACE_FILE]: 'packages:\n  - "."\n  - packages/*\n',
+      "package.json": manifest({ name: "root-project" }),
+      "packages/child/package.json": manifest({ name: "@fixture/child" }),
+    });
+
+    const { index, diagnostics } = await loadPnpmWorkspaceGraph({ root });
+    expect(diagnostics).toEqual([]);
+    expect(index.packages.map(record => record.name).sort()).toEqual(["@fixture/child", "root-project"]);
   });
 
   it("throws when the workspace document is not a YAML mapping", async () => {

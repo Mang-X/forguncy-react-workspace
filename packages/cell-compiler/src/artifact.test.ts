@@ -43,7 +43,14 @@ const TRIVIAL_BUNDLE = [
  * own contents are asserted separately, so the fixture does not need to prove
  * anything about them.
  */
-const bundlerOf = (module: BundledCellModule): CellBundlerPort => ({ bundle: async () => module });
+const bundlerOf = (module: BundledCellModule): CellBundlerPort => ({
+  bundle: async () => module,
+  // A fixture bundle declares its own `referencedSpecifiers`, so the fixture
+  // resolver reports none: `compileCell` uses the resolver's answer for the
+  // preflight, and passing an empty one keeps the fixture's contract "the bundle is
+  // whatever the test declared".
+  resolveEntrySpecifiers: async () => [],
+});
 
 const TRIVIAL_BUNDLER = bundlerOf({ code: TRIVIAL_BUNDLE, inlinedPackages: [] });
 
@@ -169,6 +176,7 @@ describe("compiling a trivial entry with no third-party dependency", () => {
         requests.push(request);
         return Promise.resolve({ code: TRIVIAL_BUNDLE });
       },
+      resolveEntrySpecifiers: async () => [],
     };
 
     const input: CompileCellInput = { entry: "src/App.tsx", dependencies: [] };
@@ -191,6 +199,7 @@ describe("compiling a trivial entry with no third-party dependency", () => {
         requests.push(request);
         return Promise.resolve({ code: TRIVIAL_BUNDLE });
       },
+      resolveEntrySpecifiers: async () => [],
     };
 
     const outcome = await compileCell({ entry: "src/App.tsx", dependencies: [] }, { bundler });
@@ -535,6 +544,7 @@ describe("bundler failure", () => {
     const outcome = await compile({
       bundler: {
         bundle: () => Promise.reject(new Error("ENOENT: src/App.tsx")),
+        resolveEntrySpecifiers: async () => [],
       },
     });
 
