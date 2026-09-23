@@ -3,8 +3,12 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "//": "vite is a test-only devDependency: it powers dev-seam.test.ts's real dev server. The plugin itself never imports Vite — it is typed structurally against the host plugin contract.",
   "dependencies": {
     "@forguncy-react-workspace/core": "workspace:*"
+  },
+  "devDependencies": {
+    "vite": "8.3.0"
   },
   "exports": {
     ".": "./src/index.ts"

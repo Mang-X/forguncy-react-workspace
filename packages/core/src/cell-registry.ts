@@ -50,6 +50,7 @@ export const CELL_ID_PATTERN = /^[A-Za-z][A-Za-z0-9_-]*$/;
 export type ConfigDiagnosticCode =
   // Document level.
   | "invalid-project-root"
+  | "registry-root-mismatch"
   | "config-file-not-found"
   | "config-load-failed"
   | "config-missing-default-export"
