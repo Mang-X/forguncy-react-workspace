@@ -10,9 +10,15 @@
     "Frontend Extension (global `TanStackQuery`), so the compiler externalizes every",
     "import of it and the npm implementation never enters the generated Cell artifact.",
     "The pinned version therefore shapes types only: runtime identity belongs to the",
-    "extension bundle the page loads, not to this install."
+    "extension bundle the page loads, not to this install.",
+    "",
+    "The pin is exactly the version the verified extension ships (5.102.8, the",
+    "`@tanstack/react-query` dependency of `MangMax/forguncy-react-library`",
+    "packages/tanstack-query): types the author sees match what the page global will",
+    "actually provide, and `fgc.lock.json` records the same version so",
+    "`compilationDependencies` fails closed if the pin and the lock ever drift."
   ],
   "dependencies": {
-    "@tanstack/react-query": "5.103.2"
+    "@tanstack/react-query": "5.102.8"
   }
 }

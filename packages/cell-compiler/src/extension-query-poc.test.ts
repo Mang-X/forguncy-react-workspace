@@ -8,15 +8,29 @@
  *
  * #13's steps 1–6 are what this file executes: the example carries a real
  * `@tanstack/react-query` source dependency (for authored-source types and the
- * editor), one recorded `extension` decision maps it to `libraryId:
- * tanstack-query` / global `TanStackQuery`, the compiler externalizes every
- * import of it to the generated extension module, `frontendLibraries` is derived
- * from that decision rather than written by hand, and the artifact is asserted —
- * several ways — to contain no npm implementation of the package. The example's
- * own self-check (`client=pass | provider=pass | query=pass`) is what turns "the
- * wiring works" into an assertion: every verdict is computed from the objects the
- * *page global* handed the cell, so a cell that bundled its own copy, resolved
- * the wrong identity, or silently read `undefined` renders `fail`.
+ * editor), one recorded `extension` decision — read from the example's own
+ * `fgc.lock.json`, projected through `compilationDependencies` after the
+ * conformance audit — maps it to `libraryId: tanstack-query` / global
+ * `TanStackQuery`, the compiler externalizes every import of it to the
+ * generated extension module, `frontendLibraries` is derived from that decision
+ * rather than written by hand, and the artifact is asserted — several ways — to
+ * contain no npm implementation of the package. The example's own self-check
+ * (`client=pass | provider=pass | query=pass`) is what turns "the wiring works"
+ * into an assertion: every verdict is computed from the objects the *page
+ * global* handed the cell, so a cell that bundled its own copy, resolved the
+ * wrong identity, or silently read `undefined` renders `fail`.
+ *
+ * The lock chain, not a hand-written constant (PR review of #61): every
+ * compile path reads `examples/extension-query/fgc.lock.json` through
+ * `readFgcLock`, checks it against the verified extension catalog, projects it
+ * onto `dependencies` via `compilationDependencies` with a real
+ * `LockEnvironment` (install-graph versions, recomposed probe fingerprint,
+ * installed extension version), and only then calls `compileCell`. Version
+ * alignment — the package.json pin, the install graph, the lock record and the
+ * environment's extension version — is asserted equal; a stale environment
+ * (simulated extension upgrade) withholds the decision and the compile is
+ * rejected `unresolved-dependency-decision`, which is the fail-closed path the
+ * lock exists to enforce.
  *
  * Shared identity — #13's reason this package is `extension` and not `inline` —
  * is tested explicitly rather than inferred: the last test compiles the example
@@ -38,7 +52,18 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createContext, Script } from "node:vm";
 
-import type { DependencyDecision } from "@forguncy-react-workspace/core";
+import type { DependencyDecision, LockEnvironment } from "@forguncy-react-workspace/core";
+import { EXTENSION_EXTERNAL_MAPPINGS, RUNTIME_CONTRACT_TARGET } from "@forguncy-react-workspace/core";
+import type { ExtensionCatalog, WithheldCompilationDependency } from "@forguncy-react-workspace/dependency-resolver";
+import {
+  auditLockDecisionConformance,
+  compilationDependencies,
+  composeProbeFingerprint,
+  conformanceErrors,
+  readFgcLock,
+  recordedPackageNames,
+  resolveInstalledVersions,
+} from "@forguncy-react-workspace/dependency-resolver";
 import { describe, expect, it } from "vitest";
 
 import { compileCell } from "./artifact";
@@ -50,26 +75,78 @@ const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const exampleRoot = join(packageRoot, "..", "..", "examples", "extension-query");
 const entry = "src/App.tsx";
 
-/**
- * The decision recorded for this example — #13 step 2.
- *
- * The library id and global are exactly what #12's shipped mapping table row
- * binds this package to, so the compile accepts the decision and the derived
- * `frontendLibraries` reference names the one extension the page must load.
- */
-const DECISIONS: readonly DependencyDecision[] = [
-  {
-    strategy: "extension",
-    packageName: "@tanstack/react-query",
-    libraryId: "tanstack-query",
-    globalName: "TanStackQuery",
-  },
-];
-
+const PACKAGE_NAME = "@tanstack/react-query";
+const EXPECTED_VERSION = "5.102.8";
 const EXPECTED_REPORT = "client=pass | provider=pass | query=pass";
 
-function compileExample(): Promise<CompileCellOutcome> {
-  return compileCell({ entry, dependencies: DECISIONS }, { bundler: createRolldownCellBundler({ dir: exampleRoot }) });
+/**
+ * #12's shipped mapping table, projected onto the shape the conformance audit
+ * reads — so the catalog the test supplies is the same table the compiler
+ * compiles against, not a second hand-written copy that could drift.
+ */
+const EXTENSION_CATALOG: ExtensionCatalog = {
+  mappings: EXTENSION_EXTERNAL_MAPPINGS.map(mapping => ({
+    packageName: mapping.packageName,
+    libraryId: mapping.libraryId,
+    globalName: mapping.globalName,
+  })),
+};
+
+/**
+ * The `LockEnvironment` a real project's page would report right now.
+ *
+ * Versions come from the install graph the bundler reads; the probe
+ * fingerprint is recomposed from the same declared inputs the recorded probe
+ * used (recomputable without re-running, #8 rule 2); the extension version is
+ * what `api.app.listFrontendLibraries` reports for a page that has the
+ * verified extension installed.
+ */
+async function environmentFor(overrides: Partial<LockEnvironment> = {}): Promise<LockEnvironment> {
+  const lock = await readFgcLock(exampleRoot);
+  const { versions } = await resolveInstalledVersions(exampleRoot, recordedPackageNames(lock));
+  const probeFingerprints: Record<string, string> = {};
+  for (const record of lock.decisions) {
+    probeFingerprints[record.packageName] = composeProbeFingerprint({
+      probeId: "inline-bundle",
+      entry: PACKAGE_NAME,
+    }).fingerprint;
+  }
+
+  return {
+    resolvedVersions: versions,
+    target: RUNTIME_CONTRACT_TARGET,
+    toolchain: { vitePlus: "0.3.2" },
+    probeFingerprints,
+    extensionVersions: { "tanstack-query": EXPECTED_VERSION },
+    extensionIdentities: {},
+    ...overrides,
+  };
+}
+
+/**
+ * The example's dependencies, projected from the lock exactly as a real
+ * compile would: read → conformance → environment → `compilationDependencies`.
+ */
+async function dependenciesFromLock(
+  environment?: LockEnvironment,
+): Promise<{ dependencies: readonly DependencyDecision[]; withheld: readonly WithheldCompilationDependency[] }> {
+  const lock = await readFgcLock(exampleRoot);
+
+  const diagnostics = auditLockDecisionConformance(lock, { extensionCatalog: EXTENSION_CATALOG });
+  expect(conformanceErrors(diagnostics).map(diagnostic => diagnostic.code)).toEqual([]);
+
+  return compilationDependencies(lock, environment ?? (await environmentFor()));
+}
+
+function compileWith(dependencies: readonly DependencyDecision[]): Promise<CompileCellOutcome> {
+  return compileCell({ entry, dependencies }, { bundler: createRolldownCellBundler({ dir: exampleRoot }) });
+}
+
+async function compileExample(): Promise<CompileCellOutcome> {
+  const { dependencies, withheld } = await dependenciesFromLock();
+  expect(withheld).toEqual([]);
+  expect(dependencies).toHaveLength(1);
+  return compileWith(dependencies);
 }
 
 function compiledCodeOf(outcome: Extract<CompileCellOutcome, { readonly status: "compiled" }>): string {
@@ -263,6 +340,55 @@ describe("extension tanstack-query PoC (#13)", () => {
     expect(source).toContain("QueryClientProvider");
     expect(source).not.toContain("TanStackQuery");
     expect(source).not.toContain("frontendLibraries");
+  });
+
+  it("aligns the package.json pin, the install graph and the lock record on one version", async () => {
+    // PR review of #61 point 1: the pin, the installed package, the recorded
+    // `resolvedVersion`/`extension.version` and the environment's extension
+    // version must all be the verified extension's version — the chain fails
+    // closed the moment any of them drifts.
+    const manifest = JSON.parse(readFileSync(join(exampleRoot, "package.json"), "utf8")) as {
+      readonly dependencies?: Readonly<Record<string, string>>;
+    };
+    expect(manifest.dependencies?.[PACKAGE_NAME]).toBe(EXPECTED_VERSION);
+
+    const lock = await readFgcLock(exampleRoot);
+    const record = lock.decisions.find(candidate => candidate.packageName === PACKAGE_NAME);
+    expect(record?.resolvedVersion).toBe(EXPECTED_VERSION);
+    expect(record?.extension?.version).toBe(EXPECTED_VERSION);
+
+    const environment = await environmentFor();
+    expect(environment.resolvedVersions[PACKAGE_NAME]).toBe(EXPECTED_VERSION);
+    expect(environment.extensionVersions["tanstack-query"]).toBe(EXPECTED_VERSION);
+  });
+
+  it("withholds the decision and refuses to compile when the installed extension moves", async () => {
+    // PR review of #61 point 2: freshness is what gates compilation. A page
+    // whose installed extension is no longer the one the probe validated
+    // against reports a different `extensionVersions` entry; the projection
+    // must withhold, and the compile must then be rejected rather than
+    // externalizing against an unverified decision.
+    const lock = await readFgcLock(exampleRoot);
+    const environment = await environmentFor({
+      extensionVersions: { "tanstack-query": "5.103.0" },
+    });
+
+    const projected = compilationDependencies(lock, environment);
+    expect(projected.dependencies).toEqual([]);
+    expect(projected.withheld).toContainEqual({
+      packageName: PACKAGE_NAME,
+      strategy: "extension",
+      reason: "not-verified",
+      stalenessReasons: ["extension-version-changed"],
+      realRuntimeValidation: "validated",
+    });
+
+    const outcome = await compileWith(projected.dependencies);
+    expect(outcome.status).toBe("rejected");
+    if (outcome.status !== "rejected") return;
+    expect(outcome.diagnostics.map(diagnostic => diagnostic.code)).toContain(
+      "unresolved-dependency-decision",
+    );
   });
 
   it("emits exactly one tanstack-query reference and no bundled npm implementation", async () => {
