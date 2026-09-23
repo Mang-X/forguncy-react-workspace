@@ -126,10 +126,14 @@ export interface DevHarnessVitePlugin {
   /**
    * The host-substitution aliases, the dedupe list and the optimizer inclusions.
    *
+   * Takes the user's config because the aliases have to be filtered against it: Vite merges this
+   * result *over* the project's config, so an unconditional alias here would silently replace a
+   * project's own. See {@link unclaimedHostAliases}.
+   *
    * Deliberately no `plugins` member: see {@link REACT_FAST_REFRESH_PLUGIN_NAME} for why a
    * plugin cannot supply one, and {@link reactFastRefresh} for what a project does instead.
    */
-  config(): {
+  config(userConfig: { readonly resolve?: { readonly alias?: unknown } }): {
     readonly resolve: { readonly alias: Readonly<Record<string, string>>; readonly dedupe: readonly string[] };
     readonly optimizeDeps: { readonly include: readonly string[] };
   };
@@ -137,8 +141,21 @@ export interface DevHarnessVitePlugin {
   resolveId(id: string): string | null;
   /** Generates the mount module, or an explanation, or `null` for ids this plugin does not own. */
   load(id: string): string | null;
-  /** Adds the mount node and the entry script to the page. */
-  transformIndexHtml(html: string): string;
+  /**
+   * Adds the mount node and the entry script to the page.
+   *
+   * Returns Vite's tag-injection form rather than a rewritten HTML string, so the harness never
+   * has to find an insertion point in the project's own template. See the implementation for the
+   * silent-green failure the string form caused.
+   */
+  transformIndexHtml(): {
+    readonly html: string;
+    readonly tags: readonly {
+      readonly tag: string;
+      readonly attrs: Readonly<Record<string, string>>;
+      readonly injectTo: "body";
+    }[];
+  };
 }
 
 export const DEV_HARNESS_PLUGIN_NAME = "forguncy-dev-harness";
@@ -248,6 +265,49 @@ export function harnessHostModulePlan(): {
 }
 
 /**
+ * The host aliases a project has *not* already claimed for itself.
+ *
+ * Vite merges a plugin's `config()` result over the user's config, so an alias emitted here wins
+ * against the project's own — which is wrong for the one case the split exists to support: a
+ * project deliberately pointing a host package somewhere else (a patched React, a local fork).
+ * Dropping the keys the project already named is what turns `harnessHostModulePlan()` from a
+ * duplicate of this hook into an actual override.
+ *
+ * Both alias shapes are read, because Vite accepts either and a project may use whichever:
+ *
+ * - **object form** (`{ react: "/path" }`) — the keys are the ids;
+ * - **array form** (`[{ find: "react", replacement: "/path" }]`) — `find` may be a string or a
+ *   `RegExp`, and only string `find`s can be compared for equality. A `RegExp` is deliberately
+ *   *not* treated as claiming anything: it is not possible to decide from here which ids it
+ *   matches, and guessing "probably react" would silently drop a substitution the harness needs.
+ *   An entry we cannot read therefore leaves our own alias in place, which is the conservative
+ *   direction — the project can still remove ours by naming the id as a string.
+ *
+ * An `undefined` or unreadable `userAlias` claims nothing, so a bare
+ * `devHarness({ config })` with no `resolve.alias` of its own still gets the full plan.
+ */
+function unclaimedHostAliases(userAlias: unknown): Record<string, string> {
+  const claimed = new Set<string>();
+
+  if (Array.isArray(userAlias)) {
+    for (const entry of userAlias) {
+      if (typeof entry === "object" && entry !== null) {
+        const find = (entry as { find?: unknown }).find;
+        if (typeof find === "string") {
+          claimed.add(find);
+        }
+      }
+    }
+  } else if (typeof userAlias === "object" && userAlias !== null) {
+    for (const key of Object.keys(userAlias)) {
+      claimed.add(key);
+    }
+  }
+
+  return Object.fromEntries(Object.entries(hostModuleAliases()).filter(([moduleId]) => !claimed.has(moduleId)));
+}
+
+/**
  * The message a version mismatch produces, or `undefined` when the install matches.
  *
  * Exported so a test asserts the wording and a caller can decide where it goes. Not a gate
@@ -342,7 +402,9 @@ function generateEntryModule(cell: RegisteredCell, overlay: Readonly<Record<stri
  */
 export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
   const requireEntryFiles = options.requireEntryFiles ?? true;
-  const { aliases, dedupe } = harnessHostModulePlan();
+  // Only `dedupe` is read here: the aliases are derived inside `config()`, because they have to
+  // be filtered against the user's own alias settings, which are not available until then.
+  const { dedupe } = harnessHostModulePlan();
   let registry: CellRegistry | undefined;
   let mounted: RegisteredCell | undefined;
 
@@ -406,16 +468,35 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
       mounted = first;
     },
 
-    config() {
+    config(userConfig) {
       // No `plugins` here, and that is the whole point of `formatFastRefreshWarning`: Vite
       // ignores plugins returned from a `config()` hook, so a `react()` returned here would be a
       // line that reads as Fast Refresh and does nothing. See `reactFastRefresh` for the
       // verified mechanism and for what a project does instead.
+      //
+      // `resolve.alias` *is* emitted here, but only for the ids the project has not claimed —
+      // and that filter is a review finding, not a first-draft nicety. The harness used to return
+      // every host alias unconditionally while also exporting `harnessHostModulePlan()` for the
+      // project to spread into its own config, which reads as belt-and-braces and is actually a
+      // silent override: Vite merges a `config()` result with `mergeConfig(conf, res)`, and
+      // object-form `resolve.alias` merges key-by-key with the *later* value winning, so this
+      // hook — which runs after the user's config — replaced every entry it named. A project that
+      // deliberately pointed `react` at a patched build found its alias silently ignored, which
+      // is exactly the failure the example's comment claimed the split prevented. Verified
+      // against Vite 8.3.0 with a real server: a user `react` alias came back as the plugin's.
+      //
+      // Keeping the aliases here (rather than deleting them and making the project responsible)
+      // is deliberate: a project that never calls `harnessHostModulePlan()` still gets a working
+      // harness, which is the common case and the one a bare `devHarness({ config })` should
+      // serve. The filter is what makes the export an *override* rather than a duplicate.
+      //
+      // `dedupe` and `optimizeDeps.include` need no such filter: both are arrays, and Vite
+      // concatenates array config values instead of replacing them (verified: a user
+      // `dedupe: ["user-pkg"]` beside this hook's yields both), so they cannot drop a project's
+      // entries.
       return {
         resolve: {
-          // The host substitutions, bound to this package's own copies. See `host-modules.ts`
-          // for why the harness installs them rather than the example.
-          alias: aliases,
+          alias: unclaimedHostAliases(userConfig.resolve?.alias),
           // Covers the ids the bridge deliberately leaves unaliased — `react-dom/server` is
           // the case that matters — so a second copy cannot reach the same page.
           dedupe,
@@ -430,10 +511,10 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
           // "react"` dies with "does not provide an export named 'createElement'", a message about
           // React that is really about the optimizer being switched off.
           //
-          // Pre-bundling is what *creates* the single instance: the optimizer resolves the alias,
-          // interops the CJS package once, and every importer gets that one module. Excluding a
-          // package is for sources that must not be pre-bundled (a plugin's own virtual modules,
-          // a package with side effects at import time), which is not this case.
+          // Pre-bundling is what *creates* the single instance: the optimizer resolves the
+          // alias, interops the CJS package once, and every importer gets that one module.
+          // Excluding a package is for sources that must not be pre-bundled (a plugin's own
+          // virtual modules, a package with side effects at import time), which is not this case.
           include: [...dedupe],
         },
       };
@@ -477,7 +558,7 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
       return generateEntryModule(mounted, options.props);
     },
 
-    transformIndexHtml(html) {
+    transformIndexHtml() {
       const warning = formatHostVersionWarning();
       if (warning !== undefined) {
         // To stderr rather than into the page: the page is what a developer is looking at when
@@ -486,17 +567,40 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
         process.stderr.write(`${warning}\n`);
       }
 
-      // The mount node, then the module that fills it. The element id comes from this module
-      // rather than from the template, so a project-provided `index.html` cannot disagree with
-      // the generated script about where the Cell goes.
-      return html.replace(
-        "</body>",
-        [
-          `<div id="${HARNESS_MOUNT_ELEMENT_ID}"></div>`,
-          `<script type="module" src="${HARNESS_ENTRY_URL_PATH}"></script>`,
-          "</body>",
-        ].join("\n"),
-      );
+      // The mount node, then the module that fills it — returned as *tags* for Vite to inject
+      // rather than spliced into the HTML string, and that is a review finding rather than a
+      // style preference.
+      //
+      // The first version did `html.replace("</body>", ...)`, which is a no-op for any template
+      // whose closing body tag is absent, upper-case, or formatted with whitespace inside it —
+      // and every one of those is valid HTML. The server still started and the page still
+      // served, so the failure was a *green* one: no mount node, no entry script, a blank page,
+      // and nothing in the output to say why. That is precisely the silent-green shape this
+      // package exists to avoid, so it was the wrong mechanism even though it worked for the
+      // example's own template.
+      //
+      // `injectTo: "body"` is Vite's own answer and it needs no closing tag to exist: verified
+      // against Vite 8.3.0 with a real server and a template whose `</body>` was omitted
+      // entirely — both tags were still injected, appended after the existing content. It also
+      // means the harness never rewrites the project's HTML, so a template's own formatting
+      // survives untouched.
+      //
+      // The element id comes from this module rather than from the template, so a project's
+      // `index.html` cannot disagree with the generated script about where the Cell renders.
+      //
+      // Annotated rather than inferred: without the type, TypeScript widens the two different
+      // `attrs` shapes into a union whose members each carry the *other's* keys as `undefined`,
+      // which does not satisfy the interface's `Record<string, string>`.
+      const tags: readonly {
+        readonly tag: string;
+        readonly attrs: Readonly<Record<string, string>>;
+        readonly injectTo: "body";
+      }[] = [
+        { tag: "div", attrs: { id: HARNESS_MOUNT_ELEMENT_ID }, injectTo: "body" },
+        { tag: "script", attrs: { type: "module", src: HARNESS_ENTRY_URL_PATH }, injectTo: "body" },
+      ];
+
+      return { html: "", tags };
     },
   };
 }
