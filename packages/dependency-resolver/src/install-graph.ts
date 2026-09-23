@@ -134,6 +134,49 @@ async function nearestNamedManifest(startDirectory: string): Promise<Manifest | 
 }
 
 /**
+ * The `node_modules` directories a resolve from `projectRoot` is allowed to
+ * answer out of — one per ancestor, the same walk Node performs.
+ *
+ * `require.resolve` cannot be trusted to keep that walk alone: `NODE_PATH` and
+ * the other `Module.globalPaths` entries are appended to every resolution, and
+ * the test runner injects `NODE_PATH` entries pointing into this workspace's
+ * pnpm store. A package installed *here* would then be reported as installed in
+ * the project that was asked about — which is the one answer this module must
+ * never give, since it is the input to the lock's staleness rule.
+ */
+function projectResolutionRoots(projectRoot: string): string[] {
+  const roots: string[] = [];
+  let directory = projectRoot;
+  for (;;) {
+    roots.push(join(directory, "node_modules"));
+    const parent = dirname(directory);
+    if (parent === directory) {
+      return roots;
+    }
+    directory = parent;
+  }
+}
+
+/**
+ * Whether a resolved entry belongs to the project's own install graph.
+ *
+ * Two allowances, both answers to "could this project actually bundle it": a
+ * path under an ancestor's `node_modules` — the graph Node walked — or a path
+ * under `projectRoot` itself, which is where a `workspace:` link's realpath
+ * lands after Node resolves the symlink. Anything else (an entry reached through
+ * `NODE_PATH`, which lands in some other tree entirely) fails, and case is
+ * ignored on Windows because the entry and the walk can disagree about drive
+ * letter case while pointing at the same file.
+ */
+function isInProjectGraph(entry: string, projectRoot: string, roots: readonly string[]): boolean {
+  const fold = (value: string): string => (process.platform === "win32" ? value.toLowerCase() : value);
+  const comparable = fold(entry);
+  const hasPrefix = (prefix: string): boolean =>
+    comparable === prefix || comparable.startsWith(`${prefix}/`) || comparable.startsWith(`${prefix}\\`);
+  return hasPrefix(fold(projectRoot)) || roots.some(root => hasPrefix(fold(root)));
+}
+
+/**
  * Resolves one requested id to the manifest that provides it.
  *
  * Two attempts, in this order, because they fail in opposite cases. The
@@ -143,8 +186,18 @@ async function nearestNamedManifest(startDirectory: string): Promise<Manifest | 
  * always resolves *something*, and its entry point is then walked up to the
  * manifest — which is the only route for a subpath id such as
  * `react/jsx-runtime`.
+ *
+ * Every attempt is filtered through `isInProjectGraph`, because resolving
+ * is not the same as scoping: a resolve that succeeds through a global path has
+ * found *a* copy of the package, not this project's copy, and only the latter is
+ * an answer to the question that was asked.
  */
-async function resolveManifest(require: NodeJS.Require, request: string): Promise<Manifest | null> {
+async function resolveManifest(
+  require: NodeJS.Require,
+  request: string,
+  projectRoot: string,
+  roots: readonly string[],
+): Promise<Manifest | null> {
   for (const candidate of [`${request}/package.json`, request]) {
     let entry: string;
     try {
@@ -154,6 +207,9 @@ async function resolveManifest(require: NodeJS.Require, request: string): Promis
     }
     // A builtin resolves to its own name rather than to a path, and has no manifest.
     if (!isAbsolute(entry)) {
+      continue;
+    }
+    if (!isInProjectGraph(entry, projectRoot, roots)) {
       continue;
     }
     const manifest = await nearestNamedManifest(dirname(entry));
@@ -188,13 +244,14 @@ export async function resolveInstalledVersions(
   // resolution scope is wanted, and it does not have to exist for the scope to be
   // correct. The manifest is what the walk up from here finds that matters.
   const require = createRequire(join(projectRoot, "package.json"));
+  const roots = projectResolutionRoots(projectRoot);
   const requested = [...new Set(packageNames)].sort(compareStrings);
 
   const versions: Record<string, string> = {};
   const unresolved: UnresolvedInstalledPackage[] = [];
 
   for (const packageName of requested) {
-    const manifest = await resolveManifest(require, packageName);
+    const manifest = await resolveManifest(require, packageName, projectRoot, roots);
 
     if (manifest === null) {
       unresolved.push({ packageName, reason: "not-installed" });

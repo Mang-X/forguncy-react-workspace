@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "decisions": [
+    {
+      "packageName": "@tanstack/react-query",
+      "cellTarget": null,
+      "strategy": "extension",
+      "resolvedVersion": "5.102.8",
+      "globalName": "TanStackQuery",
+      "libraryId": "tanstack-query",
+      "probe": {
+        "status": "passed",
+        "fingerprint": "probe=\"inline-bundle\";entry=\"@tanstack/react-query\";config={};bundler={\"attachDebugInfo\":\"none\",\"codeSplitting\":\"false\",\"format\":\"iife\",\"jsx\":\"react-jsx\",\"platform\":\"browser\"}",
+        "versionIndependent": false
+      },
+      "target": null,
+      "probedWith": {
+        "vitePlus": "0.3.2"
+      },
+      "extension": {
+        "version": "5.102.8",
+        "identity": null
+      },
+      "rejectedCandidate": null,
+      "rationale": "A bundled copy would give every Cell its own QueryClient and query cache, so the shared page global published by the verified tanstack-query extension is required for cross-Cell module identity.",
+      "evidence": [
+        {
+          "kind": "runtime-observation",
+          "reference": "https://github.com/MangMax/forguncy-react-library/blob/main/packages/tanstack-query/report.md"
+        },
+        {
+          "kind": "spec-issue",
+          "reference": "https://github.com/Mang-X/forguncy-react-workspace/issues/13"
+        }
+      ]
+    }
+  ]
+}

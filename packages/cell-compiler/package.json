@@ -31,9 +31,17 @@
     "(React 19.2.7). The host-bridge regression evaluates the generated JSX runtime",
     "adapter against the same React the host injects, so the adapter's key/children",
     "semantics are asserted against real React rather than a stub. Nothing in `src/`",
-    "may import React: mapping `react` to the host global is the entire point of #9."
+    "may import React: mapping `react` to the host global is the entire point of #9.",
+    "",
+    "`@forguncy-react-workspace/dependency-resolver` is what the #13 PoC test reads",
+    "decisions through: `readFgcLock` + `resolveInstalledVersions` +",
+    "`compilationDependencies` (with the conformance audit) turn the example's",
+    "`fgc.lock.json` into the `dependencies` `compileCell` receives, so the test",
+    "exercises the recorded chain rather than a hand-written decision constant.",
+    "Test-only: nothing in `src/` imports it, so there is no cycle with the resolver."
   ],
   "devDependencies": {
+    "@forguncy-react-workspace/dependency-resolver": "workspace:*",
     "react": "19.2.7",
     "react-dom": "19.2.7"
   },
