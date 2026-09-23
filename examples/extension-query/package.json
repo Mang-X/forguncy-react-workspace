@@ -2,5 +2,17 @@
   "name": "@examples/extension-query",
   "version": "0.0.0",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "//dependencies": [
+    "@tanstack/react-query is installed so the authored source in src/App.tsx gets real",
+    "types and editor completion while it is written as an ordinary npm import. The #13",
+    "`extension` decision maps the package to the verified tanstack-query Forguncy",
+    "Frontend Extension (global `TanStackQuery`), so the compiler externalizes every",
+    "import of it and the npm implementation never enters the generated Cell artifact.",
+    "The pinned version therefore shapes types only: runtime identity belongs to the",
+    "extension bundle the page loads, not to this install."
+  ],
+  "dependencies": {
+    "@tanstack/react-query": "5.103.2"
+  }
 }
