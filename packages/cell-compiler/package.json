@@ -5,8 +5,24 @@
   "type": "module",
   "dependencies": {
     "@babel/parser": "7.29.8",
-    "@forguncy-react-workspace/core": "workspace:*"
+    "@forguncy-react-workspace/core": "workspace:*",
+    "rolldown": "1.2.9"
   },
+  "//dependencies": [
+    "`rolldown` is the bundler #6 mandates for the compiler's resolution and code",
+    "generation half, pinned to the version this toolchain actually installs",
+    "(`vite-plus@0.3.2`). It is a runtime dependency because `src/rolldown-bundler.ts`",
+    "implements `CellBundlerPort` with it — the port is the package's own code, not a",
+    "test fixture — while `compileCell` itself stays bundler-agnostic behind the port.",
+    "",
+    "Two test-only facts ride on the same pin. #12's generated module is only correct",
+    "with respect to the CommonJS-to-ESM interop this bundler applies to it, and that",
+    "interop is not visible in the module's own source: the shapes that work and the",
+    "shapes that fail silently differ only once a consumer's namespace import enumerates",
+    "the module, so the regression builds through the real bundler rather than through a",
+    "hand-written copy of its runtime helper. The end-to-end tests likewise run authored",
+    "entries through the full `compileCell` path against this exact build."
+  ],
   "//devDependencies": [
     "Test-only, and pinned to versions measured in this repository rather than to",
     "whatever a range resolves to.",
@@ -15,20 +31,11 @@
     "(React 19.2.7). The host-bridge regression evaluates the generated JSX runtime",
     "adapter against the same React the host injects, so the adapter's key/children",
     "semantics are asserted against real React rather than a stub. Nothing in `src/`",
-    "may import React: mapping `react` to the host global is the entire point of #9.",
-    "",
-    "`rolldown` is the bundler this toolchain actually installs (`vite-plus@0.3.2`).",
-    "#12's generated module is only correct with respect to the CommonJS-to-ESM interop",
-    "a bundler applies to it, and that interop is not visible in the module's own source:",
-    "the shapes that work and the shapes that fail silently differ only once a consumer's",
-    "namespace import enumerates the module. The regression builds through this bundler",
-    "rather than through a hand-written copy of its runtime helper, so an interop change",
-    "fails a test instead of breaking cells. Nothing in `src/` may import it."
+    "may import React: mapping `react` to the host global is the entire point of #9."
   ],
   "devDependencies": {
     "react": "19.2.7",
-    "react-dom": "19.2.7",
-    "rolldown": "1.2.9"
+    "react-dom": "19.2.7"
   },
   "exports": {
     ".": "./src/index.ts"

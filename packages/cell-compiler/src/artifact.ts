@@ -94,8 +94,29 @@ export interface BundledCellModule {
   readonly externalImports?: readonly string[];
   /** Packages the bundler flattened into `code`. */
   readonly inlinedPackages?: readonly string[];
+  /**
+   * Bare specifiers the bundler actually inlined from installed packages.
+   *
+   * Package names fold `sneaky-dep` and `sneaky-dep/subpath` into one entry,
+   * which destroys the exact-subpath precedence `findDependencyDecision` relies
+   * on. Specifier-level provenance lets each decision lookup use the real bare
+   * specifier. Optional because fixture bundlers only report package names.
+   */
+  readonly inlinedSpecifiers?: readonly string[];
   /** Files the bundler emitted next to `code`. Any entry breaks the single-artifact contract. */
   readonly emittedAssets?: readonly string[];
+  /**
+   * Findings in #6's vocabulary that only the build could observe.
+   *
+   * Optional because the report fields above cover most artifact violations on
+   * their own, and a fixture port has nothing to add. The real port uses it for
+   * the conditions no output field can express — a decision that contradicts a
+   * mapping table, an artifact reading an extension module no decision declares
+   * — reported here rather than smuggled in from the plans' own vocabularies,
+   * which are about mappings rather than artifacts and stay separate (#7's
+   * bundler documents which plan codes translate and which do not).
+   */
+  readonly diagnostics?: readonly CellArtifactDiagnostic[];
 }
 
 export interface CellBundlingRequest {
@@ -255,7 +276,7 @@ export function assembleCellArtifact(input: AssembleCellArtifactInput): CompileC
 
   const decisionDiagnostics = auditDependencyDecisions(dependencies);
   const importDiagnostics = auditExternalImports(module.externalImports ?? [], dependencies);
-  const inlinedDiagnostics = auditInlinedPackages(module.inlinedPackages ?? [], dependencies);
+  const inlinedDiagnostics = auditInlinedPackages(module.inlinedPackages ?? [], dependencies, module.inlinedSpecifiers);
   const assetDiagnostics = auditEmittedAssets(module.emittedAssets ?? []);
   const collection = collectFrontendLibraries(dependencies);
 
@@ -271,6 +292,12 @@ export function assembleCellArtifact(input: AssembleCellArtifactInput): CompileC
   const metadataDiagnostics = auditFrontendLibraries(collection.libraries);
 
   const diagnostics = dedupeCellArtifactDiagnostics([
+    // The bundler's own findings first: when one of them names the same
+    // condition an audit below also reports (an unmapped extension decision is
+    // visible both in the plan and in the output report), the build's more
+    // specific explanation — which can say *why* the mapping is unusable — is
+    // the one a reader keeps after deduplication.
+    ...(module.diagnostics ?? []),
     ...decisionDiagnostics,
     ...importDiagnostics,
     ...inlinedDiagnostics,
@@ -557,11 +584,22 @@ function auditExternalImports(
 function auditInlinedPackages(
   inlinedPackages: readonly string[],
   dependencies: readonly DependencyDecision[],
+  inlinedSpecifiers?: readonly string[],
 ): readonly CellArtifactDiagnostic[] {
   const diagnostics: CellArtifactDiagnostic[] = [];
 
-  for (const packageName of inlinedPackages) {
-    const decision = findDependencyDecision(dependencies, packageName);
+  // Specifier-level provenance when present: each bare specifier keeps its
+  // exact-subpath identity so `findDependencyDecision` can apply exact-first
+  // precedence. Package names fall back for fixture bundlers that only report
+  // package roots, and for packages in the set that no specifier covers.
+  const specifierPackageNames = new Set(
+    (inlinedSpecifiers ?? []).map(specifier => packageNameOfSpecifier(specifier)),
+  );
+  const leftoverPackages = inlinedPackages.filter(name => !specifierPackageNames.has(name));
+  const subjects = [...(inlinedSpecifiers ?? []), ...leftoverPackages];
+
+  for (const subject of subjects) {
+    const decision = findDependencyDecision(dependencies, subject);
     if (decision === undefined) continue;
 
     switch (decision.strategy) {
