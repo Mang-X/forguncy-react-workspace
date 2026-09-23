@@ -47,6 +47,8 @@
  * is a report outcome, because that is the evidence #16 exists to produce.
  */
 
+import { normalize } from "node:path";
+
 import type {
   FgcLockDocument,
   ForguncyTargetIdentity,
@@ -356,21 +358,37 @@ export async function runDependencyProbe(options: RunDependencyProbeOptions): Pr
   steps.addRejections(exportMetadata.rejectionFindings);
   steps.record(exportMetadata.validation);
 
-  const nodeScan = await observeNodeBuiltins(options.projectRoot, identity);
-  steps.addFacts(nodeScan.facts);
-  steps.addRisks(nodeScan.risks);
-  steps.addRejections(nodeScan.rejectionFindings);
-  steps.record(nodeScan.validation);
-
+  // The candidate build runs **before** the two source scans even though `build` is declared
+  // after them in `PROBE_STEPS`. Execution order is free here: `validationInOrder()` sorts by
+  // the declared step order and the canonical report sorts facts and risks totally, so moving
+  // the build changes nothing a consumer sees.
+  //
+  // It has to run first because both source scans are bounded by what the build actually
+  // included. Reachability is not bundling — rolldown drops a module whose bindings are unused,
+  // and it can drop it *before* resolving what the module imports or calls — so a scan over the
+  // full reachable set reports findings from files the artifact does not contain. Measured on
+  // `const x = () => import("./w.js")` where `w.js` needs `node:fs`: the bundler built cleanly
+  // while the report rejected the package. That is the false-rejection class #16 exists to
+  // remove, so the bound is not optional for either scan.
   const build = await runCandidateBuild({
     projectRoot: options.projectRoot,
     packageName: identity.packageName,
     entry,
   });
-  steps.addFacts(build.facts);
-  steps.record(build.validation);
 
   const buildFailed = build.outcome === "failed";
+  // No artifact means no set to bound by, so the scans run unbounded and report what they see;
+  // the build step's own failure is the actionable evidence in that case.
+  const bundledFiles = buildFailed ? undefined : bundledSourceFiles(build.output);
+
+  const nodeScan = await observeNodeBuiltins(options.projectRoot, identity, bundledFiles);
+  steps.addFacts(nodeScan.facts);
+  steps.addRisks(nodeScan.risks);
+  steps.addRejections(nodeScan.rejectionFindings);
+  steps.record(nodeScan.validation);
+
+  steps.addFacts(build.facts);
+  steps.record(build.validation);
 
   const artifact = observeArtifact(build.output, options.projectRoot);
   steps.addFacts(artifact.facts);
@@ -386,7 +404,15 @@ export async function runDependencyProbe(options: RunDependencyProbeOptions): Pr
 
   // Source, not output: still meaningful when the build failed, which is why
   // this step does not cascade into a skip.
-  const runtimePatterns = await observeRuntimePatterns(identity.directory);
+  //
+  // Bounded by what the build actually included when there is a build, because reachability is
+  // not bundling: rolldown tree-shakes a module with unused bindings while the walk still
+  // reaches it, and a risk drawn from a shaken-out file describes an artifact that does not
+  // exist. Measured on an unused named import with `new Worker(` inside it.
+  const runtimePatterns = await observeRuntimePatterns(
+    identity,
+    bundledFiles,
+  );
   steps.addFacts(runtimePatterns.facts);
   steps.addRisks(runtimePatterns.risks);
   steps.addRejections(runtimePatterns.rejectionFindings);
@@ -432,6 +458,39 @@ export async function runDependencyProbe(options: RunDependencyProbeOptions): Pr
     fromCache: false,
     cacheRelativePath: probeCacheRelativePath(fingerprint),
   };
+}
+
+/**
+ * The files the build actually included, as **absolute** paths, for bounding the source scans.
+ *
+ * Read from the emitted chunks' `modules` map, which is the bundler's own record of what it
+ * kept — the same authority `artifact-scan` reads for its facts, rather than a second
+ * interpretation of the build.
+ *
+ * Absolute rather than package-relative, because the bound has to answer the question for
+ * **every** graph member, not only the probed package: a transitive dependency is bundled (or
+ * dropped) by the same build, and its files live under its own directory. A package-relative
+ * set could only be compared against the probed package, which left a dependency's findings
+ * unbounded — measured on a shaken-out `dep-lib` whose `process.dlopen` still produced a
+ * rejection, the false-rejection class this bound exists to remove, one level of graph
+ * indirection out.
+ */
+function bundledSourceFiles(
+  output: readonly (OutputChunk | OutputAsset)[] | undefined,
+): ReadonlySet<string> {
+  const ids = (output ?? [])
+    .filter((item): item is OutputChunk => item.type === "chunk")
+    .flatMap(item => Object.keys(item.modules ?? {}));
+
+  const files = new Set<string>();
+  for (const id of ids) {
+    // A virtual module id (` rolldown/runtime.js`) is not a file on disk.
+    if (id.startsWith(" ")) {
+      continue;
+    }
+    files.add(normalize(id));
+  }
+  return files;
 }
 
 async function recordRuntimeSmoke(

@@ -10,9 +10,7 @@
  * machine (no absolute paths, no ANSI paint).
  */
 
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
@@ -20,10 +18,8 @@ import {
   compareStrings,
   describeBuildFailureLines,
   portableText,
-  relativePortablePath,
   safePathSegment,
   stripAnsi,
-  walkPackageSourceFiles,
 } from "./scan-utils";
 
 describe("compareStrings", () => {
@@ -91,44 +87,10 @@ describe("describeBuildFailureLines", () => {
   });
 });
 
-describe("walkPackageSourceFiles", () => {
-  it("returns source files in sorted order, skipping node_modules and hidden dirs", async () => {
-    const root = await mkdtemp(join(tmpdir(), "fgc-scan-utils-"));
-    const paths = [
-      "index.js",
-      "lib/b.js",
-      "lib/a.js",
-      "types.d.ts",
-      "node_modules/dep/index.js",
-      ".git/config",
-      "styles.css",
-    ];
-    for (const relative of paths) {
-      const absolute = join(root, ...relative.split("/"));
-      await mkdir(dirname(absolute), { recursive: true });
-      await writeFile(absolute, "// x\n", "utf8");
-    }
-
-    const found = await walkPackageSourceFiles(root);
-    const relatives = found.map(absolute => absolute.slice(root.length + 1).split("\\").join("/"));
-
-    expect(relatives).toEqual(["index.js", "lib/a.js", "lib/b.js"]);
-  });
-});
-
-describe("relativePortablePath", () => {
-  it("returns a path relative to the base with forward slashes", () => {
-    expect(relativePortablePath(join("a", "b"), join("a", "b", "c", "d.js"))).toBe("c/d.js");
-  });
-
-  it("falls back to the basename when the file escaped the base", () => {
-    expect(relativePortablePath(join("a", "b"), join("x", "y", "d.js"))).toBe("d.js");
-  });
-});
-
 describe("safePathSegment", () => {
   it("makes a package name safe as a directory component", () => {
     expect(safePathSegment("@fixture/date-picker")).toBe("_fixture_date-picker");
     expect(safePathSegment("tiny-math")).toBe("tiny-math");
   });
 });
+

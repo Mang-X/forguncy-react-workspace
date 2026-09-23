@@ -11,7 +11,7 @@
  * without re-running the probe"; `LockEnvironment.probeFingerprints` compares it),
  * #16 (the probe protocol whose steps the fingerprint covers).
  *
- * The composition is deliberately **excludes** three things the record models
+ * The composition deliberately **excludes** three things the record models
  * separately: the resolved package version (`resolvedVersion` has its own
  * staleness reason — `package-version-changed`), the Forguncy target
  * (`target`/`forguncy-target-changed`) and the toolchain (`probedWith`/
@@ -21,10 +21,12 @@
  * would go stale anyway. What remains is exactly what the lock's comment lists as
  * this fingerprint's job — the probe id, the entry, the probe configuration (with
  * the budget folded in as a declared input, since a budget change alters what the
- * `size` step concludes) and the bundler input no other field captures.
+ * `size` step concludes), the bundler input no other field captures, and
+ * {@link PROBE_ANALYSIS_REVISION}, which the three excluded dimensions do not cover
+ * and which a change to the scanners makes load-bearing.
  *
- * The format (`probe=…;entry=…;config=…;bundler=…`) is stable and human-readable
- * on purpose: a fingerprint appears in lock diffs and in
+ * The format (`probe=…;entry=…;analysis=…;config=…;bundler=…`) is stable and
+ * human-readable on purpose: a fingerprint appears in lock diffs and in
  * `probe-fingerprint-changed` diagnostics, and an opaque hash would make both
  * unreadable. Sorted JSON for the maps keeps the same inputs composing the same
  * bytes across machines and Node versions — recursively, so nested `probeConfig`
@@ -64,6 +66,53 @@ function stableScalar(value: string): string {
   return JSON.stringify(value);
 }
 
+/**
+ * The revision of the probe's own analysis, as a declared fingerprint input.
+ *
+ * Why this exists, and why it is not the thing the module header says to exclude:
+ * version, target and toolchain are excluded because each is *modeled separately* on
+ * the lock record, and folding one in would report a single change twice. The
+ * analysis itself is not modeled anywhere — nothing else on the record can express
+ * "the scanner now reads what a browser build reaches instead of the whole directory
+ * tree". So a change here is invisible to every staleness rule, and a report cached
+ * under the old behaviour would keep being served forever: the three false
+ * `platform-api-unavailable` rejections this revision accompanies would have survived
+ * the fix on any machine with a warm `.fgc/probe-cache/`.
+ *
+ * Bump this whenever a step's *findings* could change for inputs that otherwise
+ * compose the same fingerprint. It is not a code version and does not track refactors:
+ * it marks a change in what a probe of the same declared inputs would observe.
+ *
+ * - `1` — initial. Whole-directory, raw-text scanning.
+ * - `2` — scanners are bounded by browser-entry reachability and read comment-masked
+ *   source (`module-source.ts`); `artifact-scan` matches masked chunk code. Changes
+ *   findings for packages shipping a Node build beside a browser one (`three`,
+ *   `@embedpdf/pdfium`) and for packages naming a builtin only in a comment
+ *   (`es-toolkit`).
+ * - `3` — manifest interpretation corrected against Node and the bundler: `exports`
+ *   condition order is the manifest's own key order rather than a preference list,
+ *   `browser` substitutions apply to resolved files (and to subpaths resolved through
+ *   `exports`/`imports`), substitution chains, and `browser: { "<specifier>": false }`
+ *   redirects a bare specifier. Changes findings for any package whose manifest
+ *   exercises those rules — measured on shapes where the walk previously followed a
+ *   file the artifact replaces.
+ * - `4` — `runtime-pattern-scan` is bounded by the files the build actually included, so a
+ *   risk is not reported from a module tree-shaking removed. Changes findings for any package
+ *   with an unused module carrying a Worker/asset pattern — measured on `es-toolkit`, where
+ *   ten reached files are not in the artifact.
+ * - `5` — the bound reaches `node-builtin-scan` too, which required running the build before
+ *   the source scans (execution order is free; the report sorts). Its native-indicator channel
+ *   needed it most: a `process.dlopen` is reached through no import, so a build that merely
+ *   *drops* the module stays green while the report refused the package. Native evidence also
+ *   names the file now.
+ * - `6` — the artifact bound's containment tests are `..`-as-a-segment rather than string
+ *   prefixes, the `.fgc` name exclusion is gone (the scratch tree is never under the package),
+ *   and the bound applies to **every** graph member. Each of those three was a false negative:
+ *   a bundled `src/.fgc/x.js` or `..helper.js` lost its rejection, and a shaken-out dependency
+ *   kept one.
+ */
+export const PROBE_ANALYSIS_REVISION = 6;
+
 export interface ComposeProbeFingerprintInput {
   /** Which probe ran, e.g. `inline-bundle`. */
   readonly probeId: string;
@@ -86,7 +135,10 @@ export interface ComposedProbeFingerprint {
 
 /**
  * Composes the fingerprint from the declared inputs, with no package version,
- * target or toolchain in it (see the module header for why each is excluded).
+ * target or toolchain in it (see the module header for why each is excluded) and one
+ * addition it does not cover: {@link PROBE_ANALYSIS_REVISION}, whose own doc comment
+ * explains why the analysis is a declared input rather than a separately-modeled
+ * dimension.
  */
 export function composeProbeFingerprint(input: ComposeProbeFingerprintInput): ComposedProbeFingerprint {
   const probeConfig: Record<string, unknown> = { ...input.probeConfig };
@@ -98,6 +150,7 @@ export function composeProbeFingerprint(input: ComposeProbeFingerprintInput): Co
   const fingerprint = [
     `probe=${stableScalar(input.probeId)}`,
     `entry=${stableScalar(input.entry)}`,
+    `analysis=${String(PROBE_ANALYSIS_REVISION)}`,
     `config=${stableJson(probeConfig)}`,
     `bundler=${stableJson(bundlerInput)}`,
   ].join(";");

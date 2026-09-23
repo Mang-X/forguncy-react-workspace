@@ -28,6 +28,14 @@
  * Risks are deduplicated by signal with the earliest observing step winning, so a
  * marker seen in both the artifact and the source scan is filed once, by the step
  * that observes it first.
+ *
+ * **Text patterns match masked code, not raw code.** A bundle preserves the comments of
+ * everything folded into it, so an artifact's text contains prose that was never a
+ * construct. `es-toolkit`'s emitted chunk names `import('node:fs')` and `import('node:vm')`
+ * only inside JSDoc `@example` blocks while the chunk's own `dynamicImports` is empty;
+ * matching the raw text reported a runtime module load the artifact does not perform.
+ * `module-source.ts` holds the mechanism and the reasoning, and
+ * {@link matchableChunkCode} is this step's single point of application.
  */
 
 import type {
@@ -38,6 +46,7 @@ import type {
 } from "@forguncy-react-workspace/core";
 import type { OutputAsset, OutputChunk } from "rolldown";
 
+import { sourceWithoutCommentsLenient } from "./module-source";
 import { compareStrings, portableText } from "./scan-utils";
 
 /** Marker patterns matched against emitted chunk code. Order does not matter; findings dedupe by signal. */
@@ -66,6 +75,40 @@ const AMD_UMD_PATTERN = /typeof\s+define\s*===\s*["']function["']|\bdefine\s*\.\
 
 const DYNAMIC_IMPORT_CALL_PATTERN = /\bimport\s*\(/;
 
+/**
+ * A chunk's code with comments blanked — what every text pattern above matches against.
+ *
+ * A bundler preserves the license comments and JSDoc of the sources it folds in, so an
+ * artifact's text contains plenty of prose that was never code. `es-toolkit`'s emitted
+ * chunk names `import('node:fs')` and `import('node:vm')` **only** inside JSDoc
+ * `@example` blocks, and matching the raw text reported a surviving dynamic import for
+ * a chunk whose bundler-reported `dynamicImports` is empty — a risk the artifact does
+ * not carry. The same rule as the source scans, applied to the output: text is not a
+ * construct, and a pattern that cannot tell a comment from code is looking at prose.
+ *
+ * An unparseable chunk keeps its raw text, fail-open: dropping it would turn a false
+ * positive into a false negative, which is the worse error.
+ *
+ * Memoized per chunk by {@link chunkCodeAccessor}: parsing is the expensive half, and
+ * an artifact can be megabytes while the marker table has five patterns to try.
+ */
+function matchableChunkCode(chunk: OutputChunk): string {
+  return sourceWithoutCommentsLenient(chunk.code);
+}
+
+/** Reads each chunk's matchable code once, however many patterns ask for it. */
+function chunkCodeAccessor(): (chunk: OutputChunk) => string {
+  const cache = new Map<OutputChunk, string>();
+  return chunk => {
+    let cached = cache.get(chunk);
+    if (cached === undefined) {
+      cached = matchableChunkCode(chunk);
+      cache.set(chunk, cached);
+    }
+    return cached;
+  };
+}
+
 function chunksOf(output: readonly (OutputChunk | OutputAsset)[]): readonly OutputChunk[] {
   return output.filter((item): item is OutputChunk => item.type === "chunk");
 }
@@ -79,10 +122,11 @@ function summarizeMarkerMatches(
   label: string,
   chunks: readonly OutputChunk[],
   projectRoot: string,
+  matchableCode: (chunk: OutputChunk) => string,
 ): { readonly found: boolean; readonly evidence: readonly string[] } {
   const evidence: string[] = [];
   for (const chunk of chunks) {
-    if (RISK_MARKERS.find(marker => marker.signal === signal)?.pattern.test(chunk.code) === true) {
+    if (RISK_MARKERS.find(marker => marker.signal === signal)?.pattern.test(matchableCode(chunk)) === true) {
       evidence.push(`chunk:${chunk.fileName}`);
     }
   }
@@ -121,6 +165,7 @@ export function observeArtifact(
   const chunks = chunksOf(output);
   const assets = assetsOf(output);
   const entry = chunks.find(chunk => chunk.isEntry);
+  const matchableCode = chunkCodeAccessor();
 
   const facts: ProbeFact[] = [
     {
@@ -156,7 +201,7 @@ export function observeArtifact(
     });
   }
 
-  const survivingDynamicCall = chunks.some(chunk => DYNAMIC_IMPORT_CALL_PATTERN.test(chunk.code));
+  const survivingDynamicCall = chunks.some(chunk => DYNAMIC_IMPORT_CALL_PATTERN.test(matchableCode(chunk)));
   if (chunks.length > 1 || survivingDynamicCall) {
     risks.push({
       signal: "dynamic-import-or-code-splitting",
@@ -168,12 +213,15 @@ export function observeArtifact(
       evidence:
         chunks.length > 1
           ? chunks.map(chunk => `chunk:${chunk.fileName}`).sort(compareStrings)
-          : chunks.filter(chunk => DYNAMIC_IMPORT_CALL_PATTERN.test(chunk.code)).map(chunk => `chunk:${chunk.fileName}`).sort(compareStrings),
+          : chunks
+              .filter(chunk => DYNAMIC_IMPORT_CALL_PATTERN.test(matchableCode(chunk)))
+              .map(chunk => `chunk:${chunk.fileName}`)
+              .sort(compareStrings),
     });
   }
 
   for (const marker of RISK_MARKERS) {
-    const match = summarizeMarkerMatches(marker.signal, marker.label, chunks, projectRoot);
+    const match = summarizeMarkerMatches(marker.signal, marker.label, chunks, projectRoot, matchableCode);
     if (match.found) {
       risks.push({
         signal: marker.signal,
@@ -184,7 +232,7 @@ export function observeArtifact(
     }
   }
 
-  if (entry !== undefined && AMD_UMD_PATTERN.test(entry.code)) {
+  if (entry !== undefined && AMD_UMD_PATTERN.test(matchableCode(entry))) {
     rejectionFindings.push({
       signal: "amd-umd-branch-observed-in-artifact",
       step: "artifact-scan",

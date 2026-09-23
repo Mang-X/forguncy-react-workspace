@@ -272,6 +272,237 @@ describe("runDependencyProbe: node-only package", () => {
   });
 });
 
+/**
+ * The three shapes that produced a false `platform-api-unavailable` on a real package.
+ *
+ * Each fixture is the minimum reduction of a package the first real-package probe
+ * refused while its browser artifact contained no Node builtins. The synthetic
+ * fixtures above never caught this because each of their packages has exactly one
+ * entry file, so "every file in the tree" and "every file the browser build reaches"
+ * happened to be the same set. These fixtures exist so that coincidence is no longer
+ * load-bearing.
+ *
+ * Governing Spec: #16 — a rejection is a claim about the artifact the cell would
+ * ship, and a claim made without looking at the artifact is not evidence.
+ */
+describe("runDependencyProbe: a Node build beside a browser build", () => {
+  it("does not refuse a package whose Node entries are unreachable from its browser entry", async () => {
+    // `@embedpdf/pdfium`'s shape: `index.browser.js` next to `index.js` /
+    // `index.cjs`, where only the Node builds reach `fs`/`module`.
+    const { report, assessment, lockStatus } = await probe("node-build-not-browser-entry", "dual-build");
+
+    expect(rejectionSignals(report)).toEqual([]);
+    expect(assessment.status).toBe("supports-deployment");
+    expect(lockStatus).toBe("passed");
+
+    // The positive signal is present precisely because the builtins were not reachable.
+    expect(report.facts.some(fact => fact.name === "signal.no-node-builtins" && fact.value === true)).toBe(true);
+    const specifiers = report.facts.find(fact => fact.name === "graph.node-only-specifiers")?.value;
+    expect(specifiers).toEqual([]);
+
+    // Coverage: the report says how much of the package it actually read, so
+    // "nothing was found" cannot be confused with "nothing was looked at". This is
+    // the distinction that was invisible while the step scanned whole directories.
+    const reachable = report.facts.find(fact => fact.name === "graph.reachable-file-count")?.value;
+    expect(reachable).toBe(1); // the browser entry, and only it
+    // Nothing was dropped or unparseable, so the resolutions fact is empty.
+    expect(report.facts.find(fact => fact.name === "graph.entry-resolutions")?.value).toEqual([]);
+  });
+});
+
+describe("runDependencyProbe: an optional loader outside the entry graph", () => {
+  it("does not report a Worker risk from a file the browser entry cannot reach", async () => {
+    // `three`'s shape: draco/basis loaders under `examples/jsm/` that each construct a
+    // Worker, none reachable from `build/three.module.js`.
+    const { report, assessment } = await probe("unreachable-optional-loader", "engine-lib");
+
+    expect(rejectionSignals(report)).toEqual([]);
+    // The Worker lives in an exported-but-unentered subtree, so there is no risk to weigh.
+    expect(riskSignals(report)).not.toContain("worker");
+    expect(assessment.status).toBe("supports-deployment");
+  });
+});
+
+describe("runDependencyProbe: builtins named only in comments", () => {
+  it("does not refuse a package whose Node specifiers appear only in JSDoc examples", async () => {
+    // `es-toolkit`'s shape, which produced both false positives at once: `node:fs`
+    // inside a JSDoc `@example` on a reachable file, and a real `node:child_process`
+    // behind the `./server` subpath the root entry never imports.
+    const { report, assessment, lockStatus } = await probe("comment-only-builtins", "util-lib");
+
+    expect(rejectionSignals(report)).toEqual([]);
+    expect(report.facts.some(fact => fact.name === "signal.no-node-builtins" && fact.value === true)).toBe(true);
+    expect(assessment.status).toBe("supports-deployment");
+    expect(lockStatus).toBe("passed");
+  });
+});
+
+/**
+ * The artifact bound: which files a finding may be drawn from.
+ *
+ * Reaching a file and bundling it are different sets — rolldown drops a module whose bindings
+ * are unused while the walk, which applies no tree-shaking, still reaches it — so a finding has
+ * to be bounded by the artifact. These cases pin that bound and its bookkeeping fact.
+ */
+describe("runDependencyProbe: the artifact bound's path tests", () => {
+  it("keeps a real package directory named `.fgc` inside the bound", async () => {
+    // The bound's containment test must not special-case `.fgc` by name. The probe's scratch
+    // directory sits at the *project* root, so it never appears under the package — an
+    // exclusion by name can therefore only drop real package files. Measured: a package
+    // shipping `src/.fgc/x.js` was bundled by rolldown, contained a `dlopen`, and the engine
+    // reported `supports-deployment` with no rejection.
+    const { report, assessment } = await probe("dot-fgc-directory", "dot-fgc");
+
+    const finding = report.rejectionFindings.find(
+      entry => entry.signal === "node-filesystem-process-or-native-addon",
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.evidence.some(item => item.includes("src/.fgc/x.js"))).toBe(true);
+    expect(assessment.status).toBe("supports-rejection-only");
+    // And the file is not miscounted as shaken out.
+    expect(report.facts.find(fact => fact.name === "graph.files-shaken-out")?.value).toBe(0);
+  });
+
+  it("treats a file whose name begins with `..` as inside the package", async () => {
+    // `..` is a path *segment*, not a string prefix. A bare `startsWith("..")` classified
+    // `./..helper.js` — a real relative import of a file the package ships — as escaped, so
+    // the walk reported a false `escapedSpecifiers` entry and never filed the rejection for
+    // the builtin inside it, while rolldown bundled it.
+    const { report, assessment } = await probe("dotdot-filename", "dotdot-name");
+
+    const finding = report.rejectionFindings.find(
+      entry => entry.signal === "node-filesystem-process-or-native-addon",
+    );
+    expect(finding).toBeDefined();
+    expect(assessment.status).toBe("supports-rejection-only");
+    expect(report.facts.find(fact => fact.name === "graph.entry-resolutions")?.value).toEqual([]);
+  });
+
+  it("bounds a transitive dependency by the artifact too", async () => {
+    // The bound has to answer for **every** graph member, not only the probed package: a
+    // dependency is bundled or dropped by the same build. Bounding only the root left a
+    // shaken-out dependency's `dlopen` producing a rejection — the same false rejection, one
+    // level of graph indirection out. `dep-lib` is declared and imported but its binding is
+    // unused, so rolldown drops it.
+    const { report, assessment } = await probe("shaken-out-dependency", "shaken-dep");
+
+    expect(rejectionSignals(report)).toEqual([]);
+    expect(assessment.status).toBe("supports-deployment");
+    expect(report.facts.find(fact => fact.name === "graph.files-shaken-out")?.value).toBe(1);
+    expect(report.facts.some(fact => fact.name === "signal.no-node-builtins" && fact.value === true)).toBe(true);
+  });
+});
+
+describe("runDependencyProbe: findings are bounded by the artifact", () => {
+  it("does not report a native indicator from a file the bundle does not contain", async () => {
+    // `process.dlopen` is reached through no import, so rolldown neither resolves nor fails on
+    // it — it simply drops the module. Measured before the bound: build passed, the artifact
+    // contained no `dlopen`, and the report refused the package for a native addon.
+    const { report, assessment } = await probe("shaken-out-native", "shaken-native");
+
+    expect(rejectionSignals(report)).toEqual([]);
+    expect(assessment.status).toBe("supports-deployment");
+    expect(report.facts.find(fact => fact.name === "graph.files-shaken-out")?.value).toBe(1);
+    expect(report.facts.some(fact => fact.name === "signal.no-node-builtins" && fact.value === true)).toBe(true);
+  });
+
+  it("does not report a Worker risk from a file the bundle does not contain", async () => {
+    const { report, assessment } = await probe("shaken-out-worker", "shaken-worker");
+
+    expect(riskSignals(report)).not.toContain("worker");
+    expect(assessment.status).toBe("supports-deployment");
+    expect(report.facts.find(fact => fact.name === "runtime.files-shaken-out")?.value).toBe(1);
+  });
+
+  it("still reports the same findings when the file is kept in the bundle", async () => {
+    // The control: `export *` keeps the module, so the rejection stands. Without this, a bound
+    // that suppressed everything would pass the two cases above.
+    const { report, assessment } = await probe("kept-native", "kept-native");
+
+    const finding = report.rejectionFindings.find(
+      entry => entry.signal === "node-filesystem-process-or-native-addon",
+    );
+    expect(finding).toBeDefined();
+    // The evidence names the file, which is what makes the claim checkable.
+    expect(finding?.evidence.some(item => item.includes("w.js"))).toBe(true);
+    expect(assessment.status).toBe("supports-rejection-only");
+    expect(report.facts.find(fact => fact.name === "graph.files-shaken-out")?.value).toBe(0);
+  });
+
+  it("keeps a file whose name contains `.fgc` inside the bound", async () => {
+    // The scratch-directory exclusion is a path *segment* test. A substring check dropped
+    // `.fgc-helper.js` from the bound while rolldown had it in the bundle, which made
+    // `graph.files-shaken-out` claim a drop that had not happened.
+    const { report } = await probe("fgc-in-name", "fgc-name");
+
+    expect(report.facts.find(fact => fact.name === "graph.files-shaken-out")?.value).toBe(0);
+    expect(report.facts.find(fact => fact.name === "runtime.files-shaken-out")?.value).toBe(0);
+  });
+});
+
+describe("runDependencyProbe: the reachability rule still catches a real Node dependency", () => {
+  it("keeps filing the rejection when a reachable file genuinely needs a builtin", async () => {
+    // The fix must not be a blanket amnesty: `config-from-disk`'s builtin is in the
+    // file its entry imports, so it is exactly as rejected as it was before.
+    const { report, assessment } = await probe("node-only", "config-from-disk");
+
+    const finding = report.rejectionFindings.find(
+      entry => entry.signal === "node-filesystem-process-or-native-addon",
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.step).toBe("node-builtin-scan");
+    expect(assessment.status).toBe("supports-rejection-only");
+  });
+
+  it("withholds the clean bill of health when no browser entry could be reached", async () => {
+    // The blanket-amnesty shape an adversarial review found: a server-only package that
+    // attaches a `browser` field. `export-metadata` used to count the bare field as
+    // proof of browser-resolvability while the entry resolution (correctly) named no
+    // browser-executable root, so the dependency step reached zero files and reported
+    // `no-node-builtins: true` — a clean result drawn from an empty set, on a package
+    // whose only source file imports `node:fs`.
+    //
+    // With the two steps agreeing, `export-metadata` files the rejection it should. The
+    // assertions here cover this step's half: it must not claim a clean scan when it
+    // reached nothing.
+    const { report, assessment } = await probe("unreachable-no-browser-entry", "server-only");
+
+    expect(assessment.status).not.toBe("supports-deployment");
+
+    const noBuiltins = report.facts.find(fact => fact.name === "signal.no-node-builtins");
+    expect(noBuiltins?.value).toBe(false);
+    expect(report.facts.find(fact => fact.name === "scan.no-reachable-source")?.value).toBe(true);
+    expect(report.facts.find(fact => fact.name === "graph.reachable-file-count")?.value).toBe(0);
+
+    // The rejection comes from the step that can answer the question from the manifest.
+    expect(report.rejectionFindings.map(finding => finding.signal)).toContain(
+      "ssr-or-server-only-without-browser-build",
+    );
+  });
+
+  it("follows the package's own name through its exports map, as a bundler does", async () => {
+    // The third shape, and the one that would have been a false *negative*: a root
+    // entry that re-exports from its own `./server` subpath. Node and every bundler
+    // resolve a self-reference through the package's `exports` map, so a walk that
+    // followed only `./` and `../` reached the entry alone and filed no finding —
+    // even though the build itself fails on the builtin it never looked at.
+    //
+    // A false negative is the more dangerous direction of the two: the report neither
+    // supported deployment nor justified a rejection, so no decision was recordable.
+    const { report, assessment } = await probe("self-referencing-subpath", "self-ref-lib");
+
+    const finding = report.rejectionFindings.find(
+      entry => entry.signal === "node-filesystem-process-or-native-addon",
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.evidence).toContain("builtin:node:child_process");
+    expect(assessment.status).toBe("supports-rejection-only");
+
+    // Both files, not just the entry: the self-reference was followed.
+    expect(report.facts.find(fact => fact.name === "graph.reachable-file-count")?.value).toBe(2);
+  });
+});
+
 describe("runDependencyProbe: broken build", () => {
   it("fails the build with actionable, portable diagnostics and cascades skips", async () => {
     const { report, assessment, lockStatus } = await probe("broken-build", "broken-widget");
