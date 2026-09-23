@@ -114,8 +114,13 @@ function stableScalar(value: string): string {
  *   filter on what the package's root entry reaches, and the walk follows a `browser` map's
  *   bare-specifier redirect. Changes findings for a dependency reached through an `exports`
  *   subpath and for a redirect target — measured, both lost a rejection the artifact justified.
+ * - `8` — `graph.files-shaken-out` is a set difference rather than a cardinality subtraction, and
+ *   a finding names only the packages that actually contributed it (deepest owning directory for
+ *   files, hits rather than the probed root for contributors). Changes findings for a package
+ *   whose nested dependency carries the hit, and the coverage count for any package whose
+ *   reachable and scanned sets overlap only partly.
  */
-export const PROBE_ANALYSIS_REVISION = 7;
+export const PROBE_ANALYSIS_REVISION = 8;
 
 export interface ComposeProbeFingerprintInput {
   /** Which probe ran, e.g. `inline-bundle`. */

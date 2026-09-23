@@ -344,6 +344,34 @@ describe("runDependencyProbe: builtins named only in comments", () => {
  * are unused while the walk, which applies no tree-shaking, still reaches it — so a finding has
  * to be bounded by the artifact. These cases pin that bound and its bookkeeping fact.
  */
+describe("runDependencyProbe: a finding is attributed to the package that contributed it", () => {
+  it("names only the nested dependency whose own file carries the builtin", async () => {
+    // `attribution-outer`'s directory contains the nested `attribution-inner`, so a containment
+    // test alone matched both and the rejection named **both** packages. Measured: the evidence
+    // listed `package:attribution-outer@1.0.0` for a builtin that only the nested package's
+    // source imports — a claim about a package a reviewer would check and find nothing in.
+    //
+    // Two separate mechanisms had to agree for this: the file-to-package attribution (deepest
+    // containing directory) and the contributor list (derived from the hits, not seeded with the
+    // probed root).
+    const { report, assessment } = await probe("nested-package-attribution", "attribution-outer");
+
+    const finding = report.rejectionFindings.find(
+      entry => entry.signal === "node-filesystem-process-or-native-addon",
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.evidence).toContain("package:attribution-inner@1.0.0");
+    expect(finding?.evidence).not.toContain("package:attribution-outer@1.0.0");
+    expect(assessment.status).toBe("supports-rejection-only");
+
+    // The outer package is still walked — it is in the graph and its own files are scanned; it
+    // simply contributes no hit.
+    const scanned = report.facts.find(fact => fact.name === "graph.packages-scanned")?.value ?? [];
+    expect(scanned).toContain("attribution-outer@1.0.0");
+    expect(scanned).toContain("attribution-inner@1.0.0");
+  });
+});
+
 describe("runDependencyProbe: files the build loaded by a path the root entry misses", () => {
   it("scans a dependency's exports-subpath file, which the artifact contains", async () => {
     // Reached only through `import "subpath-dep/sub"`: the dependency's own root entry resolves
@@ -359,8 +387,15 @@ describe("runDependencyProbe: files the build loaded by a path the root entry mi
     expect(finding).toBeDefined();
     expect(finding?.evidence.some(item => item.includes("native.js"))).toBe(true);
     expect(assessment.status).toBe("supports-rejection-only");
-    // The file is in the artifact, so it is not miscounted as dropped.
-    expect(report.facts.find(fact => fact.name === "graph.files-shaken-out")?.value).toBe(0);
+
+    // The dependency's own root-entry file **is** reached but is not in the artifact — the build
+    // loaded its `./sub` file instead — so the coverage fact has to count it. An earlier assertion
+    // here expected `0`, which froze a bug: the count was computed by subtracting cardinalities,
+    // and in this fixture the reachable set `{clean.js}` and the scanned set `{native.js}` are
+    // both length 1, so the difference read as nothing had been dropped. That is the one fact a
+    // reader consults to understand why the walk and the artifact disagree, so it has to be a
+    // set difference rather than a subtraction.
+    expect(report.facts.find(fact => fact.name === "graph.files-shaken-out")?.value).toBe(1);
   });
 
   it("follows a `browser` redirect to the shim the build actually loads", async () => {

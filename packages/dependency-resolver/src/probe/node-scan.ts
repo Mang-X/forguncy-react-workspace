@@ -405,6 +405,7 @@ function portableEvidence(specifier: string): string {
  */
 async function filesToScan(
   package_: GraphPackage,
+  graph: readonly GraphPackage[],
   reachableFiles: readonly PackageSourceFile[],
   bundledFiles: ReadonlySet<string> | undefined,
 ): Promise<readonly PackageSourceFile[]> {
@@ -416,12 +417,42 @@ async function filesToScan(
     if (!isInside(package_.directory, absolutePath)) {
       continue;
     }
+    // Attribution goes to the **deepest** graph package whose directory contains the file, not
+    // to every package that does. A nested dependency's directory sits inside its parent's, so
+    // an `isInside` test alone matched both: measured on `outer` depending on
+    // `outer/node_modules/inner`, the `node:fs` in `inner/index.js` was filed once and reported
+    // against **both** `inner@1.0.0` and `outer@1.0.0` — a package named in evidence it did not
+    // contribute to, which is exactly what a reviewer checks first.
+    if (deepestOwningPackage(graph, absolutePath) !== package_.directory) {
+      continue;
+    }
     const file = await readSourceFile(package_.directory, absolutePath);
     if (file !== undefined) {
       fromArtifact.push(file);
     }
   }
   return fromArtifact.sort((left, right) => compareStrings(left.relativePath, right.relativePath));
+}
+
+/**
+ * The graph package whose directory most specifically contains `absolutePath`.
+ *
+ * "Most specifically" means the longest matching directory: a file under
+ * `outer/node_modules/inner/` belongs to `inner` even though it is also inside `outer`. Comparing
+ * lengths is enough because a containing directory is a prefix of the path, so the longest
+ * match is the deepest one.
+ */
+function deepestOwningPackage(graph: readonly GraphPackage[], absolutePath: string): string | null {
+  let owner: string | null = null;
+  for (const candidate of graph) {
+    if (!isInside(candidate.directory, absolutePath)) {
+      continue;
+    }
+    if (owner === null || candidate.directory.length > owner.length) {
+      owner = candidate.directory;
+    }
+  }
+  return owner;
 }
 
 export async function observeNodeBuiltins(
@@ -493,8 +524,17 @@ export async function observeNodeBuiltins(
     // package: those files exist in the artifact by definition, so a finding drawn from one is
     // a statement about the artifact. Reachability still supplies the files for the
     // no-artifact case, and still bounds *which* of a package's files can be attributed to it.
-    const scanned = await filesToScan(package_, reachable.files, bundledFiles);
-    skippedShakenOut += Math.max(0, reachable.files.length - scanned.length);
+    const scanned = await filesToScan(package_, graph, reachable.files, bundledFiles);
+    // Counted as a **set difference**, not by subtracting cardinalities. `scanned` is no longer a
+    // subset of `reachable` — when a build ran it is taken from the artifact's own module list,
+    // which can contain a file the walk never reached (a dependency's `exports` subpath) — so
+    // the two lengths no longer describe one set against another. Measured on the
+    // `dependency-subpath-native` fixture, where the two sets are `{clean.js}` and
+    // `{native.js}`: both length 1, so a subtraction reported 0 while `clean.js` genuinely is
+    // reached-but-not-in-the-artifact.
+    if (bundledFiles !== undefined) {
+      skippedShakenOut += reachable.files.filter(file => !bundledFiles.has(file.absolutePath)).length;
+    }
 
     for (const file of scanned) {
       for (const specifier of nodeOnlySpecifiersOf(file, package_.manifest)) {
@@ -605,15 +645,29 @@ export async function observeNodeBuiltins(
   }
 
   if (builtinSpecifiers.length > 0 || nativeIndicators.length > 0) {
-    // Name every package that contributed a hit, not just the probed root:
-    // the review regression is a *nested* dependency reaching a builtin, and
-    // evidence that only says the root's name hides which graph member did it.
-    const contributingPackages = new Set<string>([
-      `package:${identity.packageName}@${identity.packageVersion}`,
-    ]);
+    // Name every package that **contributed** a hit — derived from the hits, not seeded with the
+    // probed root.
+    //
+    // Seeding the root unconditionally was wrong in the same way the file attribution was: it
+    // named a package in the evidence whatever that package's files actually said. Measured on
+    // `outer` depending on `outer/node_modules/inner`, where only `inner/index.js` imports
+    // `node:fs`: the evidence listed `package:outer@1.0.0` as well, so a reviewer checking the
+    // claim against `outer`'s own source would find nothing. A root that genuinely contributes
+    // its own hit is still named — by this same loop.
+    const contributingPackages = new Set<string>();
     for (const packagesForSpecifier of builtinHits.values()) {
       for (const packageEvidence of packagesForSpecifier) {
         contributingPackages.add(packageEvidence);
+      }
+    }
+    // Native indicators are keyed by `"<indicator> [<name>] <file>"`, so the package is read off
+    // the token rather than re-derived; an indicator with no package token (a manifest- or
+    // filesystem-level one) is still evidence about the root it was found under.
+    for (const indicator of nativeIndicators) {
+      const named = /^[^\[]*\[([^\]]+)\]/.exec(indicator)?.[1];
+      const owner = named === undefined ? undefined : graph.find(entry => entry.name === named);
+      if (owner !== undefined) {
+        contributingPackages.add(`package:${owner.name}@${owner.version ?? "?"}`);
       }
     }
     const evidence: string[] = [
