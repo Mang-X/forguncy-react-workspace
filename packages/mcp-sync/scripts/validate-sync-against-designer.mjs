@@ -38,10 +38,10 @@ import { createHash } from "node:crypto";
 // The transport and executor are loaded from source, so the validation runs the code
 // under review rather than a build.
 const { createDesignerSyncPort } = await import("../src/designer-transport.ts");
-const { executeCellSync, readCellState } = await import("../src/executor.ts");
+const { executeCellSync, executeCellSyncTargets, readCellState } = await import("../src/executor.ts");
 const { planCellSync } = await import("../src/sync-plan.ts");
 const { CELL_ARTIFACT_BANNER } = await import("@forguncy-react-workspace/cell-compiler");
-const { EXTENSION_EXTERNAL_MAPPINGS } = await import("@forguncy-react-workspace/core");
+const { EXTENSION_EXTERNAL_MAPPINGS, createCellRegistry } = await import("@forguncy-react-workspace/core");
 
 const URL_ = process.env.FGC_MCP_URL ?? "http://localhost:11234/mcp";
 
@@ -406,6 +406,39 @@ async function main() {
     JSON.stringify(merged),
   );
   check("the merged Cell was written", mergedRun.status === "written", mergedRun.status);
+
+  // --- A batch, reached through the shared registry ---------------------------------
+  // The criterion is "Cell id resolves through the shared project config/target registry":
+  // the executor is given *ids*, and the coordinates it writes are the config's.
+  const registry = createCellRegistry(
+    {
+      runtime: { forguncyVersion: "12.0.100", projectAlias: "fgc-sync-validation" },
+      cells: {
+        probeA: { entry: "cells/probeA/App.tsx", target: { pageName: PAGE, cell: "F1" } },
+        probeB: { entry: "cells/probeB/App.tsx", target: { pageName: PAGE, cell: "G1" } },
+      },
+    },
+    { root: process.cwd(), requireEntryFiles: false },
+  );
+  const batchRuns = await executeCellSyncTargets(registry, [
+    { cellId: "probeA", artifact, decisions, listings, port },
+    { cellId: "probeB", artifact, decisions, listings, port },
+  ]);
+  const batchRead = await designer(`
+    const g = await api.page.getCells({ pageName: ${JSON.stringify(PAGE)}, range: "F1:G1" });
+    return g.cells.map(c => ({ row: c.row, col: c.col, hasCode: typeof c.cellTypeProps?.code === "string" }));
+  `);
+  record("13. a batch resolved through the registry", {
+    runs: batchRuns.map(run => `${run.target.pageName}!${run.target.cell}=${run.status}`),
+    persisted: batchRead,
+  });
+  check(
+    "the batch wrote the coordinates the config declared, not a caller's",
+    batchRuns.map(run => `${run.target.pageName}!${run.target.cell}`).join(",") === `${PAGE}!F1,${PAGE}!G1` &&
+      batchRuns.every(run => run.status === "written"),
+    batchRuns.map(run => run.status).join(","),
+  );
+  check("both batch Cells persisted generated code", batchRead.length === 2 && batchRead.every(c => c.hasCode));
 
   // --- Summary ----------------------------------------------------------------------
   const failed = checks.filter(entry => !entry.ok);

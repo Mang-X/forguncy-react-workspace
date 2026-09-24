@@ -25,8 +25,9 @@ import { describe, expect, it } from "vitest";
 
 import { CELL_ARTIFACT_BANNER, frontendLibraryReference } from "@forguncy-react-workspace/cell-compiler";
 import type { CompileCellResult } from "@forguncy-react-workspace/cell-compiler";
+import { createCellRegistry } from "@forguncy-react-workspace/core";
 
-import { executeCellSync, formatCellSyncRun, deployedStateOfRead, readCellState } from "./executor.ts";
+import { executeCellSync, executeCellSyncTargets, formatCellSyncRun, deployedStateOfRead, readCellState } from "./executor.ts";
 import type { CellSyncRun, SyncRunStepStatus } from "./executor.ts";
 import { stampSyncMarker } from "./fingerprint.ts";
 import type {
@@ -499,8 +500,94 @@ describe("turning a read into a plan input", () => {
 });
 
 // ---------------------------------------------------------------------------
-// The dispatch barrier, at the call site the executor uses
+// A batch, through the registry
 // ---------------------------------------------------------------------------
+
+describe("executing a batch of declared Cells", () => {
+  // The acceptance criterion this covers is "Cell id resolves through the shared project
+  // config/target registry": the executor never sees a `pageName`/`cell` pair directly —
+  // a declared Cell id does, through `core`'s registry — so the ids are what the test
+  // names and the coordinates are what it asserts.
+  const PROJECT_ROOT = process.platform === "win32" ? "C:\\probe\\project" : "/probe/project";
+
+  function registryOf() {
+    return createCellRegistry(
+      {
+        runtime: { forguncyVersion: "12.0.100", projectAlias: "sync-executor" },
+        cells: {
+          orderList: { entry: "cells/orderList/App.tsx", target: { pageName: "销售订单", cell: "A1" } },
+          orderBoard: { entry: "cells/orderBoard/App.tsx", target: { pageName: "销售订单", cell: "D4" } },
+        },
+      },
+      { root: PROJECT_ROOT, requireEntryFiles: false },
+    );
+  }
+
+  it("resolves every id through the registry and writes each declared destination", async () => {
+    const { port, written } = recordingPort();
+
+    const runs = await executeCellSyncTargets(registryOf(), [
+      { cellId: "orderList", artifact: generated(), decisions: [], listings: [], port },
+      { cellId: "orderBoard", artifact: generated(), decisions: [], listings: [], port },
+    ]);
+
+    expect(runs.map(run => run.status)).toEqual(["written", "written"]);
+    // The coordinates are the config's, not a caller's — which is the whole point of
+    // resolving through the registry rather than accepting a target.
+    expect(written.map(request => [request.pageName, request.cells[0].cell])).toEqual([
+      ["销售订单", "A1"],
+      ["销售订单", "D4"],
+    ]);
+  });
+
+  it("reads each target immediately before its own write", async () => {
+    const { port, calls } = recordingPort();
+
+    await executeCellSyncTargets(registryOf(), [
+      { cellId: "orderList", artifact: generated(), decisions: [], listings: [], port },
+      { cellId: "orderBoard", artifact: generated(), decisions: [], listings: [], port },
+    ]);
+
+    // Per target, not once for the batch: the state a plan classifies has to be the state
+    // its own write would replace.
+    expect(calls.filter(call => call.method === "readCellSource").map(call => call.argument)).toEqual([
+      { pageName: "销售订单", cell: "A1" },
+      { pageName: "销售订单", cell: "D4" },
+    ]);
+    expect(calls.filter(call => call.method === "setCells")).toHaveLength(2);
+  });
+
+  // The batch-wide guard, exercised through the executor rather than through the resolver
+  // alone: the same id twice is a request-level collision that a well-formed registry
+  // cannot express, and it is the one a caller can actually produce.
+  it("fails the batch before reading or writing when one id is requested twice", async () => {
+    const { port, calls } = recordingPort();
+
+    await expect(
+      executeCellSyncTargets(registryOf(), [
+        { cellId: "orderList", artifact: generated(), decisions: [], listings: [], port },
+        { cellId: "orderList", artifact: generated(), decisions: [], listings: [], port },
+      ]),
+    ).rejects.toThrow(/cell sync request|claim/i);
+    // The batch's whole-request guard, not two guards racing: nothing reached the designer,
+    // so there is no partially-written project to roll back. (Two *registry entries* cannot
+    // express this collision — `createCellRegistry` refuses one at construction — which is
+    // why the request-level guard exists as well.)
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses an id the registry does not declare", async () => {
+    const { port, calls } = recordingPort();
+
+    await expect(
+      executeCellSyncTargets(registryOf(), [
+        { cellId: "notDeclared", artifact: generated(), decisions: [], listings: [], port },
+      ]),
+    ).rejects.toThrow();
+    expect(calls).toEqual([]);
+  });
+});
+
 
 describe("the executor cannot send what the plan held", () => {
   it("only reaches `setCells` through the dispatch's own request", async () => {

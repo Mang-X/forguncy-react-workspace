@@ -64,7 +64,7 @@
  *   `step-outcomes.ts` for the same rule stated on the other side.
  */
 
-import type { ExtensionLibraryListing } from "@forguncy-react-workspace/core";
+import type { ExtensionLibraryListing, CellRegistry } from "@forguncy-react-workspace/core";
 
 import {
   assertMcpSyncFlowIsCoherent,
@@ -79,7 +79,7 @@ import { planCellSync, planSetCellsDispatch } from "./sync-plan.ts";
 import type { CellSyncDispatch, CellSyncPlan, PlanCellSyncOptions } from "./sync-plan.ts";
 import { outcomeOfPageGeneration, outcomeOfProjectErrorCheck } from "./step-outcomes.ts";
 import { cellTargetLabel } from "./target.ts";
-import { planCellSyncTargets } from "./registry-target.ts";
+import { resolveCellSyncTargets } from "./registry-target.ts";
 import type { CellSyncTargetPlan } from "./registry-target.ts";
 import type {
   ForguncySyncPort,
@@ -442,8 +442,17 @@ export async function readCellState(
 // A batch
 // ---------------------------------------------------------------------------
 
-/** One target's sync, executed after the batch's targets were resolved and guarded. */
-export interface ExecuteCellSyncTargetOptions extends CellSyncTargetPlan {
+/**
+ * One target's sync in a batch: everything *except* what the batch reads for itself.
+ *
+ * `deployed` is deliberately absent rather than optional. {@link executeCellSyncTargets}
+ * performs the read, so accepting a caller's `deployed` would let a batch plan a write
+ * against a state nobody just observed — and the two ways that goes wrong (a stale
+ * snapshot missing a designer's edit, a fabricated one claiming a Cell is blank) are both
+ * silent. Requiring it here and ignoring it there would be worse still: a caller would pass
+ * one and believe it was used.
+ */
+export interface ExecuteCellSyncTargetOptions extends Omit<CellSyncTargetPlan, "deployed"> {
   readonly port: ForguncySyncPort;
   readonly listings?: readonly ExtensionLibraryListing[];
 }
@@ -462,24 +471,33 @@ export interface ExecuteCellSyncTargetOptions extends CellSyncTargetPlan {
  * start of the batch.
  */
 export async function executeCellSyncTargets(
-  registry: Parameters<typeof planCellSyncTargets>[0],
+  registry: CellRegistry,
   plans: readonly ExecuteCellSyncTargetOptions[],
 ): Promise<readonly CellSyncRun[]> {
-  // Resolve once, up front: an unresolvable or colliding batch throws here, before any
-  // read or write has happened.
-  planCellSyncTargets(registry, plans);
+  // Resolve the whole batch up front: an unresolvable or colliding request throws here,
+  // before any read or write has happened, so there is no partially-written project to
+  // reason about. `resolveCellSyncTargets` is the guarded path — it re-asserts registry
+  // uniqueness and the batch's own distinctness — and it is called *once* for the batch so
+  // the cross-member check sees every claim.
+  const resolved = resolveCellSyncTargets(
+    registry,
+    plans.map(plan => plan.cellId),
+  );
 
   const runs: CellSyncRun[] = [];
-  for (const planOptions of plans) {
-    const [resolved] = planCellSyncTargets(registry, [planOptions]);
-    if (resolved === undefined) {
+  for (const [index, planOptions] of plans.entries()) {
+    const target = resolved[index];
+    if (target === undefined) {
       // Unreachable: the resolver returns one entry per input.
       throw new Error(`No resolved target for Cell ${planOptions.cellId}.`);
     }
-    const { state } = await readCellState(planOptions.port, resolved.target);
+
+    // Each target is read immediately before its own plan is built, so the state the plan
+    // classifies is the state its write would replace rather than a snapshot from the start.
+    const { state } = await readCellState(planOptions.port, target.target);
     runs.push(
       await executeCellSync({
-        target: resolved.target,
+        target: target.target,
         artifact: planOptions.artifact,
         decisions: planOptions.decisions,
         deployed: state,
