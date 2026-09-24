@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { FgcLockDocument, FgcLockMigrationStep, LockedDependencyDecision } from "./index";
+import type { FgcLockDocument, FgcLockMigrationStep, LockedDependencyDecision } from "./index.ts";
 import {
   FGC_LOCK_MIGRATION_STEPS,
   FGC_LOCK_SCHEMA_VERSION,
@@ -15,7 +15,7 @@ import {
   planFgcLockMigration,
   serializeFgcLock,
   validateFgcLockMigrationSteps,
-} from "./index";
+} from "./index.ts";
 
 const validRecord: LockedDependencyDecision = {
   strategy: "inline",

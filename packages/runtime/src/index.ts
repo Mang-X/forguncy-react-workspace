@@ -56,7 +56,7 @@ export {
   RUNTIME_FACADE_DECISION_REFERENCE,
   RUNTIME_GOVERNING_DECISIONS,
   RUNTIME_GOVERNING_SPEC_REFERENCE_LINE,
-} from "./provenance";
+} from "./provenance.ts";
 
 // Which capabilities are admitted, and why the rest are not
 export {
@@ -83,7 +83,7 @@ export {
   runtimeFacadeCapabilitiesOfFamily,
   runtimeFacadeConcernOf,
   runtimeFacadeEvidenceChannels,
-} from "./capabilities";
+} from "./capabilities.ts";
 export type {
   CellPropKey,
   ForguncyPropMember,
@@ -98,7 +98,7 @@ export type {
   RuntimeFacadeFamilyId,
   RuntimeFacadeFamilyVerdict,
   RuntimeFacadeHostBinding,
-} from "./capabilities";
+} from "./capabilities.ts";
 
 // The confirmed call shapes, the provider boundary, and the non-goals
 export {
@@ -120,7 +120,7 @@ export {
   runtimeFacadePortChannelOfBinding,
   runtimeFacadePortChannels,
   runtimeFacadePortCoversBinding,
-} from "./contract";
+} from "./contract.ts";
 export type {
   DataSourceBinding,
   DataSourceOrderByParam,
@@ -141,10 +141,10 @@ export type {
   ServerCommandParameterMap,
   ServerCommandResult,
   ServerCommandResultKey,
-} from "./contract";
+} from "./contract.ts";
 
 // The low-level escape hatch, kept out of the façade's public surface
-export { getHostGlobal } from "./host-globals";
+export { getHostGlobal } from "./host-globals.ts";
 
 // The local development runtime contract (#22)
 export {
@@ -208,7 +208,7 @@ export {
   localDevResolvableModuleIds,
   localDevResolvedBridgeRows,
   localDevUnsupportedModuleIds,
-} from "./local-dev";
+} from "./local-dev.ts";
 export type {
   LocalDevAlignmentExpectation,
   LocalDevAudit,
@@ -240,7 +240,7 @@ export type {
   LocalDevOwedCheck,
   LocalDevStrategyHandling,
   LocalDevVersionField,
-} from "./local-dev";
+} from "./local-dev.ts";
 
 // #29 — the façade surface: six members, each an address for admitted
 // capabilities, plus the audit that keeps the registry and the implementation
@@ -271,7 +271,7 @@ export {
   runtimeFacadeExposedAddresses,
   runtimeFacadeExposedAddressNames,
   runtimeFacadeMemberCarriesBinding,
-} from "./facade";
+} from "./facade.ts";
 export type {
   ExposedCellPropKey,
   ExposedForguncyMember,
@@ -282,7 +282,7 @@ export type {
   RuntimeFacadeSurfaceMember,
   RuntimeFacadeSurfaceMemberId,
   RuntimeFacadeSurfaceSignature,
-} from "./facade";
+} from "./facade.ts";
 
 // #29 — how the surface resolves, and every way of not resolving
 export {
@@ -296,7 +296,7 @@ export {
   runtimeFacadeProviderState,
   throwingRuntimeFacadeAbsenceCodes,
   uninstallRuntimeFacadeProvider,
-} from "./provider";
+} from "./provider.ts";
 export type {
   RuntimeFacadeAbsenceId,
   RuntimeFacadeAbsenceMode,
@@ -304,22 +304,22 @@ export type {
   RuntimeFacadeAddressKind,
   RuntimeFacadeProviderState,
   RuntimeFacadeResolutionErrorCode,
-} from "./provider";
+} from "./provider.ts";
 
 // #29 — the two provider kinds
-export { createHostRuntimeFacadeProvider, RUNTIME_FACADE_HOST_BINDING_CHANNELS } from "./host-provider";
-export type { HostRuntimeFacadeProviderInput } from "./host-provider";
+export { createHostRuntimeFacadeProvider, RUNTIME_FACADE_HOST_BINDING_CHANNELS } from "./host-provider.ts";
+export type { HostRuntimeFacadeProviderInput } from "./host-provider.ts";
 
 export {
   createMockDataSource,
   createMockRuntimeFacadeProvider,
   mockUndeclaredDataSourceMessage,
-} from "./mock-provider";
+} from "./mock-provider.ts";
 export type {
   MockDataSourceResolver,
   MockRuntimeFacadeOptions,
   MockStandInCellPropKey,
-} from "./mock-provider";
+} from "./mock-provider.ts";
 
 // #28 — the fixture module contract: what a project's `fixture` default-exports
 // and how a local harness turns it into the mock provider. The registry
@@ -331,5 +331,5 @@ export {
   CellFixtureError,
   createCellFixtureProvider,
   resolveCellFixtureOptions,
-} from "./cell-fixture";
-export type { CellFixtureContext, CellFixtureErrorCode } from "./cell-fixture";
+} from "./cell-fixture.ts";
+export type { CellFixtureContext, CellFixtureErrorCode } from "./cell-fixture.ts";

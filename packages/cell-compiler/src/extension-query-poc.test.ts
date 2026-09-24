@@ -75,10 +75,10 @@ import {
 } from "@forguncy-react-workspace/dependency-resolver";
 import { describe, expect, it } from "vitest";
 
-import { compileCell } from "./artifact";
-import type { CompileCellOutcome } from "./artifact";
-import { CELL_ENTRY_COMPONENT_BINDING } from "./entry";
-import { createRolldownCellBundler } from "./rolldown-bundler";
+import { compileCell } from "./artifact.ts";
+import type { CompileCellOutcome } from "./artifact.ts";
+import { CELL_ENTRY_COMPONENT_BINDING } from "./entry.ts";
+import { createRolldownCellBundler } from "./rolldown-bundler.ts";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const exampleRoot = join(packageRoot, "..", "..", "examples", "extension-query");

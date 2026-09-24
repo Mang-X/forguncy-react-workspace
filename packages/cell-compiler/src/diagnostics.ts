@@ -23,7 +23,7 @@
  *   six would point the Agent at the wrong fix.
  */
 
-import type { CellArtifactGuaranteeId } from "./guarantees";
+import type { CellArtifactGuaranteeId } from "./guarantees.ts";
 
 /** The failure modes GitHub Issue #6 names explicitly. */
 export const REQUIRED_CELL_ARTIFACT_DIAGNOSTIC_CODES = [

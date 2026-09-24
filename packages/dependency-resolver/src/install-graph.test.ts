@@ -17,7 +17,7 @@ import {
   recordDependencyDecision,
   recordedPackageNames,
   resolveInstalledVersions,
-} from "./index";
+} from "./index.ts";
 
 async function writeFileAt(path: string, contents: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });

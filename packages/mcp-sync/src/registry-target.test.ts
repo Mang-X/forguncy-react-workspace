@@ -13,8 +13,8 @@ import {
   resolveCellSyncTarget,
   resolveCellSyncTargets,
   syncCellInput,
-} from "./registry-target";
-import type { CellSyncTargetPlan } from "./registry-target";
+} from "./registry-target.ts";
+import type { CellSyncTargetPlan } from "./registry-target.ts";
 
 /**
  * #19 left target resolution outside sync on purpose ("the target arrives as an

@@ -15,7 +15,7 @@ import {
   SyncFingerprintError,
   syncMarkerLine,
   verifySyncMarkerSelfConsistency,
-} from "./fingerprint";
+} from "./fingerprint.ts";
 
 /**
  * Issue #19 asks for two things that are one mechanism: a "recognizable generated

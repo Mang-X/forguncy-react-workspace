@@ -51,11 +51,11 @@ import {
   formatGoverningSpecReferenceLine,
   GOVERNING_ARCHITECTURE_DECISIONS,
   HOST_BRIDGE_DECISION,
-} from "./governance";
-import type { ArchitectureDecisionSource } from "./governance";
-import { findPlatformConflictRule } from "./platform-conflicts";
-import { cellUserScopeBinding, CELL_PRESET_LIBRARIES } from "./runtime-contract";
-import type { CellBindingAvailability, CellUserScopeBinding, RuntimeEvidenceChannel } from "./runtime-contract";
+} from "./governance.ts";
+import type { ArchitectureDecisionSource } from "./governance.ts";
+import { findPlatformConflictRule } from "./platform-conflicts.ts";
+import { cellUserScopeBinding, CELL_PRESET_LIBRARIES } from "./runtime-contract.ts";
+import type { CellBindingAvailability, CellUserScopeBinding, RuntimeEvidenceChannel } from "./runtime-contract.ts";
 
 // ---------------------------------------------------------------------------
 // The mechanism

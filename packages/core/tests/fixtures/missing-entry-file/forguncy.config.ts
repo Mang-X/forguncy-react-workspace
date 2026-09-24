@@ -1,4 +1,4 @@
-import { defineForguncyConfig } from "../../../src/forguncy-config";
+import { defineForguncyConfig } from "../../../src/forguncy-config.ts";
 
 /**
  * Fixture: the declared entry is intentionally **absent** from this directory.

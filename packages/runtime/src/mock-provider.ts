@@ -46,8 +46,8 @@ import {
   CELL_PROPS_BASE_KEYS,
 } from "@forguncy-react-workspace/core/browser";
 
-import type { CellPropKey, ForguncyPropMember } from "./capabilities";
-import { RuntimeFacadeContractError } from "./capabilities";
+import type { CellPropKey, ForguncyPropMember } from "./capabilities.ts";
+import { RuntimeFacadeContractError } from "./capabilities.ts";
 import type {
   DataSourceBinding,
   DataSourceQueryOptions,
@@ -57,7 +57,7 @@ import type {
   RuntimeFacadeProvider,
   ServerCommandBindings,
   ServerCommandParameterMap,
-} from "./contract";
+} from "./contract.ts";
 
 /** A data source's behaviour, as the project wants it simulated. */
 export type MockDataSourceResolver = (options?: DataSourceQueryOptions) => DataSourceResult;

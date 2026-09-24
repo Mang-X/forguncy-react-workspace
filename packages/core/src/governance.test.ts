@@ -16,7 +16,7 @@ import {
   PROJECT_CONFIG_DECISION,
   PROJECT_CONFIG_DECISION_QUALIFIED_REFERENCE,
   PROJECT_CONFIG_DECISION_REFERENCE,
-} from "./governance";
+} from "./governance.ts";
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 

@@ -29,7 +29,7 @@
 
 import type { CellRegistry, RegisteredCell } from "@forguncy-react-workspace/core";
 
-import type { CompileCellInput } from "./artifact";
+import type { CompileCellInput } from "./artifact.ts";
 
 /** Where a compiled artifact would be written, exactly as the config declared it. */
 export interface CellCompileTarget {

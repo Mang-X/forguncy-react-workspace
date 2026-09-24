@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { syncDiagnosticRule } from "./diagnostics";
-import { SYNC_STEP_SUCCEEDED, outcomeOfPageGeneration, outcomeOfProjectErrorCheck } from "./step-outcomes";
-import type { CellTarget } from "./target";
+import { syncDiagnosticRule } from "./diagnostics.ts";
+import { SYNC_STEP_SUCCEEDED, outcomeOfPageGeneration, outcomeOfProjectErrorCheck } from "./step-outcomes.ts";
+import type { CellTarget } from "./target.ts";
 
 /**
  * #19 states two post-mutation gates rather than two optional checks: "treat non-zero

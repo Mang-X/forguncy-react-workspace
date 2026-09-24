@@ -13,8 +13,8 @@
 
 import { describe, expect, it } from "vitest";
 
-import { BUILD_CONFIGURATION_FINGERPRINT } from "./build";
-import { composeProbeFingerprint, PROBE_ANALYSIS_REVISION } from "./fingerprint";
+import { BUILD_CONFIGURATION_FINGERPRINT } from "./build.ts";
+import { composeProbeFingerprint, PROBE_ANALYSIS_REVISION } from "./fingerprint.ts";
 
 describe("composeProbeFingerprint", () => {
   it("composes the documented format from the declared inputs", () => {

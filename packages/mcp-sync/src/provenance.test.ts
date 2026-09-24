@@ -20,7 +20,7 @@ import {
   MCP_SYNC_DECISION_REFERENCE,
   MCP_SYNC_GOVERNING_DECISIONS,
   MCP_SYNC_GOVERNING_SPEC_REFERENCE_LINE,
-} from "./provenance";
+} from "./provenance.ts";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 

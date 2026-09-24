@@ -46,8 +46,8 @@
 
 import type { RuntimeEvidenceChannel } from "@forguncy-react-workspace/core";
 
-import { FORGUNCY_SYNC_PORT_METHODS } from "./port";
-import type { ForguncySyncPortMethod } from "./port";
+import { FORGUNCY_SYNC_PORT_METHODS } from "./port.ts";
+import type { ForguncySyncPortMethod } from "./port.ts";
 
 // ---------------------------------------------------------------------------
 // Evidence

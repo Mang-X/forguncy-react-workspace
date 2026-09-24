@@ -33,8 +33,20 @@ Ownership boundaries are role-sensitive: a state library used for one cell's loc
 
 ## Local development
 
-`vp run dev` in a Cell project mounts one Cell's authored source as ordinary React, with the
-project's `fixture` installed as a mock provider. It is the fast loop: edit, see, no sync.
+`vp dev` — the bare command, no flags — in a Cell project mounts one Cell's authored source as
+ordinary React, with the project's `fixture` installed as a mock provider. It is the fast loop:
+edit, see, no sync.
+
+That it needs no flag is a property of this repository's *source*, not of the harness: every
+relative import in `packages/**` and `examples/**` names its file with a `.ts`/`.tsx` extension,
+so Node's ESM loader can resolve a `vite.config.ts` that imports workspace TypeScript after
+Vite's default config bundler externalizes it. Write relative imports with the extension, and do
+not remove `allowImportingTsExtensions` from the root `tsconfig.json` — a single extensionless
+import among them breaks bare `vp dev` before Vite starts. `dev-harness`'s
+`bare-vp-dev.test.ts` loads the example's config with `configLoader: "bundle"`, which is the same
+mechanism and fails the same way, so the convention is guarded rather than merely documented.
+A project with extensionless workspace imports will not get bare `vp dev` for free; the rest of
+the reasoning is in `examples/dev-harness/package.json` under `//scripts`.
 
 It is **not** a Forguncy emulator, and its output is `local` evidence only. In particular a
 green local render says nothing about: whether the designer accepts the source (it refuses

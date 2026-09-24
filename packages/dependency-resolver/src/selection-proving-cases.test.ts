@@ -69,11 +69,11 @@ import {
 } from "@forguncy-react-workspace/core";
 import { describe, expect, it } from "vitest";
 
-import { recordDependencyDecision } from "./decision-recording";
-import { readFgcLock } from "./lock-store";
+import { recordDependencyDecision } from "./decision-recording.ts";
+import { readFgcLock } from "./lock-store.ts";
 import { auditSelectionDecision } from "@forguncy-react-workspace/core";
-import { probeCacheRelativePath, probeLockEnvironment, probeRunLockEvidence, runDependencyProbe } from "./index";
-import { readToolchainIdentity } from "./probe/identity";
+import { probeCacheRelativePath, probeLockEnvironment, probeRunLockEvidence, runDependencyProbe } from "./index.ts";
+import { readToolchainIdentity } from "./probe/identity.ts";
 
 /**
  * Wall-clock allowance for one case.

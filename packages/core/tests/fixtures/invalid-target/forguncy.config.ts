@@ -1,4 +1,4 @@
-import { defineForguncyConfig } from "../../../src/forguncy-config";
+import { defineForguncyConfig } from "../../../src/forguncy-config.ts";
 
 /**
  * Fixture: target declarations that cannot address a Forguncy Cell.

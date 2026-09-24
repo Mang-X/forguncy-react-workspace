@@ -13,7 +13,7 @@ import {
   isConfigRecord,
   normalizeCellReference,
   targetLocatorKey,
-} from "./forguncy-config";
+} from "./forguncy-config.ts";
 
 describe("project config contract", () => {
   it("declares the revision this toolchain understands", () => {

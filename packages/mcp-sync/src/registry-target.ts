@@ -41,9 +41,9 @@
 import { assertDistinctTargetClaims, assertUniqueTargets } from "@forguncy-react-workspace/core";
 import type { CellRegistry, RegisteredCell } from "@forguncy-react-workspace/core";
 
-import { planCellSync } from "./sync-plan";
-import type { CellSyncPlan, PlanCellSyncOptions } from "./sync-plan";
-import type { CellTarget, SyncCellInput } from "./target";
+import { planCellSync } from "./sync-plan.ts";
+import type { CellSyncPlan, PlanCellSyncOptions } from "./sync-plan.ts";
+import type { CellTarget, SyncCellInput } from "./target.ts";
 
 /**
  * One resolved destination: the logical Cell id and the coordinates sync writes.

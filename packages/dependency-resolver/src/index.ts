@@ -117,31 +117,31 @@ export {
   removeLockDecision,
   upsertLockDecision,
   writeFgcLock,
-} from "./lock-store";
+} from "./lock-store.ts";
 export type {
   CompilationDependencies,
   CompilationDependencyOptions,
   LocalCompilationDependencyOptions,
   WithheldCompilationDependency,
-} from "./lock-store";
+} from "./lock-store.ts";
 
-export { resolveInstalledVersions } from "./install-graph";
+export { resolveInstalledVersions } from "./install-graph.ts";
 export type {
   InstalledVersions,
   UnresolvedInstalledPackage,
   UnresolvedInstalledPackageReason,
-} from "./install-graph";
+} from "./install-graph.ts";
 
 export {
   mergeDependencyDecisionUpdate,
   recordDependencyDecision,
   recordDependencyDecisions,
-} from "./decision-recording";
+} from "./decision-recording.ts";
 export type {
   DependencyDecisionUpdate,
   RecordedDependencyDecision,
   RecordedDependencyDecisions,
-} from "./decision-recording";
+} from "./decision-recording.ts";
 
 export {
   auditLockDecisionConformance,
@@ -151,7 +151,7 @@ export {
   JSX_RUNTIME_MODULE_IDS,
   PRESET_PROVIDED_HOST_GLOBALS,
   validateLockDecisionConformance,
-} from "./decision-conformance";
+} from "./decision-conformance.ts";
 export type {
   ConformanceDiagnostic,
   ConformanceOptions,
@@ -162,7 +162,7 @@ export type {
   HostBridgeMapping,
   PresetProvidedGlobal,
   VerifiedExtensionMapping,
-} from "./decision-conformance";
+} from "./decision-conformance.ts";
 
 // ---------------------------------------------------------------------------
 // The dependency probe engine (#17)
@@ -173,7 +173,7 @@ export {
   probeRunLockEvidence,
   ProbeIdentityError,
   runDependencyProbe,
-} from "./probe/probe-engine";
+} from "./probe/probe-engine.ts";
 export type {
   DependencyProbeResult,
   ProbeLockEnvironmentOptions,
@@ -182,19 +182,19 @@ export type {
   RuntimeSmokeResult,
   ResolvedPackageIdentity,
   RunDependencyProbeOptions,
-} from "./probe/probe-engine";
+} from "./probe/probe-engine.ts";
 
-export { composeProbeFingerprint } from "./probe/fingerprint";
-export type { ComposedProbeFingerprint, ComposeProbeFingerprintInput } from "./probe/fingerprint";
+export { composeProbeFingerprint } from "./probe/fingerprint.ts";
+export type { ComposedProbeFingerprint, ComposeProbeFingerprintInput } from "./probe/fingerprint.ts";
 
-export { createFileProbeCache, PROBE_CACHE_DIRECTORY, probeCacheRelativePath } from "./probe/cache";
-export type { ProbeCache } from "./probe/cache";
+export { createFileProbeCache, PROBE_CACHE_DIRECTORY, probeCacheRelativePath } from "./probe/cache.ts";
+export type { ProbeCache } from "./probe/cache.ts";
 
-export { BUILD_CONFIGURATION_FINGERPRINT, probeEntryPath, runCandidateBuild } from "./probe/build";
-export type { CandidateBuildOptions, CandidateBuildResult } from "./probe/build";
+export { BUILD_CONFIGURATION_FINGERPRINT, probeEntryPath, runCandidateBuild } from "./probe/build.ts";
+export type { CandidateBuildOptions, CandidateBuildResult } from "./probe/build.ts";
 
-export { findNodeOnlySpecifiers, observeNodeBuiltins } from "./probe/node-scan";
-export type { NodeScanObservation } from "./probe/node-scan";
+export { findNodeOnlySpecifiers, observeNodeBuiltins } from "./probe/node-scan.ts";
+export type { NodeScanObservation } from "./probe/node-scan.ts";
 
 // Which files a browser build can reach, and what a package's source actually says.
 // Exported because both are answers a consumer may want to re-check independently of
@@ -206,8 +206,8 @@ export {
   resolveBrowserEntryPaths,
   resolveSelfReferenceSubpath,
   selfReferenceResolver,
-} from "./probe/browser-entry";
-export type { BrowserEntryResolution } from "./probe/browser-entry";
+} from "./probe/browser-entry.ts";
+export type { BrowserEntryResolution } from "./probe/browser-entry.ts";
 
 export {
   analyzeModuleSource,
@@ -215,7 +215,7 @@ export {
   isRelativeSpecifier,
   maskComments,
   sourceWithoutComments,
-} from "./probe/module-source";
+} from "./probe/module-source.ts";
 export type {
   CommentRange,
   ImportReference,
@@ -224,31 +224,31 @@ export type {
   PackageSourceFile,
   ReachableSourceResult,
   SelfReferenceResolver,
-} from "./probe/module-source";
+} from "./probe/module-source.ts";
 
-export { observeExportMetadata } from "./probe/export-metadata";
-export type { ExportMetadataObservation } from "./probe/export-metadata";
+export { observeExportMetadata } from "./probe/export-metadata.ts";
+export type { ExportMetadataObservation } from "./probe/export-metadata.ts";
 
-export { observeArtifact } from "./probe/artifact-scan";
-export type { ArtifactScanObservation } from "./probe/artifact-scan";
+export { observeArtifact } from "./probe/artifact-scan.ts";
+export type { ArtifactScanObservation } from "./probe/artifact-scan.ts";
 
-export { observeAssets } from "./probe/asset-inventory";
-export type { AssetInventoryObservation } from "./probe/asset-inventory";
+export { observeAssets } from "./probe/asset-inventory.ts";
+export type { AssetInventoryObservation } from "./probe/asset-inventory.ts";
 
-export { observeRuntimePatterns } from "./probe/runtime-pattern-scan";
-export type { RuntimePatternObservation } from "./probe/runtime-pattern-scan";
+export { observeRuntimePatterns } from "./probe/runtime-pattern-scan.ts";
+export type { RuntimePatternObservation } from "./probe/runtime-pattern-scan.ts";
 
-export { measureArtifactSize, observeSize } from "./probe/size";
-export type { ArtifactSize, SizeObservation } from "./probe/size";
+export { measureArtifactSize, observeSize } from "./probe/size.ts";
+export type { ArtifactSize, SizeObservation } from "./probe/size.ts";
 
 export {
   buildProbeEnvironment,
   defaultProbeTarget,
   normalizeSourceReference,
   resolvePackageIdentity,
-} from "./probe/identity";
+} from "./probe/identity.ts";
 
-export { describeBuildFailureLines, portableText, stripAnsi } from "./probe/scan-utils";
+export { describeBuildFailureLines, portableText, stripAnsi } from "./probe/scan-utils.ts";
 
 export interface ResolveDependencyInput {
   packageName: string;

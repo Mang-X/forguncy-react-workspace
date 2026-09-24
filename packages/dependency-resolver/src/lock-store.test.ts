@@ -26,7 +26,7 @@ import {
   removeLockDecision,
   upsertLockDecision,
   writeFgcLock,
-} from "./index";
+} from "./index.ts";
 
 const FIXTURE = fileURLToPath(new URL("./__fixtures__/fgc.lock.json", import.meta.url));
 

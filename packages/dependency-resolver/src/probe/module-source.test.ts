@@ -31,16 +31,16 @@ import {
   resolveImportsMapSubpath,
   selfReferenceResolver,
   UNUSABLE_TARGET_EVIDENCE,
-} from "./browser-entry";
-import { observeExportMetadata } from "./export-metadata";
-import type { ResolvedPackageIdentity } from "./identity";
+} from "./browser-entry.ts";
+import { observeExportMetadata } from "./export-metadata.ts";
+import type { ResolvedPackageIdentity } from "./identity.ts";
 import {
   analyzeModuleSource,
   collectReachableSourceFiles,
   maskComments,
   sourceWithoutComments,
   sourceWithoutCommentsLenient,
-} from "./module-source";
+} from "./module-source.ts";
 
 describe("resolveBrowserEntryPaths", () => {
   it("prefers the browser condition over the Node builds beside it", () => {

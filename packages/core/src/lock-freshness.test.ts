@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { LockEnvironment, LockedDependencyDecision } from "./index";
+import type { LockEnvironment, LockedDependencyDecision } from "./index.ts";
 import {
   assessLockDecision,
   findLockDecision,
@@ -11,7 +11,7 @@ import {
   requiresRuntimeValidation,
   resolveLockDecision,
   RUNTIME_CONTRACT_TARGET,
-} from "./index";
+} from "./index.ts";
 
 const SPEC_4 = "https://github.com/Mang-X/forguncy-react-workspace/issues/4";
 const SPEC_8 = "https://github.com/Mang-X/forguncy-react-workspace/issues/8";

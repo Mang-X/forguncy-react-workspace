@@ -42,21 +42,21 @@ export {
   MCP_SYNC_DECISION_REFERENCE,
   MCP_SYNC_GOVERNING_DECISIONS,
   MCP_SYNC_GOVERNING_SPEC_REFERENCE_LINE,
-} from "./provenance";
+} from "./provenance.ts";
 
 // Where a sync writes: the locator, #26's finalization of it, and the registry seam
-export { cellTargetLabel, SYNC_TARGET_LOCATOR } from "./target";
-export type { CellTarget, SyncCellInput } from "./target";
+export { cellTargetLabel, SYNC_TARGET_LOCATOR } from "./target.ts";
+export type { CellTarget, SyncCellInput } from "./target.ts";
 export {
   planCellSyncTargets,
   resolveCellSyncTarget,
   resolveCellSyncTargets,
   syncCellInput,
-} from "./registry-target";
-export type { CellSyncTargetPlan, ResolvedCellSyncTarget } from "./registry-target";
+} from "./registry-target.ts";
+export type { CellSyncTargetPlan, ResolvedCellSyncTarget } from "./registry-target.ts";
 
 // The designer surface the flow needs, and the operations it deliberately lacks
-export { FORGUNCY_SYNC_PORT_METHODS } from "./port";
+export { FORGUNCY_SYNC_PORT_METHODS } from "./port.ts";
 export type {
   ForguncySyncPort,
   ForguncySyncPortMethod,
@@ -70,7 +70,7 @@ export type {
   SetCellsCellType,
   SetCellsCellTypeProps,
   SetCellsRequest,
-} from "./port";
+} from "./port.ts";
 
 // The flow, its evidence, and whether it can be executed
 export {
@@ -96,7 +96,7 @@ export {
   SYNC_EVIDENCE_SOURCES,
   syncMutationStep,
   unestablishedSyncCapabilities,
-} from "./capability-surface";
+} from "./capability-surface.ts";
 export type {
   McpSyncStep,
   McpSyncStepId,
@@ -108,7 +108,7 @@ export type {
   SyncCapabilityId,
   SyncEvidenceSource,
   SyncEvidenceSourceId,
-} from "./capability-surface";
+} from "./capability-surface.ts";
 
 // The error model
 export {
@@ -128,7 +128,7 @@ export {
   SYNC_DIAGNOSTIC_CODES,
   SYNC_DIAGNOSTIC_RULES,
   translatedExtensionAuditCodes,
-} from "./diagnostics";
+} from "./diagnostics.ts";
 export type {
   ContractSyncDiagnosticCode,
   RequiredSyncDiagnosticCode,
@@ -139,7 +139,7 @@ export type {
   SyncDiagnosticRule,
   SyncExtensionDelegate,
   SyncFixOwner,
-} from "./diagnostics";
+} from "./diagnostics.ts";
 
 // What a sync promises
 export {
@@ -148,8 +148,8 @@ export {
   realRuntimeSyncGuarantees,
   SYNC_GUARANTEE_IDS,
   SYNC_GUARANTEES,
-} from "./guarantees";
-export type { SyncGuarantee, SyncGuaranteeId } from "./guarantees";
+} from "./guarantees.ts";
+export type { SyncGuarantee, SyncGuaranteeId } from "./guarantees.ts";
 
 // The generated-artifact fingerprint and its marker
 export {
@@ -165,8 +165,8 @@ export {
   SyncFingerprintError,
   syncMarkerLine,
   verifySyncMarkerSelfConsistency,
-} from "./fingerprint";
-export type { SyncFingerprintErrorCode, SyncMarker, SyncMarkerState } from "./fingerprint";
+} from "./fingerprint.ts";
+export type { SyncFingerprintErrorCode, SyncMarker, SyncMarkerState } from "./fingerprint.ts";
 
 // What the target holds, and what may be done about it
 export {
@@ -179,7 +179,7 @@ export {
   DEFAULT_CELL_OVERWRITE_POLICY,
   formatCellDivergence,
   resolveCellWriteAction,
-} from "./divergence";
+} from "./divergence.ts";
 export type {
   CellDivergence,
   CellDivergenceKind,
@@ -188,27 +188,27 @@ export type {
   CellReadUnavailableReason,
   CellWriteAction,
   DeployedCellState,
-} from "./divergence";
+} from "./divergence.ts";
 
 // Extension references, verified from the project rather than guessed
 export {
   findSyncDiagnosticByCode,
   formatExtensionReferenceVerification,
   verifyExtensionReferences,
-} from "./extension-verification";
+} from "./extension-verification.ts";
 export type {
   ExtensionReferenceVerification,
   ExtensionVerificationStatus,
   VerifyExtensionReferencesOptions,
-} from "./extension-verification";
+} from "./extension-verification.ts";
 
 // What a resolved step result means
 export {
   outcomeOfPageGeneration,
   outcomeOfProjectErrorCheck,
   SYNC_STEP_SUCCEEDED,
-} from "./step-outcomes";
-export type { SyncStepOutcome } from "./step-outcomes";
+} from "./step-outcomes.ts";
+export type { SyncStepOutcome } from "./step-outcomes.ts";
 
 // The plan
 export {
@@ -220,7 +220,7 @@ export {
   serializeCellSyncMutation,
   SYNC_MUTATION_GEOMETRY_NOTE,
   SYNC_MUTATION_OMITTED_FIELDS,
-} from "./sync-plan";
+} from "./sync-plan.ts";
 export type {
   CellSyncDispatch,
   CellSyncGate,
@@ -231,4 +231,4 @@ export type {
   PlanCellSyncOptions,
   SyncStepPlan,
   SyncStepStatus,
-} from "./sync-plan";
+} from "./sync-plan.ts";

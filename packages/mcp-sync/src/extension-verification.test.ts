@@ -7,12 +7,12 @@ import {
 } from "@forguncy-react-workspace/cell-compiler";
 import type { CompileCellResult } from "@forguncy-react-workspace/cell-compiler";
 
-import { syncDiagnosticCodes } from "./diagnostics";
+import { syncDiagnosticCodes } from "./diagnostics.ts";
 import {
   findSyncDiagnosticByCode,
   formatExtensionReferenceVerification,
   verifyExtensionReferences,
-} from "./extension-verification";
+} from "./extension-verification.ts";
 
 /**
  * #19's step 2 asks sync to verify `libraryId`, existence, type definitions and the

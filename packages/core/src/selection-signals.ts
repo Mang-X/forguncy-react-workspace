@@ -48,7 +48,7 @@
  *   {@link MACHINE_OBSERVED_SIGNAL_INVARIANT}.
  */
 
-import type { TechnicalDependencyRejection, TechnicalRejectionCode } from "./rejection";
+import type { TechnicalDependencyRejection, TechnicalRejectionCode } from "./rejection.ts";
 
 // ---------------------------------------------------------------------------
 // Families

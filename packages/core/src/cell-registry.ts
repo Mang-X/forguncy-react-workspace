@@ -36,8 +36,8 @@ import {
   RUNTIME_ALLOWED_FIELDS,
   TARGET_LOCATOR_MODEL,
   targetLocatorKey,
-} from "./forguncy-config";
-import type { CellCodeBudgetOverrides, ForguncyTargetLocator, TargetLocatorModel } from "./forguncy-config";
+} from "./forguncy-config.ts";
+import type { CellCodeBudgetOverrides, ForguncyTargetLocator, TargetLocatorModel } from "./forguncy-config.ts";
 
 /** Fields allowed inside a `target`. */
 export const TARGET_ALLOWED_FIELDS = ["pageName", "cell"] as const;

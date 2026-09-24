@@ -29,11 +29,11 @@
  * hand to a browser step that then has nothing to open.
  */
 
-import { createSyncDiagnostic } from "./diagnostics";
-import type { SyncDiagnostic } from "./diagnostics";
-import type { GeneratedPage, ProjectErrorReport } from "./port";
-import { cellTargetLabel } from "./target";
-import type { CellTarget } from "./target";
+import { createSyncDiagnostic } from "./diagnostics.ts";
+import type { SyncDiagnostic } from "./diagnostics.ts";
+import type { GeneratedPage, ProjectErrorReport } from "./port.ts";
+import { cellTargetLabel } from "./target.ts";
+import type { CellTarget } from "./target.ts";
 
 /**
  * Whether a step left the sync in a usable state.

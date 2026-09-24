@@ -2,13 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import { CELL_FORGUNCY_PROP_KEYS, CELL_PROPS_BASE_KEYS } from "@forguncy-react-workspace/core";
 
-import { RuntimeFacadeContractError } from "./capabilities";
-import type { RuntimeFacadeCellProps, RuntimeFacadeHostBindings } from "./contract";
+import { RuntimeFacadeContractError } from "./capabilities.ts";
+import type { RuntimeFacadeCellProps, RuntimeFacadeHostBindings } from "./contract.ts";
 import {
   createMockDataSource,
   createMockRuntimeFacadeProvider,
   mockUndeclaredDataSourceMessage,
-} from "./mock-provider";
+} from "./mock-provider.ts";
 
 function cellPropsOf(provider: { readonly bindings: RuntimeFacadeHostBindings }): Record<string, unknown> {
   return provider.bindings.cellProps as unknown as Record<string, unknown>;

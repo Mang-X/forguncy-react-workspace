@@ -77,14 +77,14 @@ import {
   RUNTIME_FACADE_CAPABILITIES,
   RuntimeFacadeContractError,
   runtimeFacadeBindingName,
-} from "./capabilities";
+} from "./capabilities.ts";
 import type {
   CellPropKey,
   ForguncyPropMember,
   RuntimeFacadeCapabilityId,
   RuntimeFacadeHostBinding,
-} from "./capabilities";
-import { RUNTIME_FACADE_PORT_HOOK_NAME } from "./contract";
+} from "./capabilities.ts";
+import { RUNTIME_FACADE_PORT_HOOK_NAME } from "./contract.ts";
 import type {
   DataSourceQueryOptions,
   DataSourceResult,
@@ -92,13 +92,13 @@ import type {
   RuntimeFacadeProvider,
   ServerCommandParameterMap,
   ServerCommandResult,
-} from "./contract";
+} from "./contract.ts";
 import {
   refuseAbsence,
   requireRuntimeFacadeProvider,
   RuntimeFacadeResolutionError,
-} from "./provider";
-import type { RuntimeFacadeRefusalPathId } from "./provider";
+} from "./provider.ts";
+import type { RuntimeFacadeRefusalPathId } from "./provider.ts";
 
 // ---------------------------------------------------------------------------
 // The surface

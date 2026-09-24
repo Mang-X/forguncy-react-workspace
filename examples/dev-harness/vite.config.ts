@@ -1,6 +1,6 @@
 import { defineConfig } from "vite-plus";
 
-import forguncyConfig from "./forguncy.config";
+import forguncyConfig from "./forguncy.config.ts";
 import { devHarness, harnessHostModulePlan, reactFastRefresh } from "@forguncy-react-workspace/dev-harness";
 
 /**

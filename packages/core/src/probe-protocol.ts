@@ -32,10 +32,10 @@
  *   that does not.
  */
 
-import type { ForguncyTargetIdentity, ToolchainIdentity } from "./lock";
-import { isEvidenceReference } from "./lock";
-import type { SelectionSignalId } from "./selection-signals";
-import { findSelectionSignal, isSelectionSignalId, validateSignalFindings } from "./selection-signals";
+import type { ForguncyTargetIdentity, ToolchainIdentity } from "./lock.ts";
+import { isEvidenceReference } from "./lock.ts";
+import type { SelectionSignalId } from "./selection-signals.ts";
+import { findSelectionSignal, isSelectionSignalId, validateSignalFindings } from "./selection-signals.ts";
 
 // ---------------------------------------------------------------------------
 // Steps

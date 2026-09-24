@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { CompileCellResult } from "@forguncy-react-workspace/cell-compiler";
 
-import type { SyncCellInput } from "./index";
+import type { SyncCellInput } from "./index.ts";
 
 /**
  * Issue #6's fifth acceptance criterion is that "a generated artifact can be

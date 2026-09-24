@@ -22,7 +22,7 @@ import {
   WORKSPACE_GRAPH_IMPLEMENTATION,
   WORKSPACE_GRAPH_IMPLEMENTATION_REFERENCE,
   WORKSPACE_SOURCE_DECISION,
-} from "./provenance";
+} from "./provenance.ts";
 
 const packageSourceDirectory = dirname(fileURLToPath(import.meta.url));
 

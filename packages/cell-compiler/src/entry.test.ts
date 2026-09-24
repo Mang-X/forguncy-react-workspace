@@ -16,8 +16,8 @@ import {
   findCellEntryWrapperSupport,
   renderCellEntryWrapper,
   runtimeContractEmittableCellEntryKinds,
-} from "./entry";
-import { scanCellArtifactSource } from "./source-guard";
+} from "./entry.ts";
+import { scanCellArtifactSource } from "./source-guard.ts";
 
 describe("entry wrapper support table", () => {
   // A new entry shape in the runtime contract must force an edit here rather than

@@ -1,4 +1,4 @@
-import { defineForguncyConfig } from "../../../src/forguncy-config";
+import { defineForguncyConfig } from "../../../src/forguncy-config.ts";
 
 /**
  * Fixture: several managed Cells, one of them with a local-dev fixture entry.

@@ -49,14 +49,16 @@ React 单元格更适合承载：
 
 项目不会尝试在 React 单元格里重新实现一套应用路由、全局业务 Store、权限系统或数据层。
 
-## 本地开发（`vp run dev`）
+## 本地开发（`vp dev`）
 
 在活字格里同步一次才能看到一次 UI 改动，反馈太慢。因此项目提供一个**很薄的本地开发环境**：它把 Cell 的源码当作普通 React 挂载，用 Vite+ 的 HMR 提供反馈。
 
 ```bash
 cd examples/dev-harness
-vp run dev
+vp dev
 ```
+
+无需任何 flag、无需 wrapper 脚本 —— 这也是 #22 的 Developer workflow 与 #23 第一条验收标准的写法。
 
 它做的事情只有三件：
 

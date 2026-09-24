@@ -24,7 +24,7 @@ import {
 } from "@forguncy-react-workspace/runtime";
 import type { RuntimeFacadeProvider } from "@forguncy-react-workspace/runtime";
 
-import type { AppServerCommands } from "./orders";
+import type { AppServerCommands } from "./orders.ts";
 
 /** Fake rows for the `Sales` source. The shape is the example's business, not the host's. */
 const SALES_ROWS = [

@@ -67,7 +67,7 @@ export {
   DEV_HARNESS_DECISION_REFERENCE,
   DEV_HARNESS_GOVERNING_DECISIONS,
   DEV_HARNESS_GOVERNING_SPEC_REFERENCE_LINE,
-} from "./provenance";
+} from "./provenance.ts";
 
 // The host substitutions (#9 via #22's projection)
 export {
@@ -79,12 +79,12 @@ export {
   hostPackageVersionMismatches,
   installedHostPackageVersion,
   LocalHostResolutionError,
-} from "./host-modules";
+} from "./host-modules.ts";
 export type {
   HostModuleStandIn,
   HostPackageVersionExpectation,
   HostPackageVersionMismatch,
-} from "./host-modules";
+} from "./host-modules.ts";
 
 // The Vite plugin (#23's steps 1, 2, 4, 5 and 6)
 export {
@@ -97,9 +97,9 @@ export {
   harnessHostModulePlan,
   REACT_FAST_REFRESH_PLUGIN_NAME,
   reactFastRefresh,
-} from "./vite-plugin";
-export type { DevHarnessOptions, DevHarnessVitePlugin } from "./vite-plugin";
+} from "./vite-plugin.ts";
+export type { DevHarnessOptions, DevHarnessVitePlugin } from "./vite-plugin.ts";
 
 // The seam between the node half and the browser half. Types only: the modules themselves
 // are reached by path (`./mount`), because the browser half must not be pulled in here.
-export type { DevHarnessMountableCell, DevHarnessMountTarget } from "./types";
+export type { DevHarnessMountableCell, DevHarnessMountTarget } from "./types.ts";

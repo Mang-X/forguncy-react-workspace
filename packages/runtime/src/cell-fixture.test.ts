@@ -10,9 +10,9 @@ import {
   CellFixtureError,
   createCellFixtureProvider,
   resolveCellFixtureOptions,
-} from "./cell-fixture";
-import type { CellFixtureContext } from "./cell-fixture";
-import type { MockRuntimeFacadeOptions } from "./mock-provider";
+} from "./cell-fixture.ts";
+import type { CellFixtureContext } from "./cell-fixture.ts";
+import type { MockRuntimeFacadeOptions } from "./mock-provider.ts";
 
 const fixtureRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "tests", "fixtures", "cell-fixture");
 

@@ -13,7 +13,7 @@ import {
   WORKSPACE_SOURCE_DECISION_REFERENCE,
   WORKSPACE_SOURCE_GOVERNING_DECISIONS,
   WORKSPACE_SOURCE_GOVERNING_SPEC_REFERENCE_LINE,
-} from "./provenance";
+} from "./provenance.ts";
 import {
   auditWorkspaceSource,
   classifyWorkspaceModule,
@@ -35,13 +35,13 @@ import {
   WORKSPACE_SOURCE_REUSE_CLASS_IDS,
   WORKSPACE_SOURCE_REUSE_CLASSES,
   WORKSPACE_SOURCE_SHARING_INVARIANT,
-} from "./workspace-source";
+} from "./workspace-source.ts";
 import type {
   WorkspaceGraph,
   WorkspacePackageRecord,
   WorkspaceSourceDiagnostic,
   WorkspaceSourceDiagnosticCode,
-} from "./workspace-source";
+} from "./workspace-source.ts";
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
@@ -1244,8 +1244,9 @@ describe("workspace source decision provenance", () => {
     expect(citesEveryArchitectureDecision(loader)).toBe(true);
     // The loader consumes the contract rather than restating it: the index and the
     // record type come from `workspace-source`, so there is no second definition of
-    // what a workspace package is.
-    expect(loader).toMatch(/from "\.\/workspace-source"/);
+    // what a workspace package is. The optional extension keeps this about the *module*
+    // the loader imports rather than about the specifier's punctuation (#67).
+    expect(loader).toMatch(/from "\.\/workspace-source(?:\.ts)?"/);
     expect(loader).not.toMatch(/interface WorkspacePackageRecord/);
     expect(loader).not.toMatch(/function indexWorkspaceGraph/);
   });

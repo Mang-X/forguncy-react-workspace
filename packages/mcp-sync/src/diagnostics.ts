@@ -43,7 +43,7 @@ import type {
   ExtensionExternalDiagnosticCode,
 } from "@forguncy-react-workspace/core";
 
-import type { SyncGuaranteeId } from "./guarantees";
+import type { SyncGuaranteeId } from "./guarantees.ts";
 
 // ---------------------------------------------------------------------------
 // The vocabulary

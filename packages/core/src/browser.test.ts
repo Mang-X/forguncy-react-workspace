@@ -4,8 +4,8 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import * as barrel from "./index";
-import * as browser from "./browser";
+import * as barrel from "./index.ts";
+import * as browser from "./browser.ts";
 
 /**
  * The `core/browser` projection, and the property it exists for.
@@ -46,11 +46,18 @@ const packageRoot = join(here, "..");
  * modules are browser-safe" is only answerable per module. Reading the barrel's `from "./x"`
  * clauses is also what makes the check independent of the barrel's current spelling — a
  * namespace check would pass for a name re-exported here from anywhere.
+ *
+ * "Spelling" now includes the extension: every relative specifier in this repository carries
+ * one (#67, so `vp dev` can load a config that imports workspace TypeScript). `RELATIVE_MODULE`
+ * reads the *module name* and tolerates an extension either way, so this check is about which
+ * modules are re-exported rather than about how the clause is punctuated.
  */
+const RELATIVE_MODULE = /from "\.\/([a-z-]+?)(?:\.tsx?)?"/g;
+
 function barrelModuleNames(): readonly string[] {
   const source = readFileSync(join(here, "index.ts"), "utf8");
   const names = new Set<string>();
-  for (const match of source.matchAll(/from "\.\/([a-z-]+)"/g)) {
+  for (const match of source.matchAll(RELATIVE_MODULE)) {
     if (match[1] !== undefined) {
       names.add(match[1]);
     }
@@ -62,7 +69,7 @@ function barrelModuleNames(): readonly string[] {
 function browserModuleNames(): readonly string[] {
   const source = readFileSync(join(here, "browser.ts"), "utf8");
   const names = new Set<string>();
-  for (const match of source.matchAll(/from "\.\/([a-z-]+)"/g)) {
+  for (const match of source.matchAll(RELATIVE_MODULE)) {
     if (match[1] !== undefined) {
       names.add(match[1]);
     }
@@ -104,7 +111,7 @@ function nodeImportsOf(moduleName: string, seen = new Set<string>()): readonly s
     }
   }
 
-  const relative = /from "\.\/([a-z-]+)"/g;
+  const relative = RELATIVE_MODULE;
   for (const match of source.matchAll(relative)) {
     if (match[1] !== undefined) {
       found.push(...nodeImportsOf(match[1], seen));

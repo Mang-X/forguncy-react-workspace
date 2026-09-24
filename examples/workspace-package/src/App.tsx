@@ -33,7 +33,7 @@
 import { ThemeScope, formatMoney } from "@app/ui";
 import { SURFACE_RADIUS, SURFACE_STEP } from "@app/tokens";
 
-import { ORDER_TOTAL } from "./orders";
+import { ORDER_TOTAL } from "./orders.ts";
 
 const EXPECTED_MONEY = "CNY 1234.50";
 

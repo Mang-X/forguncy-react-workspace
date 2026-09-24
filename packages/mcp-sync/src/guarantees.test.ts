@@ -6,8 +6,8 @@ import {
   realRuntimeSyncGuarantees,
   SYNC_GUARANTEE_IDS,
   SYNC_GUARANTEES,
-} from "./guarantees";
-import type { SyncGuaranteeId } from "./guarantees";
+} from "./guarantees.ts";
+import type { SyncGuaranteeId } from "./guarantees.ts";
 
 /**
  * #19's acceptance criteria are also its promises, and the reason they are data rather
