@@ -13,6 +13,8 @@ import {
 } from "@forguncy-react-workspace/core";
 
 import {
+  createHostBridgeDiagnostic,
+  formatHostBridgeDiagnostic,
   formatHostBridgePlan,
   interceptedHostBridgeModuleIds,
   planHostBridge,
@@ -927,6 +929,41 @@ describe("the plan refuses to be wired from contradictory mapping information", 
     expect(agreeing.wireable).toBe(true);
     expect(disagreeing.diagnostics.map(diagnostic => diagnostic.code)).toEqual(["host-mapping-conflict"]);
     expect(disagreeing.wireable).toBe(false);
+  });
+
+  // The review's non-blocking follow-up. `host-mapping-conflict` covers two origins —
+  // a table that contradicts itself, and a decision that contradicts its row — and the
+  // code's static rule can only state one owner. Left unoverridden, the report below
+  // would send an Agent to edit the mapping table for a problem whose bad input is the
+  // dependency decision, which is the misdirection the field exists to prevent.
+  it("names the dependency decision as the owner of a decision-origin conflict", () => {
+    const decisionOrigin = planHostBridge({ decisions: [hostDecision("react", "ReactDOM")] }).diagnostics[0];
+    const rendered = formatHostBridgeDiagnostic(decisionOrigin!);
+
+    expect(decisionOrigin?.fixOwner).toBe("dependency-decision");
+    // No table edit repairs this, which is the same statement from the other side: the
+    // caller must not go looking for a row to add.
+    expect(decisionOrigin?.fixableByMapping).toBe(false);
+    expect(rendered).toContain("fix owner: dependency-decision");
+    expect(rendered).not.toContain("fix owner: bridge-mapping");
+
+    // The fallback still holds for an occurrence that says nothing: the code's own rule,
+    // which is the table-level origin a `formatHostBridgeDiagnostic` on a hand-built
+    // diagnostic gets.
+    expect(createHostBridgeDiagnostic("host-mapping-conflict", "x", "y").fixOwner).toBeUndefined();
+    expect(formatHostBridgeDiagnostic(createHostBridgeDiagnostic("host-mapping-conflict", "x", "y"))).toContain(
+      "fix owner: bridge-mapping",
+    );
+  });
+
+  // The other origin, so the override is not mistaken for "this code always means the
+  // decision": a table that claims one module id twice is still the mapping's problem.
+  it("keeps the mapping table as the owner of a table-origin conflict", () => {
+    const plan = planHostBridge({ mappings: collidingTable(), decisions: [hostDecision("antd", "antd")] });
+    const tableOrigin = plan.diagnostics.find(diagnostic => diagnostic.code === "host-mapping-conflict");
+
+    expect(tableOrigin?.fixOwner).toBeUndefined();
+    expect(formatHostBridgeDiagnostic(tableOrigin!)).toContain("fix owner: bridge-mapping");
   });
 
   // The decision audit and the missing-mapping audit must not both fire for one decision:
