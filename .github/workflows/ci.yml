@@ -17,7 +17,14 @@ jobs:
         with:
           node-version: "24"
           cache: true
-          run-install: true
+          # `--frozen-lockfile` is passed explicitly rather than relying on pnpm's
+          # CI default. pnpm does enable it in CI when a lockfile is present, but that
+          # made the gate invisible: it lived in pnpm's inference rather than in this
+          # file, so "is the lockfile actually checked here?" could not be answered by
+          # reading the workflow — and one of us concluded the opposite. Passing it
+          # makes a stale `pnpm-lock.yaml` fail the `check` every reviewer can see.
+          run-install: |
+            - args: ['--frozen-lockfile']
       - run: vp toolchain
       - run: vp check
       - run: vp test --run
