@@ -26,7 +26,7 @@ import { devHarness, HARNESS_ENTRY_URL_PATH, HARNESS_MOUNT_ELEMENT_ID, normalize
  *    the example also spread `harnessHostModulePlan()` into its own config, so the example's
  *    documented ability to override an entry was illusory — Vite merges a plugin's `config()`
  *    result *over* the user's. A project pointing `react` at a patched build got the plugin's path
- *    and no diagnostic. The plugin now emits only the ids the project claims.
+ *    and no diagnostic. The plugin now emits only the ids the project has not claimed.
  *
  *    **A second review round found the fix was incomplete**, and the shape of that mistake is the
  *    most instructive thing in this file: the filter tested ids for equality, while Vite matches
@@ -385,6 +385,49 @@ describe("alias precedence between the project and the plugin's config() hook", 
     expect(normalizeAliasFind("react", "/patched-react/")).toBe("react");
     // A non-string replacement (a function resolver) cannot satisfy Vite's condition either.
     expect(normalizeAliasFind("react/", undefined)).toBe("react/");
+  });
+
+  /**
+   * The object form of the same case, asserted on the **entry set** rather than on a resolved id.
+   *
+   * The fourth review round caught a documentation error here — object entries *are* normalized by
+   * Vite, contrary to what an earlier comment claimed — and fixing it exposed a latent defect
+   * rather than a mere wording problem. With `{ "react/": "/patched-react/" }` the filter judged
+   * the project as having claimed nothing, so the harness kept its own `react` entry beside the
+   * project's. The resolution still came out right, because object-form merge order puts the
+   * project's entry first — so a test asserting on the resolved id passes either way and would
+   * have been the third non-guard in this file.
+   *
+   * The observable that distinguishes them is that **two entries exist for one id**. That is a
+   * latent failure rather than a working state: whichever wins today, the duplicate means the
+   * harness is substituting for an id the project has taken, which is exactly what the filter
+   * exists to prevent. Asserted on the entry set, where the difference is visible.
+   */
+  it("does not leave a duplicate host alias for an object-form key with trailing slashes", async () => {
+    const server = await createServer({
+      root: join(fixturesRoot, "ordinary"),
+      configFile: false,
+      logLevel: "error",
+      appType: "spa",
+      resolve: { alias: { "react/": "/patched-react/" } },
+      plugins: [devHarness({ config }) as never],
+      server: { middlewareMode: true, hmr: false, watch: null },
+    });
+
+    try {
+      const entries = (server.config.resolve.alias as { find?: unknown }[]).filter(
+        entry => String(entry.find) === "react",
+      );
+
+      // Exactly one entry claims `react`: the project's. A second one would be the harness's,
+      // meaning it declined to yield an id the project had taken.
+      expect(entries).toHaveLength(1);
+      expect(await resolveModuleId(server, "react")).toBe("/patched-react");
+      // And the subpaths, which the project's prefix match now covers without a rival entry.
+      expect(await resolveModuleId(server, "react/jsx-dev-runtime")).toBe("/patched-react/jsx-dev-runtime");
+    } finally {
+      await server.close();
+    }
   });
 
   /**
