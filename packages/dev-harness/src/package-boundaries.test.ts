@@ -159,4 +159,20 @@ describe("a package's `src/` imports only what its `dependencies` declare", () =
     expect(harness!.dependencies).toContain("@forguncy-react-workspace/dependency-resolver");
     expect(harness!.devDependencies).not.toContain("@forguncy-react-workspace/dependency-resolver");
   });
+
+  it("keeps the resolver's conformance audit independent of the compiler's plan", () => {
+    // #52's validation plan asks for this to be asserted rather than assumed. The reason the
+    // host-bridge plan's `wireable` field cannot change the resolver's audit is structural:
+    // `decision-conformance.ts` derives `DEFAULT_HOST_BRIDGE_MANIFEST` from `core`'s
+    // `HOST_BRIDGE_MAPPINGS`, and `core` is the only workspace package the resolver may reach.
+    // So the plan is not merely unused here — it is unreachable, and a change that made the
+    // audit consume the plan would have to break the package boundary to do it.
+    const resolver = workspacePackages().find(pkg => pkg.name === "@forguncy-react-workspace/dependency-resolver");
+    expect(resolver, "the dependency-resolver package is missing from the workspace scan").toBeDefined();
+
+    const imported = [...bareImportsIn(resolver!.directory)].filter(name =>
+      name.startsWith("@forguncy-react-workspace/"),
+    );
+    expect(imported).toEqual(["@forguncy-react-workspace/core"]);
+  });
 });

@@ -163,7 +163,12 @@ function createInterceptionResolver(decisions: readonly DependencyDecision[]): {
     // The page's own modules first: a host row and an extension row naming the same
     // specifier must resolve to the page object, never to a second copy behind an
     // extension global.
-    if (hostPlan.activation === "stated") {
+    //
+    // `wireable` as well as `stated`, matching the extension branch below: a table
+    // whose mappings contradict themselves yields an empty interception list either
+    // way, so this is not a behaviour change — but stating the rule here is what keeps
+    // the two branches from drifting into looking like they answer different questions.
+    if (hostPlan.activation === "stated" && hostPlan.wireable) {
       const host = hostPlan.interceptions.find(candidate => candidate.moduleId === specifier);
       if (host !== undefined) return { id: `${HOST_VIRTUAL_PREFIX}${specifier}`, source: host.source };
     }

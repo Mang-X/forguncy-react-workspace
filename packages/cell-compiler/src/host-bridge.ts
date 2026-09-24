@@ -43,6 +43,15 @@
  * into the compile boundary is the compiler MVP's job (#7), and asserting a
  * bridge diagnostic through `CellArtifactDiagnostic` would put two vocabularies in
  * one report before anyone has decided how they compose.
+ *
+ * Two corrections to the plan's contract were made after #9 landed, and they are
+ * Issue #52 — "host bridge plan — explicit-empty decisions, and whether the plan may
+ * be wired"
+ * (https://github.com/Mang-X/forguncy-react-workspace/issues/52): an explicitly empty
+ * input is now classified as `stated`, and {@link HostBridgePlan.wireable} refuses a
+ * plan whose mapping information contradicts itself. Both are parity with #12's
+ * sibling plan rather than a second opinion on the rule; the reasoning sits on the
+ * fields it constrains.
  */
 
 import {
@@ -662,13 +671,21 @@ export interface HostBridgePlan {
   readonly catalog: readonly HostBridgeInterception[];
   /**
    * The catalog entries this artifact actually activates — what a resolver hook may
-   * be wired from.
+   * be wired from, and only when {@link HostBridgePlan.wireable} is `true`.
    *
    * Separate from {@link catalog} because a mapping says *how* a `host` decision
    * compiles, never that a package must be `host`. Wiring the catalog in wholesale
    * would make the presence of a row override an `inline`/`extension`/`replace`
    * decision and intercept a module the artifact deliberately carries its own copy
    * of, which is the policy this contract exists to avoid.
+   *
+   * Empty whenever {@link HostBridgePlan.wireable} is `false` — a plan that may not be
+   * wired from never hands back a list to wire, so this array is not the field to test
+   * to decide whether wiring is allowed. The converse does not hold: a known-empty
+   * artifact is `wireable` with an empty `interceptions`, because "the answer is
+   * nothing" and "the answer is unknown" are different answers (see
+   * {@link HostBridgePlan.activation}). Branch on `wireable`, read this array for what
+   * to wire.
    */
   readonly interceptions: readonly HostBridgeInterception[];
   /**
@@ -678,8 +695,42 @@ export interface HostBridgePlan {
    * `interceptions` is empty because the answer is unknown — not because the
    * artifact activates nothing. A caller may not wire resolver hooks from an
    * `unstated` plan.
+   *
+   * An explicitly empty `decisions` or `referencedSpecifiers` is *stated*, not
+   * unstated: a caller that knows there are no decisions has answered the question,
+   * and reading that as "unknown" would make a known-empty artifact indistinguishable
+   * from an unspecified one.
    */
   readonly activation: HostBridgeActivation;
+  /**
+   * Whether {@link interceptions} may be wired from at all.
+   *
+   * `false` for problems of two kinds, and the field is one boolean rather than a
+   * conjunction a caller has to remember because the failure mode of forgetting half of
+   * it is a resolver wired to something no guarantee covers:
+   *
+   * - `activation === "unstated"` — the caller did not say what the artifact uses, so
+   *   there is nothing to wire *from*;
+   * - the mapping information contradicts itself — so what is in the list cannot be
+   *   trusted even though the artifact is fully specified. Two ways that happens: two
+   *   rows claim one module id, or a table guard and a decision audit each leave
+   *   "what does this import resolve to" with two answers.
+   *
+   * The second kind needs its own statement because a diagnostic is advice. The case
+   * that makes it necessary: two rows claiming one module id, where a `host` decision
+   * naming that id would otherwise satisfy the activation predicate for *both* of them
+   * and put two different generated sources for one id into a wireable list.
+   * `host-mapping-conflict` is reported either way, but a caller that wires first and
+   * reports later would be resolving the import by table order — the state the guard
+   * exists to prevent. A contradictory mapping therefore has no wireable outcome,
+   * whatever the caller does with the diagnostics.
+   *
+   * The bound on the rule: a `host` decision with no mapping at all
+   * (`host-mapping-missing`) is a *truthful absence* rather than a contradiction — the
+   * artifact does have imports, and the rows that do exist are precisely known — so it
+   * must not block wiring.
+   */
+  readonly wireable: boolean;
   readonly diagnostics: readonly HostBridgeDiagnostic[];
 }
 
@@ -692,6 +743,9 @@ export interface PlanHostBridgeOptions {
    *
    * Used for two things, and both need it: which bridged modules the artifact
    * actually contains, and which of them a bare `host` claim has no mapping for.
+   * An explicit empty array is a caller saying the artifact has none — which is
+   * *stated*, and is the reason this stays `undefined` when omitted rather than
+   * being defaulted here.
    */
   readonly decisions?: readonly DependencyDecision[];
   /**
@@ -799,14 +853,45 @@ export function planHostBridge(options: PlanHostBridgeOptions = {}): HostBridgeP
     seen.set(interception.moduleId, interception.specifier);
   }
 
-  const decisions = options.decisions ?? [];
+  // `undefined` stays `undefined`: an explicitly empty list is a caller that answered
+  // "what does this artifact use" with "nothing", which is a different answer from not
+  // having been asked. Pre-defaulting the array here is what used to erase that
+  // distinction, so the supplied-ness is threaded into `hostBridgeUsage` instead.
+  const decisions = options.decisions;
   const usage = hostBridgeUsage(decisions, options.referencedSpecifiers, mappings);
-  const interceptions = catalog.filter(interception => usage.activated.has(interception.moduleId));
 
-  diagnostics.push(...auditHostBridgeDecisions(decisions, mappings));
+  diagnostics.push(...auditHostBridgeDecisions(decisions ?? [], mappings));
   diagnostics.push(...auditHostBridgePresetReadiness(mappings, options.cellPreset, usage));
 
-  return { catalog, interceptions, activation: usage.state, diagnostics };
+  // Whether the mapping information the interceptions are *derived from* names exactly
+  // one source per module id. Three producers report `host-mapping-conflict` — the table
+  // guard, the duplicate scan above, and a row that cannot be rendered — and what they
+  // have in common is that the table cannot be trusted to answer "what does this import
+  // resolve to". Two rows claiming one id answer it twice; an unrenderable row answers
+  // it with a table that does not describe itself. A resolver wired from a list built on
+  // either would be picking one by table order.
+  //
+  // Keyed on the code rather than on the specific producer because the three are
+  // interchangeable as far as this question goes. Every other code is deliberately
+  // absent, and each for its own reason: `host-mapping-missing` says there is *no*
+  // mapping, so a module's absence from the list is truthful rather than contradictory;
+  // `host-adapter-not-used` is about how a JSX runtime id is provided, not about a
+  // bridged import; `host-module-duplicated` is about a module the artifact deliberately
+  // carries a copy of. None of the three leaves a live interception with two possible
+  // sources.
+  const mappingInformationIsCoherent = !diagnostics.some(
+    diagnostic => diagnostic.code === "host-mapping-conflict",
+  );
+
+  // Decided once, so "what is wired" and "what is checked" cannot disagree about what
+  // the artifact contains — the state in which a diagnostic is reported for a module
+  // the plan does not intercept, or a hook is wired for one the audit never examined.
+  const wireable = usage.state === "stated" && mappingInformationIsCoherent;
+  const interceptions = wireable
+    ? catalog.filter(interception => usage.activated.has(interception.moduleId))
+    : [];
+
+  return { catalog, interceptions, activation: usage.state, wireable, diagnostics };
 }
 
 export interface HostBridgeUsage {
@@ -839,7 +924,9 @@ export interface HostBridgeUsage {
  * What this artifact asks of the bridge, and of the host's preset chains.
  *
  * `unstated` when neither input was supplied: the answer is unknown, and the caller is
- * told so rather than handed an empty activation that reads like a decision.
+ * told so rather than handed an empty activation that reads like a decision. Supplied —
+ * even supplied empty — is `stated`, because "the caller said there is nothing" and
+ * "the caller did not say" are the two answers `activation` exists to separate.
  *
  * Takes the mapping table for the same reason the catalog does. A project-supplied row
  * has to participate in activation and in the preset audit, not merely appear in the
@@ -847,11 +934,11 @@ export interface HostBridgeUsage {
  * reference would be looking at a capability the bridge refuses to use.
  */
 function hostBridgeUsage(
-  decisions: readonly DependencyDecision[],
+  decisions: readonly DependencyDecision[] | undefined,
   referencedSpecifiers: readonly string[] | undefined,
   mappings: readonly HostBridgeMapping[],
 ): HostBridgeUsage {
-  if (referencedSpecifiers === undefined && decisions.length === 0) {
+  if (referencedSpecifiers === undefined && decisions === undefined) {
     return { state: "unstated", activated: new Set(), presetDependent: new Set() };
   }
 
@@ -859,7 +946,7 @@ function hostBridgeUsage(
   const activated = new Set<string>();
   const presetDependent = new Set<string>();
 
-  for (const decision of decisions) {
+  for (const decision of decisions ?? []) {
     // A JSX runtime id is not a `host` strategy — the resolver requires `replace`
     // for it, because the published module would carry its own React — so the adapter
     // is activated by the id being reached, and a decision naming one is what a
@@ -884,7 +971,7 @@ function hostBridgeUsage(
     // `react-dom` decision governs an import of `react-dom/client`. Using an exact
     // comparison here would leave the very module id the source imports
     // unactivated — the subpath would be in the catalog and never wired.
-    const governing = findDependencyDecision(decisions, specifier);
+    const governing = findDependencyDecision(decisions ?? [], specifier);
 
     if (governing === undefined) {
       // A reference alone never activates a host-global mapping: without a `host`
@@ -1042,9 +1129,18 @@ function auditHostBridgePresetReadiness(
 
 /** A report block for a CI log or a PR body. */
 export function formatHostBridgePlan(plan: HostBridgePlan): string {
+  // Which of the two reasons applies is the difference between "tell me what this cell
+  // uses" and "your mapping table is broken", so the report names it rather than
+  // saying only that wiring was refused.
+  const wiring = plan.wireable
+    ? "allowed"
+    : plan.activation === "unstated"
+      ? "refused (no decisions and no reference list were supplied, so the answer is unknown)"
+      : "refused (the mapping information contradicts itself)";
   return [
     `Host bridge catalog: ${plan.catalog.length} module id(s): ${plan.catalog.map(entry => entry.moduleId).join(", ")}`,
-    `Activations: ${plan.activation}${plan.activation === "unstated" ? " (no decisions or references supplied, so nothing may be wired)" : ""}`,
+    `Activations: ${plan.activation}`,
+    `Wiring: ${wiring}`,
     `Active interceptions: ${plan.interceptions.map(entry => `${entry.moduleId} (${entry.shape})`).join(", ") || "(none)"}`,
     plan.diagnostics.length === 0
       ? "No bridge diagnostics."
