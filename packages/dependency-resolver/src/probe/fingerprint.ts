@@ -119,8 +119,12 @@ function stableScalar(value: string): string {
  *   files, hits rather than the probed root for contributors). Changes findings for a package
  *   whose nested dependency carries the hit, and the coverage count for any package whose
  *   reachable and scanned sets overlap only partly.
+ * - `9` — a native indicator carries the **identity of the version** that produced it rather than
+ *   a bare package name, so a finding no longer names the wrong one when the graph holds two
+ *   versions of a name. Changes findings for that shape only; measured, the old evidence named
+ *   the clean version.
  */
-export const PROBE_ANALYSIS_REVISION = 8;
+export const PROBE_ANALYSIS_REVISION = 9;
 
 export interface ComposeProbeFingerprintInput {
   /** Which probe ran, e.g. `inline-bundle`. */

@@ -465,7 +465,16 @@ export async function observeNodeBuiltins(
   const graph = await collectGraph(identity);
 
   const builtinHits = new Map<string, Set<string>>(); // specifier -> package evidence set
-  const nativeHits = new Set<string>();
+  /**
+   * Native indicators, each carrying the **full** identity of the package that produced it.
+   *
+   * The package token is `package:name@version`, the same shape `builtinHits` uses, and it is
+   * stored here rather than re-derived later from a formatted evidence string. Deriving it meant
+   * recovering an owner by bare name, and the graph may hold two versions of one name — measured
+   * on `shared-util@1.0.0` (clean) and `shared-util@2.0.0` (`process.dlopen`): the first node
+   * matching the name was `1.0.0`, so the evidence named the version that contributed nothing.
+   */
+  const nativeHits = new Map<string, { readonly packageEvidence: string }>();
   const scannedPackages: string[] = [];
   const unreachableEntryHits: string[] = [];
   let reachableFileCount = 0;
@@ -474,10 +483,14 @@ export async function observeNodeBuiltins(
   for (const package_ of graph) {
     scannedPackages.push(`${package_.name}@${package_.version ?? "?"}`);
     for (const indicator of nativeIndicatorsFromManifest(package_.manifest)) {
-      nativeHits.add(`${indicator} [${package_.name}]`);
+      nativeHits.set(`${indicator} [${package_.name}]`, {
+        packageEvidence: `package:${package_.name}@${package_.version ?? "?"}`,
+      });
     }
     if (await hasNodeFile(package_.directory)) {
-      nativeHits.add(`filesystem:*.node [${package_.name}]`);
+      nativeHits.set(`filesystem:*.node [${package_.name}]`, {
+        packageEvidence: `package:${package_.name}@${package_.version ?? "?"}`,
+      });
     }
 
     // Only what a browser build can reach from this package's published entries.
@@ -552,13 +565,15 @@ export async function observeNodeBuiltins(
         // falsifiable. Measured: without the path, the evidence read
         // `native:source:process.dlopen [oracle]`, which names neither the file the indicator
         // came from nor, for an oracle or a reviewer, which file to check.
-        nativeHits.add(`${indicator} [${package_.name}] ${file.relativePath}`);
+        nativeHits.set(`${indicator} [${package_.name}] ${file.relativePath}`, {
+          packageEvidence: `package:${package_.name}@${package_.version ?? "?"}`,
+        });
       }
     }
   }
 
   const builtinSpecifiers = [...builtinHits.keys()].sort(compareStrings);
-  const nativeIndicators = [...nativeHits].sort(compareStrings);
+  const nativeIndicators = [...nativeHits.keys()].sort(compareStrings);
 
   facts.push({
     step: "node-builtin-scan",
@@ -663,12 +678,8 @@ export async function observeNodeBuiltins(
     // Native indicators are keyed by `"<indicator> [<name>] <file>"`, so the package is read off
     // the token rather than re-derived; an indicator with no package token (a manifest- or
     // filesystem-level one) is still evidence about the root it was found under.
-    for (const indicator of nativeIndicators) {
-      const named = /^[^\[]*\[([^\]]+)\]/.exec(indicator)?.[1];
-      const owner = named === undefined ? undefined : graph.find(entry => entry.name === named);
-      if (owner !== undefined) {
-        contributingPackages.add(`package:${owner.name}@${owner.version ?? "?"}`);
-      }
+    for (const entry of nativeHits.values()) {
+      contributingPackages.add(entry.packageEvidence);
     }
     const evidence: string[] = [
       ...builtinSpecifiers.map(portableEvidence),

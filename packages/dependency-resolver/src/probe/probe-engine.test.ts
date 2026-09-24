@@ -344,6 +344,27 @@ describe("runDependencyProbe: builtins named only in comments", () => {
  * are unused while the walk, which applies no tree-shaking, still reaches it — so a finding has
  * to be bounded by the artifact. These cases pin that bound and its bookkeeping fact.
  */
+describe("runDependencyProbe: a native finding names the contributing version", () => {
+  it("names only the installed version whose file carries the native indicator", async () => {
+    // The graph may hold two versions of one name, which the `multi-version-shared` fixture
+    // already covers for the *builtin* channel — that one was always correct, because a builtin
+    // hit records `package:name@version` when it is created. The native channel recorded only
+    // `[name]` and recovered the owner by searching the graph for that name, so with
+    // `native-shared@1.0.0` (clean) and `native-shared@2.0.0` (`process.dlopen`) the first match
+    // won and the evidence named **1.0.0** — the version that contributed nothing, in a report
+    // whose whole purpose is checkable evidence.
+    const { report, assessment } = await probe("multi-version-native-attribution", "native-host");
+
+    const finding = report.rejectionFindings.find(
+      entry => entry.signal === "node-filesystem-process-or-native-addon",
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.evidence).toContain("package:native-shared@2.0.0");
+    expect(finding?.evidence).not.toContain("package:native-shared@1.0.0");
+    expect(assessment.status).toBe("supports-rejection-only");
+  });
+});
+
 describe("runDependencyProbe: a finding is attributed to the package that contributed it", () => {
   it("names only the nested dependency whose own file carries the builtin", async () => {
     // `attribution-outer`'s directory contains the nested `attribution-inner`, so a containment
