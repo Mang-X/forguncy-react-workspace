@@ -12,6 +12,12 @@ import {
   type HostBridgeMapping,
 } from "@forguncy-react-workspace/core";
 
+// Imported from the package root rather than from `./host-bridge.ts`, and only here:
+// the constructor's fourth parameter is a *public* surface, so the compatibility
+// regression below has to go through the export that makes it public. An import from the
+// module would pass even if the re-export were dropped.
+import { createHostBridgeDiagnostic as createHostBridgeDiagnosticFromRoot } from "@forguncy-react-workspace/cell-compiler";
+
 import {
   createHostBridgeDiagnostic,
   formatHostBridgeDiagnostic,
@@ -964,6 +970,41 @@ describe("the plan refuses to be wired from contradictory mapping information", 
 
     expect(tableOrigin?.fixOwner).toBeUndefined();
     expect(formatHostBridgeDiagnostic(tableOrigin!)).toContain("fix owner: bridge-mapping");
+  });
+
+  // Review regression on the commit that added the overrides. `createHostBridgeDiagnostic`
+  // is exported from this package's root, so its fourth parameter is a public surface:
+  // `member?: string` before the overrides existed. It is a union now, and a caller
+  // written against the old signature has to keep working.
+  //
+  // Asserted *through the package root* rather than through the module, because the root
+  // is what makes it public — an import from `./host-bridge.ts` would pass even if the
+  // re-export were dropped.
+  it("keeps the legacy fourth-string argument meaning the member", () => {
+    const legacy = createHostBridgeDiagnosticFromRoot("host-member-not-verified", "react-dom/client", "detail", "version");
+
+    // The field survives, which is the whole point: read as an options object it would
+    // have been dropped, and a caller in plain JS would have seen a diagnostic that
+    // silently lost the one part of its message it could branch on.
+    expect(legacy).toEqual({
+      code: "host-member-not-verified",
+      specifier: "react-dom/client",
+      detail: "detail",
+      member: "version",
+    });
+    // The old form carries no overrides, so it takes the rule's owner as before.
+    expect(legacy.fixOwner).toBeUndefined();
+  });
+
+  it("still accepts the options form alongside the legacy one", () => {
+    const withOptions = createHostBridgeDiagnostic("host-mapping-conflict", "x", "y", {
+      fixOwner: "dependency-decision",
+      fixableByMapping: false,
+    });
+
+    expect(withOptions.member).toBeUndefined();
+    expect(withOptions.fixOwner).toBe("dependency-decision");
+    expect(withOptions.fixableByMapping).toBe(false);
   });
 
   // The decision audit and the missing-mapping audit must not both fire for one decision:

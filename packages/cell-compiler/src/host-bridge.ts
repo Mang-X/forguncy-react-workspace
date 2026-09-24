@@ -621,12 +621,27 @@ export interface CreateHostBridgeDiagnosticOptions {
   readonly fixableByMapping?: boolean;
 }
 
+/**
+ * Builds a finding, with an occurrence's overrides when it has any.
+ *
+ * The fourth parameter is a **union** rather than the options object it became in the
+ * commit that added the overrides, because this function is exported from the package
+ * root and `member?: string` was its public fourth parameter before that. A caller
+ * written against the old signature must keep working: as a `string` it still means the
+ * member name, and only an object is read as overrides. Replacing the parameter outright
+ * would have accepted the old call at runtime while silently dropping the member — the
+ * failure being invisible is what makes it worse than a type error, and a package's
+ * root export is not a place to break callers over an internal tidy-up.
+ */
 export function createHostBridgeDiagnostic(
   code: HostBridgeDiagnosticCode,
   specifier: string,
   detail: string,
-  options: CreateHostBridgeDiagnosticOptions = {},
+  memberOrOptions: string | CreateHostBridgeDiagnosticOptions = {},
 ): HostBridgeDiagnostic {
+  const options: CreateHostBridgeDiagnosticOptions =
+    typeof memberOrOptions === "string" ? { member: memberOrOptions } : memberOrOptions;
+
   return {
     code,
     specifier,
