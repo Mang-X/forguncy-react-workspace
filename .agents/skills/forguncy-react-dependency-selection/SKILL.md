@@ -61,6 +61,21 @@ node $S record --project <projectRoot> --decision decision.json
 node $S status --project <projectRoot>
 ```
 
+真机已验证过的决策要写入 `target` 时，必须传一个本地 hook 让 `runtime-smoke` 真的执行：
+
+```bash
+# hook.mjs: export default () => ({ facts: [...], risks: [...] });
+node $S record --project <projectRoot> --runtime-smoke ./hook.mjs --decision decision.json
+```
+
+`extension` 决策会被拿去和已验证扩展目录比对；用真实清单覆盖默认目录：
+
+```bash
+node $S record --project <projectRoot> --extension-catalog listing.json --decision decision.json
+```
+
+`audit` 与 `record` 跑**同一套**检查（含 conformance）。`audit` 说 `recordable: true` 而 `record` 拒绝的情况不会发生——否则就等于告诉调用者「可以写了」。
+
 决策文件由 **Agent** 产出，脚本从不代填。字段与示例见 `references/decision-recording.md`。
 
 ## 环境要求

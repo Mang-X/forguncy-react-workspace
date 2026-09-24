@@ -40,11 +40,22 @@
  * - `probe`   — run the deterministic probe for one installed package. Emits
  *   `facts` / `risks` / `validation` / `environment` / `assessment`, and never a
  *   strategy.
- * - `audit`   — check a decision file against the ownership gate, the probe it owes
- *   and #8's evidence profile. Prints problems; decides nothing.
- * - `record`  — audit a decision file, then write it into `fgc.lock.json`. Refuses
- *   a decision the audit rejects, so an unrecordable decision cannot be persisted.
+ * - `audit`   — check a decision file against the ownership gate, the probe it owes,
+ *   #8's evidence profile and conformance against the verified target. Prints
+ *   problems; decides nothing.
+ * - `record`  — audit a decision file, then write it into `fgc.lock.json`. Runs the
+ *   *same* checks `audit` does and refuses on any of them, so an unrecordable
+ *   decision cannot be persisted. `audit` and `record` therefore agree by
+ *   construction: a decision one calls ready is one the other writes.
  * - `status`  — read the lock back and report each record's freshness.
+ *
+ * Two of those checks are the CLI's own contribution rather than the resolver's, and
+ * both exist because a strategy is *persisted* here: the conformance audit (a
+ * fabricated `extension` `libraryId`, or a `host` global no target provides, is a
+ * claim about a source this repository does not own, so nothing downstream could catch
+ * it) and the runtime-target guard (`target` means "validated in a real runtime", which
+ * only an executed `runtime-smoke` hook can support — a JSON file of results would make
+ * it a value the caller types).
  *
  * `--json` on any command prints machine-readable output (the default for `policy`,
  * `probe` and `status`).
@@ -53,7 +64,7 @@
 import { readFile } from "node:fs/promises";
 import { register } from "node:module";
 import { isAbsolute, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // Registering the loader before the workspace packages are imported is what makes
 // them resolvable at all — see the file's own header for why that matters.
@@ -234,15 +245,77 @@ function evaluateOwnership(packageName, role) {
  * fix (name the right project) under frames from inside the engine, which is exactly
  * the shape of failure the rest of this script exists to avoid.
  */
+/**
+ * Loads the caller's `runtime-smoke` hook, or returns `undefined` when none was given.
+ *
+ * Why the CLI executes a module instead of reading a recorded result: the engine
+ * records `runtime-smoke: passed` **only** when a hook actually ran and returned
+ * (`recordRuntimeSmoke` in `probe/probe-engine.ts` records `failed` when it throws,
+ * and `skipped` when it is absent). So a passing smoke step is evidence that a real
+ * check executed. Accepting a JSON file of smoke output instead would make
+ * "was this verified?" a value a caller can type, which is precisely what
+ * `runtimeTargetFor`'s guard exists to prevent — a claim that can be written down
+ * without being performed is not a claim this flow may record.
+ *
+ * The hook is the caller's own local module, which is the same trust level as the
+ * decision file they already hand in: this command already executes nothing on the
+ * repository's behalf, and a real runtime check is the one thing #4 marks as
+ * necessarily `real-runtime` rather than `local`.
+ */
+async function loadRuntimeSmokeHook(options) {
+  // Keyed as spelled on the command line: `parseArguments` stores the flag name
+  // verbatim, so a kebab-case option stays kebab-case here.
+  const path = options["runtime-smoke"];
+  if (path === undefined) {
+    return undefined;
+  }
+
+  const absolute = fromWorkingDirectory(path);
+  const exportName = options["runtime-smoke-export"] ?? "default";
+
+  let module;
+  try {
+    module = await import(pathToFileURL(absolute).href);
+  } catch (error) {
+    fail(`Cannot load the --runtime-smoke module at "${absolute}": ${error.message}`);
+  }
+
+  const hook = module[exportName];
+  if (typeof hook !== "function") {
+    const available = Object.keys(module).sort().join(", ") || "(none)";
+    fail(
+      `The --runtime-smoke module at "${absolute}" has no callable export "${exportName}"; it exports: ${available}. ` +
+        `Export the hook as \`default\`, or name it with --runtime-smoke-export.`,
+    );
+  }
+  return hook;
+}
+
 async function runProbe(options, packageName) {
   const projectRoot = fromWorkingDirectory(options.project ?? ".");
+  const runtimeSmoke = await loadRuntimeSmokeHook(options);
+
+  // `--no-cache` forces the *read* to miss. It must not also discard the measurement,
+  // because whatever cites the run cites `.fgc/probe-cache/<hash>.json`, and a lock
+  // pointing at a file that was never written is exactly what #8's evidence rule
+  // exists to prevent. A write-only view expresses that distinction: the engine sees a
+  // cache that never hits, and the report still lands on disk.
+  const fileCache = resolver.createFileProbeCache(projectRoot);
+  const cache =
+    options.noCache === true
+      ? { get: async () => null, set: (fingerprint, report) => fileCache.set(fingerprint, report) }
+      : fileCache;
+
+  let result;
   try {
-    const result = await resolver.runDependencyProbe({
+    result = await resolver.runDependencyProbe({
       projectRoot,
       packageName,
-      cache: options.noCache === true ? false : undefined,
+      cache,
+      // Passing the hook is what makes the `runtime-smoke` step run at all; without
+      // it the step is `skipped` with a reason, which is the honest local-only record.
+      ...(runtimeSmoke === undefined ? {} : { runtimeSmoke }),
     });
-    return { projectRoot, result };
   } catch (error) {
     if (error instanceof resolver.ProbeIdentityError) {
       fail(
@@ -250,8 +323,19 @@ async function runProbe(options, packageName) {
           `\`examples/probe-proving-cases\` declares es-toolkit and @embedpdf/pdfium.`,
       );
     }
-    throw error;
+    // A hook returning a finding shape the protocol refuses surfaces as a throw from
+    // inside the engine. That is a caller-input problem, not a crash, so it is reported
+    // in this script's own style rather than as a stack trace through the engine — which
+    // is the failure shape this script exists to avoid.
+    fail(`Probing "${packageName}" failed: ${error.message}`);
   }
+
+  // The engine writes a hookless report itself. It deliberately does not write one that
+  // carries runtime-smoke findings, and `--no-cache` bypasses its write as well, so
+  // persisting here is what makes a cited `probe` link resolve in every mode. Writing an
+  // already-written report is an idempotent overwrite, not a second source of truth.
+  await fileCache.set(result.fingerprint, result.report);
+  return { projectRoot, result };
 }
 
 /**
@@ -417,15 +501,119 @@ function runtimeTargetFor(document, probe) {
 
   const smoke = probe?.validation.find((entry) => entry.step === "runtime-smoke");
   if (smoke?.outcome !== "passed") {
+    // Names the flag rather than only the condition, because "supply a hook" is the
+    // one thing the caller has to do and the option is not discoverable from the
+    // record. A skipped smoke step is the normal local case, so reaching here without
+    // one is expected — and the fix is a single flag, not a different workflow.
     fail(
-      `The decision file for "${document.packageName}" claims validatedAgainstRuntime, but the probe's runtime-smoke step is "${smoke?.outcome ?? "absent"}". Run the probe with a real runtime-smoke hook before claiming a target; a skipped smoke step is not a confirmation.`,
+      `The decision file for "${document.packageName}" claims validatedAgainstRuntime, but the probe's runtime-smoke step is "${smoke?.outcome ?? "absent"}". ` +
+        `Pass \`--runtime-smoke <module>\` so a real check runs (\`passed\` is only recorded when a hook actually executed), or drop validatedAgainstRuntime for a local-only decision.`,
     );
   }
 
   return { target: core.forguncyTargetIdentity(), validation: "validated: the probe's runtime-smoke step passed for this target." };
 }
 
-function auditPayload(entry, probe, problems) {
+/**
+ * The verified extension catalog a conformance audit checks `extension` records against.
+ *
+ * Defaults to this repository's verified mappings, projected from
+ * `EXTENSION_EXTERNAL_MAPPINGS` by name so a moved or added row moves here too —
+ * restating the table would be the second source of truth the rest of this script
+ * avoids. `--extension-catalog` overrides it with a real
+ * `api.app.listFrontendLibraries` listing or a verified catalog artifact, which is
+ * what discharges #12's rule that a `libraryId` comes from one of those two sources
+ * rather than from a display name someone typed.
+ */
+async function extensionCatalogFor(options) {
+  const override = options["extension-catalog"];
+  if (override !== undefined) {
+    const document = await readJson(override, "extension catalog");
+    const rows = Array.isArray(document) ? document : (document.mappings ?? document.libraries);
+    if (!Array.isArray(rows)) {
+      fail(
+        `The --extension-catalog file at "${fromWorkingDirectory(override)}" must be an array of extensions, or an object with a "mappings" (or "libraries") array. ` +
+          `\`api.app.listFrontendLibraries\` returns the listing; only \`id\`, \`name\`/\`globalName\` are read.`,
+      );
+    }
+    // Validated here rather than left to the audit: a catalog whose rows are missing
+    // their id would reach `mappings.filter(...)` inside the conformance module and come
+    // back as a native TypeError, which reads as a crash in the tool rather than as a
+    // problem with the file the caller handed in.
+    const mappings = rows.map((row, index) => {
+      const entry = {
+        packageName: row?.packageName ?? row?.name,
+        libraryId: row?.libraryId ?? row?.id,
+        globalName: row?.globalName,
+      };
+      const missing = Object.entries(entry).filter(([, value]) => typeof value !== "string" || value.length === 0);
+      if (missing.length > 0) {
+        fail(
+          `The --extension-catalog file at "${fromWorkingDirectory(override)}" has an incomplete entry at index ${index}: ` +
+            `${missing.map(([field]) => field).join(", ")} must be a non-empty string. A row needs the package it maps, the stable \`libraryId\`, and the \`globalName\` the extension publishes.`,
+        );
+      }
+      return entry;
+    });
+    return { mappings };
+  }
+
+  return {
+    mappings: core.EXTENSION_EXTERNAL_MAPPINGS.map((mapping) => ({
+      packageName: mapping.packageName,
+      libraryId: mapping.libraryId,
+      globalName: mapping.globalName,
+    })),
+  };
+}
+
+/**
+ * The conformance problems a candidate lock has, in the audit's own words.
+ *
+ * Runs over the **whole** candidate document, not the one record, because the rules
+ * are not all per-record: `host-inline-conflict` is a fact about a *pair* of records
+ * for the same module, so a per-record check cannot express it. That also mirrors how
+ * the compiler consumes the lock — one document at a time.
+ *
+ * Errors block; warnings do not. A warning is a fact about the *cell* (whether a
+ * preset-provided global is on the page depends on the cell's preset chain), which a
+ * lock file is the wrong place to hold, so refusing on one would make a supported
+ * configuration unwritable.
+ */
+async function conformanceProblems(lock, options) {
+  const extensionCatalog = await extensionCatalogFor(options);
+  return resolver.validateLockDecisionConformance(lock, { extensionCatalog });
+}
+
+/**
+ * Why a decision recorded a runtime target or did not, in the words the report uses.
+ *
+ * `runtimeTargetFor` decides it once, and this states that same decision for the
+ * payload — a caller that re-derived the sentence from the record's fields would
+ * eventually describe a different rule than the one enforced.
+ */
+/**
+ * Why a decision recorded a runtime target or did not, in the words the report uses.
+ *
+ * `runtimeTargetFor` decides it once, and this states that same decision for the
+ * payload — a caller that re-derived the sentence from the record's fields would
+ * eventually describe a different rule than the one enforced.
+ */
+function runtimeValidationOf(document, probe) {
+  return runtimeTargetFor(document, probe).validation;
+}
+
+/**
+ * The `audit` command's payload.
+ *
+ * `recordable` folds in every check the write path applies, which is the whole point of
+ * `audit` being the read-only counterpart: a decision the audit calls recordable and the
+ * write then refuses would be worse than no audit at all. So it is computed from both
+ * sources `record` consults — the selection audit and the conformance gate — rather than
+ * from the selection audit alone, which is what let an earlier revision report
+ * `recordable: true` beside a non-empty `conformanceProblems` list.
+ */
+function auditPayload(entry, probe, problems, conformance = []) {
   return {
     command: "audit",
     packageName: entry.decision.packageName,
@@ -434,51 +622,34 @@ function auditPayload(entry, probe, problems) {
     ownership: entry.ownership,
     branch: core.branchForOwnership(entry.ownership).id,
     evidenceProfile: core.lockEvidenceProfileForDecision(entry.decision),
-    recordable: problems.length === 0,
+    recordable: problems.length === 0 && conformance.length === 0,
     problems,
+    conformanceProblems: conformance,
   };
 }
 
-async function commandAudit(options) {
-  const path = options.decision ?? options.positionals[0];
-  if (path === undefined) {
-    fail("audit needs a decision file: `audit --decision <path>`. See the decision-file shape in this script's header.");
-  }
-  const entry = decisionFromFile(await readJson(path, "decision file"));
-  const { probe } = await probeForDecision(entry, options);
-  const problems = core.auditSelectionDecision({ decision: entry.decision, probe, ownership: entry.ownership });
-  const payload = auditPayload(entry, probe, problems);
-  print(payload, { ...options, json: options.json === true });
-  if (problems.length > 0) {
-    process.exitCode = 1;
-  }
-}
-
 /**
- * Records a decision, after the same audit `audit` runs.
+ * The lock update a decision file produces, given the probe it owes.
  *
- * The script's whole reason for existing on the write side: an unrecordable decision
- * has to be *refused*, not written. `writeFgcLock` would refuse it anyway, but the
- * refusal would come back as a lock-format error rather than as the selection problem
- * it is, and a caller would have to work out which rule it broke.
+ * Shared by `audit` and `record` so the two cannot disagree about what the record
+ * would be: `audit` runs this to build the candidate it checks, `record` runs it to
+ * build the one it writes. A second construction would let the checked document and
+ * the written document differ, which is exactly the gap that let conformance be
+ * bypassed before.
+ *
+ * Returns `null` when the probe reached no conclusion, because then no lock status can
+ * claim its outcome — named rather than thrown so the caller reports it in its own
+ * command's shape.
  */
-async function commandRecord(options) {
-  const path = options.decision ?? options.positionals[0];
-  if (path === undefined) {
-    fail("record needs a decision file: `record --decision <path>`.");
-  }
-  const entry = decisionFromFile(await readJson(path, "decision file"));
-  const { probe, probeResult } = await probeForDecision(entry, options);
-  const problems = core.auditSelectionDecision({ decision: entry.decision, probe, ownership: entry.ownership });
+async function updateFor(entry, probe, probeResult) {
+  const lockEvidence = probeResult === null
+    ? { status: core.ARCHITECTURAL_REJECTION_PROBE_STATUS, fingerprint: null, versionIndependent: false }
+    : resolver.probeRunLockEvidence(probeResult);
 
-  if (problems.length > 0) {
-    print({ ...auditPayload(entry, probe, problems), command: "record", recorded: false }, { ...options, json: true });
-    process.stderr.write(`Refused to record "${entry.decision.packageName}": the decision audit found ${problems.length} problem(s). Nothing was written.\n`);
-    process.exitCode = 1;
-    return;
+  if (lockEvidence === null) {
+    return null;
   }
 
-  const projectRoot = probeResult?.projectRoot ?? fromWorkingDirectory(options.project ?? ".");
   const evidence = [];
 
   // An architectural rejection owes no probe evidence, so its record cites the
@@ -509,23 +680,9 @@ async function commandRecord(options) {
     evidence.push({ kind: "spec-issue", reference: core.OWNERSHIP_AND_DEPENDENCY_DECISION.url });
   }
 
-  const lockEvidence = probeResult === null
-    ? { status: core.ARCHITECTURAL_REJECTION_PROBE_STATUS, fingerprint: null, versionIndependent: false }
-    : resolver.probeRunLockEvidence(probeResult);
-
-  if (lockEvidence === null) {
-    print(
-      { command: "record", packageName: entry.decision.packageName, recorded: false, problems: ["The probe reached no conclusion, so no lock status can claim its outcome."] },
-      { ...options, json: true },
-    );
-    process.stderr.write(`Refused to record "${entry.decision.packageName}": the probe was inconclusive. Nothing was written.\n`);
-    process.exitCode = 1;
-    return;
-  }
-
   const runtime = runtimeTargetFor(entry.document, probe);
 
-  const update = {
+  return {
     decision: entry.decision,
     probe: lockEvidence,
     cellTarget: entry.document.cellTarget ?? null,
@@ -553,10 +710,119 @@ async function commandRecord(options) {
       ? { rejectedCandidate: { version: probe.environment.packageVersion } }
       : {}),
   };
+}
 
-  let recorded;
+/** The lock a decision file would produce, for a caller that wants to check it first. */
+async function candidateLockFor(entry, probe, probeResult, options) {
+  const update = await updateFor(entry, probe, probeResult);
+  if (update === null) {
+    return null;
+  }
+  const projectRoot = probeResult?.projectRoot ?? fromWorkingDirectory(options.project ?? ".");
+  const lock = await resolver.readFgcLock(projectRoot);
+  const existing = resolver.findExactLockDecision(lock, {
+    packageName: entry.decision.packageName,
+    cellTarget: entry.document.cellTarget ?? null,
+  });
+  return { projectRoot, lock, existing, update, candidate: resolver.upsertLockDecision(lock, resolver.mergeDependencyDecisionUpdate(existing, update)) };
+}
+
+async function commandAudit(options) {
+  const path = options.decision ?? options.positionals[0];
+  if (path === undefined) {
+    fail("audit needs a decision file: `audit --decision <path>`. See the decision-file shape in this script's header.");
+  }
+  const entry = decisionFromFile(await readJson(path, "decision file"));
+  const { probe, probeResult } = await probeForDecision(entry, options);
+  const problems = core.auditSelectionDecision({ decision: entry.decision, probe, ownership: entry.ownership });
+
+  // The same conformance gate `record` applies, over the lock this decision *would*
+  // produce. `audit` is the read-only check, so the two have to reach the same verdict
+  // — an audit that passed a decision the write then refused would be worse than no
+  // audit, because the caller would have been told it was ready.
+  //
+  // The conformance problems are folded into `problems` rather than reported beside it,
+  // so a consumer that only reads `problems` cannot miss a refusal, and both commands
+  // speak one vocabulary. `inconclusive` is folded the same way for the same reason.
+  const built = await candidateLockFor(entry, probe, probeResult, options);
+  const conformance = built === null ? [] : await conformanceProblems(built.candidate, options);
+  const allProblems = built === null
+    ? [...problems, "The probe reached no conclusion, so no lock status can claim its outcome."]
+    : [...problems, ...conformance];
+
+  print({ ...auditPayload(entry, probe, allProblems, conformance), problems: allProblems }, { ...options, json: true });
+  if (allProblems.length > 0) {
+    process.exitCode = 1;
+  }
+}
+
+/**
+ * Records a decision, after the same audit `audit` runs.
+ *
+ * The script's whole reason for existing on the write side: an unrecordable decision
+ * has to be *refused*, not written. `writeFgcLock` would refuse it anyway, but the
+ * refusal would come back as a lock-format error rather than as the selection problem
+ * it is, and a caller would have to work out which rule it broke.
+ */
+async function commandRecord(options) {
+  const path = options.decision ?? options.positionals[0];
+  if (path === undefined) {
+    fail("record needs a decision file: `record --decision <path>`.");
+  }
+  const entry = decisionFromFile(await readJson(path, "decision file"));
+  const { probe, probeResult } = await probeForDecision(entry, options);
+  const problems = core.auditSelectionDecision({ decision: entry.decision, probe, ownership: entry.ownership });
+
+  if (problems.length > 0) {
+    print({ ...auditPayload(entry, probe, problems), command: "record", recorded: false }, { ...options, json: true });
+    process.stderr.write(`Refused to record "${entry.decision.packageName}": the decision audit found ${problems.length} problem(s). Nothing was written.\n`);
+    process.exitCode = 1;
+    return;
+  }
+
+  // The candidate lock is built by the same helper `audit` uses, so the document
+  // checked and the document written cannot differ — a second construction was the gap
+  // that let conformance be bypassed in the first place.
+  const built = await candidateLockFor(entry, probe, probeResult, options);
+  if (built === null) {
+    print(
+      { command: "record", packageName: entry.decision.packageName, recorded: false, problems: ["The probe reached no conclusion, so no lock status can claim its outcome."] },
+      { ...options, json: true },
+    );
+    process.stderr.write(`Refused to record "${entry.decision.packageName}": the probe was inconclusive. Nothing was written.\n`);
+    process.exitCode = 1;
+    return;
+  }
+  const { projectRoot, candidate, existing } = built;
+
+  // The measurement is already persisted by `runProbe`, which is where the `probe`
+  // command's `cacheRelativePath` gets the same guarantee — one place, so the two
+  // commands cannot disagree about whether a cited report exists.
+
+  // The gate that makes "only when supported by evidence" true at the point a strategy
+  // is persisted. #8's lock-shape validation cannot answer "is this record *true*", and
+  // for an `extension` decision the answer lives in an extension catalog this
+  // repository does not own — without this, a fabricated `libraryId` records happily.
+  //
+  // Composing the read-modify-write rather than changing `recordDependencyDecision` is
+  // deliberate: that helper has its own callers and tests, and giving it a
+  // default-blocking audit would change a merged contract and strand every caller that
+  // does not hold a catalog. The refusal belongs where the Agent hands the decision in.
+  const conformance = await conformanceProblems(candidate, options);
+  if (conformance.length > 0) {
+    print(
+      { command: "record", packageName: entry.decision.packageName, recorded: false, conformanceProblems: conformance },
+      { ...options, json: true },
+    );
+    process.stderr.write(
+      `Refused to record "${entry.decision.packageName}": the record does not conform to the verified target for ${conformance.length} reason(s). Nothing was written.\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+
   try {
-    recorded = await resolver.recordDependencyDecision(projectRoot, update);
+    await resolver.writeFgcLock(projectRoot, candidate);
   } catch (error) {
     // `writeFgcLock` validates the whole canonical document on the way out, and it
     // knows rules this audit does not restate — #8's rationale requirement is the one
@@ -571,21 +837,28 @@ async function commandRecord(options) {
     process.exitCode = 1;
     return;
   }
+
+  // Read the written lock back rather than reporting the in-memory candidate, so what is
+  // reported is what a later reader will load.
+  const written = await resolver.readFgcLock(projectRoot);
+  const record = resolver.findExactLockDecision(written, {
+    packageName: entry.decision.packageName,
+    cellTarget: entry.document.cellTarget ?? null,
+  });
   const environment = await resolver.probeLockEnvironment(projectRoot, {
-    lock: recorded.lock,
+    lock: written,
     probeFingerprints: probeResult === null ? {} : { [entry.decision.packageName]: probeResult.fingerprint },
   });
-  const assessment = core.assessLockDecision(recorded.record, environment);
 
   print(
     {
       command: "record",
       recorded: true,
-      replaced: recorded.replaced,
+      replaced: existing !== null,
       lockPath: resolver.fgcLockPath(projectRoot),
-      record: recorded.record,
-      freshness: assessment,
-      runtimeValidation: runtime.validation,
+      record,
+      freshness: core.assessLockDecision(record, environment),
+      runtimeValidation: runtimeValidationOf(entry.document, probe),
     },
     { ...options, json: true },
   );
@@ -679,8 +952,22 @@ Commands:
 Options:
   --project <dir>   Project root holding the package (default: current directory).
   --decision <file> The Agent-formed decision JSON. See this script's header for its shape.
-  --no-cache        Force a fresh probe instead of reusing .fgc/probe-cache/.
+  --no-cache        Force a fresh probe instead of reusing .fgc/probe-cache/. The
+                    measurement is still persisted, so the lock's evidence resolves.
+  --runtime-smoke <module>
+                    Load a local module and run its export as the probe's
+                    runtime-smoke hook. Needed for a decision that claims
+                    validatedAgainstRuntime: the step is only \`passed\` when a hook
+                    really executed.
+  --runtime-smoke-export <name>
+                    Which export of that module is the hook (default: \`default\`).
+  --extension-catalog <file>
+                    Verify \`extension\` records against a real listing or catalog
+                    artifact instead of this repository's verified mappings.
   --json            Machine-readable output (default for policy, probe and status).
+
+audit and record run the same checks, including conformance against the verified target;
+record refuses to write anything the checks reject.
 
 The script measures, audits and persists. It never chooses a strategy, never picks a
 replacement package and never classifies ownership — #16 puts all three on the Agent.

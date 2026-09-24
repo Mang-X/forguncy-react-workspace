@@ -1,0 +1,590 @@
+/**
+ * The CLI contract, executed against the real command.
+ *
+ * Decision source: GitHub Issue #18 — "Implement: Forguncy React dependency-selection
+ * Agent Skill" — https://github.com/Mang-X/forguncy-react-workspace/issues/18
+ *
+ * Governing Specs: #16 (the Skill/scripts split and the evidence rule), #8 (the lock
+ * whose evidence links must resolve), #12 (a `libraryId` comes from a listing or a
+ * verified catalog, never from a display name).
+ *
+ * ## Why this file exists, and why `selection-cases.test.ts` did not cover it
+ *
+ * Every check here is about the *command-line* behaviour: which file lands on disk,
+ * whether a cited path resolves, what an exit code means. `selection-cases.test.ts`
+ * drives the resolver and `core` APIs directly, so it exercises the same policy while
+ * never executing `select_dependency.mjs` — and three real defects lived exactly in that
+ * gap (a `probe` link pointing at a file `--no-cache` never wrote, a `validated` branch
+ * that no flag could reach, and an `extension` record written with a fabricated
+ * `libraryId`). Those are all "the code was right and the wiring was not" failures, so
+ * the regression suite has to run the wiring.
+ *
+ * ## What it asserts, and what it does not
+ *
+ * It asserts observable CLI facts: exit code, whether `fgc.lock.json` exists, whether a
+ * path the lock cites can be read, and which problem codes came back. It does **not**
+ * re-assert the policy reasoning — that is `selection-cases.test.ts`'s job, and a second
+ * copy here would be two places to update and one to forget.
+ *
+ * ## Why the scratch project is a `.fgc/` directory inside a committed example
+ *
+ * The CLI needs a project root that actually installs the candidate, so it can only run
+ * somewhere beneath `examples/`. A scratch root under the example's own `.fgc/` is
+ * resolved by the same ancestor walk (`projectResolutionRoots` in
+ * `packages/dependency-resolver/src/install-graph.ts`) and the whole path is already
+ * git-ignored, so a run cannot dirty a committed file.
+ *
+ * A consequence worth stating rather than working around: `commandRecord` reads the
+ * toolchain from the project root, and a scratch root has no manifest of its own, so a
+ * record written there reports `toolchain-unknown` and is `stale`. That is the honest
+ * result for a directory that declares no toolchain, and these tests assert on the record
+ * and its evidence rather than on freshness for that reason.
+ */
+
+import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+
+import { describe, expect, it } from "vitest";
+
+const run = promisify(execFile);
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const REPOSITORY_ROOT = join(HERE, "..", "..", "..", "..");
+const CLI = join(REPOSITORY_ROOT, ".agents", "skills", "forguncy-react-dependency-selection", "scripts", "select_dependency.mjs");
+const PROVING_CASES = join(REPOSITORY_ROOT, "examples", "probe-proving-cases");
+const EXTENSION_QUERY = join(REPOSITORY_ROOT, "examples", "extension-query");
+
+/** Both cases run a real Rolldown build of a published package. */
+const CASE_TIMEOUT_MS = 120_000;
+
+interface CommandResult {
+  readonly code: number;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+/**
+ * Runs the CLI as a child process, which is the only way to observe the exit code and the
+ * bytes actually written — the two things every defect here got wrong.
+ */
+async function cli(args: readonly string[]): Promise<CommandResult> {
+  try {
+    const { stdout, stderr } = await run(process.execPath, [CLI, ...args], {
+      cwd: REPOSITORY_ROOT,
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    return { code: 0, stdout, stderr };
+  } catch (error) {
+    const failure = error as { code?: number; stdout?: string; stderr?: string };
+    return { code: failure.code ?? -1, stdout: failure.stdout ?? "", stderr: failure.stderr ?? "" };
+  }
+}
+
+function json<T = Record<string, unknown>>(result: CommandResult): T {
+  return JSON.parse(result.stdout) as T;
+}
+
+/**
+ * A scratch project root inside the example's git-ignored `.fgc/`.
+ *
+ * `mkdir` rather than only `mkdtemp`, because the root must exist before the CLI reads a
+ * lock from it. Cleanup is the caller's, via `withScratch`.
+ */
+async function scratchRoot(example: string): Promise<string> {
+  const parent = join(example, ".fgc");
+  await mkdir(parent, { recursive: true });
+  return mkdtemp(join(parent, "cli-contract-"));
+}
+
+async function withScratch<T>(example: string, body: (root: string) => Promise<T>): Promise<T> {
+  const root = await scratchRoot(example);
+  try {
+    return await body(root);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+/** Writes a decision file outside the project root, so a probe never mistakes it for source. */
+async function decisionFile(contents: Record<string, unknown>): Promise<{ path: string; cleanup: () => Promise<void> }> {
+  const directory = await mkdtemp(join(tmpdir(), "fgc-cli-decision-"));
+  const path = join(directory, "decision.json");
+  await writeFile(path, JSON.stringify(contents, null, 2), "utf8");
+  return { path, cleanup: () => rm(directory, { recursive: true, force: true }) };
+}
+
+interface LockRecord {
+  readonly packageName: string;
+  readonly strategy: string;
+  readonly target: unknown;
+  readonly resolvedVersion: string | null;
+  readonly probe: { readonly status: string; readonly fingerprint: string | null };
+  readonly extension: { readonly version: string | null; readonly identity: string | null } | null;
+  readonly evidence: readonly { readonly kind: string; readonly reference: string }[];
+}
+
+async function readLock(root: string): Promise<{ decisions: readonly LockRecord[] }> {
+  return JSON.parse(await readFile(join(root, "fgc.lock.json"), "utf8")) as { decisions: readonly LockRecord[] };
+}
+
+/** The `probe` evidence link a record cites, or null when it cites none. */
+function probeLink(record: LockRecord): string | null {
+  return record.evidence.find(link => link.kind === "probe")?.reference ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Defect 1 — every cited `probe` link must resolve
+// ---------------------------------------------------------------------------
+
+describe("CLI contract: a recorded probe link resolves to real evidence", () => {
+  it("writes the report `record` cites, including under --no-cache", async () => {
+    // The defect: `--no-cache` made the engine skip its write, while the lock still cited
+    // `.fgc/probe-cache/<hash>.json` — a lock whose evidence points at nothing, which is
+    // the one thing #8's evidence rule exists to prevent.
+    await withScratch(PROVING_CASES, async root => {
+      const decision = await decisionFile({ packageName: "es-toolkit", role: "cell-local-ui", strategy: "inline" });
+      try {
+        const recorded = await cli(["record", "--project", root, "--no-cache", "--decision", decision.path]);
+        expect(recorded.code, recorded.stderr).toBe(0);
+
+        const record = (await readLock(root)).decisions.find(entry => entry.packageName === "es-toolkit")!;
+        const reference = probeLink(record);
+        expect(reference, "a passing record must cite its probe").not.toBeNull();
+
+        const onDisk = join(root, ...reference!.split("/"));
+        expect(existsSync(onDisk), `cited evidence ${reference} must exist`).toBe(true);
+
+        // Resolving is not enough: the bytes have to be the report this run measured,
+        // which is what makes the fingerprint in the lock re-checkable.
+        const cached = JSON.parse(await readFile(onDisk, "utf8")) as { fingerprint: string; report: unknown };
+        expect(cached.fingerprint).toBe(record.probe.fingerprint);
+        expect(cached.report).toBeDefined();
+      } finally {
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("makes `probe --no-cache` report a path that exists, not only `record`", async () => {
+    // The sibling command had the same bug and was not in the review: `probe --no-cache`
+    // printed a `cacheRelativePath` for a file the suppression had prevented writing.
+    await withScratch(PROVING_CASES, async root => {
+      const probed = await cli(["probe", "--project", root, "--no-cache", "es-toolkit"]);
+      expect(probed.code, probed.stderr).toBe(0);
+
+      const report = json<{ cacheRelativePath: string }>(probed);
+      expect(existsSync(join(root, ...report.cacheRelativePath.split("/")))).toBe(true);
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("does not let a hook-bearing report answer a later hookless run", async () => {
+    // The reason the engine declines to cache a hook-bearing report. Writing one is now
+    // deliberate, so this pins the guarantee that makes it safe: the refusal lives in
+    // `cacheHitAnswersThisRun`, on the read side.
+    await withScratch(PROVING_CASES, async root => {
+      const hookDirectory = await mkdtemp(join(tmpdir(), "fgc-cli-hook-"));
+      const hook = join(hookDirectory, "hook.mjs");
+      await writeFile(
+        hook,
+        'export default () => ({ risks: [{ signal: "global-singleton-assumption", summary: "page global observed", evidence: ["page:forguncy"] }] });\n',
+        "utf8",
+      );
+      try {
+        const withHook = await cli(["probe", "--project", root, "--runtime-smoke", hook, "es-toolkit"]);
+        expect(withHook.code, withHook.stderr).toBe(0);
+        const hookReport = json<{ validation: readonly { step: string; outcome: string }[]; cacheRelativePath: string }>(withHook);
+        expect(hookReport.validation.find(entry => entry.step === "runtime-smoke")?.outcome).toBe("passed");
+
+        // A later hookless run must re-probe: it cannot inherit a runtime result it did
+        // not request, even though the report is now sitting in the cache.
+        const hookless = await cli(["probe", "--project", root, "es-toolkit"]);
+        expect(hookless.code, hookless.stderr).toBe(0);
+        const hooklessReport = json<{ validation: readonly { step: string; outcome: string }[]; risks: readonly unknown[] }>(hookless);
+        expect(hooklessReport.validation.find(entry => entry.step === "runtime-smoke")?.outcome).toBe("skipped");
+        expect(hooklessReport.risks).toEqual([]);
+      } finally {
+        await rm(hookDirectory, { recursive: true, force: true });
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+});
+
+// ---------------------------------------------------------------------------
+// Defect 2 — the runtime-smoke path is reachable and still evidence-backed
+// ---------------------------------------------------------------------------
+
+describe("CLI contract: a validated runtime target requires a real hook", () => {
+  it("records a non-null target when a hook actually ran", async () => {
+    // The defect: `runtimeTargetFor` required `runtime-smoke: passed`, and nothing in the
+    // CLI could supply a hook — so the branch that records `validated` was unreachable.
+    await withScratch(PROVING_CASES, async root => {
+      const hookDirectory = await mkdtemp(join(tmpdir(), "fgc-cli-hook-"));
+      const hook = join(hookDirectory, "hook.mjs");
+      await writeFile(hook, "export default () => ({ facts: [{ name: 'page.global', value: 'forguncy' }] });\n", "utf8");
+      const decision = await decisionFile({
+        packageName: "es-toolkit",
+        role: "cell-local-ui",
+        strategy: "inline",
+        validatedAgainstRuntime: true,
+        evidence: [{ kind: "runtime-observation", reference: "https://example.invalid/report.md" }],
+      });
+      try {
+        const recorded = await cli(["record", "--project", root, "--runtime-smoke", hook, "--decision", decision.path]);
+        expect(recorded.code, recorded.stderr).toBe(0);
+
+        const record = (await readLock(root)).decisions.find(entry => entry.packageName === "es-toolkit")!;
+        expect(record.target).not.toBeNull();
+        expect(json<{ freshness: { realRuntimeValidation: string } }>(recorded).freshness.realRuntimeValidation).toBe("validated");
+      } finally {
+        await decision.cleanup();
+        await rm(hookDirectory, { recursive: true, force: true });
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("records a null target by default, so a local probe is not a runtime claim", async () => {
+    // The other direction, and the one AGENTS.md rule 7 is about: no hook, no claim.
+    await withScratch(PROVING_CASES, async root => {
+      const decision = await decisionFile({ packageName: "es-toolkit", role: "cell-local-ui", strategy: "inline" });
+      try {
+        const recorded = await cli(["record", "--project", root, "--decision", decision.path]);
+        expect(recorded.code, recorded.stderr).toBe(0);
+        const record = (await readLock(root)).decisions.find(entry => entry.packageName === "es-toolkit")!;
+        expect(record.target).toBeNull();
+        expect(json<{ freshness: { realRuntimeValidation: string } }>(recorded).freshness.realRuntimeValidation).toBe("not-validated");
+      } finally {
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("refuses the runtime claim when the hook threw, and writes nothing", async () => {
+    // A hook that throws makes the step `failed`, which is evidence about the attempt
+    // rather than a confirmation — so the claim it was invoked to support cannot stand.
+    await withScratch(PROVING_CASES, async root => {
+      const hookDirectory = await mkdtemp(join(tmpdir(), "fgc-cli-hook-"));
+      const hook = join(hookDirectory, "hook.mjs");
+      await writeFile(hook, 'export default () => { throw new Error("page did not load"); };\n', "utf8");
+      const decision = await decisionFile({
+        packageName: "es-toolkit",
+        role: "cell-local-ui",
+        strategy: "inline",
+        validatedAgainstRuntime: true,
+        evidence: [{ kind: "runtime-observation", reference: "https://example.invalid/report.md" }],
+      });
+      try {
+        const recorded = await cli(["record", "--project", root, "--runtime-smoke", hook, "--decision", decision.path]);
+        expect(recorded.code).not.toBe(0);
+        expect(recorded.stderr).toContain("failed");
+        expect(existsSync(join(root, "fgc.lock.json"))).toBe(false);
+      } finally {
+        await decision.cleanup();
+        await rm(hookDirectory, { recursive: true, force: true });
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("refuses the runtime claim with no hook at all, naming the flag", async () => {
+    await withScratch(PROVING_CASES, async root => {
+      const decision = await decisionFile({
+        packageName: "es-toolkit",
+        role: "cell-local-ui",
+        strategy: "inline",
+        validatedAgainstRuntime: true,
+        evidence: [{ kind: "runtime-observation", reference: "https://example.invalid/report.md" }],
+      });
+      try {
+        const recorded = await cli(["record", "--project", root, "--decision", decision.path]);
+        expect(recorded.code).not.toBe(0);
+        expect(recorded.stderr).toContain("--runtime-smoke");
+        expect(existsSync(join(root, "fgc.lock.json"))).toBe(false);
+      } finally {
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("reports a missing hook module and a non-function export cleanly, without a stack trace", async () => {
+    // A caller-input problem has to read as one. Letting `import()` throw or the engine's
+    // report validation escape would surface this as engine frames, which is the failure
+    // shape the script's own header says it exists to avoid.
+    await withScratch(PROVING_CASES, async root => {
+      const missing = await cli(["probe", "--project", root, "--runtime-smoke", join(root, "no-such-hook.mjs"), "es-toolkit"]);
+      expect(missing.code).not.toBe(0);
+      expect(missing.stderr).toContain("Cannot load the --runtime-smoke module");
+      expect(missing.stderr).not.toContain("at async");
+
+      const hookDirectory = await mkdtemp(join(tmpdir(), "fgc-cli-hook-"));
+      const hook = join(hookDirectory, "hook.mjs");
+      await writeFile(hook, "export const notAHook = 1;\n", "utf8");
+      try {
+        const wrongExport = await cli(["probe", "--project", root, "--runtime-smoke", hook, "es-toolkit"]);
+        expect(wrongExport.code).not.toBe(0);
+        expect(wrongExport.stderr).toContain('no callable export "default"');
+        expect(wrongExport.stderr).not.toContain("at async");
+
+        // A hook returning a finding the protocol refuses is the same class of problem, and
+        // it surfaces from inside the engine, so it has to be caught rather than escape.
+        const malformed = join(hookDirectory, "malformed.mjs");
+        await writeFile(malformed, 'export default () => ({ facts: [{ bogus: true }] });\n', "utf8");
+        const badFinding = await cli(["probe", "--project", root, "--runtime-smoke", malformed, "es-toolkit"]);
+        expect(badFinding.code).not.toBe(0);
+        expect(badFinding.stderr).toContain("failed");
+        expect(badFinding.stderr).not.toContain("at async");
+      } finally {
+        await rm(hookDirectory, { recursive: true, force: true });
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("still honours --no-cache together with --runtime-smoke", async () => {
+    await withScratch(PROVING_CASES, async root => {
+      const hookDirectory = await mkdtemp(join(tmpdir(), "fgc-cli-hook-"));
+      const hook = join(hookDirectory, "hook.mjs");
+      await writeFile(hook, "export default () => ({ facts: [{ name: 'page.global', value: true }] });\n", "utf8");
+      try {
+        const probed = await cli(["probe", "--project", root, "--no-cache", "--runtime-smoke", hook, "es-toolkit"]);
+        expect(probed.code, probed.stderr).toBe(0);
+        const report = json<{ validation: readonly { step: string; outcome: string }[]; cacheRelativePath: string }>(probed);
+        expect(report.validation.find(entry => entry.step === "runtime-smoke")?.outcome).toBe("passed");
+        expect(existsSync(join(root, ...report.cacheRelativePath.split("/")))).toBe(true);
+      } finally {
+        await rm(hookDirectory, { recursive: true, force: true });
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+});
+
+// ---------------------------------------------------------------------------
+// Defect 3 — conformance gates the write, for extensions and hosts alike
+// ---------------------------------------------------------------------------
+
+describe("CLI contract: conformance is checked before anything is written", () => {
+  it("refuses an `extension` record whose libraryId nothing verifies", async () => {
+    // The defect: `recordDependencyDecision` validates lock *shape* only, so a fabricated
+    // `libraryId`/`globalName`/identity recorded happily. #18's "only when supported by
+    // evidence" was therefore unenforced at the exact point a strategy is persisted.
+    await withScratch(PROVING_CASES, async root => {
+      const decision = await decisionFile({
+        packageName: "es-toolkit",
+        role: "cell-local-data-access",
+        strategy: "extension",
+        libraryId: "completely-invented-library-id",
+        globalName: "InventedGlobal",
+        extensionVersion: "0.0.1",
+        extensionIdentity: "sha256:deadbeef",
+        rationale: "claims a verified extension that does not exist",
+      });
+      try {
+        const recorded = await cli(["record", "--project", root, "--decision", decision.path]);
+        expect(recorded.code).not.toBe(0);
+        expect(json<{ conformanceProblems: readonly string[] }>(recorded).conformanceProblems.join(" ")).toContain(
+          "extension-library-not-verified",
+        );
+        expect(existsSync(join(root, "fgc.lock.json"))).toBe(false);
+      } finally {
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("records the verified catalog row", async () => {
+    // The positive case, and the one that proves the gate is not simply refusing every
+    // `extension`: this repository's one verified mapping has to pass.
+    await withScratch(EXTENSION_QUERY, async root => {
+      const decision = await decisionFile({
+        packageName: "@tanstack/react-query",
+        role: "cell-local-data-access",
+        strategy: "extension",
+        libraryId: "tanstack-query",
+        globalName: "TanStackQuery",
+        extensionVersion: "5.102.8",
+        rationale: "A bundled copy would give every Cell its own QueryClient, so the shared page global is required.",
+      });
+      try {
+        const recorded = await cli(["record", "--project", root, "--decision", decision.path]);
+        expect(recorded.code, recorded.stderr).toBe(0);
+        const record = (await readLock(root)).decisions.find(entry => entry.packageName === "@tanstack/react-query")!;
+        expect(record.strategy).toBe("extension");
+        expect(record.extension).not.toBeNull();
+      } finally {
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("refuses a `host` record naming a global the target does not provide", async () => {
+    // Conformance is not only about extensions: a `host` decision claims a page global,
+    // and a claim about a global no target provides is the same class of defect.
+    await withScratch(PROVING_CASES, async root => {
+      const decision = await decisionFile({
+        packageName: "es-toolkit",
+        role: "cell-local-ui",
+        strategy: "host",
+        globalName: "notAProvidedGlobal",
+      });
+      try {
+        const recorded = await cli(["record", "--project", root, "--decision", decision.path]);
+        expect(recorded.code).not.toBe(0);
+        expect(json<{ conformanceProblems: readonly string[] }>(recorded).conformanceProblems.join(" ")).toContain("host-global-not-provided");
+        expect(existsSync(join(root, "fgc.lock.json"))).toBe(false);
+      } finally {
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("audit and record reach the same verdict on the same decision file", async () => {
+    // `audit` is the read-only counterpart, so a decision it calls recordable and the write
+    // then refuses would be worse than no audit — the caller would have been told it was
+    // ready. Asserted through the pair rather than on either alone.
+    await withScratch(PROVING_CASES, async root => {
+      const fabricated = await decisionFile({
+        packageName: "es-toolkit",
+        role: "cell-local-data-access",
+        strategy: "extension",
+        libraryId: "invented",
+        globalName: "Invented",
+        rationale: "x",
+      });
+      const legitimate = await decisionFile({ packageName: "es-toolkit", role: "cell-local-ui", strategy: "inline" });
+      try {
+        const audited = await cli(["audit", "--project", root, "--decision", fabricated.path]);
+        expect(audited.code).not.toBe(0);
+        const payload = json<{ recordable: boolean; problems: readonly string[]; conformanceProblems: readonly string[] }>(audited);
+        // `recordable` must not contradict the problems it reports beside it.
+        expect(payload.recordable).toBe(false);
+        expect(payload.problems.join(" ")).toContain("extension-library-not-verified");
+
+        const refused = await cli(["record", "--project", root, "--decision", fabricated.path]);
+        expect(refused.code).not.toBe(0);
+        expect(json<{ conformanceProblems: readonly string[] }>(refused).conformanceProblems).toEqual(payload.conformanceProblems);
+
+        // And the legitimate decision must pass both, so the pair is not merely rejecting
+        // everything.
+        const auditedOk = await cli(["audit", "--project", root, "--decision", legitimate.path]);
+        expect(auditedOk.code, auditedOk.stderr).toBe(0);
+        expect(json<{ recordable: boolean }>(auditedOk).recordable).toBe(true);
+
+        const recordedOk = await cli(["record", "--project", root, "--decision", legitimate.path]);
+        expect(recordedOk.code, recordedOk.stderr).toBe(0);
+      } finally {
+        await fabricated.cleanup();
+        await legitimate.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("refuses when --extension-catalog is malformed rather than crashing", async () => {
+    // An override file with no usable rows would otherwise reach `mappings.filter(...)`
+    // inside the conformance module and come back as a native TypeError — a crash in the
+    // tool rather than a problem with the file the caller handed in.
+    await withScratch(PROVING_CASES, async root => {
+      const directory = await mkdtemp(join(tmpdir(), "fgc-cli-catalog-"));
+      const empty = join(directory, "empty.json");
+      const incomplete = join(directory, "incomplete.json");
+      await writeFile(empty, JSON.stringify({}), "utf8");
+      await writeFile(incomplete, JSON.stringify({ mappings: [{ packageName: "es-toolkit" }] }), "utf8");
+      const decision = await decisionFile({
+        packageName: "es-toolkit",
+        role: "cell-local-data-access",
+        strategy: "extension",
+        libraryId: "tanstack-query",
+        globalName: "TanStackQuery",
+        rationale: "x",
+      });
+      try {
+        for (const catalog of [empty, incomplete]) {
+          const recorded = await cli(["record", "--project", root, "--extension-catalog", catalog, "--decision", decision.path]);
+          expect(recorded.code).not.toBe(0);
+          expect(recorded.stderr).toContain("--extension-catalog");
+          expect(recorded.stderr).not.toContain("at async");
+        }
+      } finally {
+        await decision.cleanup();
+        await rm(directory, { recursive: true, force: true });
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("still loads a lock that holds a fabricated extension, so the gate does not reach the read path", async () => {
+    // Conformance gates *writing*. Freshness is a separate question, and `status` has to
+    // keep answering it for a lock that already exists — otherwise a bad record written
+    // before this gate landed would make the project unreadable.
+    await withScratch(PROVING_CASES, async root => {
+      await writeFile(
+        join(root, "fgc.lock.json"),
+        JSON.stringify(
+          {
+            schemaVersion: 1,
+            decisions: [
+              {
+                packageName: "es-toolkit",
+                cellTarget: null,
+                strategy: "extension",
+                resolvedVersion: "1.52.0",
+                libraryId: "fabricated-before-the-gate",
+                globalName: "Fabricated",
+                probe: { status: "passed", fingerprint: "fingerprint", versionIndependent: false },
+                target: null,
+                probedWith: { vitePlus: "0.3.2" },
+                extension: { version: "1.52.0", identity: null },
+                rejectedCandidate: null,
+                rationale: "recorded before the gate existed",
+                evidence: [{ kind: "probe", reference: ".fgc/probe-cache/x.json" }],
+              },
+            ],
+          },
+          null,
+          2,
+        ),
+        "utf8",
+      );
+
+      // `status` exits non-zero when a record is stale — that is its documented signal, and
+      // this record is stale for the ordinary reasons (a scratch root declares no toolchain,
+      // and the fingerprints do not match). What matters is that it *loaded*: the gate must
+      // not have reached the read path, or a lock written before this change would become
+      // unreadable rather than reported stale.
+      const status = await cli(["status", "--project", root]);
+      const payload = json<{ decisions: readonly { packageName: string; freshness: string; stalenessReasons: readonly string[] }[] }>(status);
+      expect(payload.decisions.map(entry => entry.packageName)).toEqual(["es-toolkit"]);
+      expect(payload.decisions[0]?.freshness).toBe("stale");
+      // Reported for freshness reasons only — never as a conformance refusal.
+      expect(payload.decisions[0]?.stalenessReasons.join(" ")).not.toContain("verified");
+      expect(status.stderr).not.toContain("conformance");
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("keeps a re-record idempotent, preserving accumulated evidence and rationale", async () => {
+    // The reason the read-modify-write is composed from the exported primitives rather than
+    // hand-rolled: `mergeDependencyDecisionUpdate` owns the merge rules, and a second copy
+    // would be where an idempotency bug (dropping `existing`) hides.
+    await withScratch(PROVING_CASES, async root => {
+      const decision = await decisionFile({ packageName: "es-toolkit", role: "cell-local-ui", strategy: "inline" });
+      try {
+        const first = await cli(["record", "--project", root, "--decision", decision.path]);
+        expect(first.code, first.stderr).toBe(0);
+        const second = await cli(["record", "--project", root, "--decision", decision.path]);
+        expect(second.code, second.stderr).toBe(0);
+
+        const payload = json<{ replaced: boolean; record: { evidence: readonly { kind: string; reference: string }[] } }>(second);
+        expect(payload.replaced).toBe(true);
+
+        // One record, and the evidence of both runs still there — the merge unions links
+        // rather than replacing them.
+        const lock = await readLock(root);
+        expect(lock.decisions).toHaveLength(1);
+        expect(probeLink(lock.decisions[0]!)).not.toBeNull();
+        expect(payload.record.evidence.length).toBeGreaterThanOrEqual(lock.decisions[0]!.evidence.length);
+      } finally {
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+});

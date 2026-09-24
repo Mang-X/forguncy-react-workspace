@@ -42,10 +42,38 @@
 
 - **归属**：跑 `assessDependencyRole(packageName, role)`。是平台冲突 → 走架构分支。
 - **probe**：架构拒绝不 probe（其证据是归属决策）；其余策略 probe 该包，并**以 probe 报告作为证据**，不接受"文档说可以"。
-- **audit**：跑 `auditSelectionDecision`，检查归属门、决策欠的证据、报告是否关于这个包、技术拒绝是否绑定机器观测到的发现、repair recipe 是否满足三条件。**有问题就拒绝写入。**
-- **写入**：`recordDependencyDecision` 合并进 `fgc.lock.json`（读-改-写，合并而非覆盖，证据是并集）。
+- **audit**：跑 `auditSelectionDecision`，检查归属门、决策欠的证据、报告是否关于这个包、技术拒绝是否绑定机器观测到的发现、repair recipe 是否满足三条件。
+- **conformance**：把决策放进候选锁，跑 `validateLockDecisionConformance`——`extension` 的 `libraryId` 必须来自已验证目录或真实 `listFrontendLibraries` 清单；`host` 的 `globalName` 必须是目标真的提供的全局。**只拦 error**，warning 是"关于 Cell 的事实"，不阻断。
+- **写入**：读锁 → 合并 → 过上述全部检查 → 才 `writeFgcLock`。**任一检查不通过就不落盘**。
 
 脚本会**自动**为决策补两条 `spec-issue` 链接：#16（决策所依据的 Spec），以及架构拒绝时的 #4（#8 规则 5 要求架构冲突可追溯到归属决策）。URL 从 `core` 读出，不硬编码。
+
+## 证据必须真实存在
+
+锁里 cite 的 `probe` 链接形如 `.fgc/probe-cache/<sha256>.json`，因此**跑过的测量必须落盘**。`--no-cache` 只强制"不读缓存里的旧 report"，不会丢弃本次测量——否则锁会指向一个从未写过的文件，而这正是 #8 证据规则要防的事。`probe` 与 `record` 都保证这一点。
+
+带 hook 的 report 也写盘。引擎本来不写它（担心之后的 hookless run 继承没请求过的运行时证据），但那条保证由**读**侧执行：`cacheHitAnswersThisRun` 会拒绝一份 `runtime-smoke` 不是 `skipped` 的缓存 report。所以写下来是安全的，而"这条证据在哪"有唯一答案。
+
+## 真机验证怎么落地
+
+`validatedAgainstRuntime: true` 要求 probe 的 `runtime-smoke` 步骤为 `passed`，而该步骤**只有 hook 真的执行并返回**时才记 `passed`（抛错记 `failed`，不传 hook 记 `skipped`）。所以：
+
+```bash
+node $S record --project <root> --runtime-smoke ./hook.mjs --decision decision.json
+```
+
+`hook.mjs` 由你提供，形态是 `RuntimeSmokeHook`：
+
+```js
+export default ({ report, output }) => ({
+  facts: [{ name: "page.global", value: "forguncy" }],
+  risks: [{ signal: "global-singleton-assumption", summary: "…", evidence: ["…"] }],
+});
+```
+
+**不接受**"读一份 smoke 结果 JSON"作为替代：那会把"是否验证过"变成可以手写的输入，而这条分支的全部意义就是让 `passed` 由真的执行产生。hook 是你自己的本地模块，与决策文件同一信任级别。
+
+要记 `target` 还需在决策文件里 cite 一条 `runtime-observation` 证据——`target` 的含义是"这份证据在哪个真实运行时里被验证过"，它必须指向一次观测，而不是指向本地缓存文件。
 
 ## 关于 `replace` 的两个 #8 规则
 

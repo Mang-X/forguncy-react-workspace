@@ -49,8 +49,19 @@
 - `references/decision-recording.md`：决策文件字段、锁、新鲜度。
 - `references/report-and-handoff.md`：报告字段、本地/真机分开、移交给打包 skill。
 - `evals/selection-cases.test.ts`：六个必需评测用例的**可执行**一半，进 CI。
+- `evals/cli-contract.test.ts`：**CLI 级**回归测试，真正 spawn 脚本，覆盖证据可追溯、`--runtime-smoke` 可达性、conformance 门。
 - `evals/execution_cases.json`：Agent 侧（语义）用例，供人工/Agent 复核。
 - `evals/trigger_cases.json` + `evals/semantic_config.json`：路由评测（precision 1.0 / recall 1.0，阈值 0.30）。
+
+## 关键选项
+
+| 选项 | 作用 |
+|---|---|
+| `--project <dir>` | probe 该包的位置；必须是**已安装**它的目录 |
+| `--no-cache` | 不读缓存里的旧 report（本次测量仍会落盘，证据可追溯） |
+| `--runtime-smoke <module>` | 执行该本地模块作为 `runtime-smoke` hook；`validatedAgainstRuntime` 需要它 |
+| `--runtime-smoke-export <name>` | 指定 hook 的导出名（默认 `default`） |
+| `--extension-catalog <file>` | 用真实清单/已验证目录校验 `extension` 的 `libraryId` |
 
 ## 用法示例
 
