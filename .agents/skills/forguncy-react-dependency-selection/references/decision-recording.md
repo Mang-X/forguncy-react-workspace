@@ -79,9 +79,13 @@
 | 字段 | 含义 |
 |---|---|
 | `unresolvedEvidence` | 引用不存在、读不出（含被同名目录占据） |
-| `alteredEvidence` | 文件在，但**内容 hash 与文件名不符**——被误改、合并冲突解决错了 |
+| `alteredEvidence` | 文件在，但**内容与文件名不符**——被误改、合并冲突解决错了、或根本不是一份合法 report |
 
-后者是 content-addressed 语义的核心：文件名**就是**对内容的断言，因此必须重算 hash 校验，不能只看"路径存在"。URL 形式的引用（如 `runtime-observation` 指向外部报告）不检查，因为它断言的是本命令够不到的地方。
+后者是 content-addressed 语义的核心：文件名**就是**对内容的断言，因此必须校验，不能只看"路径存在"。
+
+校验的是 **canonical report**，不是 checkout 出来的原始字节。这个区别在 Windows 上是真实的：`serializeProbeReport` 输出 LF，地址是那条 LF 字符串的 hash，而 Git 在 `core.autocrlf=true` 下 checkout 时会把文本文件改成 CRLF。若对原始字节做 hash/比对，一个**没人动过、只是从 Git 检出**的证据文件就会被误报为 `alteredEvidence`——而本仓库没有 `.gitattributes` 固定这些文件，那等于依赖每个使用者的 Git 配置。定义在 canonical report 上就不依赖任何配置：EOL 变化不改变文档含义，也就不该改变地址。篡改仍然能被发现，因为流程会**先 parse 再比对**——不是合法 report 的直接失败，字段被改的 canonicalize 后不同。
+
+URL 形式的引用（如 `runtime-observation` 指向外部报告）不检查，因为它断言的是本命令够不到的地方。
 
 `record` 写证据时同样校验：若目标路径已存在但内容不同（或被目录占据），直接拒绝而不是接受——否则会把错误的字节挂到新记录上，还报告成功。
 

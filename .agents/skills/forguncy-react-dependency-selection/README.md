@@ -72,6 +72,7 @@
 - 位置与 `.fgc/`（被 git 忽略）无关。放在那里等于全新 checkout 后锁的引用指向空气，而锁仍显示 `validated`。
 - **只在决策被接受时写**：`probe`/`audit` 只测量并算出会被 cite 的地址，不写文件（`audit` 是 read-only 的，被拒绝的 `record` 也不该留下孤儿）。
 - 按内容寻址，且**读取端会校验**：不同 report 不会互相覆盖；文件名就是内容断言，被误改/合并坏的文件会被报成 `alteredEvidence`（`evidence-integrity-mismatch`），而不是仅因路径存在就算通过。
+- 校验的是 **canonical report** 而非 checkout 原始字节，所以 `core.autocrlf=true` 下 Git 把文件转成 CRLF **不会**被误判成篡改；真正的改动仍会被发现（先 parse，再按 canonical 内容比对）。
 - `status` 会把 `evidence-missing`（引用不存在）与 `evidence-integrity-mismatch`（内容不符）都列入 `blockers`、以非零码退出——它不会在证据缺失或变样时继续说 fresh/validated。
 
 ## 用法示例

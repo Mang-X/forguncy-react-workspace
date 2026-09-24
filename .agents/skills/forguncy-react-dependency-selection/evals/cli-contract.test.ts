@@ -1321,23 +1321,38 @@ describe("CLI contract: a content-addressed citation is verified, not assumed", 
     });
   }, CASE_TIMEOUT_MS);
 
-  it("refuses to cite a path already holding different content, instead of accepting it", async () => {
+  it("refuses to cite a path that does not hold this report, instead of accepting it", async () => {
     // The acceptance-check half. Accepting the existing file is what would silently attach the
-    // wrong bytes to a new record, and it would do so under a message reporting success. The
+    // wrong content to a new record, and it would do so under a message reporting success. The
     // refusal now happens before any write, reported under the unified `problems` key.
+    //
+    // Two distinct findings, because the comparison now parses before it compares: content that
+    // is not a report at all fails validation, while a report whose fields differ canonicalizes
+    // to other bytes. Neither may be accepted, and they are not the same message.
     await withScratch(PROVING_CASES, async root => {
       const file = await decisionFile(decision);
       try {
         const reference = await recordOnce(root, file);
-        await writeFile(join(root, ...reference.split("/")), "not a report\n", "utf8");
+        const absolute = join(root, ...reference.split("/"));
+        const original = await readFile(absolute, "utf8");
 
-        const refused = await cli(["record", "--project", root, "--decision", file.path]);
-        expect(refused.code).not.toBe(0);
-        expect(json<{ problems: readonly string[] }>(refused).problems.join(" ")).toContain("already exists with different content");
-        expect(refused.stderr).toContain("Nothing was written");
+        await writeFile(absolute, "not a report\n", "utf8");
+        const invalid = await cli(["record", "--project", root, "--decision", file.path]);
+        expect(invalid.code).not.toBe(0);
+        expect(json<{ problems: readonly string[] }>(invalid).problems.join(" ")).toContain("does not hold a valid probe report");
+        expect(invalid.stderr).toContain("Nothing was written");
 
-        // Still refused by the write path too, so the preflight is not the only guard.
-        expect(existsSync(join(root, ...reference.split("/")))).toBe(true);
+        // A well-formed report whose content changed: same shape, different canonical bytes.
+        const altered = JSON.parse(original) as { environment: { packageVersion: string } };
+        altered.environment.packageVersion = "9.9.9";
+        await writeFile(absolute, `${JSON.stringify(altered, null, 2)}\n`, "utf8");
+
+        const changed = await cli(["record", "--project", root, "--decision", file.path]);
+        expect(changed.code).not.toBe(0);
+        expect(json<{ problems: readonly string[] }>(changed).problems.join(" ")).toContain("already exists with different content");
+
+        // Still present: the preflight is not the only guard, it just refuses earlier.
+        expect(existsSync(absolute)).toBe(true);
       } finally {
         await file.cleanup();
       }
@@ -1528,8 +1543,9 @@ describe("CLI contract: audit checks the evidence path too", () => {
         const refused = await cli(["record", "--project", root, "--decision", decision.path]);
         expect(refused.code).not.toBe(0);
         expect(refused.stderr).toContain("Nothing was written");
-        const reason = payload.problems.find(problem => problem.includes("different content"));
-        expect(reason, "audit names the content mismatch").toBeDefined();
+        const reason = payload.problems.find(problem => problem.includes("does not hold a valid probe report"));
+        expect(reason, "audit names the invalid report").toBeDefined();
+        expect(json<{ problems: readonly string[] }>(refused).problems).toContain(reason);
       } finally {
         await decision.cleanup();
       }
@@ -1594,6 +1610,130 @@ describe("CLI contract: audit checks the evidence path too", () => {
         expect(json<{ recordable: boolean }>(audited).recordable).toBe(true);
       } finally {
         await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+});
+
+// ---------------------------------------------------------------------------
+// Review round 8 — the content address is defined over the canonical report
+// ---------------------------------------------------------------------------
+
+/**
+ * An evidence address must not depend on the reader's Git configuration.
+ *
+ * `serializeProbeReport` emits LF, and the address is the hash of that string. `status` used to
+ * re-hash the working-tree *bytes*, and `evidencePreflight` compared raw bytes — so Git's
+ * `core.autocrlf=true`, which rewrites text files to CRLF on checkout, reported a
+ * false `evidence-integrity-mismatch` for a file nobody had edited. The repository has no
+ * `.gitattributes` fixing those files, and it already carries a known Windows CRLF-fixture
+ * failure, so a design that depends on the consumer's Git configuration is the wrong one.
+ *
+ * The address is now defined over the **canonical report**: an EOL change does not alter what
+ * the document means, so it does not alter the address. Tampering still shows, because the
+ * content is parsed and re-serialized — anything that is not a well-formed report fails, and any
+ * altered field changes the canonical bytes.
+ *
+ * These tests simulate the checkout conversion directly rather than relying on the machine's
+ * `core.autocrlf`, so they mean the same thing on CI as locally.
+ */
+describe("CLI contract: a CRLF checkout is not a content mismatch", () => {
+  const decision = { packageName: "es-toolkit", role: "cell-local-ui", strategy: "inline" };
+
+  /** The CRLF conversion Git performs on a text file under `core.autocrlf=true`. */
+  async function asCheckedOutByWindowsGit(path: string): Promise<void> {
+    const text = await readFile(path, "utf8");
+    await writeFile(path, text.replace(/\r\n/g, "\n").replace(/\n/g, "\r\n"), "utf8");
+  }
+
+  async function recordOnce(root: string, file: { path: string }): Promise<string> {
+    const recorded = await cli(["record", "--project", root, "--decision", file.path]);
+    expect(recorded.code, recorded.stderr).toBe(0);
+    const record = (await readLock(root)).decisions.find(entry => entry.packageName === "es-toolkit")!;
+    return probeLink(record)!;
+  }
+
+  it("leaves status, audit and record agreeing after the file is converted", async () => {
+    // All three consumers, because each one compared differently: `status` hashed the raw bytes,
+    // `audit` compared them for equality, and `record` reused the `evidencePreflight` rule.
+    await withScratch(PROVING_CASES, async root => {
+      const file = await decisionFile(decision);
+      try {
+        const reference = await recordOnce(root, file);
+        const absolute = join(root, ...reference.split("/"));
+        await asCheckedOutByWindowsGit(absolute);
+        expect(await readFile(absolute, "utf8")).toContain("\r\n");
+
+        const status = await cli(["status", "--project", root]);
+        const finding = json<{ decisions: readonly { alteredEvidence: readonly string[]; unresolvedEvidence: readonly string[] }[] }>(status).decisions[0]!;
+        expect(finding.alteredEvidence, "a re-checkout is not an edit").toEqual([]);
+        expect(finding.unresolvedEvidence).toEqual([]);
+
+        const audited = await cli(["audit", "--project", root, "--decision", file.path]);
+        expect(audited.code, audited.stderr).toBe(0);
+        expect(json<{ recordable: boolean }>(audited).recordable).toBe(true);
+
+        // Re-recording reuses the file rather than refusing it: same report, same address.
+        const rerecorded = await cli(["record", "--project", root, "--decision", file.path]);
+        expect(rerecorded.code, rerecorded.stderr).toBe(0);
+        expect(json<{ evidence: { created: boolean } }>(rerecorded).evidence.created).toBe(false);
+      } finally {
+        await file.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("still detects tampering through the canonical form", async () => {
+    // The property the tolerance must not have cost. A file that parses but says something else
+    // canonicalizes to different bytes; a file that is not a report at all fails to parse. Both
+    // are mismatches.
+    await withScratch(PROVING_CASES, async root => {
+      const file = await decisionFile(decision);
+      try {
+        const reference = await recordOnce(root, file);
+        const absolute = join(root, ...reference.split("/"));
+
+        for (const replacement of ['{"tampered":true}\n', "not a report at all\n"]) {
+          await writeFile(absolute, replacement, "utf8");
+          const status = await cli(["status", "--project", root]);
+          expect(status.code, `${replacement.trim()} must be reported`).not.toBe(0);
+          const finding = json<{ decisions: readonly { alteredEvidence: readonly string[] }[] }>(status).decisions[0]!;
+          expect(finding.alteredEvidence).toEqual([reference]);
+
+          const refused = await cli(["record", "--project", root, "--decision", file.path]);
+          expect(refused.code).not.toBe(0);
+          expect(refused.stderr).toContain("Nothing was written");
+        }
+      } finally {
+        await file.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("keeps the address stable across the conversion, so the citation still matches", async () => {
+    // The deeper property: the address is a function of the report, not of the file's bytes on
+    // disk. Converting the file must not change what the lock should cite.
+    await withScratch(PROVING_CASES, async root => {
+      const file = await decisionFile(decision);
+      try {
+        const reference = await recordOnce(root, file);
+        const absolute = join(root, ...reference.split("/"));
+        const before = await readFile(absolute, "utf8");
+
+        await asCheckedOutByWindowsGit(absolute);
+
+        // The lock still cites the same path, and that path still verifies — which is only
+        // possible because the address is over the canonical report.
+        const after = await cli(["status", "--project", root]);
+        const finding = json<{ decisions: readonly { alteredEvidence: readonly string[] }[] }>(after).decisions[0]!;
+        expect(finding.alteredEvidence).toEqual([]);
+        expect(probeLink((await readLock(root)).decisions[0]!)).toBe(reference);
+
+        // And the two files differ only in EOL, which is what makes this a real test.
+        expect(before).not.toBe(await readFile(absolute, "utf8"));
+        expect(before.replace(/\r\n/g, "\n")).toBe((await readFile(absolute, "utf8")).replace(/\r\n/g, "\n"));
+      } finally {
+        await file.cleanup();
       }
     });
   }, CASE_TIMEOUT_MS);

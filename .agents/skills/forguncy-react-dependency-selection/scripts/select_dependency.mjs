@@ -80,8 +80,15 @@
  * keeps its non-null `target`. No read-side guard can prevent a write-side collision, which
  * is what an earlier revision of this script missed.
  *
- * A content address has neither problem: identical bytes reuse one path, different bytes
+ * A content address has neither problem: identical reports reuse one path, different reports
  * cannot collide, and the cited artifact is pinned to exactly what was measured.
+ *
+ * The address is defined over the **canonical report** (`serializeProbeReport`), not over
+ * working-tree bytes. On Windows that distinction decides whether this works at all: Git's
+ * `core.autocrlf=true` rewrites text files to CRLF on checkout, so hashing raw bytes reported an
+ * untouched file as altered, and the repository has no `.gitattributes` to prevent it. An EOL
+ * change does not alter what a report means, so it must not alter its address; tampering still
+ * shows because the content is parsed and re-serialized before comparison.
  *
  * `--json` on any command prints machine-readable output (the default for `policy`,
  * `probe` and `status`).
@@ -434,6 +441,25 @@ const EVIDENCE_DIRECTORY = "fgc-evidence";
  */
 const EVIDENCE_REFERENCE_PATTERN = new RegExp(`^${EVIDENCE_DIRECTORY}/([0-9a-f]{64})\\.json$`);
 
+/**
+ * The canonical bytes of a report, which is what an evidence address is a hash *of*.
+ *
+ * Canonical rather than "whatever is in the file", and the distinction is a real one on
+ * Windows: `serializeProbeReport` emits LF, the address is the hash of that LF string, and
+ * Git's `core.autocrlf=true` rewrites text files to CRLF on checkout. Hashing the working-tree
+ * bytes therefore reported a false `evidence-integrity-mismatch` for a file nobody had
+ * touched — and since this repository has no `.gitattributes` fixing those files, that would
+ * depend on every consumer's Git configuration.
+ *
+ * Defining the address over the *canonical report* removes the dependency entirely: an EOL
+ * change does not alter what the document means, so it must not alter the address either.
+ * Tampering still shows, because this parses and validates — anything that is not a
+ * well-formed report fails to parse, and any altered field changes the canonical bytes.
+ */
+function canonicalReportBytes(text) {
+  return core.serializeProbeReport(core.parseProbeReport(text));
+}
+
 function evidenceRelativePath(report) {
   const digest = createHash("sha256").update(core.serializeProbeReport(report), "utf8").digest("hex");
   return `${EVIDENCE_DIRECTORY}/${digest}.json`;
@@ -476,8 +502,18 @@ async function evidencePreflight(projectRoot, report) {
     return `The evidence path "${relative}" already exists but cannot be read as a file (${error.code ?? error.message}). Remove it so the run can write the report it measured.`;
   }
 
-  if (existing !== expected) {
-    return `The evidence path "${relative}" already exists with different content, so it is not the report this run measured. A content-addressed path is only trustworthy while its bytes hash to its name; remove the file to re-measure, or treat the difference as the finding it is.`;
+  // Compared as canonical reports, not as raw bytes, so a Git-normalized CRLF checkout is not
+  // mistaken for an edit — see `canonicalReportBytes`. A file that is not a well-formed report
+  // throws from `parseProbeReport`, which is the same finding as different content.
+  let canonical;
+  try {
+    canonical = canonicalReportBytes(existing);
+  } catch (error) {
+    return `The evidence path "${relative}" already exists but does not hold a valid probe report (${error.message}). Remove it so the run can write the report it measured.`;
+  }
+
+  if (canonical !== expected) {
+    return `The evidence path "${relative}" already exists with different content, so it is not the report this run measured. A content-addressed path is only trustworthy while its content hashes to its name; remove the file to re-measure, or treat the difference as the finding it is.`;
   }
   return null;
 }
@@ -518,7 +554,7 @@ async function persistEvidence(projectRoot, report) {
 
 /**
  * Whether a cited evidence reference resolves against the project root, and whether a
- * content-addressed one still hashes to its own name.
+ * content-addressed one still carries the content its name claims.
  *
  * Three answers rather than a boolean, because "not there" and "there but wrong" are
  * different findings with different fixes: the first means the evidence never travelled with
@@ -540,15 +576,26 @@ function inspectEvidenceReference(projectRoot, reference) {
     return existsSync(absolute) ? "ok" : "missing";
   }
 
-  let bytes;
+  let text;
   try {
-    bytes = readFileSync(absolute);
+    text = readFileSync(absolute, "utf8");
   } catch {
-    // Absent, a directory, or unreadable. For a citation, "I cannot read the bytes you cited"
-    // is the same finding as "they are not here".
+    // Absent, a directory, or unreadable. For a citation, "I cannot read what you cited" is the
+    // same finding as "it is not here".
     return "missing";
   }
-  const digest = createHash("sha256").update(bytes).digest("hex");
+
+  // Hashed as a canonical report, not as working-tree bytes: the address is defined over the
+  // canonical report, so a Git-normalized CRLF checkout must not read as a mismatch. A file
+  // that is not a valid report at all fails to parse, which is a mismatch — it cannot be the
+  // document this address names.
+  let canonical;
+  try {
+    canonical = canonicalReportBytes(text);
+  } catch {
+    return "integrity-mismatch";
+  }
+  const digest = createHash("sha256").update(canonical, "utf8").digest("hex");
   return digest === contentAddressed[1] ? "ok" : "integrity-mismatch";
 }
 
