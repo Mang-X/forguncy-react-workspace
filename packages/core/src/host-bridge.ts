@@ -899,10 +899,11 @@ export const HOST_BRIDGE_DIAGNOSTIC_RULES: Readonly<Record<HostBridgeDiagnosticC
   "host-mapping-conflict": {
     code: "host-mapping-conflict",
     moment: "build",
-    label: "Two mappings claim one module id, or one identity serves two modules",
-    states: "The mapping table itself is inconsistent.",
+    label: "Conflicting claims about which page object a module id resolves to",
+    states:
+      "The mapping table, or a mapping and the decision that selected it, disagree about which import resolves to which page object.",
     remediation:
-      "Make the table name each module id once and each host identity once. Two rows for one specifier make the interception order decide the outcome, and one global serving two module identities means code that is not the same module can pass an identity check.",
+      "Make the table name each module id once and each host identity once, and make a decision say what the row it selects says. Two rows for one specifier make the interception order decide the outcome, and one global serving two module identities means code that is not the same module can pass an identity check. A decision naming a global other than its row's binds the import to the row's global while the lock records another, so the artifact and the decision would disagree about which page object the import reads.",
     fixOwner: "bridge-mapping",
     fixableByMapping: true,
   },

@@ -882,6 +882,63 @@ describe("the plan refuses to be wired from contradictory mapping information", 
     expect(plan.diagnostics.map(diagnostic => diagnostic.code)).toContain("host-mapping-conflict");
   });
 
+  // The review's finding on #52's first PR. The table can be perfectly coherent and the
+  // *decision* can still contradict the row it selects, which is the same "two answers"
+  // state reached from the other side — #12's plan refuses it for `libraryId` and
+  // `globalName` alike, and #52 asks for parity rather than a second opinion.
+  //
+  // This one is the reason the field has to exist rather than only the table collision:
+  // the row is fine and the decision is fine on its own terms, and the generated module
+  // reads the row's global while the lock records the decision's. A later audit cannot
+  // see it, because the global the decision names *does* exist as a host identity.
+  it("refuses a `host` decision whose globalName is not the row's", () => {
+    const plan = planHostBridge({ decisions: [{ strategy: "host", packageName: "react", globalName: "ReactDOM" }] });
+
+    expect(plan.activation).toBe("stated");
+    expect(plan.wireable).toBe(false);
+    expect(plan.interceptions).toEqual([]);
+    expect(plan.diagnostics.map(diagnostic => diagnostic.code)).toEqual(["host-mapping-conflict"]);
+    expect(plan.diagnostics[0]?.detail).toContain('"ReactDOM"');
+    expect(plan.diagnostics[0]?.detail).toContain('"React"');
+    // The row is not the problem, so the catalog still says how the bridge would bind it.
+    expect(plan.catalog.find(entry => entry.moduleId === "react")?.source).toContain('globalThis["React"]');
+  });
+
+  // The bound, and the reason the check is keyed on the decision naming the global at all:
+  // a decision that agrees with its row is the ordinary case and must stay wireable, or the
+  // rule above would refuse every legal `host` decision.
+  it("stays wireable when the decision agrees with its row", () => {
+    const plan = planHostBridge({
+      decisions: [hostDecision("react", "React"), hostDecision("react-dom", "ReactDOM"), hostDecision("antd", "antd")],
+    });
+
+    expect(plan.diagnostics).toEqual([]);
+    expect(plan.wireable).toBe(true);
+    expect(plan.interceptions.map(entry => entry.moduleId)).toEqual(["react", "react-dom", "antd"]);
+  });
+
+  // A subpath decision is checked against the row it selects, not against the row's
+  // first id: `react-dom/client` and `react-dom` share a row and both bind `ReactDOM`.
+  it("checks a subpath decision against the row that covers it", () => {
+    const agreeing = planHostBridge({ decisions: [hostDecision("react-dom/client", "ReactDOM")] });
+    const disagreeing = planHostBridge({ decisions: [hostDecision("react-dom/client", "React")] });
+
+    expect(agreeing.diagnostics).toEqual([]);
+    expect(agreeing.wireable).toBe(true);
+    expect(disagreeing.diagnostics.map(diagnostic => diagnostic.code)).toEqual(["host-mapping-conflict"]);
+    expect(disagreeing.wireable).toBe(false);
+  });
+
+  // The decision audit and the missing-mapping audit must not both fire for one decision:
+  // a module with no row at all has nothing to disagree with, so it stays a truthful
+  // absence rather than being reported twice.
+  it("reports only `host-mapping-missing` for a decision with no row to contradict", () => {
+    const plan = planHostBridge({ decisions: [hostDecision("lodash", "React")] });
+
+    expect(plan.diagnostics.map(diagnostic => diagnostic.code)).toEqual(["host-mapping-missing"]);
+    expect(plan.wireable).toBe(true);
+  });
+
   it("never hands back a list a caller may not wire from", () => {
     // The direction that is load-bearing: `wireable: false` always comes with an empty
     // `interceptions`, so a caller that reads the list without checking the flag cannot
@@ -904,6 +961,8 @@ describe("the plan refuses to be wired from contradictory mapping information", 
       { mappings: collidingTable() },
       { mappings: collidingTable(), decisions: [hostDecision("antd", "antd")] },
       { mappings: collidingTable(), referencedSpecifiers: ["antd"] },
+      { decisions: [hostDecision("react", "ReactDOM")] },
+      { decisions: [hostDecision("react-dom/client", "React")] },
     ];
 
     for (const options of cases) {

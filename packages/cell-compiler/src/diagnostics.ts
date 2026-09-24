@@ -152,9 +152,10 @@ export const CELL_ARTIFACT_DIAGNOSTIC_RULES: Readonly<
     code: "duplicate-host-mapping",
     origin: "issue-6-error-model",
     label: "Duplicate or invalid host mapping",
-    states: "A `host` dependency maps to a global that is not a verified host identity, or one that another package already claims.",
+    states:
+      "A `host` dependency maps to a global that is not a verified host identity, to one that another package already claims, or to one other than the global its bridge mapping binds.",
     remediation:
-      "Map the package to one of the names #5 verified as visible inside a cell, and give each package its own global. Two packages sharing one global, or one package bundled alongside its own host mapping, both break the singleton semantics `host` exists to preserve.",
+      "Map the package to one of the names #5 verified as visible inside a cell, give each package its own global, and make the `globalName` the bridge row binds the one the decision records. Two packages sharing one global, one package bundled alongside its own host mapping, or a decision naming a global its row does not bind, all break the singleton semantics `host` exists to preserve — the last because the artifact reads the row's object while the lock records another.",
     fixOwner: "dependency-decision",
     breaksGuarantees: ["host-dependencies-reference-host-identity"],
   },

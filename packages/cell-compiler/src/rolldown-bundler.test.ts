@@ -276,6 +276,34 @@ describe("createRolldownCellBundler through compileCell", () => {
     expect(diagnostic?.message).toContain("src/Missing.jsx");
   });
 
+  it("refuses a `host` decision whose global the mapping row does not bind", async () => {
+    // Issue #52's review finding, end to end. The row binds `React`; the decision names
+    // `ReactDOM`, which *is* a verified host identity (#5 records it as a `page-global`),
+    // so #6's own artifact audit has nothing to object to — it can only ask whether the
+    // global is a host identity, not whether it is the row's. Letting this compile would
+    // ship an artifact that reads `globalThis.React` while its lock records `ReactDOM`.
+    const dir = fixture("host-global-mismatch", {
+      "App.jsx": `import { useState } from "react";
+
+export function App() {
+  const [value] = useState("from-host");
+  return <b>{value}</b>;
+}
+`,
+    });
+
+    const outcome = await compileFixture(dir, "App.jsx", [
+      { strategy: "host", packageName: "react", globalName: "ReactDOM" },
+    ]);
+
+    expect(outcome.status).toBe("rejected");
+    if (outcome.status !== "rejected") return;
+    const diagnostic = outcome.diagnostics.find(candidate => candidate.code === "duplicate-host-mapping");
+    expect(diagnostic?.subject).toBe("react");
+    expect(diagnostic?.message).toContain("ReactDOM");
+    expect(diagnostic?.message).toContain("React");
+  });
+
   it("intercepts react for the host global instead of bundling an implementation", async () => {
     const dir = fixture("host-react", {
       "App.jsx": `import { useState } from "react";

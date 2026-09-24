@@ -996,9 +996,12 @@ function hostBridgeUsage(
 /**
  * A decision list against the mapping table.
  *
- * Three questions, each a way a decision and a mapping can disagree:
+ * Four questions, each a way a decision and a mapping can disagree:
  *
  * - a `host` decision for a module the table cannot bind;
+ * - a `host` decision whose `globalName` is not the one the row it selects binds, which
+ *   leaves "what does this import resolve to" with two answers — the decision's global
+ *   and the row's;
  * - a JSX runtime id resolved by a page global, when only the adapter has the
  *   module's shape;
  * - a bridged module that the decision bundles anyway, which is the duplicated
@@ -1031,6 +1034,7 @@ function auditHostBridgeDecisions(
       // generated code rather than by a global — so it is reported once above, as
       // `host-adapter-not-used`, and not again here.
       const bridgedByAdapter = mapping !== undefined && mapping.kind === "jsx-runtime-adapter";
+      const bindsThisId = mapping !== undefined && hostBridgeModuleIds(mapping).includes(packageName);
 
       if (mapping === undefined) {
         diagnostics.push(
@@ -1040,12 +1044,28 @@ function auditHostBridgeDecisions(
             `The decision is \`host\` and the bridge has no mapping for this module id, so it would compile to a reference nothing supplies.`,
           ),
         );
-      } else if (!bridgedByAdapter && !hostBridgeModuleIds(mapping).includes(packageName)) {
+      } else if (!bridgedByAdapter && !bindsThisId) {
         diagnostics.push(
           createHostBridgeDiagnostic(
             "host-mapping-missing",
             packageName,
             `The mapping for this module covers ${hostBridgeModuleIds(mapping).join(", ")} and not this exact id.`,
+          ),
+        );
+      } else if (mapping.kind === "host-global" && mapping.globalName !== decision.globalName) {
+        // The state the extension path refuses for the same reason: the row the decision
+        // selects binds one page global and the decision names another, so "what does
+        // this import resolve to" has two answers. The generated module would read the
+        // row's global while the lock records the decision's, and the mismatch is
+        // invisible in the artifact — a later audit sees a `host` decision naming a
+        // global that *does* exist, so it has nothing to object to. The plan is where
+        // the disagreement is still visible, which is why it is reported here and why it
+        // makes the plan non-wireable.
+        diagnostics.push(
+          createHostBridgeDiagnostic(
+            "host-mapping-conflict",
+            packageName,
+            `The decision names the global "${decision.globalName}" while the mapping row for this module binds "${mapping.globalName}", so the compiled module and the recorded decision would disagree about which page object the import resolves to.`,
           ),
         );
       }
