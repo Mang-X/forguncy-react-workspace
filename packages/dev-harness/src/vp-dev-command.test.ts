@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 
 import { HARNESS_ENTRY_URL_PATH, HARNESS_MOUNT_ELEMENT_ID } from "./vite-plugin.ts";
 
@@ -41,13 +41,19 @@ import { HARNESS_ENTRY_URL_PATH, HARNESS_MOUNT_ELEMENT_ID } from "./vite-plugin.
  * that the plugin ran *inside the real command* — not just that some server answered 200. A
  * process that started and served a directory listing would satisfy the weaker check.
  *
- * ## The orphan hazard, found by building this test
+ * ## Two ways this test can leak a server, both found by building it
  *
- * `child.kill()` is not enough, and getting that wrong is worse than not having the test: the
- * first draft of this file killed the direct child and left a **listening dev server** behind —
- * verified by fetching the port after the kill and getting 200 back. `vp` spawns Vite as a
- * separate process, so the test has to kill the whole tree. `killTree` below does that per
- * platform, and it runs in a `finally` so a failing assertion cannot leak a server either.
+ * **`child.kill()` is not enough.** The first draft killed the direct child and left a
+ * **listening dev server** behind — verified by fetching the port after the kill and getting 200
+ * back. `vp` spawns Vite as a separate process, so the tree has to be killed; `killTree` does
+ * that per platform.
+ *
+ * **A `finally` inside the test body is not enough either**, and this one came from review. When
+ * Vitest's own test timeout aborts the body, the `finally` does *not* run — measured with a probe
+ * of the same shape, which logged its spawn and then never logged `finally-entered`, leaving a
+ * real `vp dev` listening. So cleanup is registered with `onTestFinished`, which does run under
+ * an abort, and the test timeout is set above the operational deadline so the internal diagnostic
+ * wins the race and is not replaced by Vitest's generic message. `TEST_TIMEOUT_MS` documents why.
  *
  * ## `--port 0` and the "no flags" claim
  *
@@ -68,6 +74,28 @@ const exampleRoot = join(here, "..", "..", "..", "examples", "dev-harness");
 
 /** How long to wait for the server's banner before failing with its captured output. */
 const STARTUP_TIMEOUT_MS = 60_000;
+
+/**
+ * The Vitest test timeout, deliberately **longer** than `STARTUP_TIMEOUT_MS`.
+ *
+ * A review of this PR found these were equal, and the finding was right — but the consequence is
+ * worse than a race, so it is worth writing down exactly. With both at the same value, a true
+ * startup hang (a banner-format regression, a wedged `vp`) makes Vitest's own timeout fire *at*
+ * the internal deadline rather than after it, and that aborts the test body:
+ *
+ * - the internal diagnostic — `vp dev`'s captured output, which is where the `ERR_MODULE_NOT_FOUND`
+ *   this whole Issue is about would appear — is **discarded** in favour of Vitest's generic
+ *   "Test timed out in 60000ms";
+ * - the `finally { killTree(child) }` **never runs at all**. Measured, not reasoned: a probe test
+ *   with the same shape logged `spawned pid=…` and then no `finally-entered`, and left a real
+ *   `vp dev` **listening on its port** after the run. So the guard designed to prevent a leaked
+ *   server leaked one exactly when it mattered.
+ *
+ * The headroom below is what keeps the internal diagnostic and the cleanup in charge. It is not
+ * padding: the operational deadline is `STARTUP_TIMEOUT_MS`, and this only has to be long enough
+ * that the *inner* path always wins.
+ */
+const TEST_TIMEOUT_MS = STARTUP_TIMEOUT_MS + 15_000;
 
 /**
  * The project-local `vp` entry point.
@@ -165,6 +193,13 @@ describe("the `vp dev` command starts the harness with no config flag", () => {
         stdio: ["ignore", "pipe", "pipe"],
       });
 
+      // Registered *before* anything can fail, and in `onTestFinished` rather than only in a
+      // `finally`. That is not belt-and-braces: measured on this repository's Vitest, a `finally`
+      // inside the test body does **not** run when Vitest's own timeout aborts the test, so a
+      // hang would leak the server the guard exists to kill. `onTestFinished` does run, which is
+      // what makes the guarantee real rather than intended.
+      onTestFinished(() => killTree(child));
+
       let output = "";
       child.stdout.on("data", (chunk: Buffer) => (output += chunk.toString()));
       child.stderr.on("data", (chunk: Buffer) => (output += chunk.toString()));
@@ -175,30 +210,26 @@ describe("the `vp dev` command starts the harness with no config flag", () => {
           ? undefined
           : `\`vp dev\` exited with code ${child.exitCode} before serving.\nCaptured output:\n${output}`;
 
-      try {
-        const deadline = Date.now() + STARTUP_TIMEOUT_MS;
-        const url = await waitForAnnouncement(() => announcedUrl(output), deadline, childMissing);
-        const page = await waitForServing(`${url}/`, deadline, childMissing);
+      const deadline = Date.now() + STARTUP_TIMEOUT_MS;
+      const url = await waitForAnnouncement(() => announcedUrl(output), deadline, childMissing);
+      const page = await waitForServing(`${url}/`, deadline, childMissing);
 
-        expect(page.status).toBe(200);
+      expect(page.status).toBe(200);
 
-        const html = await page.text();
-        // The two things the harness plugin injects, so this is the plugin running inside the
-        // real command rather than merely a server answering.
-        expect(html).toContain(`id="${HARNESS_MOUNT_ELEMENT_ID}"`);
-        expect(html).toContain(HARNESS_ENTRY_URL_PATH);
+      const html = await page.text();
+      // The two things the harness plugin injects, so this is the plugin running inside the
+      // real command rather than merely a server answering.
+      expect(html).toContain(`id="${HARNESS_MOUNT_ELEMENT_ID}"`);
+      expect(html).toContain(HARNESS_ENTRY_URL_PATH);
 
-        // The entry module itself, which is the plugin's generated virtual module. Requested
-        // separately because it is served by the plugin's own `load` hook, and a 200 here is
-        // what proves the Cell seam — not just the HTML injection — is wired under `vp dev`.
-        const entry = await waitForServing(`${url}${HARNESS_ENTRY_URL_PATH}`, deadline, childMissing);
-        expect(entry.status).toBe(200);
-        expect(await entry.text()).toContain("mountCell");
-      } finally {
-        killTree(child);
-      }
+      // The entry module itself, which is the plugin's generated virtual module. Requested
+      // separately because it is served by the plugin's own `load` hook, and a 200 here is
+      // what proves the Cell seam — not just the HTML injection — is wired under `vp dev`.
+      const entry = await waitForServing(`${url}${HARNESS_ENTRY_URL_PATH}`, deadline, childMissing);
+      expect(entry.status).toBe(200);
+      expect(await entry.text()).toContain("mountCell");
     },
-    STARTUP_TIMEOUT_MS,
+    TEST_TIMEOUT_MS,
   );
 });
 
