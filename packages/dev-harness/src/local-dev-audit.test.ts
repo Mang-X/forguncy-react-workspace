@@ -16,6 +16,7 @@ import { createEmptyFgcLock, FGC_LOCK_SCHEMA_VERSION } from "@forguncy-react-wor
 import {
   auditHarnessConfiguration,
   blockingLocalDevFindings,
+  effectiveDecisionsForCell,
   BlockingLocalDevFindingError,
   formatHarnessAudit,
   readProjectDependencyDecisions,
@@ -221,6 +222,53 @@ describe("an `extension` dependency with no declared local choice is refused, no
         extensionChoices: [substitute, realRuntimeOnly],
       }),
     ).toThrow(/more than one local choice/);
+  });
+});
+
+describe("the lock is projected onto the mounted Cell before the audit sees it", () => {
+  /**
+   * The precedence rule is `findLockDecision`'s, not this module's, and the assertions are the same
+   * ones that function's own tests make — so a change to the rule cannot move one without the other.
+   */
+  it("prefers the cell-specific record and falls back to the target-independent one", () => {
+    // The cast is on the literal, not applied after a spread: a spread widens `strategy` to `string`
+    // and `tsc` refused the result, which is the type system saying a lock record's metadata is not
+    // something to assemble loosely.
+    const base = extensionDecision("es-toolkit");
+    const lock: readonly LockedDependencyDecision[] = [
+      { ...base, strategy: "inline", cellTarget: null, extension: null } as LockedDependencyDecision,
+      { ...base, strategy: "extension", cellTarget: "orders-table" } as LockedDependencyDecision,
+    ];
+
+    // The scoped record wins for its own Cell...
+    expect(effectiveDecisionsForCell(lock, "orders-table").map(d => d.strategy)).toEqual(["extension"]);
+    // ...and the target-independent one answers everywhere else.
+    expect(effectiveDecisionsForCell(lock, "customers-card").map(d => d.strategy)).toEqual(["inline"]);
+    // Including when the caller cannot name a Cell at all, which is what `null` means.
+    expect(effectiveDecisionsForCell(lock, null).map(d => d.strategy)).toEqual(["inline"]);
+  });
+
+  it("emits one record per package, never both of a package's records", () => {
+    const base = extensionDecision("es-toolkit");
+    const lock: readonly LockedDependencyDecision[] = [
+      { ...base, cellTarget: null } as LockedDependencyDecision,
+      { ...base, cellTarget: "orders-table" } as LockedDependencyDecision,
+    ];
+
+    // One effective decision per package, which is the property the audit depends on: it reads a
+    // flat list and has no way to tell two records for one package apart.
+    expect(effectiveDecisionsForCell(lock, "orders-table")).toHaveLength(1);
+    expect(effectiveDecisionsForCell(lock, "orders-table")[0]?.cellTarget).toBe("orders-table");
+  });
+
+  it("keeps packages whose only record is scoped elsewhere out of the projection", () => {
+    const lock: readonly LockedDependencyDecision[] = [
+      { ...extensionDecision("es-toolkit"), cellTarget: "another-cell" } as LockedDependencyDecision,
+    ];
+
+    // No fallback exists, so this Cell has no decision for that package — `findLockDecision`'s
+    // "missing" answer, which is a different state from "decided as something else".
+    expect(effectiveDecisionsForCell(lock, "probe")).toEqual([]);
   });
 });
 

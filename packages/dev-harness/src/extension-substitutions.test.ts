@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -157,9 +157,9 @@ function viteErrorReason(html: string): string {
  * accepts is one whose Cells are `CellConfig`s, and a test that hands it something looser would be
  * asserting against a shape no real project has.
  */
-function configFor(): ForguncyConfig {
+function configFor(cellId = "probe"): ForguncyConfig {
   return {
-    cells: { probe: { entry: "./cells/probe/src/App.tsx", target: { pageName: "探针", cell: "A1" } } },
+    cells: { [cellId]: { entry: "./cells/probe/src/App.tsx", target: { pageName: "探针", cell: "A1" } } },
     runtime: { dependencyLockPath: "./fgc.lock.json" },
   };
 }
@@ -255,6 +255,158 @@ async function loadedForSubstitutedImport(root: string, choices: readonly unknow
     await server.close();
   }
 }
+
+/**
+ * A lock with a target-independent record plus one scoped to `cellTarget`.
+ *
+ * Both records are built from one base so every field the validator requires is present on both —
+ * the first version spread a partial over a bare literal, which `core` refused six times over
+ * (`packageName`, `resolvedVersion`, `rationale`, `probe`, `target`, `probedWith`). The overrides are
+ * applied *after* the base, so a caller changes only the fields the case is about.
+ */
+function writeLockWithCellScopedDecision(
+  root: string,
+  cellTarget: string,
+  overrides: Record<string, unknown>,
+): void {
+  const base = {
+    packageName: "@tanstack/react-query",
+    resolvedVersion: "5.102.8",
+    probe: { status: "passed", fingerprint: "probe=x", versionIndependent: false },
+    target: {
+      product: "Forguncy",
+      productVersion: "12.0.100.0",
+      productBuild: "b",
+      hostReactVersion: "19.2.7",
+    },
+    probedWith: { vitePlus: "0.3.2" },
+    rejectedCandidate: null,
+    rationale: "fixture",
+    evidence: [{ kind: "runtime-observation", reference: "https://example.invalid/r.md" }],
+  };
+
+  writeFileSync(
+    join(root, "fgc.lock.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      decisions: [
+        {
+          ...base,
+          cellTarget: null,
+          strategy: "extension",
+          globalName: "TanStackQuery",
+          libraryId: "tanstack-query",
+          extension: { version: "5.102.8", identity: "sha256:aa" },
+        },
+        { ...base, cellTarget, ...overrides },
+      ],
+    }),
+    "utf8",
+  );
+}
+
+/**
+ * Whether the harness answered the Cell's extension import, and what it answered with.
+ *
+ * The projection tests below want the *absence* of a substitution to be a result rather than an
+ * exception, because "the ordinary module path won" manifests as Vite failing to resolve a package
+ * the fixture never installed. Wrapping the helper keeps that as an assertion about the substitute
+ * instead of a test that passes because something threw.
+ */
+async function substitutionOutcome(
+  root: string,
+  choices: readonly unknown[],
+): Promise<{ readonly substituted: string | undefined; readonly error: string | undefined }> {
+  try {
+    const { exportedFrom } = await loadedForSubstitutedImport(root, choices);
+    return { substituted: exportedFrom, error: undefined };
+  } catch (error) {
+    return { substituted: undefined, error: (error as Error).message };
+  }
+}
+
+describe("a cell-scoped decision governs the mounted Cell, not another Cell's record", () => {
+  /**
+   * The reviewer's case, and the reason the projection exists: the lock is keyed by
+   * `(packageName, cellTarget)` because #4 defines a strategy per pair. Handing the audit the raw
+   * lock let the target-independent `extension` record govern a Cell that had decided `inline`, so
+   * the harness substituted or threw where the compiler inlined.
+   */
+  it("does not require a choice when the mounted Cell's own record is `inline`", async () => {
+    const { root } = projectWithShim();
+
+    writeLockWithCellScopedDecision(root, "probe", {
+      strategy: "inline",
+      // An `inline` record carries `extension: null`; the validator refuses one with a library.
+      extension: null,
+    });
+
+    // No `extensionChoices` supplied, which is the assertion: with the unprojected lock the audit
+    // saw the target-independent `extension` record and reported
+    // `local-dev-extension-needs-substitute`, which is **blocking** — so the server was refused
+    // before any module was served, and this call would fail with the refusal rather than a
+    // resolution error.
+    const { substituted, error } = await substitutionOutcome(root, []);
+
+    // Nothing was substituted — the mounted Cell's `inline` decision means the ordinary module path
+    // answers the id, exactly as the compiler would.
+    expect(substituted).toBeUndefined();
+    // And the failure is Vite's own "cannot resolve", not the audit's refusal. That distinction is
+    // the whole test: with the raw lock the server never started, so this error would read
+    // "refused to start". Asserting only `substituted === undefined` would pass for both.
+    expect(error).toContain('Failed to resolve import "@tanstack/react-query"');
+    expect(error).not.toContain("refused to start");
+  }, 120_000);
+
+  it("still refuses when the mounted Cell's own record is `extension`", async () => {
+    const { root } = projectWithShim();
+
+    // The control, and it is what keeps the test above from passing for the wrong reason. Same
+    // lock shape, but the cell-specific record *is* `extension` — so the projection must keep it,
+    // and the blocking finding must still fire.
+    writeLockWithCellScopedDecision(root, "probe", {
+      strategy: "extension",
+      globalName: "TanStackQuery",
+      libraryId: "tanstack-query",
+      extension: { version: "5.102.8", identity: "sha256:aa" },
+    });
+
+    await expect(loadedForSubstitutedImport(root, [])).rejects.toThrow(
+      /local-dev-extension-needs-substitute/,
+    );
+  }, 120_000);
+
+  it("ignores a record scoped to a different Cell", async () => {
+    const { root } = projectWithShim();
+
+    // `extension` scoped to a Cell this server does not mount, and the target-independent record set
+    // to `inline` so the fallback is unambiguous. The mounted Cell resolves to `inline`, so no choice
+    // is required — the other Cell's record is not this Cell's business.
+    //
+    // The helper builds this shape: it writes the base record as `extension` with `cellTarget: null`,
+    // which the *second* call below overrides. Both records are needed in one file, so the lock is
+    // rewritten here rather than composed from two helper calls.
+    writeLockWithCellScopedDecision(root, "another-cell", {
+      strategy: "extension",
+      globalName: "TanStackQuery",
+      libraryId: "tanstack-query",
+      extension: { version: "5.102.8", identity: "sha256:aa" },
+    });
+    // Now replace the target-independent record with `inline`, keeping the other Cell's scoped one.
+    const lock = JSON.parse(readFileSync(join(root, "fgc.lock.json"), "utf8")) as {
+      decisions: Record<string, unknown>[];
+    };
+    lock.decisions[0] = { ...lock.decisions[0], strategy: "inline", extension: null };
+    writeFileSync(join(root, "fgc.lock.json"), JSON.stringify(lock), "utf8");
+
+    const { substituted, error } = await substitutionOutcome(root, []);
+
+    expect(substituted).toBeUndefined();
+    // The ordinary path, not the audit's refusal — see the test above for why both are asserted.
+    expect(error).toContain('Failed to resolve import "@tanstack/react-query"');
+    expect(error).not.toContain("refused to start");
+  }, 120_000);
+});
 
 describe("a stale choice is reported but never applied", () => {
   it("lets the ordinary module path win when the lock no longer says `extension`", async () => {

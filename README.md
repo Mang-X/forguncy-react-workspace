@@ -110,6 +110,8 @@ devHarness({
 
 已过期（stale）的声明会被**报告但绝不生效**。典型情形是依赖已经从 `extension` 改成 `inline`，而旧的 choice 还留在配置里 —— 契约会把这条 choice 报成 `local-dev-extension-choice-unmatched`（non-blocking，原文说它 "is used for nothing"）。如果本地仍然按它替换，dev server 会 serve 替代品、而编译器跟随 lock 打包真实包 —— 这正是这层要防的 dev/compiler 漂移。所以「哪些 choice 生效」直接取自审计的结论，不另写一份匹配规则。
 
+lock 里的决策是**按挂载的那个 Cell 投影过**的。这很重要，因为 #4 把策略定义为 per `(包, cellTarget)` 的组合 —— 契约原话说同一个包"可以在一个 Cell 里是 `inline`、在另一个被映射为 `host`"。审计只看 `packageName` + `strategy`，所以直接把整份 lock 交给它，会让**另一个 Cell 的决策**决定这个 Cell：一个已把某依赖定为 `inline` 的 Cell，仍会因为另一条 target-independent 的 `extension` 记录而被替换或拒绝启动，而编译器是 inline 的。投影复用 `findLockDecision` 的优先规则（先 cell 专属、再回落 `cellTarget: null`），不另写一份。
+
 `vp dev` 启动时还会审计一遍：**没有声明**的 `extension` 依赖会直接**拒绝启动**（`local-dev-extension-needs-substitute`，契约里 `blocksLocalDevelopment: true`），并把修复方式和 fix owner 一起打出来；声明了 `real-runtime-only` 的则照常启动，但在报告里逐条列出该依赖在本地**完全没有被走到**。这条规则来自 `runtime` 的契约表，而不是 harness 自己的一份清单。
 
 ### 它不是什么

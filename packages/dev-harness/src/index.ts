@@ -112,6 +112,7 @@ export {
   auditHarnessConfiguration,
   blockingLocalDevFindings,
   BlockingLocalDevFindingError,
+  effectiveDecisionsForCell,
   formatHarnessAudit,
   readProjectDependencyDecisions,
 } from "./local-dev-audit.ts";

@@ -79,6 +79,7 @@ import {
   auditHarnessConfiguration,
   blockingLocalDevFindings,
   BlockingLocalDevFindingError,
+  effectiveDecisionsForCell,
   formatHarnessAudit,
   readProjectDependencyDecisions,
   unmatchedExtensionChoicePackages,
@@ -736,7 +737,21 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
         return;
       }
 
-      const decisions = await readProjectDependencyDecisions(registry.runtime.dependencyLockPathAbsolute);
+      // The lock, projected onto the Cell this server mounts, and the projection is not optional.
+      //
+      // A lock decision is keyed by `(packageName, cellTarget)`, because #4 defines a strategy per
+      // *pair* — the same package may be `inline` in one Cell and `extension` in another. The audit
+      // has no `cellTarget` parameter, so handing it the whole lock lets another Cell's record decide
+      // this one: a mounted Cell with an `inline` override would still be substituted or refused
+      // because of a target-independent `extension` record, while the compiler inlines. Review found
+      // it, and it is the same dev/compiler drift as the stale-choice defect, reached from the other
+      // side — that one applied a decision the lock no longer had, this one applies a decision the
+      // mounted Cell does not have.
+      //
+      // `mounted` is assigned in `configResolved`, which Vite runs before this hook — measured, not
+      // assumed, and `local-dev-audit-server.test.ts` exercises the ordering by mounting a Cell.
+      const lock = await readProjectDependencyDecisions(registry.runtime.dependencyLockPathAbsolute);
+      const decisions = effectiveDecisionsForCell(lock, mounted?.id ?? null);
       const audit = auditHarnessConfiguration({
         decisions,
         extensionChoices: options.extensionChoices ?? [],

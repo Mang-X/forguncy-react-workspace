@@ -72,7 +72,8 @@ import {
   FGC_LOCK_FILE_NAME,
   parseMigratedFgcLockDocument,
 } from "@forguncy-react-workspace/core";
-import type { DependencyDecision } from "@forguncy-react-workspace/core";
+import { findLockDecision } from "@forguncy-react-workspace/core";
+import type { DependencyDecision, LockedDependencyDecision } from "@forguncy-react-workspace/core";
 import {
   assertLocalDevExtensionChoicesAreDeclared,
   auditLocalDevConfiguration,
@@ -102,6 +103,61 @@ export class BlockingLocalDevFindingError extends Error {
 }
 
 /**
+ * The project's lock decisions, projected onto the Cell this server mounts.
+ *
+ * ## Why the whole lock is not the right input, which review found
+ *
+ * The lock is keyed by `(packageName, cellTarget)`, because #4 defines a strategy as a decision per
+ * *pair*: `LockRecordMetadata.cellTarget`'s own docstring says "the same package can legitimately be
+ * `inline` in one cell and `host`-mapped in another". `findLockDecision` resolves one effective
+ * record — the cell-specific one if it exists, else the `cellTarget: null` fallback — and
+ * `compilationDependencies` compiles through exactly that.
+ *
+ * `auditLocalDevConfiguration` has no `cellTarget` parameter: it reads `packageName` and `strategy`
+ * only. So handing it the raw lock makes a decision belonging to *another* Cell able to decide this
+ * one — for the mounted Cell that is worse than it sounds, because the two consequences are
+ * opposite. A target-independent `extension` record can win here while the mounted Cell has a
+ * specific `inline` override, so the harness substitutes or throws where the compiler inlines; or
+ * an `extension` record for another Cell can make the harness demand a choice for a package this
+ * Cell never treats as `extension`. Both are the dev/compiler drift this layer exists to prevent.
+ *
+ * ## What this does, and what it deliberately does not
+ *
+ * It reduces the lock to one effective record per package for `cellTarget`, using `findLockDecision`
+ * itself rather than a second implementation of the precedence rule — "cell-specific, then the
+ * target-independent fallback" is exactly the kind of rule this repository refuses to keep two
+ * copies of. The result is a decision list the audit can read the way the compiler reads one.
+ *
+ * It does **not** carry the freshness/evidence gate `compilationDependencies` applies, and the
+ * difference is on purpose: that gate decides whether a record may shape a *shipped artifact*, with
+ * `real-runtime` validation as one of its conditions. This asks a weaker question — what does the
+ * project itself say this Cell's dependencies are — and the audit's job is to report a project's
+ * configuration, not to withhold decisions it has recorded. A package the gate would withhold is
+ * still a package this Cell treats as `extension`, and a local loop that ignored its choice would
+ * substitute against the compiler's answer.
+ *
+ * A record whose `packageName` no longer resolves, or whose `cellTarget` matches nothing, simply
+ * contributes no effective record — the same "missing" answer `resolveLockDecision` gives.
+ */
+export function effectiveDecisionsForCell(
+  decisions: readonly LockedDependencyDecision[],
+  cellTarget: string | null,
+): readonly LockedDependencyDecision[] {
+  const lock = { decisions };
+  const packageNames = [...new Set(decisions.map(decision => decision.packageName))];
+  const effective: LockedDependencyDecision[] = [];
+
+  for (const packageName of packageNames) {
+    const record = findLockDecision(lock, { packageName, cellTarget });
+    if (record !== null) {
+      effective.push(record);
+    }
+  }
+
+  return effective;
+}
+
+/**
  * The dependency decisions the project's lock records.
  *
  * `readFgcLock`'s behaviour reproduced without `dependency-resolver`'s barrel — see the module
@@ -120,7 +176,7 @@ export class BlockingLocalDevFindingError extends Error {
  */
 export async function readProjectDependencyDecisions(
   lockPathAbsolute: string,
-): Promise<readonly DependencyDecision[]> {
+): Promise<readonly LockedDependencyDecision[]> {
   let text: string;
   try {
     text = await readFile(lockPathAbsolute, "utf8");
@@ -142,7 +198,16 @@ export async function readProjectDependencyDecisions(
 
 /** The two inputs the audit needs, both of them the project's own declarations. */
 export interface HarnessAuditInput {
-  /** The decisions the project's lock records, as {@link readProjectDependencyDecisions} answers. */
+  /**
+   * The project's decisions **projected onto the mounted Cell**, as
+   * {@link effectiveDecisionsForCell} answers.
+   *
+   * Not the raw lock: see that function's docstring for why handing the audit an unprojected list
+   * lets another Cell's decision govern this one. `DependencyDecision` rather than
+   * `LockedDependencyDecision`, because the projection's output is what a compiler consumes and the
+   * audit reads only `packageName` and `strategy` — the record metadata is deliberately not part of
+   * this contract.
+   */
   readonly decisions: readonly DependencyDecision[];
   /**
    * What the project decided about each of its `extension` dependencies.
