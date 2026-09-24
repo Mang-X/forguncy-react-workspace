@@ -1,0 +1,26 @@
+interface:
+  display_name: "活字格 React 依赖选型"
+  short_description: "为 Cell 选择依赖并记录有证据的 host/inline/extension/replace 决策。"
+  default_prompt: "Use $forguncy-react-dependency-selection to decide which library fills a Cell capability, probe it, choose host/inline/extension/replace, and record the decision in fgc.lock.json."
+compatibility:
+  canonical_format: "agent-skills"
+  adapter_targets:
+    - "openai"
+    - "claude"
+    - "generic"
+    - "vscode"
+  activation:
+    mode: "manual"
+    paths: []
+  execution:
+    context: "inline"
+    shell: "bash"
+  trust:
+    source_tier: "local"
+    remote_inline_execution: "forbid"
+    remote_metadata_policy: "allow-metadata-only"
+  degradation:
+    openai: "metadata-adapter"
+    claude: "neutral-source-plus-adapter"
+    generic: "neutral-source"
+    vscode: "agent-skills-source-with-vscode-notes"

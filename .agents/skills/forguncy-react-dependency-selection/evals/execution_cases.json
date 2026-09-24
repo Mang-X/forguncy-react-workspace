@@ -1,0 +1,128 @@
+{
+  "version": "1.0.0",
+  "capability": "为一个 Cell 需要的能力做依赖选型并记录决策",
+  "how_to_use": "这些是 Agent 侧（语义推理）的评测用例。可执行的那一半在 selection-cases.test.ts 里并由 CI 运行；本文件记录无法由测试执行的那一半——候选研究、排队、权衡与最终策略选择。审查时对照 actual 与 expected。",
+  "repeatable_commands": {
+    "policy": "node .agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs policy",
+    "probe": "node .agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs probe --project examples/probe-proving-cases <package>",
+    "audit": "node .agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs audit --decision <file>",
+    "record": "node .agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs record --project <root> --decision <file>",
+    "status": "node .agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs status --project <root>"
+  },
+  "cases": [
+    {
+      "id": "utility-function",
+      "request": "Cell 里要格式化数字和日期，帮我选个工具库。",
+      "capability": "cell-local utility",
+      "expected": {
+        "ownership": "React island (cell-local-ui)；不构成平台冲突",
+        "branch": "react-island-owned",
+        "candidates": "≥2 个 browser-first ESM 工具库（如 es-toolkit、lodash-es）",
+        "probe": "对候选跑 probe；期望 assessment supports-deployment，risks 空或仅资源类",
+        "strategy": "inline",
+        "rationale_required": false,
+        "record": "写入 fgc.lock.json，profile resolved-dependency，probe.status passed",
+        "forbidden": "不引入 adapter；不为该包在代码里加特例分支"
+      },
+      "executed_by": "selection-cases.test.ts 用例 1"
+    },
+    {
+      "id": "pdf-viewer",
+      "request": "Cell 里要预览 PDF，用什么库？",
+      "capability": "cell-local UI，运行期资源风险",
+      "expected": {
+        "ownership": "React island (cell-local-ui)",
+        "branch": "react-island-owned",
+        "candidates": "比较高层的现代方案（EmbedPDF 一类）与低层 pdfjs-dist，而不是默认后者",
+        "probe": "两类候选都实跑；预期出现 wasm / import-meta-url-asset / worker 风险，但 rejectionFindings 为空",
+        "strategy": "在权衡 WASM/Worker/资源成本后选部署路径最简单且已验证者；风险高但可内嵌时仍可为 inline，风险不可内嵌时 replace",
+        "forbidden": [
+          "仅因 pdfjs-dist 知名就选它",
+          "把 wasm 风险直接当成 reject，未经实测",
+          "只凭 README 宣称兼容"
+        ]
+      },
+      "executed_by": "selection-cases.test.ts 用例 2（风险测量与呈现部分）"
+    },
+    {
+      "id": "app-navigation",
+      "request": "Cell 里想用 React Router 做页面跳转。",
+      "capability": "application navigation",
+      "expected": {
+        "ownership": "Forguncy 所有；application-router-conflict",
+        "branch": "forguncy-owned",
+        "candidates": "无。不研究、不排队、不 probe",
+        "strategy": "replace，rejection 用归属评估自带的架构拒绝，alternatives 为空",
+        "probe": "不欠 probe（probeRequirement none）；probe.status 为 not-run",
+        "record": "resolvedVersion null、target null，evidence 需 cite #4",
+        "resolution": "改用宿主页面导航"
+      },
+      "executed_by": "selection-cases.test.ts 用例 3"
+    },
+    {
+      "id": "three-d-viewer",
+      "request": "Cell 里要一个 3D 查看器，Three.js 那种。",
+      "capability": "cell-local UI，Worker/WASM/Canvas 生命周期风险",
+      "expected": {
+        "ownership": "React island (cell-local-ui)",
+        "branch": "react-island-owned",
+        "candidates": "比较 three + @react-three/fiber 等高层面（避免低层库把资源编排负担留给使用者）",
+        "probe": "预期出现 worker / wasm / import-meta-url-asset 等风险项，作为需权衡的 finding 而非自动拒绝",
+        "runtime_only": "WebGL/Canvas 生命周期、portal 到 document.body、全局单例假设只能由 runtime-smoke 观测；本地静态 probe 必须留 skipped 并说明原因，不得给出判词",
+        "strategy": "据实测资源可内嵌程度决定 inline 或 replace；WebGL 类真机验证不可省"
+      },
+      "executed_by": "selection-cases.test.ts 用例 4"
+    },
+    {
+      "id": "cross-cell-cache",
+      "request": "多个 Cell 想共享同一个 QueryClient 和缓存。",
+      "capability": "cross-cell shared module identity",
+      "expected": {
+        "ownership": "React island：cell-local-data-access 合法；但作为业务数据事实源取代已有 Forguncy DataSource 则冲突",
+        "branch": "react-island-owned",
+        "candidates": "@tanstack/react-query 等",
+        "strategy": "extension——bundled 副本会让每个 Cell 各持一份 QueryClient 与缓存，跨 Cell 单例需要扩展发布的页面全局",
+        "rationale_required": true,
+        "record": "extension 记录需 libraryId + globalName + extension 版本/身份；cite 已验证扩展",
+        "handoff": "若没有已验证的扩展可用，移交 forguncy-frontend-library 打包新扩展，而不是在本仓库重写打包逻辑"
+      },
+      "executed_by": "selection-cases.test.ts 用例 5（含 #13 已验证记录的 fresh 读回）"
+    },
+    {
+      "id": "node-only-library",
+      "request": "这个库依赖 node:fs，Cell 里能用吗？",
+      "capability": "需要 Node 运行时 API 的库",
+      "expected": {
+        "ownership": "不是归属冲突——是技术冲突；两者不可混报",
+        "branch": "react-island-owned",
+        "candidates": "必须给出已评估的浏览器端替代项（technical replace 要求至少一个）",
+        "probe": "node-builtin-scan 期望报 node-filesystem-process-or-native-addon；assessment 为 supports-rejection-only",
+        "strategy": "replace + kind: technical + code platform-api-unavailable",
+        "rationale_required": true,
+        "record": "resolvedVersion null、rejectedCandidate.version 记被拒版本",
+        "forbidden": "先尝试打包再发现不行；或写永久 adapter"
+      },
+      "executed_by": "selection-cases.test.ts 用例 6（含理由与观测不一致时被拒）"
+    },
+    {
+      "id": "role-mismatch-is-not-a-conflict",
+      "request": "Cell 的局部 UI 想用 zustand。",
+      "capability": "cell-local state",
+      "expected": {
+        "ownership": "allowed——zustand 的 allowedCellLocalRoles 含 cell-local-state / cell-local-ui",
+        "strategy": "走正常策略评估（通常 inline）",
+        "forbidden": "把它报成 application-state-conflict；同一个包用在哪决定是否冲突"
+      }
+    },
+    {
+      "id": "repair-vs-replace",
+      "request": "候选有点别扭，写个适配层还是换一个？",
+      "capability": "任何",
+      "expected": {
+        "default": "优先 replace，而不是立刻写包适配器",
+        "repair_allowed_when": "能力仍有价值 且 替代方案明显更差 且 修复可被验证——三者同时成立",
+        "forbidden": "往按包名的全局 adapter 注册表里加条目"
+      }
+    }
+  ]
+}
