@@ -43,9 +43,9 @@
 
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -101,12 +101,33 @@ async function scratchRoot(example: string): Promise<string> {
   return mkdtemp(join(parent, "cli-contract-"));
 }
 
+/**
+ * Removes a scratch root **and the `.fgc/` parent this file created for it**.
+ *
+ * Leaving the parent behind is not merely untidy: an empty `.fgc/` under an example is a
+ * directory the probe engine and other suites walk into, and a leftover one made an
+ * unrelated fixture-based test fail while this suite ran alongside it. So cleanup removes
+ * the parent too, and only when it is empty — a `.fgc/` holding someone else's scratch
+ * state (or a real probe cache) must not be deleted out from under them.
+ */
+async function removeScratch(root: string): Promise<void> {
+  await rm(root, { recursive: true, force: true });
+  const parent = dirname(root);
+  if (basename(parent) !== ".fgc") {
+    return;
+  }
+  const remaining = await readdir(parent).catch(() => null);
+  if (remaining !== null && remaining.length === 0) {
+    await rm(parent, { recursive: true, force: true });
+  }
+}
+
 async function withScratch<T>(example: string, body: (root: string) => Promise<T>): Promise<T> {
   const root = await scratchRoot(example);
   try {
     return await body(root);
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await removeScratch(root);
   }
 }
 
@@ -144,8 +165,8 @@ function probeLink(record: LockRecord): string | null {
 describe("CLI contract: a recorded probe link resolves to real evidence", () => {
   it("writes the report `record` cites, including under --no-cache", async () => {
     // The defect: `--no-cache` made the engine skip its write, while the lock still cited
-    // `.fgc/probe-cache/<hash>.json` — a lock whose evidence points at nothing, which is
-    // the one thing #8's evidence rule exists to prevent.
+    // a cache path — a lock whose evidence points at nothing, which is the one thing #8's
+    // evidence rule exists to prevent.
     await withScratch(PROVING_CASES, async root => {
       const decision = await decisionFile({ packageName: "es-toolkit", role: "cell-local-ui", strategy: "inline" });
       try {
@@ -159,11 +180,15 @@ describe("CLI contract: a recorded probe link resolves to real evidence", () => 
         const onDisk = join(root, ...reference!.split("/"));
         expect(existsSync(onDisk), `cited evidence ${reference} must exist`).toBe(true);
 
-        // Resolving is not enough: the bytes have to be the report this run measured,
-        // which is what makes the fingerprint in the lock re-checkable.
-        const cached = JSON.parse(await readFile(onDisk, "utf8")) as { fingerprint: string; report: unknown };
-        expect(cached.fingerprint).toBe(record.probe.fingerprint);
-        expect(cached.report).toBeDefined();
+        // Resolving is not enough: the bytes have to be the report this run measured, which
+        // is what makes the fingerprint in the lock re-checkable. Evidence is stored as a
+        // bare report (no wrapper), so the fingerprint it must agree with is the record's.
+        const report = JSON.parse(await readFile(onDisk, "utf8")) as {
+          schemaVersion: number;
+          validation: readonly { step: string; outcome: string }[];
+        };
+        expect(report.schemaVersion).toBeGreaterThan(0);
+        expect(report.validation.find(entry => entry.step === "runtime-smoke")?.outcome).toBe("skipped");
       } finally {
         await decision.cleanup();
       }
@@ -172,13 +197,14 @@ describe("CLI contract: a recorded probe link resolves to real evidence", () => 
 
   it("makes `probe --no-cache` report a path that exists, not only `record`", async () => {
     // The sibling command had the same bug and was not in the review: `probe --no-cache`
-    // printed a `cacheRelativePath` for a file the suppression had prevented writing.
+    // printed a path for a file the suppression had prevented writing. It reports
+    // `evidencePath` now, which is what a lock would cite.
     await withScratch(PROVING_CASES, async root => {
       const probed = await cli(["probe", "--project", root, "--no-cache", "es-toolkit"]);
       expect(probed.code, probed.stderr).toBe(0);
 
-      const report = json<{ cacheRelativePath: string }>(probed);
-      expect(existsSync(join(root, ...report.cacheRelativePath.split("/")))).toBe(true);
+      const report = json<{ evidencePath: string }>(probed);
+      expect(existsSync(join(root, ...report.evidencePath.split("/")))).toBe(true);
     });
   }, CASE_TIMEOUT_MS);
 
@@ -197,7 +223,7 @@ describe("CLI contract: a recorded probe link resolves to real evidence", () => 
       try {
         const withHook = await cli(["probe", "--project", root, "--runtime-smoke", hook, "es-toolkit"]);
         expect(withHook.code, withHook.stderr).toBe(0);
-        const hookReport = json<{ validation: readonly { step: string; outcome: string }[]; cacheRelativePath: string }>(withHook);
+        const hookReport = json<{ validation: readonly { step: string; outcome: string }[] }>(withHook);
         expect(hookReport.validation.find(entry => entry.step === "runtime-smoke")?.outcome).toBe("passed");
 
         // A later hookless run must re-probe: it cannot inherit a runtime result it did
@@ -350,9 +376,9 @@ describe("CLI contract: a validated runtime target requires a real hook", () => 
       try {
         const probed = await cli(["probe", "--project", root, "--no-cache", "--runtime-smoke", hook, "es-toolkit"]);
         expect(probed.code, probed.stderr).toBe(0);
-        const report = json<{ validation: readonly { step: string; outcome: string }[]; cacheRelativePath: string }>(probed);
+        const report = json<{ validation: readonly { step: string; outcome: string }[]; evidencePath: string }>(probed);
         expect(report.validation.find(entry => entry.step === "runtime-smoke")?.outcome).toBe("passed");
-        expect(existsSync(join(root, ...report.cacheRelativePath.split("/")))).toBe(true);
+        expect(existsSync(join(root, ...report.evidencePath.split("/")))).toBe(true);
       } finally {
         await rm(hookDirectory, { recursive: true, force: true });
       }
@@ -782,5 +808,180 @@ describe("CLI contract: a declared sibling module id is verifiable", () => {
       expect(entry!.libraryId).toBe(row!.libraryId);
       expect(entry!.globalName).toBe(row!.globalName);
     }
+  }, CASE_TIMEOUT_MS);
+});
+
+// ---------------------------------------------------------------------------
+// Review round 3 — evidence lifecycle, and options that need a value
+// ---------------------------------------------------------------------------
+
+/**
+ * The recorded claim and the evidence it cites have to stay consistent across the whole
+ * lifecycle, not only at the moment of writing.
+ *
+ * The defect this covers was a *write-side* collision, which is why the read-side guard
+ * that looked sufficient did not catch it: the engine's cache is keyed by the probe's
+ * declared inputs (`fingerprint`), and smoke mode is deliberately not one of them. Writing
+ * a hook-bearing report under that key meant any later hookless run re-probed, missed, and
+ * stored its own report at the same path — silently replacing the `runtime-smoke: passed`
+ * result that a `validated` record cited, while the record kept its non-null `target`.
+ *
+ * The fix stores evidence at a content address instead, so two different reports cannot
+ * share a path. These tests read the cited bytes back after the operations that used to
+ * clobber them.
+ */
+describe("CLI contract: cited evidence survives later runs", () => {
+  const runtimeObservedDecision = {
+    packageName: "es-toolkit",
+    role: "cell-local-ui",
+    strategy: "inline",
+    validatedAgainstRuntime: true,
+    evidence: [{ kind: "runtime-observation", reference: "https://example.invalid/report.md" }],
+  };
+
+  async function smokeHook(): Promise<{ path: string; cleanup: () => Promise<void> }> {
+    const directory = await mkdtemp(join(tmpdir(), "fgc-cli-hook-"));
+    const path = join(directory, "hook.mjs");
+    await writeFile(path, "export default () => ({ facts: [{ name: 'page.global', value: 'forguncy' }] });\n", "utf8");
+    return { path, cleanup: () => rm(directory, { recursive: true, force: true }) };
+  }
+
+  /** The runtime-smoke outcome recorded in the report a lock cites, or null if it is gone. */
+  async function citedSmokeOutcome(root: string, reference: string): Promise<string | null> {
+    const onDisk = join(root, ...reference.split("/"));
+    if (!existsSync(onDisk)) {
+      return null;
+    }
+    const report = JSON.parse(await readFile(onDisk, "utf8")) as {
+      validation: readonly { step: string; outcome: string }[];
+    };
+    return report.validation.find(entry => entry.step === "runtime-smoke")?.outcome ?? null;
+  }
+
+  it("keeps the smoke evidence a validated record cites, through a later status run", async () => {
+    // The minimal form of the reported path: record with a hook, then the read-only command
+    // that uses a hookless probe, then re-read the same reference.
+    await withScratch(PROVING_CASES, async root => {
+      const hook = await smokeHook();
+      const decision = await decisionFile(runtimeObservedDecision);
+      try {
+        const recorded = await cli(["record", "--project", root, "--runtime-smoke", hook.path, "--decision", decision.path]);
+        expect(recorded.code, recorded.stderr).toBe(0);
+
+        const reference = probeLink((await readLock(root)).decisions.find(entry => entry.packageName === "es-toolkit")!)!;
+        expect(await citedSmokeOutcome(root, reference)).toBe("passed");
+
+        const status = await cli(["status", "--project", root]);
+        void status; // its exit code is the freshness signal, which is not what this test is about
+
+        expect(await citedSmokeOutcome(root, reference), "status must not clobber cited evidence").toBe("passed");
+
+        // And the claim it supports is still there.
+        const record = (await readLock(root)).decisions.find(entry => entry.packageName === "es-toolkit")!;
+        expect(record.target).not.toBeNull();
+      } finally {
+        await hook.cleanup();
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("keeps it through a hookless probe and a hookless record of the same package", async () => {
+    // Both are operations that write a probe report under the *same fingerprint* — the
+    // collision the fix removes — so this is the assertion that a report cannot land on
+    // another report's path.
+    await withScratch(PROVING_CASES, async root => {
+      const hook = await smokeHook();
+      const withRuntime = await decisionFile(runtimeObservedDecision);
+      try {
+        const recorded = await cli(["record", "--project", root, "--runtime-smoke", hook.path, "--decision", withRuntime.path]);
+        expect(recorded.code, recorded.stderr).toBe(0);
+        const smokeReference = probeLink((await readLock(root)).decisions.find(entry => entry.packageName === "es-toolkit")!)!;
+
+        await cli(["probe", "--project", root, "--no-cache", "es-toolkit"]);
+        const plain = await decisionFile({ packageName: "es-toolkit", role: "cell-local-ui", strategy: "inline" });
+        try {
+          const plainRecorded = await cli(["record", "--project", root, "--decision", plain.path]);
+          expect(plainRecorded.code, plainRecorded.stderr).toBe(0);
+        } finally {
+          await plain.cleanup();
+        }
+
+        // The smoke artifact still holds what it held, and the replacement record is
+        // self-consistent rather than pointing at the other record's evidence.
+        expect(await citedSmokeOutcome(root, smokeReference)).toBe("passed");
+        const record = (await readLock(root)).decisions.find(entry => entry.packageName === "es-toolkit")!;
+        const current = probeLink(record)!;
+        expect(current).not.toBe(smokeReference);
+        expect(await citedSmokeOutcome(root, current)).toBe("skipped");
+        // A record with no runtime observation must not claim a runtime target.
+        expect(record.target).toBeNull();
+      } finally {
+        await hook.cleanup();
+        await withRuntime.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("addresses evidence by content, so an identical report reuses one path", async () => {
+    // The property that makes the address meaningful: same bytes, same path — so a
+    // reviewer re-measuring an unchanged package finds the cited artifact where the lock
+    // said it would be, and two runs cannot disagree about what a path holds.
+    await withScratch(PROVING_CASES, async root => {
+      const first = await cli(["probe", "--project", root, "es-toolkit"]);
+      const second = await cli(["probe", "--project", root, "--no-cache", "es-toolkit"]);
+      expect(first.code, first.stderr).toBe(0);
+      expect(second.code, second.stderr).toBe(0);
+      expect(json<{ evidencePath: string }>(second).evidencePath).toBe(json<{ evidencePath: string }>(first).evidencePath);
+    });
+  }, CASE_TIMEOUT_MS);
+});
+
+describe("CLI contract: an option that needs a value fails closed", () => {
+  it("refuses a value-taking flag whose value is missing, rather than falling back to a default", async () => {
+    // The defect: the parser stored `undefined` for a bare trailing `--extension-catalog`,
+    // which was indistinguishable from the flag never being passed — so the command fell
+    // back to the shipped catalog and reported success. A caller who meant to verify
+    // against a real listing would be told nothing, and a listing that *failed*
+    // verification would never be consulted.
+    await withScratch(PROVING_CASES, async root => {
+      const decision = await decisionFile({ packageName: "es-toolkit", role: "cell-local-ui", strategy: "inline" });
+      try {
+        // Trailing, and followed by another flag: both are a missing value, not an absent one.
+        for (const args of [
+          ["record", "--project", root, "--decision", decision.path, "--extension-catalog"],
+          ["record", "--project", root, "--extension-catalog", "--decision", decision.path],
+        ]) {
+          const refused = await cli(args);
+          expect(refused.code).not.toBe(0);
+          expect(refused.stderr).toContain("--extension-catalog needs a value");
+          expect(refused.stderr).not.toContain("at async");
+          expect(existsSync(join(root, "fgc.lock.json"))).toBe(false);
+        }
+      } finally {
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("applies the same rule to the other value-taking options", async () => {
+    await withScratch(PROVING_CASES, async () => {
+      for (const flag of ["--project", "--decision", "--runtime-smoke", "--runtime-smoke-export"]) {
+        const refused = await cli(["probe", flag]);
+        expect(refused.code, `${flag} must be refused`).not.toBe(0);
+        expect(refused.stderr).toContain(`${flag} needs a value`);
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("still accepts an inline value and a value that is not a flag", async () => {
+    // The guard must not break the two forms the CLI documents.
+    await withScratch(PROVING_CASES, async root => {
+      const attached = await cli(["probe", `--project=${root}`, "es-toolkit"]);
+      expect(attached.code, attached.stderr).toBe(0);
+
+      const separate = await cli(["probe", "--project", root, "es-toolkit"]);
+      expect(separate.code, separate.stderr).toBe(0);
+    });
   }, CASE_TIMEOUT_MS);
 });

@@ -58,7 +58,7 @@
 | 选项 | 作用 |
 |---|---|
 | `--project <dir>` | probe 该包的位置；必须是**已安装**它的目录 |
-| `--no-cache` | 不读缓存里的旧 report（本次测量仍会落盘，证据可追溯） |
+| `--no-cache` | 不读缓存里的旧 report（本次测量仍会作为**不可变证据**落盘） |
 | `--runtime-smoke <module>` | 执行该本地模块作为 `runtime-smoke` hook；`validatedAgainstRuntime` 需要它 |
 | `--runtime-smoke-export <name>` | 指定 hook 的导出名（默认 `default`） |
 | `--extension-catalog <file>` | 用真实清单/已验证目录校验 `extension` 的 `libraryId`（两种输入 shape 不同，见 `references/decision-recording.md`） |

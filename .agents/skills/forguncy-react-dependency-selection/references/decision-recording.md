@@ -57,11 +57,16 @@
 
 脚本会**自动**为决策补两条 `spec-issue` 链接：#16（决策所依据的 Spec），以及架构拒绝时的 #4（#8 规则 5 要求架构冲突可追溯到归属决策）。URL 从 `core` 读出，不硬编码。
 
-## 证据必须真实存在
+## 证据必须真实存在，且不可被后续运行覆盖
 
-锁里 cite 的 `probe` 链接形如 `.fgc/probe-cache/<sha256>.json`，因此**跑过的测量必须落盘**。`--no-cache` 只强制"不读缓存里的旧 report"，不会丢弃本次测量——否则锁会指向一个从未写过的文件，而这正是 #8 证据规则要防的事。`probe` 与 `record` 都保证这一点。
+锁里 cite 的 `probe` 链接形如 `.fgc/probe-evidence/<sha256>.json`，因此**跑过的测量必须落盘**。`--no-cache` 只强制"不读缓存里的旧 report"，不会丢弃本次测量——否则锁会指向一个从未写过的文件，而这正是 #8 证据规则要防的事。`probe` 与 `record` 都保证这一点。
 
-带 hook 的 report 也写盘。引擎本来不写它（担心之后的 hookless run 继承没请求过的运行时证据），但那条保证由**读**侧执行：`cacheHitAnswersThisRun` 会拒绝一份 `runtime-smoke` 不是 `skipped` 的缓存 report。所以写下来是安全的，而"这条证据在哪"有唯一答案。
+路径是**按内容寻址**的（report 字节的 sha256），不是按 probe fingerprint。这一点是刻意的，因为 fingerprint 不包含 smoke 模式：`--runtime-smoke` 跑出的 report 与同一次普通 probe 的 report 会有**相同的 fingerprint、不同的内容**。若按 fingerprint 存，后一次 hookless 运行会覆盖前一次带 smoke 的证据——锁仍写着 `target != null`／`validated`，但它 cite 的文件里已经没有当初那条 `runtime-smoke: passed`。读侧守卫（`cacheHitAnswersThisRun`）只能防"误读"，防不了"覆写"，所以证据不能和缓存共用路径：
+
+- `.fgc/probe-cache/<fingerprint>.json` —— #17 的缓存，按输入寻址，可被同 fingerprint 的运行覆盖。**不要 cite 它。**
+- `.fgc/probe-evidence/<content>.json` —— 锁 cite 的不可变工件，按内容寻址。内容不同则路径不同，因此不可能互相覆盖。
+
+同一份 report 重复测量会得到同一路径（幂等），不同 report 永远不同路径。
 
 ## 真机验证怎么落地
 

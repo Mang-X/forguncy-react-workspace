@@ -38,4 +38,6 @@
 
 ## 生成报告里的 `probe` 引用怎么写
 
-`record` 写进锁的 probe 链接形如 `.fgc/probe-cache/<sha256>.json`——仓库相对路径，跨机器可复现（#8 禁止绝对机器路径）。报告里引用同一条路径，不要贴绝对路径。
+`record` 写进锁的 probe 链接形如 `.fgc/probe-evidence/<sha256>.json`——仓库相对路径，跨机器可复现（#8 禁止绝对机器路径）。报告里引用同一条路径，不要贴绝对路径。
+
+它是按内容寻址的（report 字节的 sha256），与 #17 的 `.fgc/probe-cache/`（按 probe 输入寻址、可被同 fingerprint 的运行覆盖）是两回事。cite 前者：证据要的是"当初测到的那份"，不是"这个 fingerprint 现在会被当成什么"。

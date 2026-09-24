@@ -1,6 +1,13 @@
 # Probe scratch space, and any lock a local run writes into this Skill's own
-# directory. Neither is an artifact: `.fgc/probe-cache/` is #17's cache and
-# `fgc.lock.json` belongs to the *project* being decided, not to the Skill.
+# directory. Neither is an artifact: `.fgc/probe-cache/` is #17's cache,
+# `.fgc/probe-evidence/` holds the report a lock cites, and `fgc.lock.json` belongs to
+# the *project* being decided, not to the Skill.
+#
+# The evidence directory is ignored because a probe report is reproducible rather than
+# committed, which is the same call #17 makes for its cache. It is content-addressed, so
+# re-running the probe re-derives the path from the bytes: a reviewer who wants to check
+# a record re-measures and compares the hash, and an unchanged report reproduces the
+# cited path exactly.
 .fgc/
 fgc.lock.json
 

@@ -57,13 +57,32 @@
  * only an executed `runtime-smoke` hook can support — a JSON file of results would make
  * it a value the caller types).
  *
+ * ## Where evidence lives, and why it is not the engine's cache
+ *
+ * Every probed report is persisted to `.fgc/probe-evidence/<content-hash>.json`, and that
+ * path — not the engine's `.fgc/probe-cache/<fingerprint>.json` — is what a lock cites.
+ *
+ * The two addresses answer different questions and must not be confused. The cache is
+ * keyed by the probe's declared inputs, and smoke mode is deliberately not one of them, so
+ * a hook-bearing and a hookless report for the same package share a cache key. The engine
+ * therefore refuses to cache a hook-bearing report at all. Writing one there instead looks
+ * safe — the read side refuses to *serve* it — but a cache entry can be **overwritten**: a
+ * later hookless run misses, re-probes, and stores its own report at the same path,
+ * replacing the `runtime-smoke: passed` result a `validated` record cites while the record
+ * keeps its non-null `target`. No read-side guard can prevent a write-side collision, which
+ * is what an earlier revision of this script missed.
+ *
+ * A content address has neither problem: identical bytes reuse one path, different bytes
+ * cannot collide, and the cited artifact is pinned to exactly what was measured.
+ *
  * `--json` on any command prints machine-readable output (the default for `policy`,
  * `probe` and `status`).
  */
 
-import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { register } from "node:module";
-import { isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 // Registering the loader before the workspace packages are imported is what makes
@@ -79,6 +98,17 @@ const REPOSITORY_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 // Argument parsing
 // ---------------------------------------------------------------------------
 
+/**
+ * Options that are meaningless without a value.
+ *
+ * Listed rather than inferred, because getting one wrong is a fail-*open*: a flag that
+ * silently became `undefined` is indistinguishable from a flag that was never passed, and
+ * every reader of these options treats absence as "use the default". `--extension-catalog`
+ * is the one that bites — a caller who meant to verify against a real listing but dropped
+ * the filename would get the shipped catalog instead and be told nothing.
+ */
+const VALUE_OPTIONS = new Set(["project", "decision", "runtime-smoke", "runtime-smoke-export", "extension-catalog"]);
+
 function parseArguments(argv) {
   const [command, ...rest] = argv;
   const options = { json: command === "policy" || command === "probe" || command === "status", positionals: [] };
@@ -93,8 +123,24 @@ function parseArguments(argv) {
       options[name === "json" ? "json" : "noCache"] = inline === undefined ? true : inline !== "false";
       continue;
     }
-    const value = inline ?? rest[++index];
-    options[name] = value;
+
+    if (VALUE_OPTIONS.has(name)) {
+      // A missing value is a usage error rather than an absent option. `--x --y` and a
+      // trailing `--x` both mean the caller forgot the argument; consuming the next flag as
+      // a value, or recording `undefined`, would turn either into a silent fallback.
+      const next = inline ?? rest[index + 1];
+      if (next === undefined || (inline === undefined && next.startsWith("--"))) {
+        fail(`--${name} needs a value (\`--${name} <value>\`); none was given.`);
+      }
+      if (inline !== undefined) {
+        options[name] = inline;
+      } else {
+        options[name] = rest[++index];
+      }
+      continue;
+    }
+
+    options[name] = inline ?? true;
   }
   return { command, options };
 }
@@ -313,27 +359,68 @@ async function loadRuntimeSmokeHook(options) {
   return hook;
 }
 
+/**
+ * Where a probe report is stored as immutable evidence, relative to the project root.
+ *
+ * Keyed by the report's **content**, not by its fingerprint, and that distinction is the
+ * whole point. The engine's cache is keyed by fingerprint — the probe's declared inputs —
+ * and deliberately leaves smoke mode out of it, which is why the engine refuses to store a
+ * hook-bearing report under that key at all (`probe-engine.ts`: "a later hookless run would
+ * otherwise inherit runtime facts it never requested").
+ *
+ * Writing one there anyway looks safe because the *read* side refuses to serve it, but a
+ * cache entry can also be **overwritten**: a later hookless run misses, re-probes, and
+ * stores its own report under the same fingerprint — silently replacing the very evidence a
+ * `validated` record cites, while the record keeps its non-null `target`. The lock would
+ * then claim a runtime validation whose supporting `runtime-smoke: passed` no longer exists
+ * anywhere. Read-side guards cannot fix a write-side collision, which is what the earlier
+ * revision of this script missed.
+ *
+ * A content address has neither problem: different reports get different paths, so nothing
+ * can overwrite anything, and the cited bytes are pinned to exactly what was measured.
+ */
+function evidenceRelativePath(report) {
+  const digest = createHash("sha256").update(core.serializeProbeReport(report), "utf8").digest("hex");
+  return `.fgc/probe-evidence/${digest}.json`;
+}
+
+/**
+ * Writes a report as evidence and returns the portable path to cite.
+ *
+ * Best-effort in the same sense the engine's cache is: a failed write means a caller has no
+ * evidence to cite, which the caller must notice rather than a write that pretends to have
+ * happened. Unlike the cache, an existing file is left alone — the path is a function of the
+ * bytes, so an existing file already holds exactly this content.
+ */
+async function persistEvidence(projectRoot, report) {
+  const relative = evidenceRelativePath(report);
+  const absolute = join(projectRoot, ...relative.split("/"));
+  try {
+    await mkdir(dirname(absolute), { recursive: true });
+    await writeFile(absolute, core.serializeProbeReport(report), { encoding: "utf8", flag: "wx" });
+  } catch (error) {
+    // `wx` makes a concurrent run's identical write a no-op rather than a clobber, which is
+    // the one error worth tolerating; anything else means the evidence is not on disk.
+    if (error?.code !== "EEXIST") {
+      fail(`Cannot persist probe evidence at "${absolute}": ${error.message}`);
+    }
+  }
+  return relative;
+}
+
 async function runProbe(options, packageName) {
   const projectRoot = fromWorkingDirectory(options.project ?? ".");
   const runtimeSmoke = await loadRuntimeSmokeHook(options);
-
-  // `--no-cache` forces the *read* to miss. It must not also discard the measurement,
-  // because whatever cites the run cites `.fgc/probe-cache/<hash>.json`, and a lock
-  // pointing at a file that was never written is exactly what #8's evidence rule
-  // exists to prevent. A write-only view expresses that distinction: the engine sees a
-  // cache that never hits, and the report still lands on disk.
-  const fileCache = resolver.createFileProbeCache(projectRoot);
-  const cache =
-    options.noCache === true
-      ? { get: async () => null, set: (fingerprint, report) => fileCache.set(fingerprint, report) }
-      : fileCache;
 
   let result;
   try {
     result = await resolver.runDependencyProbe({
       projectRoot,
       packageName,
-      cache,
+      // `false` means "do not consult a cached report", which is all `--no-cache` claims.
+      // The measurement is persisted below either way, so nothing this run cites can be a
+      // file that was never written.
+      cache: options.noCache === true ? false : undefined,
       // Passing the hook is what makes the `runtime-smoke` step run at all; without
       // it the step is `skipped` with a reason, which is the honest local-only record.
       ...(runtimeSmoke === undefined ? {} : { runtimeSmoke }),
@@ -352,12 +439,12 @@ async function runProbe(options, packageName) {
     fail(`Probing "${packageName}" failed: ${error.message}`);
   }
 
-  // The engine writes a hookless report itself. It deliberately does not write one that
-  // carries runtime-smoke findings, and `--no-cache` bypasses its write as well, so
-  // persisting here is what makes a cited `probe` link resolve in every mode. Writing an
-  // already-written report is an idempotent overwrite, not a second source of truth.
-  await fileCache.set(result.fingerprint, result.report);
-  return { projectRoot, result };
+  // Persist the measurement as immutable evidence, whatever mode produced it. Doing this
+  // for every run — hookless included — is what makes one citation rule true everywhere,
+  // and it is why this script does not write into the engine's fingerprint-keyed cache:
+  // that key is shared between smoke modes, and this one is not.
+  const evidencePath = await persistEvidence(projectRoot, result.report);
+  return { projectRoot, result, evidencePath };
 }
 
 /**
@@ -369,7 +456,7 @@ async function runProbe(options, packageName) {
  * assessment is reported beside them rather than folding them into a verdict. A
  * strategy is deliberately absent: #16 puts that choice on the Agent.
  */
-function probePayload({ projectRoot, result }) {
+function probePayload({ projectRoot, result, evidencePath }) {
   const { report, assessment, fingerprint, lockStatus, fromCache, cacheRelativePath } = result;
   return {
     command: "probe",
@@ -385,6 +472,11 @@ function probePayload({ projectRoot, result }) {
     lockStatus,
     fingerprint,
     fromCache,
+    // What a lock would cite: the immutable evidence artifact this run wrote. Reported
+    // instead of the engine's `cacheRelativePath`, which is a *cache* entry — it can be
+    // evicted by any other run under the same fingerprint, so it is not what evidence
+    // should point at.
+    evidencePath,
     cacheRelativePath,
     // Stated in the output so a consumer cannot read the payload as a decision.
     decides: "nothing: `facts`, `risks` and `validation` are measurements; the strategy is the Agent's call (#16).",
@@ -482,8 +574,8 @@ async function probeForDecision(entry, options) {
   if (entry.architectural) {
     return { probe: null, probeResult: null };
   }
-  const { projectRoot, result } = await runProbe(options, entry.decision.packageName);
-  return { probe: result.report, probeResult: { ...result, projectRoot } };
+  const { projectRoot, result, evidencePath } = await runProbe(options, entry.decision.packageName);
+  return { probe: result.report, probeResult: { ...result, projectRoot, evidencePath } };
 }
 
 /**
@@ -783,7 +875,7 @@ async function updateFor(entry, probe, probeResult) {
   // ownership decision instead — which is what #8's profile names for it. Every
   // other decision cites the probe it rests on, by the portable cache path.
   if (probeResult !== null) {
-    evidence.push({ kind: "probe", reference: resolver.probeCacheRelativePath(probeResult.fingerprint) });
+    evidence.push({ kind: "probe", reference: probeResult.evidencePath });
   }
   for (const link of entry.document.evidence ?? []) {
     if (!core.DECISION_EVIDENCE_KINDS.includes(link.kind)) {
@@ -922,9 +1014,9 @@ async function commandRecord(options) {
   }
   const { projectRoot, candidate, existing } = built;
 
-  // The measurement is already persisted by `runProbe`, which is where the `probe`
-  // command's `cacheRelativePath` gets the same guarantee — one place, so the two
-  // commands cannot disagree about whether a cited report exists.
+  // The measurement is already persisted as an immutable artifact by `runProbe` — one
+  // place, so `probe` and `record` cannot disagree about whether a cited report exists,
+  // and so nothing here can write into the engine's fingerprint-keyed cache.
 
   // The gate that makes "only when supported by evidence" true at the point a strategy
   // is persisted. #8's lock-shape validation cannot answer "is this record *true*", and
@@ -1080,7 +1172,8 @@ Options:
   --project <dir>   Project root holding the package (default: current directory).
   --decision <file> The Agent-formed decision JSON. See this script's header for its shape.
   --no-cache        Force a fresh probe instead of reusing .fgc/probe-cache/. The
-                    measurement is still persisted, so the lock's evidence resolves.
+                    measurement is still persisted as evidence, so the lock's
+                    \`.fgc/probe-evidence/\` link resolves.
   --runtime-smoke <module>
                     Load a local module and run its export as the probe's
                     runtime-smoke hook. Needed for a decision that claims
