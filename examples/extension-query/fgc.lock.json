@@ -13,13 +13,18 @@
         "fingerprint": "probe=\"inline-bundle\";entry=\"@tanstack/react-query\";analysis=10;config={};bundler={\"attachDebugInfo\":\"none\",\"codeSplitting\":\"false\",\"format\":\"iife\",\"jsx\":\"react-jsx\",\"platform\":\"browser\"}",
         "versionIndependent": false
       },
-      "target": null,
+      "target": {
+        "product": "Forguncy",
+        "productVersion": "12.0.100.0",
+        "productBuild": "12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623",
+        "hostReactVersion": "19.2.7"
+      },
       "probedWith": {
         "vitePlus": "0.3.2"
       },
       "extension": {
         "version": "5.102.8",
-        "identity": null
+        "identity": "sha256:37df6a5941008a3de11d76d481ff9ab43331e6ed0b278a0ada69f803710bde3e"
       },
       "rejectedCandidate": null,
       "rationale": "A bundled copy would give every Cell its own QueryClient and query cache, so the shared page global published by the verified tanstack-query extension is required for cross-Cell module identity.",
