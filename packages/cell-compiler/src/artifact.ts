@@ -31,7 +31,12 @@
  * `guarantees.ts` for which promises that leaves outstanding.
  */
 
-import { CELL_USER_SCOPE_BINDINGS, validateDependencyDecisionShape } from "@forguncy-react-workspace/core";
+import {
+  CELL_CODE_REVIEW_CEILING_CHARACTERS,
+  CELL_USER_SCOPE_BINDINGS,
+  classifyCellCodeSize,
+  validateDependencyDecisionShape,
+} from "@forguncy-react-workspace/core";
 import type {
   CellEntryKind,
   CellUserScopeBinding,
@@ -777,11 +782,74 @@ function artifactOriginOf(bundledCode: string): (index: number) => string {
   };
 }
 
+/**
+ * Checks a composed artifact against the caller's budget, saying *which measured
+ * band* the size falls in.
+ *
+ * Decision source: GitHub Issue #21 —
+ * "Research: measure ReactCellType generated-code budget and performance envelope"
+ * (https://github.com/Mang-X/forguncy-react-workspace/issues/21). Before #21 this
+ * function reported only "over budget", which is the one thing a caller can act on
+ * and the least useful thing it could say: a 600 KiB artifact and a 4 MiB one are
+ * both "over" a 512 KiB budget and are not remotely the same decision.
+ *
+ * The band comes from `core`'s measured record rather than from a second table
+ * here. `core` owns the measurement (#21) and `cell-compiler` takes it as
+ * configuration — the same division the package's other Specs use, and the reason
+ * the measurement is not restated: two copies would drift, and the drift would be
+ * invisible because both would look plausible.
+ *
+ * The code stays `cell-code-budget-exceeded`, because that is #6's public
+ * vocabulary and a downstream consumer branches on it. What changed is that the
+ * detail now names the band and the measured cost, so a caller that sees this
+ * diagnostic can tell "worth a look" from "get an extension" without re-deriving
+ * the thresholds.
+ */
 function auditCodeBudget(code: string, budget: number | undefined): readonly CellArtifactDiagnostic[] {
-  if (budget === undefined || code.length <= budget) return [];
+  if (budget === undefined) return [];
+
+  // The budget is validated, not trusted. An unvalidated one fails in the most
+  // confusing direction available: `code.length <= Number.NaN` is `false`, so a
+  // NaN budget rejects *every* artifact with "against a configured budget of NaN",
+  // which reads like a size problem and is a caller's typo. Refusing it here puts
+  // the report on the field that is actually wrong. `classifyCellCodeSize` guards
+  // the size for the same reason; the two guards are deliberately symmetric.
+  if (!Number.isFinite(budget) || budget < 0) {
+    throw new Error(
+      `A cell code budget must be a non-negative finite number of characters, received ${String(budget)}.`,
+    );
+  }
+
+  if (code.length <= budget) return [];
+
+  const verdict = classifyCellCodeSize(code.length);
+  const { measuredAtCeiling } = verdict.definition;
+
+  // Two different situations produce this diagnostic and they need different
+  // advice, which is why the guidance is chosen rather than copied from the band:
+  //
+  // - The artifact is large by measurement (`review` or above). The band's own
+  //   guidance is the right advice.
+  // - The artifact is inside the measured ordinary range and the *budget* is what
+  //   is tight. Printing the inline band's "no review needed" next to a hard
+  //   rejection would have the diagnostic contradict itself, and would send the
+  //   caller looking for a problem in an artifact the measurement says is fine.
+  const guidance = verdict.withinInlineBand
+    ? `The artifact is inside the measured ordinary range (${verdict.definition.band}, ceiling ` +
+      `${String(verdict.definition.maxCharacters)} characters), so this rejection is the configured budget's ` +
+      `rather than a cost the measurement found. Raise the budget to the measured review ceiling ` +
+      `(${String(CELL_CODE_REVIEW_CEILING_CHARACTERS)} characters) to let the compiler report the band's own ` +
+      `cost instead of refusing.`
+    : verdict.definition.guidance;
+
   return [
     createCellArtifactDiagnostic("cell-code-budget-exceeded", "Cell artifact", {
-      detail: `The composed artifact is ${code.length} characters against a configured budget of ${budget}. The measurement is taken on the composed artifact because that is what is written into the cell.`,
+      detail:
+        `The composed artifact is ${code.length} characters against a configured budget of ${budget}. ` +
+        `The measurement is taken on the composed artifact because that is what is written into the cell. ` +
+        `Measured band: ${verdict.band} — ${measuredAtCeiling.artifact} at ` +
+        `${measuredAtCeiling.characters} characters took ${measuredAtCeiling.writeMs} ms to write and ` +
+        `${measuredAtCeiling.browserEntryMs} ms to reach the platform's first cell entry (#21). ${guidance}`,
     }),
   ];
 }
