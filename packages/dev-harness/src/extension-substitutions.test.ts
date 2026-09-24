@@ -71,6 +71,29 @@ function projectWithShim(): { root: string; shimMarker: string; substitutePackag
     "utf8",
   );
 
+  // And the package the *lock records*, installed at the version it records.
+  //
+  // Needed for a reason the projection introduced: `package-version-unknown` is a
+  // locally-observable staleness reason, so a lock naming a package this project does not have is a
+  // lock the compiler would withhold — and a fixture built on one would be testing the withholding
+  // path rather than the substitution path it names. The version must be the record's `5.102.8`,
+  // because a different installed version is `package-version-changed`, which is likewise withheld.
+  //
+  // A stub rather than the real package: nothing here executes it, and the substitute is what loads.
+  // The leaf directory needs `mkdirSync` of its own — creating `node_modules/@tanstack` does not
+  // create `react-query` inside it, which the first version of this assumed and `writeFileSync`
+  // reported as ENOENT.
+  mkdirSync(join(root, "node_modules", "@tanstack", "react-query"), { recursive: true });
+  writeFileSync(
+    join(root, "node_modules", "@tanstack", "react-query", "package.json"),
+    JSON.stringify({ name: "@tanstack/react-query", version: "5.102.8", type: "module", main: "index.js" }),
+    "utf8",
+  );
+  writeFileSync(
+    join(root, "node_modules", "@tanstack", "react-query", "index.js"),
+    "export const EXTENSION_RECORDED_PACKAGE = true;\n",
+    "utf8",
+  );
   // The project's own shim: the module the declaration names, and the one the Cell must load.
   writeFileSync(
     join(root, "shims", "query-shim.ts"),
@@ -109,7 +132,7 @@ function projectWithShim(): { root: string; shimMarker: string; substitutePackag
           target: {
             product: "Forguncy",
             productVersion: "12.0.100.0",
-            productBuild: "b",
+            productBuild: "12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623",
             hostReactVersion: "19.2.7",
           },
           probedWith: { vitePlus: "0.3.2" },
@@ -276,7 +299,7 @@ function writeLockWithCellScopedDecision(
     target: {
       product: "Forguncy",
       productVersion: "12.0.100.0",
-      productBuild: "b",
+      productBuild: "12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623",
       hostReactVersion: "19.2.7",
     },
     probedWith: { vitePlus: "0.3.2" },
@@ -344,18 +367,14 @@ describe("a cell-scoped decision governs the mounted Cell, not another Cell's re
     // No `extensionChoices` supplied, which is the assertion: with the unprojected lock the audit
     // saw the target-independent `extension` record and reported
     // `local-dev-extension-needs-substitute`, which is **blocking** — so the server was refused
-    // before any module was served, and this call would fail with the refusal rather than a
-    // resolution error.
+    // before any module was served.
     const { substituted, error } = await substitutionOutcome(root, []);
 
-    // Nothing was substituted — the mounted Cell's `inline` decision means the ordinary module path
-    // answers the id, exactly as the compiler would.
+    // The server started: no refusal, and no substitution either. That pair is the whole test —
+    // with the raw lock this call would have failed with "refused to start", and with the record
+    // applied it would have served the shim.
+    expect(error).toBeUndefined();
     expect(substituted).toBeUndefined();
-    // And the failure is Vite's own "cannot resolve", not the audit's refusal. That distinction is
-    // the whole test: with the raw lock the server never started, so this error would read
-    // "refused to start". Asserting only `substituted === undefined` would pass for both.
-    expect(error).toContain('Failed to resolve import "@tanstack/react-query"');
-    expect(error).not.toContain("refused to start");
   }, 120_000);
 
   it("still refuses when the mounted Cell's own record is `extension`", async () => {
@@ -401,10 +420,11 @@ describe("a cell-scoped decision governs the mounted Cell, not another Cell's re
 
     const { substituted, error } = await substitutionOutcome(root, []);
 
+    // Mounted `probe`, whose fallback is the target-independent `inline` record — so the other
+    // Cell's `extension` record must not decide anything here. The server starts and nothing is
+    // substituted.
+    expect(error).toBeUndefined();
     expect(substituted).toBeUndefined();
-    // The ordinary path, not the audit's refusal — see the test above for why both are asserted.
-    expect(error).toContain('Failed to resolve import "@tanstack/react-query"');
-    expect(error).not.toContain("refused to start");
   }, 120_000);
 });
 
@@ -438,7 +458,7 @@ describe("a stale choice is reported but never applied", () => {
             target: {
               product: "Forguncy",
               productVersion: "12.0.100.0",
-              productBuild: "b",
+              productBuild: "12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623",
               hostReactVersion: "19.2.7",
             },
             probedWith: { vitePlus: "0.3.2" },
@@ -454,25 +474,23 @@ describe("a stale choice is reported but never applied", () => {
       "utf8",
     );
 
-    // The assertions are about the failure being the *ordinary* one, and the fetch throws for that
-    // very reason: nothing substituted the id, so Vite tried the normal path and the package is not
-    // installed in this temp project. Before the fix the choice was applied, the id was claimed, and
-    // the shim served — so this fetch succeeded and the shim's marker was in the body.
-    //
-    // Both halves are checked: the request fails, and the failure is about the *original* specifier
-    // rather than the shim. A test that only required "it failed" would pass for the wrong reason —
-    // the same "green while the branch is broken" shape the review found in the npm-package test.
-    await expect(
-      loadedForSubstitutedImport(root, [
-        {
-          packageName: "@tanstack/react-query",
-          mode: "substitute",
-          kind: "project-shim",
-          resolvesTo: "./shims/query-shim.ts",
-          justification: "fixture: a choice whose decision moved to inline",
-        },
-      ]),
-    ).rejects.toThrow(/Failed to resolve import "@tanstack\/react-query"/);
+    // The assertion is that the stale choice is *not applied*: nothing substitutes the id, so the
+    // ordinary module path answers it. The fixture installs `@tanstack/react-query` at the recorded
+    // version, so the ordinary path resolves and the entry serves — with the shim's marker absent,
+    // which is what proves the choice was dropped rather than applied. Before the fix the id was
+    // claimed and the generated module carried the shim's re-export target instead.
+    const { exportedFrom, resolvedBody } = await loadedForSubstitutedImport(root, [
+      {
+        packageName: "@tanstack/react-query",
+        mode: "substitute",
+        kind: "project-shim",
+        resolvesTo: "./shims/query-shim.ts",
+        justification: "fixture: a choice whose decision moved to inline",
+      },
+    ]);
+
+    expect(exportedFrom).toBeUndefined();
+    expect(resolvedBody).not.toContain("PROJECT_SHIM_MARKER_7f3a");
   }, 120_000);
 });
 
@@ -593,13 +611,20 @@ describe("a declaration that cannot be honoured fails loudly rather than resolvi
     expect(body).not.toContain("QueryObserver");
   }, 120_000);
 
-  it("refuses a choice for a package the extension table does not intercept", async () => {
+  it("drops a choice for a package the extension table cannot bind, and does not substitute it", async () => {
     const { root } = projectWithShim();
 
-    // A decision *does* cover this package, so the choice is not dropped as unmatched — which is the
-    // state this test is about, and it is a correction: the first version relied on the fixture's
-    // existing decision naming a different package, so the choice was actually reported as
-    // `local-dev-extension-choice-unmatched` and never reached this guard at all.
+    // A decision *does* name this package, so the choice is not unmatched for want of a decision — it
+    // is dropped because the mapping table cannot bind the package at all. The compiler refuses this
+    // lock too (`extension-mapping-missing`), and the audit reports
+    // `lock-conformance-extension-library-not-verified`.
+    //
+    // The test's premise changed with the projection, and the change is worth recording because the
+    // old assertion is now unreachable rather than merely failing: it asserted that
+    // `extensionSubstitutions` *threw* for this case, and it cannot, because a choice whose decision
+    // the audit could not match is filtered out before that point. Measured (`subs=0`, no throw).
+    // What a developer sees is unchanged and is what matters: the id is not substituted, so it
+    // resolves the way the compiler would resolve it.
     writeFileSync(
       join(root, "fgc.lock.json"),
       JSON.stringify({
@@ -616,7 +641,7 @@ describe("a declaration that cannot be honoured fails loudly rather than resolvi
             target: {
               product: "Forguncy",
               productVersion: "12.0.100.0",
-              productBuild: "b",
+              productBuild: "12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623",
               hostReactVersion: "19.2.7",
             },
             probedWith: { vitePlus: "0.3.2" },
@@ -630,19 +655,24 @@ describe("a declaration that cannot be honoured fails loudly rather than resolvi
       "utf8",
     );
 
-    // The compiler refuses this too (`extension-mapping-missing`), and the harness agrees: there is
-    // no extension for a substitute to stand in for, and skipping the choice would leave the id on
-    // the npm path the declaration was written to leave.
-    await expect(
-      loadedForSubstitutedImport(root, [
-        {
-          packageName: "not-a-listed-extension",
-          mode: "substitute",
-          kind: "npm-package",
-          resolvesTo: "es-toolkit",
-          justification: "fixture: no mapping row covers this package",
-        },
-      ]),
-    ).rejects.toThrow(/does not intercept that package/);
+    const { substituted, error } = await substitutionOutcome(root, [
+      {
+        packageName: "not-a-listed-extension",
+        mode: "substitute",
+        kind: "npm-package",
+        resolvesTo: "es-toolkit",
+        justification: "fixture: no mapping row covers this package",
+      },
+    ]);
+
+    // The server refuses, and that is the correct answer rather than a strictness: the conformance
+    // audit reports `extension-library-not-verified` for a decision the mapping table cannot bind, so
+    // the compiler will not compile the artifact either — refusing here is the same answer, reached
+    // earlier. The refusal names the conformance finding, which is what tells a reader this is the
+    // lock's problem and not a substitute the project failed to declare.
+    expect(error).toContain("refused to start");
+    expect(error).toContain("lock-conformance-extension-library-not-verified");
+    // And nothing was substituted on the way to that refusal.
+    expect(substituted).toBeUndefined();
   }, 120_000);
 });

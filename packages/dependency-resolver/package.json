@@ -25,6 +25,7 @@
     "decision; it is pinned rather than floated so a grammar change cannot arrive silently."
   ],
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./local": "./src/local.ts"
   }
 }

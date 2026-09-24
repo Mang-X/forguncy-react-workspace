@@ -73,7 +73,7 @@ import {
   parseMigratedFgcLockDocument,
 } from "@forguncy-react-workspace/core";
 import { findLockDecision } from "@forguncy-react-workspace/core";
-import type { DependencyDecision, LockedDependencyDecision } from "@forguncy-react-workspace/core";
+import type { DependencyDecision, FgcLockDocument, LockedDependencyDecision } from "@forguncy-react-workspace/core";
 import {
   assertLocalDevExtensionChoicesAreDeclared,
   auditLocalDevConfiguration,
@@ -158,7 +158,7 @@ export function effectiveDecisionsForCell(
 }
 
 /**
- * The dependency decisions the project's lock records.
+ * The project's `fgc.lock.json`, read, migrated and validated.
  *
  * `readFgcLock`'s behaviour reproduced without `dependency-resolver`'s barrel — see the module
  * docstring for the measurement, and `local-dev-audit.test.ts` for the guard that keeps the two
@@ -176,19 +176,19 @@ export function effectiveDecisionsForCell(
  */
 export async function readProjectDependencyDecisions(
   lockPathAbsolute: string,
-): Promise<readonly LockedDependencyDecision[]> {
+): Promise<FgcLockDocument> {
   let text: string;
   try {
     text = await readFile(lockPathAbsolute, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return createEmptyFgcLock().decisions;
+      return createEmptyFgcLock();
     }
     throw new Error(`The project's ${FGC_LOCK_FILE_NAME} at ${lockPathAbsolute} could not be read: ${String(error)}`);
   }
 
   try {
-    return parseMigratedFgcLockDocument(text).decisions;
+    return parseMigratedFgcLockDocument(text);
   } catch (error) {
     throw new Error(
       `The project's ${FGC_LOCK_FILE_NAME} at ${lockPathAbsolute} is not a lock this toolchain accepts, so the local loop cannot say whether the Cell's dependencies are exercised locally: ${String(error)}`,

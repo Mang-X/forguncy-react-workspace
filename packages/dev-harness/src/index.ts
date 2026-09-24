@@ -118,6 +118,16 @@ export {
 } from "./local-dev-audit.ts";
 export type { HarnessAuditInput } from "./local-dev-audit.ts";
 
+// The lock, projected the way the compiler projects it (#23 plan step 5, validity half)
+export {
+  DEFAULT_LOCAL_EXTENSION_CATALOG,
+  formatLocalDecisionProjection,
+  installedVitePlusToolchain,
+  LOCAL_DEV_UNOBSERVABLE_STALENESS_REASONS,
+  projectLocalDecisions,
+} from "./local-decision-projection.ts";
+export type { LocalDecisionProjection, WithheldLocalDecision } from "./local-decision-projection.ts";
+
 // The declared `extensionChoices`, resolved rather than only reported (#23 plan step 5)
 export {
   EXTENSION_SUBSTITUTION_MODULE_PREFIX,

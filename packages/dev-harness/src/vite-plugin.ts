@@ -55,9 +55,10 @@ import react from "@vitejs/plugin-react-swc";
 // `forguncy()` (#28) and reads the registry that plugin produced. `createCellRegistry` and
 // `isCellRegistry` were imported here in an earlier draft that normalized the config in this
 // file, which would have been a second answer to a question the Cell seam already answers.
-import { ForguncyConfigError } from "@forguncy-react-workspace/core";
+import { ForguncyConfigError, RUNTIME_CONTRACT_TARGET } from "@forguncy-react-workspace/core";
 import type { CellRegistry, ForguncyConfig, RegisteredCell } from "@forguncy-react-workspace/core";
 import type { LocalDevExtensionChoice } from "@forguncy-react-workspace/runtime";
+import { resolveInstalledVersions } from "@forguncy-react-workspace/dependency-resolver/local";
 import { cellVirtualModuleId, forguncy } from "@forguncy-react-workspace/vite-plugin-fgc";
 
 import {
@@ -79,11 +80,15 @@ import {
   auditHarnessConfiguration,
   blockingLocalDevFindings,
   BlockingLocalDevFindingError,
-  effectiveDecisionsForCell,
   formatHarnessAudit,
   readProjectDependencyDecisions,
   unmatchedExtensionChoicePackages,
 } from "./local-dev-audit.ts";
+import {
+  formatLocalDecisionProjection,
+  installedVitePlusToolchain,
+  projectLocalDecisions,
+} from "./local-decision-projection.ts";
 
 /** The DOM element the mount script renders into. */
 export const HARNESS_MOUNT_ELEMENT_ID = "forguncy-cell-root";
@@ -751,9 +756,50 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
       // `mounted` is assigned in `configResolved`, which Vite runs before this hook — measured, not
       // assumed, and `local-dev-audit-server.test.ts` exercises the ordering by mounting a Cell.
       const lock = await readProjectDependencyDecisions(registry.runtime.dependencyLockPathAbsolute);
-      const decisions = effectiveDecisionsForCell(lock, mounted?.id ?? null);
+
+      // And the lock is then put through the *validity* projection the compiler applies before it
+      // will compile a dependency — the second half of the same defect. `compileCell` refuses an
+      // artifact whose decision the compiler withheld (`unresolved-dependency-decision`), so a
+      // harness that acted on such a record could render a Cell locally while the identical source
+      // refuses to compile: a green local render for an artifact that cannot exist.
+      //
+      // `projectLocalDecisions` runs the compiler's own conformance audit and local projection, and
+      // splits the result by axis. Axes a local process can judge decide; the two it cannot
+      // (`extension-*`, which only a page's `listFrontendLibraries` answer supplies, and
+      // `probe-fingerprint-*`, whose composer reaches a bundler) are reported as a boundary instead
+      // of silently withholding. Withholding on those would drop every `extension` record, the
+      // harness would see no `extension` strategy, and a Cell importing one would resolve silently
+      // through npm — the first defect this work closed, restored. The module's docstring has the
+      // measurement.
+      //
+      // The three axes this process *can* judge are supplied from what it actually knows, and the
+      // first version of this call got that wrong in a way worth recording: it passed `target: null`
+      // and `toolchain: null` as placeholders, which the projection correctly read as "unknown" —
+      // manufacturing `forguncy-target-changed` and `toolchain-unknown` on records that were
+      // perfectly valid, and so withholding decisions the compiler accepts. `null` in a freshness
+      // axis means *unknown*, never *don't check*, which is the same asymmetry
+      // `local-dev-audit.ts` records for `decisions` versus `referencedSpecifiers`.
+      const projection = projectLocalDecisions({
+        lock,
+        cellTarget: mounted?.id ?? null,
+        resolvedVersions: (await resolveInstalledVersions(
+          registry.root,
+          lock.decisions.map(record => record.packageName),
+        )).versions,
+        // `RUNTIME_CONTRACT_TARGET` is the measured contract, which is what a record's own `target`
+        // was written against — and comparing them is exactly what the freshness rule is for, so a
+        // record recorded against a different build is reported rather than assumed fine. The
+        // project's `runtime.forguncyVersion` is checked against it rather than substituted for it:
+        // it names a version, not a build, so it cannot answer a comparison that asks for the build.
+        target: RUNTIME_CONTRACT_TARGET,
+        // Read through this package's own resolution, so the toolchain a record is compared against
+        // is the one actually driving the loop. Absent means the comparison reports `toolchain-unknown`
+        // rather than passing, which is the honest answer for a harness installed without `vite-plus`.
+        toolchain: installedVitePlusToolchain(),
+      });
+
       const audit = auditHarnessConfiguration({
-        decisions,
+        decisions: projection.decisions,
         extensionChoices: options.extensionChoices ?? [],
       });
 
@@ -775,10 +821,17 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
         unmatchedExtensionChoicePackages(audit),
       );
 
-      const report = formatHarnessAudit(audit);
+      const lockFindings = formatLocalDecisionProjection(projection);
+      const lockRefuses = projection.conformanceErrors.length > 0;
+
+      const auditReport = formatHarnessAudit(audit);
+      const report =
+        lockFindings.length === 0
+          ? auditReport
+          : `${auditReport}\n\nLock decisions, projected the way the compiler projects them:\n${lockFindings}`;
       const blocking = blockingLocalDevFindings(audit);
 
-      if (blocking.length > 0) {
+      if (blocking.length > 0 || lockRefuses) {
         // Refusal carries the report, and *only* the refusal does.
         //
         // The first version wrote the report to stderr here as well, on the reasoning that a

@@ -364,7 +364,10 @@ describe("the lock reader, and the guard that keeps it in step with `readFgcLock
   it("treats an absent lock as no decisions, which is a normal first-run state", async () => {
     const root = await tempProject();
 
-    await expect(readProjectDependencyDecisions(join(root, "fgc.lock.json"))).resolves.toEqual([]);
+    // The whole document, `createEmptyFgcLock`'s own shape — not just its decisions. Comparing
+    // documents is what the drift guard below relies on, and it is the stronger statement: a reader
+    // that dropped `schemaVersion` would pass a decisions-only comparison and fail this one.
+    await expect(readProjectDependencyDecisions(join(root, "fgc.lock.json"))).resolves.toEqual(createEmptyFgcLock());
     // The control: the reader was pointed at a real path in a real directory, so the empty answer
     // is about the missing file rather than about a path that does not exist at all.
     await expect(readFile(join(root, "absent.txt"), "utf8")).rejects.toThrow();
@@ -372,16 +375,19 @@ describe("the lock reader, and the guard that keeps it in step with `readFgcLock
 
   it("reads a committed lock's decisions, through migration and validation", async () => {
     const root = await tempProject();
-    const lock: FgcLockDocument = {
+    const written: FgcLockDocument = {
       schemaVersion: FGC_LOCK_SCHEMA_VERSION,
       decisions: [extensionDecision("@tanstack/react-query")],
     };
-    await writeFile(join(root, "fgc.lock.json"), JSON.stringify(lock), "utf8");
+    await writeFile(join(root, "fgc.lock.json"), JSON.stringify(written), "utf8");
 
-    const decisions = await readProjectDependencyDecisions(join(root, "fgc.lock.json"));
+    const lock = await readProjectDependencyDecisions(join(root, "fgc.lock.json"));
 
-    expect(decisions.map(decision => decision.packageName)).toEqual(["@tanstack/react-query"]);
-    expect(decisions[0]?.strategy).toBe("extension");
+    expect(lock.decisions.map(decision => decision.packageName)).toEqual(["@tanstack/react-query"]);
+    expect(lock.decisions[0]?.strategy).toBe("extension");
+    // And the document round-trips: the reader returns what it read, so a caller that needs
+    // `schemaVersion` (the conformance audit does) gets it.
+    expect(lock.schemaVersion).toBe(FGC_LOCK_SCHEMA_VERSION);
   });
 
   it("refuses a malformed lock instead of reading it as no decisions", async () => {
@@ -426,22 +432,18 @@ describe("the lock reader, and the guard that keeps it in step with `readFgcLock
     // The control: a legal lock with decisions in it, so the agreement below is about a real
     // record rather than about two readers both answering "empty" to an absent file.
     expect(committed.decisions.length).toBeGreaterThan(0);
-    expect(await readProjectDependencyDecisions(join(committedRoot, "fgc.lock.json"))).toEqual(committed.decisions);
+    expect(await readProjectDependencyDecisions(join(committedRoot, "fgc.lock.json"))).toEqual(committed);
 
     const root = await tempProject();
 
     // Absent: the first-run case.
     await expect(readFgcLock(root)).resolves.toEqual(createEmptyFgcLock());
-    expect(await readProjectDependencyDecisions(join(root, "fgc.lock.json"))).toEqual(
-      (await readFgcLock(root)).decisions,
-    );
+    expect(await readProjectDependencyDecisions(join(root, "fgc.lock.json"))).toEqual(await readFgcLock(root));
 
     // Present and legal.
     const lock: FgcLockDocument = { schemaVersion: FGC_LOCK_SCHEMA_VERSION, decisions: [extensionDecision("x")] };
     await writeFile(join(root, "fgc.lock.json"), JSON.stringify(lock), "utf8");
-    expect(await readProjectDependencyDecisions(join(root, "fgc.lock.json"))).toEqual(
-      (await readFgcLock(root)).decisions,
-    );
+    expect(await readProjectDependencyDecisions(join(root, "fgc.lock.json"))).toEqual(await readFgcLock(root));
 
     // Present and malformed: both refuse, so neither can silently report an empty project. This
     // is the direction that matters most — a reader that answered `[]` here would make "this

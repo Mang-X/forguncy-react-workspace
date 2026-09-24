@@ -78,10 +78,15 @@ strategy is reported as unmatched and is never used for resolution, because appl
 the dev server serve a substitute while the compiler follows the lock and bundles the real package —
 the dev/compiler drift this layer exists to prevent. The lock is projected onto the mounted Cell
 first, because a decision is keyed by `(package, cellTarget)` and one Cell's record must not govern
-another's. Both branches, the finding, and whether it blocks belong to the runtime package
-(`LOCAL_DEV_DIAGNOSTIC_RULES`); `dev-harness` reads `blocksLocalDevelopment` off that table rather
-than keeping a list of its own, so a rule the contract marks blocking cannot be downgraded here by
-omission. Matching is exact, not a prefix, so a subpath the extension does not provide is not
+another's, and then through the same validity pipeline the compiler runs — conformance audit plus
+freshness — because `compileCell` refuses an artifact whose decision was withheld. Two freshness axes
+(an extension's version/identity, and a probe fingerprint) are not observable from a local process,
+so a record stale only on those is kept and reported rather than withheld: withholding it would drop
+every extension decision and resolve the import silently through npm, which is the defect this whole
+layer exists to prevent. Both branches, the finding, and whether it blocks belong to the runtime
+package (`LOCAL_DEV_DIAGNOSTIC_RULES`); `dev-harness` reads `blocksLocalDevelopment` off that table
+rather than keeping a list of its own, so a rule the contract marks blocking cannot be downgraded here
+by omission. Matching is exact, not a prefix, so a subpath the extension does not provide is not
 answered locally — the same rule the compiler's extension table applies.
 
 Where the loop is *more* permissive than the page it is recorded rather than smoothed over:

@@ -107,6 +107,12 @@ function extensionDecision(packageName: string): LockedDependencyDecision {
  * harness by package name and would not resolve outside the workspace), only to be created. The
  * one thing it needs is a Cell entry that exists, because `requireEntryFiles` defaults to `true`
  * and a config naming a missing file is a different failure than the one under test.
+ *
+ * It also installs the package its lock records, and that became necessary when the projection
+ * landed: `package-version-unknown` is a staleness reason a local process *can* judge, so a lock
+ * naming a package the project does not have is a lock the compiler would withhold — and these
+ * tests would then be exercising the withholding path instead of the missing-choice path they name.
+ * A real project's tree has the package it recorded, so the fixture has it too.
  */
 async function projectWithExtensionLock(): Promise<{ root: string; cleanup: () => Promise<void> }> {
   const { mkdtemp, mkdir, writeFile } = await import("node:fs/promises");
@@ -120,6 +126,16 @@ async function projectWithExtensionLock(): Promise<{ root: string; cleanup: () =
   );
   await mkdir(join(root, "cells", "probe", "src"), { recursive: true });
   await writeFile(join(root, "cells", "probe", "src", "App.tsx"), "export function App() { return null; }\n", "utf8");
+
+  // A stub at the version the record names — `5.102.8`, because any other version is
+  // `package-version-changed`, which is withheld for a real reason.
+  await mkdir(join(root, "node_modules", "@tanstack", "react-query"), { recursive: true });
+  await writeFile(
+    join(root, "node_modules", "@tanstack", "react-query", "package.json"),
+    JSON.stringify({ name: "@tanstack/react-query", version: "5.102.8", type: "module", main: "index.js" }),
+    "utf8",
+  );
+  await writeFile(join(root, "node_modules", "@tanstack", "react-query", "index.js"), "export const STUB = true;\n", "utf8");
 
   return { root, cleanup: () => removeTempProject(root) };
 }
@@ -170,8 +186,19 @@ describe("the declared lock path is honoured, which `readFgcLock(projectRoot)` c
     await mkdir(join(root, "cells", "probe", "src"), { recursive: true });
     await writeFile(join(root, "cells", "probe", "src", "App.tsx"), "export function App() { return null; }\n", "utf8");
 
+    // The package the decision records, at the version it records — so the projection keeps the
+    // decision and the only question left is *which lock file* was read. See
+    // `projectWithExtensionLock` for why this became necessary.
+    await mkdir(join(root, "node_modules", "@tanstack", "react-query"), { recursive: true });
+    await writeFile(
+      join(root, "node_modules", "@tanstack", "react-query", "package.json"),
+      JSON.stringify({ name: "@tanstack/react-query", version: "5.102.8", type: "module", main: "index.js" }),
+      "utf8",
+    );
+    await writeFile(join(root, "node_modules", "@tanstack", "react-query", "index.js"), "export const STUB = true;\n", "utf8");
+
     // The harness's reader finds them.
-    expect((await readProjectDependencyDecisions(declaredPath)).map(decision => decision.packageName)).toEqual([
+    expect((await readProjectDependencyDecisions(declaredPath)).decisions.map(d => d.packageName)).toEqual([
       "@tanstack/react-query",
     ]);
 

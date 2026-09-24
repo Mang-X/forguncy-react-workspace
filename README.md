@@ -112,6 +112,20 @@ devHarness({
 
 lock 里的决策是**按挂载的那个 Cell 投影过**的。这很重要，因为 #4 把策略定义为 per `(包, cellTarget)` 的组合 —— 契约原话说同一个包"可以在一个 Cell 里是 `inline`、在另一个被映射为 `host`"。审计只看 `packageName` + `strategy`，所以直接把整份 lock 交给它，会让**另一个 Cell 的决策**决定这个 Cell：一个已把某依赖定为 `inline` 的 Cell，仍会因为另一条 target-independent 的 `extension` 记录而被替换或拒绝启动，而编译器是 inline 的。投影复用 `findLockDecision` 的优先规则（先 cell 专属、再回落 `cellTarget: null`），不另写一份。
 
+投影还会做**有效性检查**，与编译器编译前做的那套一致：先 conformance 审计（`auditLockDecisionConformance`），再按 freshness 判定每条记录。这必要，因为 `compileCell` 对一条被 withhold 的决策会直接**拒绝编译**（`unresolved-dependency-decision`）—— 本地若照旧照单全收，就会出现"本地渲染通过、同一个源码却编译不出来"。
+
+这里有一条**本地边界**，如实说明而不是掩盖：判 freshness 需要 `LockEnvironment`，其中两轴本地观测不到 —— 扩展的 version/identity 只有页面 `listFrontendLibraries` 能回答，probe fingerprint 的组合器会拉到打包器。实测（`examples/extension-query` 真实 lock，只喂本地可观测量）：扩展记录会**全部**被 withhold。若照字面执行，"本地不索要 choice、不做替换"，Cell 就静默走 npm —— 正是本 PR 要堵的第一个缺陷。
+
+所以按轴拆开：
+
+| 轴 | 本地能否判定 | 行为 |
+| --- | --- | --- |
+| conformance（策略/映射契约） | 能 | 报为 **blocking**，拒绝启动 —— 与编译器一致 |
+| 包版本、target、toolchain | 能 | 陈旧即 withhold，并写出原因 |
+| 扩展 version/identity、probe fingerprint | **不能** | 记录**保留**，在启动报告里列出这两轴未能核对 |
+
+最后一行是刻意的方向：本地既不能证明该记录仍有效，也不能证明它已失效。启动报告会点名**哪两轴**没核对，所以一次本地绿不会被误读成"lock 已验证"。
+
 `vp dev` 启动时还会审计一遍：**没有声明**的 `extension` 依赖会直接**拒绝启动**（`local-dev-extension-needs-substitute`，契约里 `blocksLocalDevelopment: true`），并把修复方式和 fix owner 一起打出来；声明了 `real-runtime-only` 的则照常启动，但在报告里逐条列出该依赖在本地**完全没有被走到**。这条规则来自 `runtime` 的契约表，而不是 harness 自己的一份清单。
 
 ### 它不是什么
