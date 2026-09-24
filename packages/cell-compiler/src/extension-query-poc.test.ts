@@ -29,8 +29,8 @@
  *   runtime-validated record; a copy with `target` cleared (the honest
  *   pre-validation state) still withholds with
  *   `realRuntimeValidation: "not-validated"`, and a moved extension
- *   (`extension-version-changed`) still withholds as staleness — a recorded
- *   runtime claim freezes neither axis.
+ *   (`extension-version-changed` or `extension-identity-changed`) still
+ *   withholds as staleness — a recorded runtime claim freezes neither axis.
  * - The **local projection** (`localCompilationDependencies`, after the same
  *   conformance audit + a real `LockEnvironment`) is what feeds `compileCell`.
  *   It enforces freshness on every axis (package/probe/toolchain/extension
@@ -39,6 +39,9 @@
  *
  * Version alignment — the package.json pin, the install graph, the lock record
  * and the environment's extension version — is asserted equal on `5.102.8`.
+ * The lock's `extension.identity` (the integrity hash `listFrontendLibraries`
+ * reported) is asserted equal to the environment's `extensionIdentities` entry,
+ * so the identity axis is checked end-to-end rather than left null.
  *
  * Shared identity — #13's reason this package is `extension` and not `inline` —
  * is tested explicitly rather than inferred: the last test compiles the example
@@ -87,6 +90,7 @@ const entry = "src/App.tsx";
 
 const PACKAGE_NAME = "@tanstack/react-query";
 const EXPECTED_VERSION = "5.102.8";
+const EXPECTED_IDENTITY = "sha256:37df6a5941008a3de11d76d481ff9ab43331e6ed0b278a0ada69f803710bde3e";
 const EXPECTED_REPORT = "client=pass | provider=pass | query=pass";
 
 /**
@@ -128,7 +132,7 @@ async function environmentFor(overrides: Partial<LockEnvironment> = {}): Promise
     toolchain: { vitePlus: "0.3.2" },
     probeFingerprints,
     extensionVersions: { "tanstack-query": EXPECTED_VERSION },
-    extensionIdentities: {},
+    extensionIdentities: { "tanstack-query": EXPECTED_IDENTITY },
     ...overrides,
   };
 }
@@ -386,10 +390,12 @@ describe("extension tanstack-query PoC (#13)", () => {
     const record = lock.decisions.find(candidate => candidate.packageName === PACKAGE_NAME);
     expect(record?.resolvedVersion).toBe(EXPECTED_VERSION);
     expect(record?.extension?.version).toBe(EXPECTED_VERSION);
+    expect(record?.extension?.identity).toBe(EXPECTED_IDENTITY);
 
     const environment = await environmentFor();
     expect(environment.resolvedVersions[PACKAGE_NAME]).toBe(EXPECTED_VERSION);
     expect(environment.extensionVersions["tanstack-query"]).toBe(EXPECTED_VERSION);
+    expect(environment.extensionIdentities["tanstack-query"]).toBe(EXPECTED_IDENTITY);
   });
 
   it("admits the decision through the deployment gate now that a real runtime check recorded a target", async () => {
@@ -456,6 +462,27 @@ describe("extension tanstack-query PoC (#13)", () => {
       strategy: "extension",
       reason: "not-verified",
       stalenessReasons: ["extension-version-changed"],
+      realRuntimeValidation: "validated",
+    });
+  });
+
+  it("still reports extension-identity drift on the deployment gate, even with a recorded target", async () => {
+    // Identity is the second half of the extension axis (#8): the version can
+    // stay put while the uploaded bundle's content hash moves, and the gate
+    // must withhold on that alone. `realRuntimeValidation` stays `"validated"`
+    // because freshness and runtime validation are independent — the recorded
+    // target freezes neither.
+    const environment = await environmentFor({
+      extensionIdentities: { "tanstack-query": "sha256:other" },
+    });
+
+    const { dependencies, withheld } = await deploymentGate(environment);
+    expect(dependencies).toEqual([]);
+    expect(withheld).toContainEqual({
+      packageName: PACKAGE_NAME,
+      strategy: "extension",
+      reason: "not-verified",
+      stalenessReasons: ["extension-identity-changed"],
       realRuntimeValidation: "validated",
     });
   });
