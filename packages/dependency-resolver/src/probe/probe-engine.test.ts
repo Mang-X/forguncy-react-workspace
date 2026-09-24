@@ -344,6 +344,38 @@ describe("runDependencyProbe: builtins named only in comments", () => {
  * are unused while the walk, which applies no tree-shaking, still reaches it — so a finding has
  * to be bounded by the artifact. These cases pin that bound and its bookkeeping fact.
  */
+describe("runDependencyProbe: every version that contributed a native indicator is named", () => {
+  it("names both versions when both produce the same source-level indicator", async () => {
+    // The display key for a native indicator is deliberately deduplicated — the facts list is a
+    // set of indicators, not one row per installed copy — but deduplicating the *key* must not
+    // also drop a contributor. Storing one identity per key meant the second write replaced the
+    // first, so the evidence named a single version and silently omitted a package whose source
+    // really does call `process.dlopen`. Measured with both versions calling it in `index.js`.
+    const { report } = await probe("native-both-versions-contribute", "shared-host");
+
+    const finding = report.rejectionFindings.find(
+      entry => entry.signal === "node-filesystem-process-or-native-addon",
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.evidence).toContain("package:shared-name@1.0.0");
+    expect(finding?.evidence).toContain("package:shared-name@2.0.0");
+  });
+
+  it("names both versions when both are declared through the manifest", async () => {
+    // The same collision on the manifest-level path (`gypfile`), which a source-path-only fix
+    // would leave drifting: the indicator is read from each manifest, so both versions produce
+    // the key `manifest:gypfile [shared-name]`.
+    const { report } = await probe("native-manifest-both-versions", "shared-host");
+
+    const finding = report.rejectionFindings.find(
+      entry => entry.signal === "node-filesystem-process-or-native-addon",
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.evidence).toContain("package:shared-name@1.0.0");
+    expect(finding?.evidence).toContain("package:shared-name@2.0.0");
+  });
+});
+
 describe("runDependencyProbe: a native finding names the contributing version", () => {
   it("names only the installed version whose file carries the native indicator", async () => {
     // The graph may hold two versions of one name, which the `multi-version-shared` fixture

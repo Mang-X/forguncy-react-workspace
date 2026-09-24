@@ -455,6 +455,21 @@ function deepestOwningPackage(graph: readonly GraphPackage[], absolutePath: stri
   return owner;
 }
 
+/** The contributor token for a graph member: the same shape `builtinHits` records. */
+function nativeOwner(package_: GraphPackage): string {
+  return `package:${package_.name}@${package_.version ?? "?"}`;
+}
+
+/** Adds one contributor to a native indicator's display key without dropping the ones already there. */
+function addNativeHit(hits: Map<string, Set<string>>, key: string, owner: string): void {
+  let owners = hits.get(key);
+  if (owners === undefined) {
+    owners = new Set<string>();
+    hits.set(key, owners);
+  }
+  owners.add(owner);
+}
+
 export async function observeNodeBuiltins(
   projectRoot: string,
   identity: ResolvedPackageIdentity,
@@ -466,15 +481,19 @@ export async function observeNodeBuiltins(
 
   const builtinHits = new Map<string, Set<string>>(); // specifier -> package evidence set
   /**
-   * Native indicators, each carrying the **full** identity of the package that produced it.
+   * Native indicators — the display text is the key, and every **contributor identity** that
+   * produced it is a member of the value set.
    *
-   * The package token is `package:name@version`, the same shape `builtinHits` uses, and it is
-   * stored here rather than re-derived later from a formatted evidence string. Deriving it meant
-   * recovering an owner by bare name, and the graph may hold two versions of one name — measured
-   * on `shared-util@1.0.0` (clean) and `shared-util@2.0.0` (`process.dlopen`): the first node
-   * matching the name was `1.0.0`, so the evidence named the version that contributed nothing.
+   * A set rather than a single identity, because two versions of one name can produce the same
+   * indicator at the same relative path: `shared-util@1.0.0` and `shared-util@2.0.0` both calling
+   * `process.dlopen` in `index.js` yield one key, `source:process.dlopen [shared-util] index.js`.
+   * Storing one identity meant the second write replaced the first, so the evidence named a single
+   * version and silently dropped the other contributor. Measured.
+   *
+   * Deduplicating the *display* key is right — the facts list is a set of indicators, not one row
+   * per installed copy — but it must not also collapse who contributed.
    */
-  const nativeHits = new Map<string, { readonly packageEvidence: string }>();
+  const nativeHits = new Map<string, Set<string>>();
   const scannedPackages: string[] = [];
   const unreachableEntryHits: string[] = [];
   let reachableFileCount = 0;
@@ -483,14 +502,10 @@ export async function observeNodeBuiltins(
   for (const package_ of graph) {
     scannedPackages.push(`${package_.name}@${package_.version ?? "?"}`);
     for (const indicator of nativeIndicatorsFromManifest(package_.manifest)) {
-      nativeHits.set(`${indicator} [${package_.name}]`, {
-        packageEvidence: `package:${package_.name}@${package_.version ?? "?"}`,
-      });
+      addNativeHit(nativeHits, `${indicator} [${package_.name}]`, nativeOwner(package_));
     }
     if (await hasNodeFile(package_.directory)) {
-      nativeHits.set(`filesystem:*.node [${package_.name}]`, {
-        packageEvidence: `package:${package_.name}@${package_.version ?? "?"}`,
-      });
+      addNativeHit(nativeHits, `filesystem:*.node [${package_.name}]`, nativeOwner(package_));
     }
 
     // Only what a browser build can reach from this package's published entries.
@@ -565,9 +580,7 @@ export async function observeNodeBuiltins(
         // falsifiable. Measured: without the path, the evidence read
         // `native:source:process.dlopen [oracle]`, which names neither the file the indicator
         // came from nor, for an oracle or a reviewer, which file to check.
-        nativeHits.set(`${indicator} [${package_.name}] ${file.relativePath}`, {
-          packageEvidence: `package:${package_.name}@${package_.version ?? "?"}`,
-        });
+        addNativeHit(nativeHits, `${indicator} [${package_.name}] ${file.relativePath}`, nativeOwner(package_));
       }
     }
   }
@@ -678,8 +691,10 @@ export async function observeNodeBuiltins(
     // Native indicators are keyed by `"<indicator> [<name>] <file>"`, so the package is read off
     // the token rather than re-derived; an indicator with no package token (a manifest- or
     // filesystem-level one) is still evidence about the root it was found under.
-    for (const entry of nativeHits.values()) {
-      contributingPackages.add(entry.packageEvidence);
+    for (const owners of nativeHits.values()) {
+      for (const owner of owners) {
+        contributingPackages.add(owner);
+      }
     }
     const evidence: string[] = [
       ...builtinSpecifiers.map(portableEvidence),

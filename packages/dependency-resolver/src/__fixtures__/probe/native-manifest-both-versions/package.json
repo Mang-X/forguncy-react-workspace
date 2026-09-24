@@ -1,0 +1,6 @@
+{
+  "name": "probe-fixture-native-manifest-both-versions",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module"
+}

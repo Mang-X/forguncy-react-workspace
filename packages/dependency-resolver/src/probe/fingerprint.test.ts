@@ -26,7 +26,7 @@ describe("composeProbeFingerprint", () => {
     });
 
     expect(composed.fingerprint).toBe(
-      'probe="inline-bundle";entry="es-toolkit";analysis=9;config={"format":"iife"};bundler={"format":"iife","platform":"browser"}',
+      'probe="inline-bundle";entry="es-toolkit";analysis=10;config={"format":"iife"};bundler={"format":"iife","platform":"browser"}',
     );
     expect(composed.probeConfig).toEqual({ format: "iife" });
     expect(composed.bundlerInput).toEqual({ format: "iife", platform: "browser" });

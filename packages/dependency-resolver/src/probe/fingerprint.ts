@@ -123,8 +123,11 @@ function stableScalar(value: string): string {
  *   a bare package name, so a finding no longer names the wrong one when the graph holds two
  *   versions of a name. Changes findings for that shape only; measured, the old evidence named
  *   the clean version.
+ * - `10` — a native indicator accumulates **every** contributor identity rather than the last one
+ *   written, so two versions of a name that produce the same indicator are both named. Changes
+ *   findings for that shape only; measured, the earlier map kept a single version.
  */
-export const PROBE_ANALYSIS_REVISION = 9;
+export const PROBE_ANALYSIS_REVISION = 10;
 
 export interface ComposeProbeFingerprintInput {
   /** Which probe ran, e.g. `inline-bundle`. */
