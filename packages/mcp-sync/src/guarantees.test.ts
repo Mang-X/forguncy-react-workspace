@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  EXECUTED_AGAINST_DESIGNER,
   findSyncGuarantee,
   locallyCheckableSyncGuarantees,
   realRuntimeSyncGuarantees,
   SYNC_GUARANTEE_IDS,
   SYNC_GUARANTEES,
+  unexecutedRealRuntimeSyncGuarantees,
 } from "./guarantees.ts";
 import type { SyncGuaranteeId } from "./guarantees.ts";
 
@@ -73,5 +75,59 @@ describe("the one-way sync's promises", () => {
 
   it("refuses an unknown guarantee by name", () => {
     expect(() => findSyncGuarantee("not-a-guarantee" as SyncGuaranteeId)).toThrowError(/not-a-guarantee/);
+  });
+});
+
+// #20 executed the flow against a real designer, and these tests hold the two claims apart
+// that AGENTS.md rule 7 is about: what a local check establishes, and what a real project
+// has actually been asked.
+describe("what has been executed against a real project", () => {
+  it("marks the promises the run discharged, naming the environment", () => {
+    const executed = SYNC_GUARANTEES.filter(guarantee => guarantee.executedAt !== undefined);
+
+    expect(executed.map(guarantee => guarantee.id).sort()).toEqual([
+      "project-errors-checked-after-mutation",
+      "runtime-locator-returned",
+      "sync-is-idempotent",
+      "written-without-manual-copy",
+    ]);
+    for (const guarantee of executed) {
+      // The version and the fact it was a real session, not "verified somewhere".
+      expect(guarantee.executedAt, guarantee.id).toBe(EXECUTED_AGAINST_DESIGNER);
+      expect(guarantee.executedAt, guarantee.id).toMatch(/12\.0\.100\.0/);
+      expect(guarantee.executedAt, guarantee.id).toContain("#20");
+    }
+  });
+
+  it("leaves no real-runtime promise unexecuted", () => {
+    // Empty as of #20. A new `real-runtime` guarantee lands here rather than inheriting
+    // the previous run's evidence.
+    expect(unexecutedRealRuntimeSyncGuarantees()).toEqual([]);
+  });
+
+  // The two axes are independent, and that independence is the point: `level` says who
+  // *can* establish a promise, `executedAt` says whether anyone has. `sync-is-idempotent`
+  // is locally checkable *and* was confirmed against a real project — the second fact does
+  // not move it off the local side, and the first does not make the real evidence
+  // redundant. Collapsing either into the other is how a green `vp test` starts reading as
+  // runtime compatibility.
+  it("does not let an execution reclassify a locally checkable promise", () => {
+    const idempotent = findSyncGuarantee("sync-is-idempotent");
+    expect(idempotent.level).toBe("local");
+    expect(idempotent.executedAt).toBeDefined();
+
+    const manual = findSyncGuarantee("written-without-manual-copy");
+    expect(manual.level).toBe("real-runtime");
+    expect(manual.executedAt).toBeDefined();
+  });
+
+  it("keeps every real-runtime promise on the runtime side of the split", () => {
+    for (const guarantee of realRuntimeSyncGuarantees()) {
+      expect(guarantee.level, guarantee.id).toBe("real-runtime");
+      // A runtime promise says how to check it, so the record could be reproduced rather
+      // than trusted.
+      expect(guarantee.howToCheck.length, guarantee.id).toBeGreaterThan(0);
+    }
+    expect(EXECUTED_AGAINST_DESIGNER).toContain("validate-sync-against-designer");
   });
 });

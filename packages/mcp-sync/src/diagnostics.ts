@@ -317,7 +317,7 @@ export const SYNC_DIAGNOSTIC_RULES: Readonly<Record<SyncDiagnosticCode, SyncDiag
     states:
       "A step the flow needs has no designer call name recorded in the evidence, so the sync cannot be executed end to end without guessing one.",
     remediation:
-      "Establish the operation before executing the flow: enumerate the designer session's surface for it, or run a probe that performs it once and records the exact call. The two operations currently in this state are listed by `unestablishedSyncCapabilities()`, each with the evidence that would settle it.",
+      "Establish the operation before executing the flow: enumerate the designer session's surface for it, or run a probe that performs it once and records the exact call. Every required operation is established as of #20 — `api.page.getCells` to read a target and `api.app.saveProject` to persist — so this diagnostic no longer arises from the shipped flow; it is kept because the guard that raises it is what stops a future operation from acquiring a plausible name without evidence, and that guard is exercised against supplied records in `capability-surface.test.ts`.",
     fixOwner: "sync-tooling",
     breaksGuarantees: ["probable-designer-divergence-detected", "project-errors-checked-after-mutation"],
     blocksMutation: true,

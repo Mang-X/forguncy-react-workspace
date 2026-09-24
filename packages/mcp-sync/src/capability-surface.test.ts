@@ -77,7 +77,7 @@ describe("the MCP sync flow", () => {
     const report = formatMcpSyncFlow();
     expect(report).toContain("write-cell-source [mutation]");
     expect(report).toContain("api.page.setCells");
-    expect(report).toContain("no established call name");
+    expect(report).toContain("Every required designer operation has an established call name.");
   });
 });
 
@@ -86,8 +86,8 @@ describe("what the evidence establishes", () => {
    * The exact call names, pinned.
    *
    * This is the test that makes a guessed call name fail a check instead of shipping: the
-   * five names below are the ones #5's executed designer evidence and the product's own
-   * guide record, and there is no sixth. A change to any of them has to come with the
+   * names below are the ones #5's and #20's executed designer evidence and the product's
+   * own guide record, and there is no eighth. A change to any of them has to come with the
    * evidence that established it, because inventing one is precisely the failure #19's
    * "or the exact supported equivalent" hedge invites.
    */
@@ -100,29 +100,49 @@ describe("what the evidence establishes", () => {
       "api.app.generatePageAsync",
       "api.app.getProjectSaveStatus",
       "api.app.listFrontendLibraries",
+      "api.app.saveProject",
+      "api.page.getCells",
       "api.page.setCells",
     ]);
   });
 
-  it("is explicit that two required operations have no recorded call name", () => {
-    const unestablished = unestablishedSyncCapabilities();
-    expect(unestablished.map(capability => capability.id)).toEqual(["read-cell-source", "save-project"]);
+  // The two operations #5 left unnamed, established by #20's execution. This replaced a
+  // test asserting they were `unestablished`, and the replacement is the point: the axis
+  // did not change, the evidence did.
+  it("records that both operations #5 left unnamed are now executed", () => {
+    expect(unestablishedSyncCapabilities()).toEqual([]);
 
-    for (const capability of unestablished) {
-      expect(capability.method).toBeUndefined();
-      expect(capability.portMethod).toBeUndefined();
-      expect(capability.blockedBy?.length ?? 0).toBeGreaterThan(0);
-    }
+    const read = findSyncCapability("read-cell-source");
+    expect(read.method).toBe("api.page.getCells");
+    expect(read.portMethod).toBe("readCellSource");
+    expect(read.evidenceSources).toContain("issue-20-designer-execution");
+
+    const save = findSyncCapability("save-project");
+    expect(save.method).toBe("api.app.saveProject");
+    expect(save.portMethod).toBe("saveProject");
+    expect(save.evidenceSources).toContain("issue-20-designer-execution");
   });
 
-  // The reason `project-save-status` is recorded at all: it is the one save-adjacent call the
-  // probe ran, and leaving it out is how a reader concludes that it saves a project.
-  it("records the observed save-status call without letting it stand in for saving", () => {
+  // The call that was *rejected*, and why. `readCellCode` is real and was executed; it is
+  // not on the port because it truncates at 12,000 characters, which would make the marker
+  // parse read a generated Cell as damaged. Asserted so the reasoning travels with the code
+  // rather than living only in a pull request.
+  it("records the read it rejected, and the measurement that rejected it", () => {
+    const source = findSyncEvidenceSource("issue-20-designer-execution");
+    expect(source.channel).toBe("designer-api");
+    expect(source.scope).toContain("12,000");
+    expect(source.scope).toContain("readCellCode");
+    expect(findSyncCapability("read-cell-source").method).not.toBe("api.page.readCellCode");
+  });
+
+  it("keeps the save status as the step's own reason for saving", () => {
     const status = findSyncCapability("project-save-status");
     expect(status.method).toBe("api.app.getProjectSaveStatus");
-    expect(status.usedByStepIds).toEqual([]);
-    expect(status.portMethod).toBeUndefined();
-    expect(findMcpSyncStep("save-project-if-required").capabilityIds).toEqual(["save-project"]);
+    expect(status.portMethod).toBe("getProjectSaveStatus");
+    // Both halves of the conditional save are on the step: what makes it required, and the
+    // call that performs it. A step naming only the second could not decide anything.
+    expect(findMcpSyncStep("save-project-if-required").capabilityIds).toEqual(["project-save-status", "save-project"]);
+    expect(status.note).toContain("contain");
   });
 
   it("gives every capability an evidence source that resolves", () => {
@@ -146,9 +166,12 @@ describe("the port is the evidence boundary", () => {
     expect(establishedSyncPortMethods()).toEqual([...FORGUNCY_SYNC_PORT_METHODS]);
     expect([...FORGUNCY_SYNC_PORT_METHODS]).toEqual([
       "listFrontendLibraries",
+      "readCellSource",
       "setCells",
+      "saveProject",
       "checkProjectErrors",
       "generatePageAsync",
+      "getProjectSaveStatus",
     ]);
     expect(() => assertSyncPortMatchesCapabilities(establishedSyncPortMethods())).not.toThrow();
   });
@@ -209,30 +232,58 @@ describe("the guards refuse an incoherent registry", () => {
     );
   });
 
+  /**
+   * A capability in the state #20 retired from the shipped registry.
+   *
+   * Every required capability is `established` now, which would leave the guards' whole
+   * `unestablished` half with no input — and a guard whose failure branch never runs is a
+   * guard that has quietly stopped checking anything. So the branch is exercised against a
+   * *supplied* record, built from the shape the registry used to hold: the call that lost
+   * its evidence, which is the state the next such operation will be in.
+   */
+  const unestablished = (overrides: Partial<SyncCapability> = {}): SyncCapability =>
+    ({
+      id: "save-project",
+      summary: "Persist the project after a mutation.",
+      evidenceSources: ["issue-5-designer-probe"],
+      confirmation: "unestablished",
+      usedByStepIds: ["save-project-if-required"],
+      blockedBy: "Recording the exact call name.",
+      ...overrides,
+    }) as SyncCapability;
+
   // The failure this axis exists for: an unestablished operation that acquires a plausible
   // name, which would make "we verified nothing" unreportable.
   it("refuses a capability with no established call that carries a name anyway", () => {
-    expect(() =>
-      assertSyncCapabilityCoherent({
-        ...findSyncCapability("read-cell-source"),
-        method: "api.page.getCells",
-      } as SyncCapability),
-    ).toThrow(/the guess the confirmation axis exists to prevent/);
+    expect(() => assertSyncCapabilityCoherent(unestablished({ method: "api.page.getCells" }))).toThrow(
+      /the guess the confirmation axis exists to prevent/,
+    );
   });
 
   it("refuses an unestablished capability on the port", () => {
-    expect(() =>
-      assertSyncCapabilityCoherent({
-        ...findSyncCapability("save-project"),
-        portMethod: "setCells",
-      } as SyncCapability),
-    ).toThrow(/evidence boundary/);
+    expect(() => assertSyncCapabilityCoherent(unestablished({ portMethod: "setCells" }))).toThrow(
+      /evidence boundary/,
+    );
   });
 
   it("refuses an unestablished capability that does not say what would settle it", () => {
-    expect(() =>
-      assertSyncCapabilityCoherent({ ...findSyncCapability("save-project"), blockedBy: undefined } as SyncCapability),
-    ).toThrow(/without naming the evidence/);
+    expect(() => assertSyncCapabilityCoherent(unestablished({ blockedBy: undefined }))).toThrow(
+      /without naming the evidence/,
+    );
+  });
+
+  it("refuses an unestablished capability no step needs", () => {
+    expect(() => assertSyncCapabilityCoherent(unestablished({ usedByStepIds: [] }))).toThrow(
+      /no step needs it/,
+    );
+  });
+
+  // The shipped registry, asserted in the state the guards would otherwise hide: a port
+  // method that is established, required, and named by exactly one capability.
+  it("accepts every shipped capability as coherent", () => {
+    for (const capability of SYNC_CAPABILITIES) {
+      expect(() => assertSyncCapabilityCoherent(capability), capability.id).not.toThrow();
+    }
   });
 
   it("refuses an established capability with no call name", () => {

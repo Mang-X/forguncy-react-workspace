@@ -17,12 +17,18 @@
  * "the port has no more methods than the evidence supports" a failing test rather
  * than a convention.
  *
- * Two operations #19's flow needs are deliberately **absent**, because the evidence
- * does not establish a name for either — reading a cell's current source, and
- * saving the project. A port method named by guesswork is exactly the failure this
- * arrangement prevents: it would look like a verified call, ship, and fail only
- * against a real project. `unestablishedCapabilities()` reports them, and
- * `planCellSync` refuses the flow that needs them.
+ * ## The boundary this port was written to hold, and how it was settled
+ *
+ * #19's flow needs two operations whose call names the evidence at the time did not
+ * record — reading a Cell's current source, and saving the project — so both were
+ * deliberately **absent** from this port and every plan refused. #20 executed both
+ * against a real Forguncy 12.0.100.0 session, and the port now carries them:
+ * `readCellSource` (the established call is `api.page.getCells`) and `saveProject`
+ * (`api.app.saveProject`). The rule did not change with the answer: a port method
+ * named by guesswork is still the failure this arrangement prevents, which is why the
+ * evidence source records *which other plausible call was rejected and why*
+ * (`api.page.readCellCode` truncates at 12,000 characters) rather than only the one
+ * that was chosen.
  *
  * ## What these types are, and are not
  *
@@ -58,6 +64,78 @@ export type ListFrontendLibrariesRequest = Record<string, never>;
 export type ListFrontendLibrariesResult = readonly ExtensionLibraryListing[];
 
 // ---------------------------------------------------------------------------
+// api.page.getCells
+// ---------------------------------------------------------------------------
+
+/**
+ * Which Cell to read, in the platform's own two fields.
+ *
+ * The request type `api.page.getCells` accepts is a *range* request
+ * (`range` or `row`/`col`/`rowCount`/`colCount`), not a Cell locator — but a sync
+ * reads exactly one Cell, and #19's safety rule is about *that* Cell, so this type
+ * names the one destination rather than exposing the range vocabulary. The adapter
+ * owns turning it into the read the product accepts; the contract deliberately does
+ * not carry a range it would never use.
+ */
+export interface ReadCellSourceRequest {
+  readonly pageName: string;
+  readonly cell: string;
+}
+
+/**
+ * What `api.page.getCells` answers about one Cell, in this contract's vocabulary.
+ *
+ * Deliberately **not** the platform's `GetCellsResponse`. #20's execution measured
+ * three facts about that response that decide whether the divergence check can run,
+ * and all three are the reason this type is a typed union rather than a
+ * `DeployedCellState` alias:
+ *
+ * 1. **An absent Cell is a blank Cell.** `getCells` returns only cells that have
+ *    content, a type, a name or a binding, so a cell with nothing on it does not
+ *    appear in `cells` at all — it is not an entry with an empty `value`. A reader
+ *    that treated a short array as a transport failure would refuse every fresh
+ *    target.
+ * 2. **A Cell that holds something that is not a ReactCellType is reported, not
+ *    hidden.** Such a cell comes back with a `value` or another `cellType` and no
+ *    `cellTypeProps.code`. That is `foreign-code` — designer work #19 forbids
+ *    overwriting silently — and it is a *different* state from blank. Collapsing
+ *    the two would overwrite a designer's cell the moment it contained only text.
+ * 3. **The reference list is dropped when it is empty.** Writing
+ *    `frontendLibraries: []` persists *no* field, so a read of an extension-free
+ *    Cell reports the field as absent; writing `[]` over a Cell that had one clears
+ *    it. So "absent" from the product means "empty" to sync, and the mapping belongs
+ *    to the adapter because it is the product's behaviour rather than this
+ *    contract's wish.
+ *
+ * All three are facts about Forguncy 12.0.100.0 measured by #20; a different product
+ * version could differ, and the evidence source says so.
+ */
+export type ReadCellSourceResult =
+  /** Nothing is on the Cell: the product returned no entry for it. */
+  | { readonly kind: "blank" }
+  /**
+   * The Cell holds something that is not a managed ReactCellType — text, another
+   * cell type, a binding — so it was not written by this flow. Carries the code-like
+   * content when the product reported any, because that content is what the
+   * divergence check must classify rather than overwrite blindly.
+   */
+  | { readonly kind: "occupied"; readonly code: string }
+  /** The Cell is a ReactCellType: its generator code and its library references. */
+  | {
+      readonly kind: "react-cell";
+      readonly code: string;
+      /**
+       * The references the Cell carries, `[]` when the product reports none.
+       *
+       * Normalised here rather than left optional: the product omits the field for an
+       * empty list, and `DeployedCellState` already distinguishes "reported as empty"
+       * from "not stated", so the adapter collapses the product's two spellings of
+       * *empty* into one and never invents a value for *absent*.
+       */
+      readonly frontendLibraries: readonly FrontendLibraryReference[];
+    };
+
+// ---------------------------------------------------------------------------
 // api.page.setCells
 // ---------------------------------------------------------------------------
 
@@ -70,6 +148,22 @@ export type ListFrontendLibrariesResult = readonly ExtensionLibraryListing[];
  * probe pages both write `ReactCellTypeCellType`).
  */
 export type SetCellsCellType = "ReactCellTypeCellType";
+
+/**
+ * The same cell-type name, as a *value*.
+ *
+ * A runtime constant rather than only the type above, because the read path has to check
+ * it: `ReadCellSourceResult`'s `react-cell` means "this Cell *is* a managed ReactCellType",
+ * and a reader that accepted any cell with a string `code` would be claiming that from a
+ * weaker fact. The product's other supported cell type (`UserControlPageCellType`) carries
+ * no `code`, so the confusion is not currently reachable — but a future one might, and
+ * `readOneCell`'s safety branch has to be able to say what it is looking for.
+ *
+ * One constant for both directions: the write sends this name and the read requires it, so
+ * a divergence between "what sync writes" and "what sync recognises as its own" is a
+ * one-line edit rather than two spellings that drift.
+ */
+export const REACT_CELL_TYPE_NAME: SetCellsCellType = "ReactCellTypeCellType";
 
 /**
  * The `cellTypeProps` half of one Cell.
@@ -140,6 +234,60 @@ export function issueSetCellsRequest(request: SetCellsRequest): IssuedSetCellsRe
 }
 
 // ---------------------------------------------------------------------------
+// api.app.getProjectSaveStatus
+// ---------------------------------------------------------------------------
+
+/**
+ * The argument shape `api.app.getProjectSaveStatus` was called with.
+ *
+ * `Record<string, never>` for the same reason as the listing request: the observed
+ * call is `api.app.getProjectSaveStatus({})`, and a type that said `{}` would accept
+ * any object.
+ */
+export type ProjectSaveStatusRequest = Record<string, never>;
+
+/**
+ * What `api.app.getProjectSaveStatus` answers.
+ *
+ * The two fields the sync's save decision reads, named as the product names them.
+ * `containsUnsavedChanges` is the one that decides whether a save is *required*: #20
+ * measured that a `setCells` write leaves it `true` and that `saveProject` clears it,
+ * which is what turns #19's "save if the contract requires it" into an answerable
+ * question instead of a policy someone remembered.
+ *
+ * The rest of the product's response (`currentFilePath`, `canSave`, `message`) is
+ * deliberately not carried: nothing in the flow branches on it, and a field carried
+ * "for completeness" is a field a later reader assumes is load-bearing.
+ */
+export interface ProjectSaveStatus {
+  readonly containsUnsavedChanges: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// api.app.saveProject
+// ---------------------------------------------------------------------------
+
+/**
+ * The argument shape `api.app.saveProject` was called with.
+ *
+ * This call takes no parameters — it saves the project to its current file path —
+ * so there is no request type to declare beyond the empty record, and the port method
+ * below takes none.
+ */
+
+/**
+ * What `api.app.saveProject` answers.
+ *
+ * `saved` is set only by `saveProject` (`getProjectSaveStatus` returns it absent), and
+ * #20 measured it `true` with `containsUnsavedChanges` cleared afterwards. It is
+ * carried because it distinguishes "the product saved" from "the product was asked to
+ * and declined", which is exactly the case a transport could otherwise paper over.
+ */
+export interface ProjectSaveResult {
+  readonly saved: boolean;
+}
+
+// ---------------------------------------------------------------------------
 // api.app.checkProjectErrors
 // ---------------------------------------------------------------------------
 
@@ -162,11 +310,12 @@ export interface ProjectErrorReport {
 /**
  * Which page to generate.
  *
- * The argument shape of `api.app.generatePageAsync` is **not** recorded in the
- * evidence — #5 records the call as the *source* of the dev runtime URL
- * (`http://localhost:63982/Forguncy`, page route `.../Forguncy/<PageName>`), not its
- * parameters. The field name below is therefore this contract's, and the adapter
- * owns mapping it onto whatever the product accepts.
+ * `pageName` is this contract's field, and #20 measured that the product **ignores** it:
+ * `api.app.generatePageAsync({ pageName: "…" })` and `api.app.generatePageAsync({})`
+ * returned byte-identical results. The product's only parameter is `skipCheckProjectError`;
+ * generation is project-wide, not per-page. The field is carried anyway because the
+ * *locator* has to name a page (see {@link GeneratedPage}), and the adapter is what turns
+ * the project-wide call's base URL into a page-specific one.
  */
 export interface GeneratePageRequest {
   readonly pageName: string;
@@ -175,10 +324,17 @@ export interface GeneratePageRequest {
 /**
  * The runtime locator #19 requires sync to return for browser verification.
  *
- * `pageUrl` is this contract's name for the generated runtime URL, not a field the
- * product is known to return: #5 observed the *URL* (through `location.href` on the
- * generated page), not the response object it came in. `pageName` travels with it so
- * a caller holding several sync results can tell which page each locator belongs to.
+ * `pageUrl` is this contract's name for the generated runtime URL, not a field the product
+ * returns: #5 observed the *URL* (through `location.href` on the generated page), not the
+ * response object it came in, and #20 measured that the response's own `url` is the runtime
+ * **base** (`http://localhost:63982/Forguncy`) with no page in it. So the correspondence —
+ * base plus the page route `/<encoded pageName>` — is the adapter's to get right, and it is
+ * the one thing that decides whether `pageUrl` opens the page that was just synchronized or
+ * the project's start page. A caller that gets it wrong verifies the wrong page and reports
+ * success, which is why `designer-transport.ts` states the measurement next to the mapping.
+ *
+ * `pageName` travels with it so a caller holding several sync results can tell which page
+ * each locator belongs to.
  */
 export interface GeneratedPage {
   readonly pageName: string;
@@ -213,6 +369,17 @@ export interface ForguncySyncPort {
   /** Resolve the stable ids and globals of the extensions the artifact references. */
   readonly listFrontendLibraries: (request: ListFrontendLibrariesRequest) => Promise<ListFrontendLibrariesResult>;
   /**
+   * Read the source and library references one Cell currently holds.
+   *
+   * Takes a Cell locator rather than a `DeployedCellState`, because the two are
+   * different answers: this is the *call*, and `DeployedCellState` is what a caller
+   * makes of its result — including the case where the call was not made at all
+   * (`not-attempted`) or failed. Collapsing them would make "we read it and it was
+   * blank" indistinguishable from "we never looked", which is the distinction
+   * `divergence.ts` exists to keep.
+   */
+  readonly readCellSource: (request: ReadCellSourceRequest) => Promise<ReadCellSourceResult>;
+  /**
    * Write one Cell's generated source and its library references.
    *
    * Takes {@link IssuedSetCellsRequest} rather than `SetCellsRequest` on purpose: that is
@@ -222,18 +389,32 @@ export interface ForguncySyncPort {
    * which is where the mistake would otherwise be made.
    */
   readonly setCells: (request: IssuedSetCellsRequest) => Promise<void>;
+  /** Read whether the project has unsaved changes, so the save step can be conditional. */
+  readonly getProjectSaveStatus: (request: ProjectSaveStatusRequest) => Promise<ProjectSaveStatus>;
+  /** Persist the project to its current file path. */
+  readonly saveProject: () => Promise<ProjectSaveResult>;
   /** Report the project's current error count. */
   readonly checkProjectErrors: () => Promise<ProjectErrorReport>;
   /** Generate the page and report the runtime locator for browser verification. */
   readonly generatePageAsync: (request: GeneratePageRequest) => Promise<GeneratedPage>;
 }
 
-/** The established designer calls, as the port names them. */
+/**
+ * The established designer calls, as the port names them.
+ *
+ * Ordered to match the capability registry, so `establishedSyncPortMethods()` and this
+ * list are comparable element-wise rather than as sets — the guard that keeps a
+ * plausible-looking call off the port reads both, and an order difference would make it
+ * report drift that is not there.
+ */
 export const FORGUNCY_SYNC_PORT_METHODS = [
   "listFrontendLibraries",
+  "readCellSource",
   "setCells",
+  "saveProject",
   "checkProjectErrors",
   "generatePageAsync",
+  "getProjectSaveStatus",
 ] as const satisfies readonly (keyof ForguncySyncPort)[];
 
 export type ForguncySyncPortMethod = (typeof FORGUNCY_SYNC_PORT_METHODS)[number];
