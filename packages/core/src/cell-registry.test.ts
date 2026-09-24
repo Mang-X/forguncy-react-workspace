@@ -13,9 +13,9 @@ import {
   isCellRegistry,
   isSecretLikeKey,
   machineSpecificPathProblem,
-} from "./cell-registry";
-import type { CellRegistry, ConfigDiagnosticCode, RegisteredCell } from "./cell-registry";
-import { targetLocatorKey } from "./forguncy-config";
+} from "./cell-registry.ts";
+import type { CellRegistry, ConfigDiagnosticCode, RegisteredCell } from "./cell-registry.ts";
+import { targetLocatorKey } from "./forguncy-config.ts";
 
 const fixturesRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "tests", "fixtures");
 const validMultiRoot = join(fixturesRoot, "valid-multi");

@@ -35,7 +35,7 @@
  * segments.
  */
 
-import { BUILD_CONFIGURATION_FINGERPRINT } from "./build";
+import { BUILD_CONFIGURATION_FINGERPRINT } from "./build.ts";
 
 /**
  * Recursively canonicalize: object keys sorted at every depth, array order

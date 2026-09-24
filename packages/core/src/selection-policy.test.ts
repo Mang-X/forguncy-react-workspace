@@ -9,11 +9,11 @@ import {
   citesEveryArchitectureDecision,
   DEPENDENCY_LOCK_DECISION,
   DEPENDENCY_SELECTION_DECISION,
-} from "./governance";
-import { LOCK_EVIDENCE_POLICY, lockEvidenceProfileForDecision } from "./lock";
-import { assessDependencyRole, isPlatformConflict } from "./platform-conflicts";
-import type { ProbeEnvironment, ProbeRejectionFinding, ProbeReport, ProbeValidationEntry } from "./probe-protocol";
-import { assessProbeReport, PROBE_REPORT_SCHEMA_VERSION, PROBE_STEP_IDS } from "./probe-protocol";
+} from "./governance.ts";
+import { LOCK_EVIDENCE_POLICY, lockEvidenceProfileForDecision } from "./lock.ts";
+import { assessDependencyRole, isPlatformConflict } from "./platform-conflicts.ts";
+import type { ProbeEnvironment, ProbeRejectionFinding, ProbeReport, ProbeValidationEntry } from "./probe-protocol.ts";
+import { assessProbeReport, PROBE_REPORT_SCHEMA_VERSION, PROBE_STEP_IDS } from "./probe-protocol.ts";
 import {
   ARCHITECTURAL_REJECTION_PROBE_STATUS,
   auditSelectionDecision,
@@ -49,10 +49,10 @@ import {
   stagesForIslandDecision,
   stagesSkippedOnEarlyExit,
   stagesWithAuthority,
-} from "./selection-policy";
-import type { SelectionAuditInput } from "./selection-policy";
-import { selectionSignalFamilyOf } from "./selection-signals";
-import type { DependencyDecision } from "./strategy";
+} from "./selection-policy.ts";
+import type { SelectionAuditInput } from "./selection-policy.ts";
+import { selectionSignalFamilyOf } from "./selection-signals.ts";
+import type { DependencyDecision } from "./strategy.ts";
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 

@@ -5,7 +5,7 @@ import { createCellRegistry, ForguncyConfigError } from "@forguncy-react-workspa
 import type { CellRegistry, ForguncyConfig, RegisteredCell } from "@forguncy-react-workspace/core";
 import { describe, expect, it } from "vitest";
 
-import { FORGUNCY_PLUGIN_NAME, cellVirtualModuleId, forguncy, virtualModuleCellId } from "./index";
+import { FORGUNCY_PLUGIN_NAME, cellVirtualModuleId, forguncy, virtualModuleCellId } from "./index.ts";
 
 const fixturesRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "core", "tests", "fixtures");
 const validMultiRoot = join(fixturesRoot, "valid-multi");

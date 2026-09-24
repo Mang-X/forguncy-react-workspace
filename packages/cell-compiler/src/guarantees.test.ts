@@ -6,7 +6,7 @@ import {
   findCellArtifactGuarantee,
   locallyCheckableCellArtifactGuarantees,
   realRuntimeCellArtifactGuarantees,
-} from "./guarantees";
+} from "./guarantees.ts";
 
 describe("cell artifact guarantees", () => {
   // #6 fixes these seven promises. Pinned in order so that adding, removing or

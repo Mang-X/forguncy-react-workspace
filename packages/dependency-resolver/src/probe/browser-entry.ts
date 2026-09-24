@@ -45,7 +45,7 @@
  * silent.
  */
 
-import type { SelfReferenceResolver } from "./module-source";
+import type { SelfReferenceResolver } from "./module-source.ts";
 
 /** Entry fields a browser resolver would consult, in precedence order when `exports` is absent. */
 export const FALLBACK_BROWSER_FIELDS = ["browser", "module", "main"] as const;

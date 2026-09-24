@@ -60,10 +60,10 @@ import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import type { OutputAsset, OutputChunk } from "rolldown";
 import { describe, expect, it } from "vitest";
 
-import { applyBrowserField, resolveBrowserEntryPaths, selfReferenceResolver } from "./browser-entry";
-import { runCandidateBuild } from "./build";
-import { runDependencyProbe } from "./probe-engine";
-import { collectReachableSourceFiles, sourceWithoutCommentsLenient } from "./module-source";
+import { applyBrowserField, resolveBrowserEntryPaths, selfReferenceResolver } from "./browser-entry.ts";
+import { runCandidateBuild } from "./build.ts";
+import { runDependencyProbe } from "./probe-engine.ts";
+import { collectReachableSourceFiles, sourceWithoutCommentsLenient } from "./module-source.ts";
 
 /**
  * A synthetic package, reduced to the shape a review round found the walk disagreeing about.

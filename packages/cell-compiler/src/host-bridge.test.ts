@@ -20,7 +20,7 @@ import {
   renderHostBridgeGuard,
   renderHostBridgeModule,
   HOST_BRIDGE_GENERATED_BANNER,
-} from "./host-bridge";
+} from "./host-bridge.ts";
 
 // ---------------------------------------------------------------------------
 // The real React the host injects

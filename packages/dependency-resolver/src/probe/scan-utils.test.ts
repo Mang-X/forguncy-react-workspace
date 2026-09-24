@@ -20,7 +20,7 @@ import {
   portableText,
   safePathSegment,
   stripAnsi,
-} from "./scan-utils";
+} from "./scan-utils.ts";
 
 describe("compareStrings", () => {
   it("sorts by code units, not locale", () => {

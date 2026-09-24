@@ -17,7 +17,7 @@
  *   route the capability to the owning side.
  */
 
-import type { ApplicationOwner } from "./ownership";
+import type { ApplicationOwner } from "./ownership.ts";
 
 export const DEPENDENCY_REJECTION_KINDS = ["architectural", "technical"] as const;
 export type DependencyRejectionKind = (typeof DEPENDENCY_REJECTION_KINDS)[number];

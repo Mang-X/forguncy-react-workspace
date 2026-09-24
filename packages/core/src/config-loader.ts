@@ -42,9 +42,9 @@ import { pathToFileURL } from "node:url";
 import {
   createCellRegistry,
   ForguncyConfigError,
-} from "./cell-registry";
-import type { CellRegistry, ConfigDiagnostic, CreateCellRegistryOptions } from "./cell-registry";
-import { FORGUNCY_CONFIG_FILE_CANDIDATES } from "./forguncy-config";
+} from "./cell-registry.ts";
+import type { CellRegistry, ConfigDiagnostic, CreateCellRegistryOptions } from "./cell-registry.ts";
+import { FORGUNCY_CONFIG_FILE_CANDIDATES } from "./forguncy-config.ts";
 
 /**
  * Loads a config module and returns whatever it exported.

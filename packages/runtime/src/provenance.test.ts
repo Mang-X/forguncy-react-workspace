@@ -18,7 +18,7 @@ import {
   RUNTIME_FACADE_DECISION_REFERENCE,
   RUNTIME_GOVERNING_DECISIONS,
   RUNTIME_GOVERNING_SPEC_REFERENCE_LINE,
-} from "./provenance";
+} from "./provenance.ts";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 

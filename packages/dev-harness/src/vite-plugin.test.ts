@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { createServer } from "vite";
 
-import { devHarness, HARNESS_ENTRY_URL_PATH, HARNESS_MOUNT_ELEMENT_ID, normalizeAliasFind } from "./vite-plugin";
+import { devHarness, HARNESS_ENTRY_URL_PATH, HARNESS_MOUNT_ELEMENT_ID, normalizeAliasFind } from "./vite-plugin.ts";
 
 /**
  * The harness plugin under a **real Vite dev server**, which is the only place two of its

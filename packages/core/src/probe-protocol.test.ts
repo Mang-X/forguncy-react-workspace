@@ -34,8 +34,8 @@ import {
   probeSupportsDeployment,
   serializeProbeReport,
   validateProbeReport,
-} from "./probe-protocol";
-import { SELECTION_SIGNALS } from "./selection-signals";
+} from "./probe-protocol.ts";
+import { SELECTION_SIGNALS } from "./selection-signals.ts";
 import type {
   ProbeEnvironment,
   ProbeOutcome,
@@ -43,7 +43,7 @@ import type {
   ProbeReport,
   ProbeRisk,
   ProbeValidationEntry,
-} from "./probe-protocol";
+} from "./probe-protocol.ts";
 
 const ENVIRONMENT: ProbeEnvironment = {
   packageName: "es-toolkit",

@@ -22,10 +22,10 @@ import { rolldown } from "rolldown";
 import { scan } from "rolldown/experimental";
 import { afterAll, describe, expect, it } from "vitest";
 
-import { compileCell, formatCompileCellOutcome } from "./artifact";
-import type { BundledCellModule, CellBundlerPort, CompileCellOutcome } from "./artifact";
-import { createRolldownCellBundler } from "./rolldown-bundler";
-import { loadPnpmWorkspaceGraph } from "./workspace-graph";
+import { compileCell, formatCompileCellOutcome } from "./artifact.ts";
+import type { BundledCellModule, CellBundlerPort, CompileCellOutcome } from "./artifact.ts";
+import { createRolldownCellBundler } from "./rolldown-bundler.ts";
+import { loadPnpmWorkspaceGraph } from "./workspace-graph.ts";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = join(packageRoot, "..", "..");

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { ownerOf } from "./ownership";
-import { ARCHITECTURAL_REJECTION_CODES, isArchitecturalRejection } from "./rejection";
+import { ownerOf } from "./ownership.ts";
+import { ARCHITECTURAL_REJECTION_CODES, isArchitecturalRejection } from "./rejection.ts";
 import {
   APPLICATION_OWNED_ROLES,
   assessDependencyRole,
@@ -11,8 +11,8 @@ import {
   isRoleMismatch,
   PLATFORM_CONFLICT_PACKAGE_NAMES,
   PLATFORM_CONFLICT_RULES,
-} from "./platform-conflicts";
-import type { ApplicationOwnedRole, DependencyRole } from "./platform-conflicts";
+} from "./platform-conflicts.ts";
+import type { ApplicationOwnedRole, DependencyRole } from "./platform-conflicts.ts";
 
 /** The application-owned role that duplicates each rule's concern. */
 const ROLE_BY_CONCERN: Readonly<Record<string, ApplicationOwnedRole>> = {

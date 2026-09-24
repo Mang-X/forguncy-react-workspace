@@ -33,11 +33,11 @@ import { createContext, Script } from "node:vm";
 import type { DependencyDecision } from "@forguncy-react-workspace/core";
 import { afterAll, describe, expect, it } from "vitest";
 
-import { CELL_ARTIFACT_BANNER, compileCell } from "./artifact";
-import type { CompileCellOutcome } from "./artifact";
-import { CELL_ENTRY_COMPONENT_BINDING } from "./entry";
-import { frontendLibraryIds } from "./frontend-libraries";
-import { createRolldownCellBundler } from "./rolldown-bundler";
+import { CELL_ARTIFACT_BANNER, compileCell } from "./artifact.ts";
+import type { CompileCellOutcome } from "./artifact.ts";
+import { CELL_ENTRY_COMPONENT_BINDING } from "./entry.ts";
+import { frontendLibraryIds } from "./frontend-libraries.ts";
+import { createRolldownCellBundler } from "./rolldown-bundler.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures

@@ -11,7 +11,7 @@ import { basename, dirname } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { probeEntryPath } from "./build";
+import { probeEntryPath } from "./build.ts";
 
 describe("probeEntryPath", () => {
   it("keys the entry path by package name and specifier hash, not package name alone", () => {

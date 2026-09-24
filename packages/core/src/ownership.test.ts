@@ -9,7 +9,7 @@ import {
   ownerOf,
   OwnershipViolationError,
   OWNERSHIP_CONCERNS,
-} from "./ownership";
+} from "./ownership.ts";
 
 describe("application ownership boundary", () => {
   it("states the invariant as one sentence", () => {

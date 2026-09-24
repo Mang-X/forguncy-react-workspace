@@ -35,7 +35,7 @@
 import { createMockDataSource } from "@forguncy-react-workspace/runtime";
 import type { MockRuntimeFacadeOptions } from "@forguncy-react-workspace/runtime";
 
-import type { AppServerCommands } from "./src/orders";
+import type { AppServerCommands } from "./src/orders.ts";
 
 /**
  * The rows the `Sales` source answers with.

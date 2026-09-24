@@ -9,8 +9,8 @@ import {
   refusedCalleeNames,
   rejectionForRefusedCalleeName,
   scanCellArtifactSource,
-} from "./source-guard";
-import type { CellSourceCallFinding } from "./source-guard";
+} from "./source-guard.ts";
+import type { CellSourceCallFinding } from "./source-guard.ts";
 
 /**
  * The rejections a source draws.

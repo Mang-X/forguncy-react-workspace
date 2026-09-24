@@ -27,20 +27,20 @@
  *   makes the decision unreproducible on another machine and in CI.
  */
 
-import type { ArchitectureDecisionSource } from "./governance";
+import type { ArchitectureDecisionSource } from "./governance.ts";
 import {
   citesDecision,
   DEPENDENCY_LOCK_DECISION,
   formatGoverningSpecReferenceLine,
   GOVERNING_ARCHITECTURE_DECISIONS,
   OWNERSHIP_AND_DEPENDENCY_DECISION,
-} from "./governance";
-import type { RuntimeContractTarget } from "./runtime-contract";
-import { RUNTIME_CONTRACT_TARGET } from "./runtime-contract";
-import { ARCHITECTURAL_REJECTION_CODES, TECHNICAL_REJECTION_CODES } from "./rejection";
-import type { TechnicalRejectionCode } from "./rejection";
-import type { DependencyDecision, DependencyStrategy } from "./strategy";
-import { requiresRealRuntimeValidation, strategySemantics, validateDependencyDecisionShape } from "./strategy";
+} from "./governance.ts";
+import type { RuntimeContractTarget } from "./runtime-contract.ts";
+import { RUNTIME_CONTRACT_TARGET } from "./runtime-contract.ts";
+import { ARCHITECTURAL_REJECTION_CODES, TECHNICAL_REJECTION_CODES } from "./rejection.ts";
+import type { TechnicalRejectionCode } from "./rejection.ts";
+import type { DependencyDecision, DependencyStrategy } from "./strategy.ts";
+import { requiresRealRuntimeValidation, strategySemantics, validateDependencyDecisionShape } from "./strategy.ts";
 
 // ---------------------------------------------------------------------------
 // Provenance

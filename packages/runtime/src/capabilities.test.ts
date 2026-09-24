@@ -28,8 +28,8 @@ import {
   runtimeFacadeCapabilitiesOfFamily,
   runtimeFacadeConcernOf,
   runtimeFacadeEvidenceChannels,
-} from "./capabilities";
-import type { RuntimeFacadeCapability, RuntimeFacadeHostBinding } from "./capabilities";
+} from "./capabilities.ts";
+import type { RuntimeFacadeCapability, RuntimeFacadeHostBinding } from "./capabilities.ts";
 
 /**
  * #27's first acceptance criterion is that "every facade API maps to a confirmed

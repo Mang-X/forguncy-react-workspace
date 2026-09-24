@@ -27,9 +27,9 @@ import {
   findExtensionExternalMapping,
   isExtensionGlobalName,
   isExtensionLibraryId,
-} from "./extension-externals";
-import type { ExtensionExternalMapping, ExtensionLibraryListing } from "./extension-externals";
-import { hostBridgeGlobalMappings } from "./host-bridge";
+} from "./extension-externals.ts";
+import type { ExtensionExternalMapping, ExtensionLibraryListing } from "./extension-externals.ts";
+import { hostBridgeGlobalMappings } from "./host-bridge.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures

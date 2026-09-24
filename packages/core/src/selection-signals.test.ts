@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { RUNTIME_CONFIRMED_TECHNICAL_REJECTION_CODES } from "./lock";
-import { assessDependencyRole, isPlatformConflict, PLATFORM_CONFLICT_PACKAGE_NAMES } from "./platform-conflicts";
-import { isTechnicalRejectionCode, TECHNICAL_REJECTION_CODES } from "./rejection";
+import { RUNTIME_CONFIRMED_TECHNICAL_REJECTION_CODES } from "./lock.ts";
+import { assessDependencyRole, isPlatformConflict, PLATFORM_CONFLICT_PACKAGE_NAMES } from "./platform-conflicts.ts";
+import { isTechnicalRejectionCode, TECHNICAL_REJECTION_CODES } from "./rejection.ts";
 import {
   decideFromSignals,
   findReplacementSignalRejection,
@@ -24,7 +24,7 @@ import {
   SIGNAL_OBSERVATION_CHANNELS,
   signalsInFamily,
   validateSignalFindings,
-} from "./selection-signals";
+} from "./selection-signals.ts";
 
 describe("selection signal catalogue", () => {
   it("defines three families", () => {

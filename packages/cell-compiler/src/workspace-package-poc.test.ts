@@ -56,12 +56,12 @@ import { createRequire } from "node:module";
 import type { DependencyDecision } from "@forguncy-react-workspace/core";
 import { describe, expect, it } from "vitest";
 
-import { compileCell } from "./artifact";
-import type { CompileCellOutcome } from "./artifact";
-import { CELL_ENTRY_COMPONENT_BINDING } from "./entry";
-import { createRolldownCellBundler } from "./rolldown-bundler";
-import { auditWorkspaceSource, traceWorkspaceSourceClosure, workspacePackageFor } from "./workspace-source";
-import { loadPnpmWorkspaceGraph } from "./workspace-graph";
+import { compileCell } from "./artifact.ts";
+import type { CompileCellOutcome } from "./artifact.ts";
+import { CELL_ENTRY_COMPONENT_BINDING } from "./entry.ts";
+import { createRolldownCellBundler } from "./rolldown-bundler.ts";
+import { auditWorkspaceSource, traceWorkspaceSourceClosure, workspacePackageFor } from "./workspace-source.ts";
+import { loadPnpmWorkspaceGraph } from "./workspace-graph.ts";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = join(packageRoot, "..", "..");

@@ -71,12 +71,12 @@ import type {
   FrontendLibraryReference,
 } from "@forguncy-react-workspace/core";
 
-import { findDependencyDecision } from "./specifier";
+import { findDependencyDecision } from "./specifier.ts";
 import {
   collectFrontendLibraries,
   FRONTEND_LIBRARIES_FIELD_NAME,
   frontendLibraryIds,
-} from "./frontend-libraries";
+} from "./frontend-libraries.ts";
 
 // ---------------------------------------------------------------------------
 // The generated-module banner

@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { createCellRegistry, ForguncyConfigError } from "@forguncy-react-workspace/core";
 import type { CellRegistry, DependencyDecision } from "@forguncy-react-workspace/core";
 
-import { planCellCompile, planCellCompiles } from "./registry-plan";
+import { planCellCompile, planCellCompiles } from "./registry-plan.ts";
 
 /**
  * #6's boundary takes "a normal module entry plus resolved dependency decisions";

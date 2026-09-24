@@ -48,9 +48,9 @@
 
 import { isConfigRecord } from "@forguncy-react-workspace/core/browser";
 
-import type { RuntimeFacadeProvider } from "./contract";
-import type { MockRuntimeFacadeOptions } from "./mock-provider";
-import { createMockRuntimeFacadeProvider } from "./mock-provider";
+import type { RuntimeFacadeProvider } from "./contract.ts";
+import type { MockRuntimeFacadeOptions } from "./mock-provider.ts";
+import { createMockRuntimeFacadeProvider } from "./mock-provider.ts";
 
 /** Every way the fixture contract can be broken. */
 export const CELL_FIXTURE_ERROR_CODES = [

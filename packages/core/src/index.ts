@@ -39,8 +39,8 @@ export {
   ownerOf,
   OwnershipViolationError,
   OWNERSHIP_CONCERNS,
-} from "./ownership";
-export type { ApplicationOwner, OwnershipConcern, OwnershipConcernId } from "./ownership";
+} from "./ownership.ts";
+export type { ApplicationOwner, OwnershipConcern, OwnershipConcernId } from "./ownership.ts";
 
 export {
   DEPENDENCY_REJECTION_KINDS,
@@ -52,7 +52,7 @@ export {
   isTechnicalRejection,
   isTechnicalRejectionCode,
   TECHNICAL_REJECTION_CODES,
-} from "./rejection";
+} from "./rejection.ts";
 export type {
   ArchitecturalDependencyRejection,
   ArchitecturalRejectionCode,
@@ -63,7 +63,7 @@ export type {
   GroupedRejections,
   TechnicalDependencyRejection,
   TechnicalRejectionCode,
-} from "./rejection";
+} from "./rejection.ts";
 
 export {
   APPLICATION_OWNED_ROLES,
@@ -74,7 +74,7 @@ export {
   isRoleMismatch,
   PLATFORM_CONFLICT_PACKAGE_NAMES,
   PLATFORM_CONFLICT_RULES,
-} from "./platform-conflicts";
+} from "./platform-conflicts.ts";
 export type {
   ApplicationOwnedRole,
   DependencyRole,
@@ -84,7 +84,7 @@ export type {
   PlatformConflictRoleMismatch,
   PlatformConflictRule,
   PlatformConflictUnclassified,
-} from "./platform-conflicts";
+} from "./platform-conflicts.ts";
 
 export {
   assertDependencyDecision,
@@ -97,7 +97,7 @@ export {
   validateDependencyDecision,
   validateDependencyDecisionShape,
   validateDependencyVerification,
-} from "./strategy";
+} from "./strategy.ts";
 export type {
   DependencyCheck,
   DependencyCheckLevel,
@@ -109,7 +109,7 @@ export type {
   HostDependencyDecision,
   InlineDependencyDecision,
   ReplaceDependencyDecision,
-} from "./strategy";
+} from "./strategy.ts";
 
 export {
   citesDecision,
@@ -150,8 +150,8 @@ export {
   RUNTIME_CONTRACT_DECISION,
   RUNTIME_CONTRACT_DECISION_QUALIFIED_REFERENCE,
   RUNTIME_CONTRACT_DECISION_REFERENCE,
-} from "./governance";
-export type { ArchitectureDecisionSource } from "./governance";
+} from "./governance.ts";
+export type { ArchitectureDecisionSource } from "./governance.ts";
 
 export {
   CELL_DATA_SOURCE_CONTRACT,
@@ -191,7 +191,7 @@ export {
   RUNTIME_CONTRACT_TARGET,
   RUNTIME_CONTRACT_UNKNOWNS,
   RUNTIME_EVIDENCE_CHANNELS,
-} from "./runtime-contract";
+} from "./runtime-contract.ts";
 export type {
   CellBindingAvailability,
   CellEntryKind,
@@ -209,7 +209,7 @@ export type {
   RuntimeContractTarget,
   RuntimeContractUnknown,
   RuntimeEvidenceChannel,
-} from "./runtime-contract";
+} from "./runtime-contract.ts";
 
 // #9 — the host module bridge: which authored import is bound to which host
 // identity, what the JSX runtime adapter must preserve, and the diagnostics both
@@ -256,7 +256,7 @@ export {
   JSX_RUNTIME_ADAPTER_RULE_IDS,
   packageNameOfModuleId,
   sharedHostBridgeDiagnosticCodes,
-} from "./host-bridge";
+} from "./host-bridge.ts";
 export type {
   HostBridgeAdapterId,
   HostBridgeAdapterMapping,
@@ -277,7 +277,7 @@ export type {
   JsxRuntimeAdapterExport,
   JsxRuntimeAdapterRule,
   JsxRuntimeAdapterRuleId,
-} from "./host-bridge";
+} from "./host-bridge.ts";
 
 // #12 — the `extension` external mapping: which npm import a verified Forguncy
 // Frontend Extension stands in for, what keeps the compiled module independent of
@@ -323,7 +323,7 @@ export {
   formatExtensionExternalDiagnostics,
   isExtensionGlobalName,
   isExtensionLibraryId,
-} from "./extension-externals";
+} from "./extension-externals.ts";
 export type {
   AuditExtensionLibraryMetadataOptions,
   ExtensionExternalContractOptions,
@@ -337,7 +337,7 @@ export type {
   ExtensionLoadOrderRule,
   ExtensionMetadataSource,
   ExtensionVerificationBasis,
-} from "./extension-externals";
+} from "./extension-externals.ts";
 
 export {
   assertFgcLockDocument,
@@ -378,7 +378,7 @@ export {
   serializeFgcLock,
   SUPPORTED_FGC_LOCK_SCHEMA_VERSIONS,
   validateFgcLockDocument,
-} from "./lock";
+} from "./lock.ts";
 export type {
   DecisionEvidenceKind,
   DecisionEvidenceLink,
@@ -394,7 +394,7 @@ export type {
   ProbeStatus,
   RejectedCandidateEvidence,
   ToolchainIdentity,
-} from "./lock";
+} from "./lock.ts";
 
 export {
   FGC_LOCK_MIGRATION_STEPS,
@@ -406,8 +406,8 @@ export {
   parseMigratedFgcLockDocument,
   planFgcLockMigration,
   validateFgcLockMigrationSteps,
-} from "./lock-migration";
-export type { FgcLockMigrationOptions, FgcLockMigrationResult, FgcLockMigrationStep } from "./lock-migration";
+} from "./lock-migration.ts";
+export type { FgcLockMigrationOptions, FgcLockMigrationResult, FgcLockMigrationStep } from "./lock-migration.ts";
 
 export {
   assessLockDecision,
@@ -417,7 +417,7 @@ export {
   LOCK_STALENESS_REASONS,
   lockDecisionBlockers,
   resolveLockDecision,
-} from "./lock-freshness";
+} from "./lock-freshness.ts";
 export type {
   LockDecisionAssessment,
   LockDecisionQuery,
@@ -427,7 +427,7 @@ export type {
   LockFreshness,
   LockRealRuntimeValidation,
   LockStalenessReason,
-} from "./lock-freshness";
+} from "./lock-freshness.ts";
 
 // #16 — dependency selection: what makes a package a good candidate, what a probe
 // must observe, and in what order the Agent is allowed to decide anything.
@@ -453,7 +453,7 @@ export {
   SIGNAL_OBSERVATION_CHANNELS,
   signalsInFamily,
   validateSignalFindings,
-} from "./selection-signals";
+} from "./selection-signals.ts";
 export type {
   NonEvidenceSignalSource,
   ReplacementSignalRejection,
@@ -464,7 +464,7 @@ export type {
   SelectionSignalId,
   SignalObservationChannel,
   SignalVerdict,
-} from "./selection-signals";
+} from "./selection-signals.ts";
 
 export {
   assessProbeReport,
@@ -503,7 +503,7 @@ export {
   signalObservesForguncyTarget,
   SUPPORTED_PROBE_REPORT_SCHEMA_VERSIONS,
   validateProbeReport,
-} from "./probe-protocol";
+} from "./probe-protocol.ts";
 export type {
   ProbeAssessment,
   ProbeAssessmentStatus,
@@ -519,7 +519,7 @@ export type {
   ProbeStep,
   ProbeStepId,
   ProbeValidationEntry,
-} from "./probe-protocol";
+} from "./probe-protocol.ts";
 
 export {
   ARCHITECTURAL_REJECTION_PROBE_STATUS,
@@ -557,7 +557,7 @@ export {
   stagesForIslandDecision,
   stagesSkippedOnEarlyExit,
   stagesWithAuthority,
-} from "./selection-policy";
+} from "./selection-policy.ts";
 export type {
   ConditionalSelectionStage,
   RepairRecipeAssessment,
@@ -573,7 +573,7 @@ export type {
   SelectionStageId,
   SpecProvingCase,
   StrategyProbeSupport,
-} from "./selection-policy";
+} from "./selection-policy.ts";
 
 // ---------------------------------------------------------------------------
 // Project configuration and React Cell target declarations (#26)
@@ -596,7 +596,7 @@ export {
   TARGET_LOCATOR_FINALIZATION,
   TARGET_LOCATOR_MODEL,
   targetLocatorKey,
-} from "./forguncy-config";
+} from "./forguncy-config.ts";
 export type {
   CellCodeBudgetOverrides,
   CellConfig,
@@ -605,7 +605,7 @@ export type {
   ForguncyTargetLocator,
   RuntimeTargetConfig,
   TargetLocatorModel,
-} from "./forguncy-config";
+} from "./forguncy-config.ts";
 
 export {
   assertDistinctTargetClaims,
@@ -618,7 +618,7 @@ export {
   machineSpecificPathProblem,
   OUTPUT_ALLOWED_FIELDS,
   TARGET_ALLOWED_FIELDS,
-} from "./cell-registry";
+} from "./cell-registry.ts";
 export type {
   CellRegistry,
   ConfigDiagnostic,
@@ -628,15 +628,15 @@ export type {
   NormalizedRuntimeTarget,
   RegisteredCell,
   TargetClaim,
-} from "./cell-registry";
+} from "./cell-registry.ts";
 
 export {
   findForguncyConfigFile,
   importForguncyConfigModule,
   loadForguncyConfig,
-} from "./config-loader";
+} from "./config-loader.ts";
 export type {
   FindForguncyConfigFileOptions,
   ForguncyConfigModuleLoader,
   LoadForguncyConfigOptions,
-} from "./config-loader";
+} from "./config-loader.ts";

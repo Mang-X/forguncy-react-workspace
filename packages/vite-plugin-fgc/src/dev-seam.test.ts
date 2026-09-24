@@ -7,7 +7,7 @@ import { createServer } from "vite";
 import type { ViteDevServer } from "vite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { cellVirtualModuleId, forguncy } from "./index";
+import { cellVirtualModuleId, forguncy } from "./index.ts";
 
 /**
  * The execution-level proof of Issue #28's dev seam: not "the generator emits

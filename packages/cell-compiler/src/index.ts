@@ -59,7 +59,7 @@ export {
   WORKSPACE_SOURCE_DECISION_REFERENCE,
   WORKSPACE_SOURCE_GOVERNING_DECISIONS,
   WORKSPACE_SOURCE_GOVERNING_SPEC_REFERENCE_LINE,
-} from "./provenance";
+} from "./provenance.ts";
 
 // The public guarantees
 export {
@@ -68,8 +68,8 @@ export {
   findCellArtifactGuarantee,
   locallyCheckableCellArtifactGuarantees,
   realRuntimeCellArtifactGuarantees,
-} from "./guarantees";
-export type { CellArtifactGuarantee, CellArtifactGuaranteeId } from "./guarantees";
+} from "./guarantees.ts";
+export type { CellArtifactGuarantee, CellArtifactGuaranteeId } from "./guarantees.ts";
 
 // The error model
 export {
@@ -84,7 +84,7 @@ export {
   formatCellArtifactDiagnostics,
   isCellArtifactDiagnosticCode,
   REQUIRED_CELL_ARTIFACT_DIAGNOSTIC_CODES,
-} from "./diagnostics";
+} from "./diagnostics.ts";
 export type {
   CellArtifactDiagnostic,
   CellArtifactDiagnosticCode,
@@ -93,7 +93,7 @@ export type {
   CellArtifactFixOwner,
   ContractCellArtifactDiagnosticCode,
   RequiredCellArtifactDiagnosticCode,
-} from "./diagnostics";
+} from "./diagnostics.ts";
 
 // The entry contract
 export {
@@ -110,8 +110,8 @@ export {
   findCellEntryWrapperSupport,
   renderCellEntryWrapper,
   runtimeContractEmittableCellEntryKinds,
-} from "./entry";
-export type { CellEntryWrapperRender, CellEntryWrapperSupport, RenderCellEntryWrapperInput } from "./entry";
+} from "./entry.ts";
+export type { CellEntryWrapperRender, CellEntryWrapperSupport, RenderCellEntryWrapperInput } from "./entry.ts";
 
 // The metadata contract
 export {
@@ -125,8 +125,8 @@ export {
   frontendLibraryIds,
   frontendLibraryReference,
   isCanonicalFrontendLibraries,
-} from "./frontend-libraries";
-export type { FrontendLibrariesCollection } from "./frontend-libraries";
+} from "./frontend-libraries.ts";
+export type { FrontendLibrariesCollection } from "./frontend-libraries.ts";
 
 // The source guard
 export {
@@ -136,13 +136,13 @@ export {
   refusedCalleeNames,
   rejectionForRefusedCalleeName,
   scanCellArtifactSource,
-} from "./source-guard";
+} from "./source-guard.ts";
 export type {
   CellSourceAudit,
   CellSourceCallFinding,
   CellSourceScanFinding,
   CellSourceScanOmission,
-} from "./source-guard";
+} from "./source-guard.ts";
 
 // The host module bridge (#9): the interposed modules and the artifact guard
 export {
@@ -158,7 +158,7 @@ export {
   renderHostBridgeGlobalModule,
   renderHostBridgeGuard,
   renderHostBridgeModule,
-} from "./host-bridge";
+} from "./host-bridge.ts";
 export type {
   HostBridgeActivation,
   HostBridgeAdapterExportName,
@@ -168,7 +168,7 @@ export type {
   HostBridgeUsage,
   PlanHostBridgeOptions,
   RenderHostBridgeGuardOptions,
-} from "./host-bridge";
+} from "./host-bridge.ts";
 
 // The extension externals (#12): the interposed modules that answer an authored
 // import from a verified frontend extension's page global, and the plan a resolver
@@ -180,13 +180,13 @@ export {
   planExtensionExternals,
   renderExtensionExternalModule,
   EXTENSION_EXTERNAL_GENERATED_BANNER,
-} from "./extension-externals";
+} from "./extension-externals.ts";
 export type {
   ExtensionExternalInterception,
   ExtensionExternalsActivation,
   ExtensionExternalsPlan,
   PlanExtensionExternalsOptions,
-} from "./extension-externals";
+} from "./extension-externals.ts";
 
 // The workspace-source contract (#14): workspace packages are source, not runtime modules,
 // and the pnpm/Vite+ workspace graph it is resolved against (#15).
@@ -217,7 +217,7 @@ export {
   WORKSPACE_SOURCE_REUSE_CLASSES,
   WORKSPACE_SOURCE_REUSE_CLASS_IDS,
   WORKSPACE_SOURCE_SHARING_INVARIANT,
-} from "./workspace-source";
+} from "./workspace-source.ts";
 export type {
   WorkspaceDelegationAssessment,
   WorkspaceDelegationGap,
@@ -245,12 +245,12 @@ export type {
   WorkspaceSourceReuseSafety,
   WorkspaceStateSharingEstablished,
   WorkspaceUsageState,
-} from "./workspace-source";
+} from "./workspace-source.ts";
 
 // The workspace graph loader (#15): the pnpm/Vite+ graph #14 takes as an argument,
 // read from the real `pnpm-workspace.yaml` and member manifests.
-export { loadPnpmWorkspaceGraph, PNPM_WORKSPACE_FILE } from "./workspace-graph";
-export type { LoadedWorkspaceGraph, LoadWorkspaceGraphOptions } from "./workspace-graph";
+export { loadPnpmWorkspaceGraph, PNPM_WORKSPACE_FILE } from "./workspace-graph.ts";
+export type { LoadedWorkspaceGraph, LoadWorkspaceGraphOptions } from "./workspace-graph.ts";
 
 // The boundary
 export {
@@ -260,7 +260,7 @@ export {
   formatCompileCellOutcome,
   serializeCompileCellResult,
   verifyCellArtifact,
-} from "./artifact";
+} from "./artifact.ts";
 export type {
   AssembleCellArtifactInput,
   BundledCellModule,
@@ -271,7 +271,7 @@ export type {
   CompileCellOptions,
   CompileCellOutcome,
   CompileCellResult,
-} from "./artifact";
+} from "./artifact.ts";
 
 // The specifier and decision-lookup primitives the artifact boundary and the
 // workspace contract both answer with (#6 / #14 / #15). Re-exported from the
@@ -281,12 +281,12 @@ export {
   findDependencyDecision,
   isSourceSpecifier,
   packageNameOfSpecifier,
-} from "./specifier";
+} from "./specifier.ts";
 
 // The Rolldown-backed bundler port (#7): the concrete `CellBundlerPort`
-export { createRolldownCellBundler } from "./rolldown-bundler";
-export type { CreateRolldownCellBundlerOptions } from "./rolldown-bundler";
+export { createRolldownCellBundler } from "./rolldown-bundler.ts";
+export type { CreateRolldownCellBundlerOptions } from "./rolldown-bundler.ts";
 
 // The #26 registry seam: declared Cell id in, compilable input + target out
-export { planCellCompile, planCellCompiles } from "./registry-plan";
-export type { CellCompilePlan, CellCompileTarget } from "./registry-plan";
+export { planCellCompile, planCellCompiles } from "./registry-plan.ts";
+export type { CellCompilePlan, CellCompileTarget } from "./registry-plan.ts";

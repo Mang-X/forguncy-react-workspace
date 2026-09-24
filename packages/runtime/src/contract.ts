@@ -37,13 +37,13 @@ import {
   RUNTIME_FACADE_CAPABILITIES,
   RuntimeFacadeContractError,
   runtimeFacadeBindingName,
-} from "./capabilities";
+} from "./capabilities.ts";
 import type {
   CellPropKey,
   ForguncyPropMember,
   RuntimeFacadeCapability,
   RuntimeFacadeHostBinding,
-} from "./capabilities";
+} from "./capabilities.ts";
 
 // ---------------------------------------------------------------------------
 // The confirmed call shapes

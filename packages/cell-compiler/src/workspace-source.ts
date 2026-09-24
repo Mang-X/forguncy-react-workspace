@@ -124,8 +124,8 @@ import {
   findDependencyDecision,
   isSourceSpecifier,
   packageNameOfSpecifier,
-} from "./specifier";
-import type { CellArtifactFixOwner } from "./diagnostics";
+} from "./specifier.ts";
+import type { CellArtifactFixOwner } from "./diagnostics.ts";
 
 // ---------------------------------------------------------------------------
 // The invariant

@@ -19,7 +19,7 @@ import {
 } from "@forguncy-react-workspace/core";
 import type { DependencyDecision, HostBridgeMapping } from "@forguncy-react-workspace/core";
 
-import type { RuntimeFacadeHostBindings, RuntimeFacadeProvider } from "./contract";
+import type { RuntimeFacadeHostBindings, RuntimeFacadeProvider } from "./contract.ts";
 import {
   assertLocalDevBoundariesAreAdmissible,
   assertLocalDevClaimsAreLocalOnly,
@@ -74,7 +74,7 @@ import {
   localDevResolvableModuleIds,
   localDevResolvedBridgeRows,
   localDevUnsupportedModuleIds,
-} from "./local-dev";
+} from "./local-dev.ts";
 import type {
   LocalDevBoundary,
   LocalDevClaim,
@@ -83,14 +83,14 @@ import type {
   LocalDevExtensionRealRuntimeOnly,
   LocalDevLoopStage,
   LocalDevModuleResolution,
-} from "./local-dev";
+} from "./local-dev.ts";
 import {
   LOCAL_DEV_RUNTIME_CITATION_PATTERNS,
   LOCAL_DEV_RUNTIME_DECISION,
   LOCAL_DEV_RUNTIME_DECISION_QUALIFIED_REFERENCE,
   LOCAL_DEV_RUNTIME_DECISION_REFERENCE,
   RUNTIME_FACADE_DECISION,
-} from "./provenance";
+} from "./provenance.ts";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 

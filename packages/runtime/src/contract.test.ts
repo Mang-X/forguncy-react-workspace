@@ -9,8 +9,8 @@ import {
   isApplicationOwned,
 } from "@forguncy-react-workspace/core";
 
-import { RuntimeFacadeContractError, findRuntimeFacadeCapability } from "./capabilities";
-import type { ForguncyPropMember } from "./capabilities";
+import { RuntimeFacadeContractError, findRuntimeFacadeCapability } from "./capabilities.ts";
+import type { ForguncyPropMember } from "./capabilities.ts";
 import {
   APPLICATION_OWNED_CONCERNS,
   assertRuntimeFacadeBoundariesProtectApplicationConcerns,
@@ -30,7 +30,7 @@ import {
   runtimeFacadePortChannelOfBinding,
   runtimeFacadePortChannels,
   runtimeFacadePortCoversBinding,
-} from "./contract";
+} from "./contract.ts";
 import type {
   DataSourceBinding,
   DataSourceQueryOptions,
@@ -40,7 +40,7 @@ import type {
   RuntimeFacadeHostBindings,
   RuntimeFacadeProvider,
   ServerCommandBindings,
-} from "./contract";
+} from "./contract.ts";
 
 /**
  * A mock built from `core`'s key list rather than from a hand-written literal.

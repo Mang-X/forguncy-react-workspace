@@ -16,8 +16,8 @@ import { dirname, join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import type { ResolvedPackageIdentity } from "./identity";
-import { observeRuntimePatterns } from "./runtime-pattern-scan";
+import type { ResolvedPackageIdentity } from "./identity.ts";
+import { observeRuntimePatterns } from "./runtime-pattern-scan.ts";
 
 /**
  * A temporary package whose browser entry is `index.js`, so the scan has a real

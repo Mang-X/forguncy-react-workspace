@@ -14,7 +14,7 @@ import {
   frontendLibraryIds,
   frontendLibraryReference,
   isCanonicalFrontendLibraries,
-} from "./frontend-libraries";
+} from "./frontend-libraries.ts";
 
 const extensionDecision = (packageName: string, libraryId: string, globalName: string): DependencyDecision => ({
   strategy: "extension",

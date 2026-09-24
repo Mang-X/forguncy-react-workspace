@@ -5,9 +5,9 @@ import { fileURLToPath } from "node:url";
 import { RUNTIME_CONTRACT_TARGET } from "@forguncy-react-workspace/core";
 import { describe, expect, it } from "vitest";
 
-import { compileCell } from "./artifact";
-import type { CompileCellOutcome } from "./artifact";
-import { createRolldownCellBundler } from "./rolldown-bundler";
+import { compileCell } from "./artifact.ts";
+import type { CompileCellOutcome } from "./artifact.ts";
+import { createRolldownCellBundler } from "./rolldown-bundler.ts";
 
 /**
  * #23's second acceptance criterion, executed: "Same source compiles for Forguncy without

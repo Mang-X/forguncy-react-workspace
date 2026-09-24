@@ -45,12 +45,12 @@ import { describe, expect, it } from "vitest";
 // does not pull JSX types into the typecheck project. This is the test process's own
 // instance — a module the artifacts have no relationship with — which is what makes
 // the assertion below able to fail. See `state.ts`'s header.
-import { recordVisit, seenLabels } from "../../../examples/workspace-package/packages/session/src/state";
+import { recordVisit, seenLabels } from "../../../examples/workspace-package/packages/session/src/state.ts";
 
-import { compileCell } from "./artifact";
-import { CELL_ENTRY_COMPONENT_BINDING } from "./entry";
-import { createRolldownCellBundler } from "./rolldown-bundler";
-import { loadPnpmWorkspaceGraph } from "./workspace-graph";
+import { compileCell } from "./artifact.ts";
+import { CELL_ENTRY_COMPONENT_BINDING } from "./entry.ts";
+import { createRolldownCellBundler } from "./rolldown-bundler.ts";
+import { loadPnpmWorkspaceGraph } from "./workspace-graph.ts";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = join(packageRoot, "..", "..");

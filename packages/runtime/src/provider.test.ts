@@ -2,11 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { CELL_FORGUNCY_PROP_KEYS, CELL_PROPS_BASE_KEYS } from "@forguncy-react-workspace/core";
 
-import type { DataSourceBinding, RuntimeFacadeProvider } from "./contract";
-import { RUNTIME_FACADE_PORT_CHANNEL_MEMBERS } from "./contract";
-import { runtimeFacade } from "./facade";
-import { createHostRuntimeFacadeProvider, RUNTIME_FACADE_HOST_BINDING_CHANNELS } from "./host-provider";
-import { createMockRuntimeFacadeProvider } from "./mock-provider";
+import type { DataSourceBinding, RuntimeFacadeProvider } from "./contract.ts";
+import { RUNTIME_FACADE_PORT_CHANNEL_MEMBERS } from "./contract.ts";
+import { runtimeFacade } from "./facade.ts";
+import { createHostRuntimeFacadeProvider, RUNTIME_FACADE_HOST_BINDING_CHANNELS } from "./host-provider.ts";
+import { createMockRuntimeFacadeProvider } from "./mock-provider.ts";
 import {
   findRuntimeFacadeAbsenceMode,
   findRuntimeFacadeAbsencePath,
@@ -21,8 +21,8 @@ import {
   runtimeFacadeProviderState,
   throwingRuntimeFacadeAbsenceCodes,
   uninstallRuntimeFacadeProvider,
-} from "./provider";
-import type { RuntimeFacadeAbsencePathId } from "./provider";
+} from "./provider.ts";
+import type { RuntimeFacadeAbsencePathId } from "./provider.ts";
 
 const noSuchSource: DataSourceBinding = name => ({
   data: [],

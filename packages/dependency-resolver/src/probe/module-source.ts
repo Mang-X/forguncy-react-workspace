@@ -68,7 +68,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { parse } from "@babel/parser";
 
-import { compareStrings } from "./scan-utils";
+import { compareStrings } from "./scan-utils.ts";
 
 // ---------------------------------------------------------------------------
 // Parsing

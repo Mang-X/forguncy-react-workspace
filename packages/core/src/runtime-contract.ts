@@ -33,8 +33,8 @@
  * or describe local development (#22).
  */
 
-import type { ArchitectureDecisionSource } from "./governance";
-import { RUNTIME_CONTRACT_DECISION } from "./governance";
+import type { ArchitectureDecisionSource } from "./governance.ts";
+import { RUNTIME_CONTRACT_DECISION } from "./governance.ts";
 
 export type RuntimeEvidenceChannel = (typeof RUNTIME_EVIDENCE_CHANNELS)[number];
 

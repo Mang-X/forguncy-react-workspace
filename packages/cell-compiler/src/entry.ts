@@ -31,8 +31,8 @@
 import { CELL_USER_SCOPE_BINDINGS, emitCellEntryShapes, findCellEntryShape } from "@forguncy-react-workspace/core";
 import type { CellEntryKind } from "@forguncy-react-workspace/core";
 
-import type { CellArtifactDiagnostic } from "./diagnostics";
-import { createCellArtifactDiagnostic } from "./diagnostics";
+import type { CellArtifactDiagnostic } from "./diagnostics.ts";
+import { createCellArtifactDiagnostic } from "./diagnostics.ts";
 
 /**
  * Stands for the identifier the bundled component is bound to.

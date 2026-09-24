@@ -41,7 +41,7 @@
 
 import { useState } from "react";
 
-import { canReadOrders, readOrderPermissions, refreshOrders, useOrdersSummary } from "./orders";
+import { canReadOrders, readOrderPermissions, refreshOrders, useOrdersSummary } from "./orders.ts";
 
 export function App() {
   // Survives a Fast Refresh pass, resets on a full reload — see the file docstring.

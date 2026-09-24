@@ -23,9 +23,9 @@ import {
   SYNC_DIAGNOSTIC_CODES,
   SYNC_DIAGNOSTIC_RULES,
   translatedExtensionAuditCodes,
-} from "./diagnostics";
-import type { SyncDiagnostic, SyncDiagnosticCode } from "./diagnostics";
-import { SYNC_GUARANTEE_IDS } from "./guarantees";
+} from "./diagnostics.ts";
+import type { SyncDiagnostic, SyncDiagnosticCode } from "./diagnostics.ts";
+import { SYNC_GUARANTEE_IDS } from "./guarantees.ts";
 
 /**
  * The error model is the part of #19 an Agent reads before choosing a next action. These

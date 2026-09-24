@@ -31,9 +31,9 @@
 
 import type { ProbeFact, ProbeRejectionFinding, ProbeRisk, ProbeValidationEntry } from "@forguncy-react-workspace/core";
 
-import { ACTIVE_EXPORT_CONDITIONS, isPortablePackagePath } from "./browser-entry";
-import type { ResolvedPackageIdentity } from "./identity";
-import { compareStrings } from "./scan-utils";
+import { ACTIVE_EXPORT_CONDITIONS, isPortablePackagePath } from "./browser-entry.ts";
+import type { ResolvedPackageIdentity } from "./identity.ts";
+import { compareStrings } from "./scan-utils.ts";
 
 export interface ExportMetadataObservation {
   readonly facts: readonly ProbeFact[];

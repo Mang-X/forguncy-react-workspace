@@ -29,7 +29,7 @@
 import type { ProbeFact, ProbeRejectionFinding, ProbeRisk, ProbeValidationEntry } from "@forguncy-react-workspace/core";
 import type { OutputAsset, OutputChunk } from "rolldown";
 
-import { compareStrings, portableText } from "./scan-utils";
+import { compareStrings, portableText } from "./scan-utils.ts";
 
 interface AssetClass {
   readonly id: string;

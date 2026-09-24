@@ -11,7 +11,7 @@ import {
   packageNameOfSpecifier,
   serializeCompileCellResult,
   verifyCellArtifact,
-} from "./artifact";
+} from "./artifact.ts";
 import type {
   BundledCellModule,
   CellBundlerPort,
@@ -19,10 +19,10 @@ import type {
   CompileCellInput,
   CompileCellOutcome,
   CompileCellResult,
-} from "./artifact";
-import { formatCellArtifactDiagnostics } from "./diagnostics";
-import { CELL_ENTRY_COMPONENT_BINDING } from "./entry";
-import { frontendLibraryReference } from "./frontend-libraries";
+} from "./artifact.ts";
+import { formatCellArtifactDiagnostics } from "./diagnostics.ts";
+import { CELL_ENTRY_COMPONENT_BINDING } from "./entry.ts";
+import { frontendLibraryReference } from "./frontend-libraries.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures

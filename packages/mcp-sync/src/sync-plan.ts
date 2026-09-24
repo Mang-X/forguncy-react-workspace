@@ -70,25 +70,25 @@ import {
   MCP_SYNC_STEPS,
   syncMutationStep,
   unestablishedSyncCapabilities,
-} from "./capability-surface";
-import type { McpSyncStep, McpSyncStepId, McpSyncStepPhase, SyncCapabilityId } from "./capability-surface";
+} from "./capability-surface.ts";
+import type { McpSyncStep, McpSyncStepId, McpSyncStepPhase, SyncCapabilityId } from "./capability-surface.ts";
 import {
   createSyncDiagnostic,
   dedupeSyncDiagnostics,
   formatSyncDiagnostics,
   SYNC_DIAGNOSTIC_RULES,
-} from "./diagnostics";
-import type { SyncDiagnostic } from "./diagnostics";
-import { cellDivergenceOverride, classifyCellDivergence, formatCellDivergence, resolveCellWriteAction } from "./divergence";
-import type { CellDivergence, CellOverwritePolicy, CellWriteAction, DeployedCellState } from "./divergence";
-import { DEFAULT_CELL_OVERWRITE_POLICY } from "./divergence";
-import { verifyExtensionReferences, formatExtensionReferenceVerification } from "./extension-verification";
-import type { ExtensionReferenceVerification } from "./extension-verification";
-import { fingerprintArtifact, stampSyncMarker, stripSyncMarker } from "./fingerprint";
-import { issueSetCellsRequest } from "./port";
-import type { IssuedSetCellsRequest, SetCellsCell } from "./port";
-import { cellTargetLabel } from "./target";
-import type { CellTarget, SyncCellInput } from "./target";
+} from "./diagnostics.ts";
+import type { SyncDiagnostic } from "./diagnostics.ts";
+import { cellDivergenceOverride, classifyCellDivergence, formatCellDivergence, resolveCellWriteAction } from "./divergence.ts";
+import type { CellDivergence, CellOverwritePolicy, CellWriteAction, DeployedCellState } from "./divergence.ts";
+import { DEFAULT_CELL_OVERWRITE_POLICY } from "./divergence.ts";
+import { verifyExtensionReferences, formatExtensionReferenceVerification } from "./extension-verification.ts";
+import type { ExtensionReferenceVerification } from "./extension-verification.ts";
+import { fingerprintArtifact, stampSyncMarker, stripSyncMarker } from "./fingerprint.ts";
+import { issueSetCellsRequest } from "./port.ts";
+import type { IssuedSetCellsRequest, SetCellsCell } from "./port.ts";
+import { cellTargetLabel } from "./target.ts";
+import type { CellTarget, SyncCellInput } from "./target.ts";
 
 // ---------------------------------------------------------------------------
 // What gets written

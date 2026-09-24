@@ -46,8 +46,8 @@ import type {
 } from "@forguncy-react-workspace/core";
 import type { OutputAsset, OutputChunk } from "rolldown";
 
-import { sourceWithoutCommentsLenient } from "./module-source";
-import { compareStrings, portableText } from "./scan-utils";
+import { sourceWithoutCommentsLenient } from "./module-source.ts";
+import { compareStrings, portableText } from "./scan-utils.ts";
 
 /** Marker patterns matched against emitted chunk code. Order does not matter; findings dedupe by signal. */
 const RISK_MARKERS: readonly { readonly signal: ProbeRisk["signal"]; readonly pattern: RegExp; readonly label: string }[] = [

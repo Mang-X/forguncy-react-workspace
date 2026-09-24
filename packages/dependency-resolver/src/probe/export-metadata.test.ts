@@ -12,8 +12,8 @@
 
 import { describe, expect, it } from "vitest";
 
-import type { ResolvedPackageIdentity } from "./identity";
-import { observeExportMetadata } from "./export-metadata";
+import type { ResolvedPackageIdentity } from "./identity.ts";
+import { observeExportMetadata } from "./export-metadata.ts";
 
 function identity(manifest: Record<string, unknown>): ResolvedPackageIdentity {
   return {

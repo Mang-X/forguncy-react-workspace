@@ -44,6 +44,13 @@
  * says what that proves — which is `local` evidence only. `runtime`'s
  * `formatLocalDevValidationDistinction()` is the report of what remains owed, and this package
  * prints it rather than paraphrasing it.
+ *
+ * That last sentence was false when it was written, and the way it was false is worth keeping:
+ * nothing in this package called `formatLocalDevValidationDistinction()`, so the report existed,
+ * was tested, and was never shown to anybody. `local-dev-audit.ts` now prints it at server start.
+ * The general shape — a rule that is correct and that nothing acts on — is the one this package
+ * keeps meeting, and it is why the extension audit lives behind a `configureServer` hook rather
+ * than behind an exported function a project may call.
  */
 
 // The loop's stage record and the distinction it exists to make (#22)
@@ -67,7 +74,7 @@ export {
   DEV_HARNESS_DECISION_REFERENCE,
   DEV_HARNESS_GOVERNING_DECISIONS,
   DEV_HARNESS_GOVERNING_SPEC_REFERENCE_LINE,
-} from "./provenance";
+} from "./provenance.ts";
 
 // The host substitutions (#9 via #22's projection)
 export {
@@ -79,12 +86,12 @@ export {
   hostPackageVersionMismatches,
   installedHostPackageVersion,
   LocalHostResolutionError,
-} from "./host-modules";
+} from "./host-modules.ts";
 export type {
   HostModuleStandIn,
   HostPackageVersionExpectation,
   HostPackageVersionMismatch,
-} from "./host-modules";
+} from "./host-modules.ts";
 
 // The Vite plugin (#23's steps 1, 2, 4, 5 and 6)
 export {
@@ -97,9 +104,44 @@ export {
   harnessHostModulePlan,
   REACT_FAST_REFRESH_PLUGIN_NAME,
   reactFastRefresh,
-} from "./vite-plugin";
-export type { DevHarnessOptions, DevHarnessVitePlugin } from "./vite-plugin";
+} from "./vite-plugin.ts";
+export type { DevHarnessOptions, DevHarnessVitePlugin } from "./vite-plugin.ts";
+
+// The project's local-dev configuration, audited at server start (#23 plan step 5)
+export {
+  auditHarnessConfiguration,
+  blockingLocalDevFindings,
+  BlockingLocalDevFindingError,
+  effectiveDecisionsForCell,
+  formatHarnessAudit,
+  readProjectDependencyDecisions,
+} from "./local-dev-audit.ts";
+export type { HarnessAuditInput } from "./local-dev-audit.ts";
+
+// The lock, projected the way the compiler projects it (#23 plan step 5, validity half)
+export {
+  DEFAULT_LOCAL_EXTENSION_CATALOG,
+  formatLocalDecisionProjection,
+  installedVitePlusToolchain,
+  LOCAL_DEV_UNOBSERVABLE_STALENESS_REASONS,
+  projectLocalDecisions,
+} from "./local-decision-projection.ts";
+export type { LocalDecisionProjection, WithheldLocalDecision } from "./local-decision-projection.ts";
+
+// The declared `extensionChoices`, resolved rather than only reported (#23 plan step 5)
+export {
+  EXTENSION_SUBSTITUTION_MODULE_PREFIX,
+  ExtensionSubstituteError,
+  extensionSubstitutionModuleId,
+  extensionSubstitutionModuleOf,
+  extensionSubstitutionModuleSource,
+  extensionSubstitutions,
+  resolveChoiceTarget,
+  substitutedExtensionModuleIds,
+  substitutionForModuleId,
+} from "./extension-substitutions.ts";
+export type { ExtensionSubstitution, ExtensionSubstitutionTarget } from "./extension-substitutions.ts";
 
 // The seam between the node half and the browser half. Types only: the modules themselves
 // are reached by path (`./mount`), because the browser half must not be pulled in here.
-export type { DevHarnessMountableCell, DevHarnessMountTarget } from "./types";
+export type { DevHarnessMountableCell, DevHarnessMountTarget } from "./types.ts";

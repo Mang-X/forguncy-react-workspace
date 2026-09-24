@@ -3,8 +3,8 @@ import { describe, expect, it } from "vitest";
 import { CELL_ARTIFACT_BANNER } from "@forguncy-react-workspace/cell-compiler";
 import type { CompileCellResult } from "@forguncy-react-workspace/cell-compiler";
 
-import { cellTargetLabel, SYNC_TARGET_LOCATOR } from "./target";
-import type { CellTarget, SyncCellInput } from "./target";
+import { cellTargetLabel, SYNC_TARGET_LOCATOR } from "./target.ts";
+import type { CellTarget, SyncCellInput } from "./target.ts";
 
 /**
  * #19 splits the target in two sentences — "resolve target page + cell from project

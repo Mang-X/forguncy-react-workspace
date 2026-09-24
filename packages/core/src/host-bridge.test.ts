@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { HOST_BRIDGE_DECISION, HOST_BRIDGE_DECISION_REFERENCE, HOST_BRIDGE_CITATION_PATTERNS, citesDecision } from "./governance";
+import { HOST_BRIDGE_DECISION, HOST_BRIDGE_DECISION_REFERENCE, HOST_BRIDGE_CITATION_PATTERNS, citesDecision } from "./governance.ts";
 import {
   assertHostBridgeContract,
   assertHostBridgeMappingIsAdmissible,
@@ -41,9 +41,9 @@ import {
   JSX_RUNTIME_ADAPTER_RULE_IDS,
   packageNameOfModuleId,
   sharedHostBridgeDiagnosticCodes,
-} from "./host-bridge";
-import type { HostBridgeAdapterMapping, HostBridgeGlobalMapping, HostBridgeMapping } from "./host-bridge";
-import { CELL_PRESET_LIBRARIES, cellUserScopeBinding } from "./runtime-contract";
+} from "./host-bridge.ts";
+import type { HostBridgeAdapterMapping, HostBridgeGlobalMapping, HostBridgeMapping } from "./host-bridge.ts";
+import { CELL_PRESET_LIBRARIES, cellUserScopeBinding } from "./runtime-contract.ts";
 
 function adapterMapping(specifier: string): HostBridgeAdapterMapping {
   const mapping = findHostBridgeModuleMapping(specifier);
