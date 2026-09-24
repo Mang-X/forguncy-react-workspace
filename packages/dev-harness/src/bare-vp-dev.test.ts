@@ -7,9 +7,8 @@ import { loadConfigFromFile } from "vite";
 import { DEV_HARNESS_PLUGIN_NAME } from "./vite-plugin.ts";
 
 /**
- * #67's criterion, executed: **bare `vp dev`** — no flags, no wrapper — can load this
- * repository's `vite.config.ts`, because Vite's *default* config loader can resolve the workspace
- * TypeScript that config imports.
+ * #67's mechanism, pinned: Vite's **default** config loader can resolve the workspace TypeScript
+ * that `examples/dev-harness/vite.config.ts` imports.
  *
  * Decision sources: GitHub Issues
  * - #67 — "Implement: bare `vp dev` for the local Cell harness (configLoader / workspace
@@ -21,7 +20,27 @@ import { DEV_HARNESS_PLUGIN_NAME } from "./vite-plugin.ts";
  *   (https://github.com/Mang-X/forguncy-react-workspace/issues/22), whose Developer workflow
  *   spells the loop as `vp dev`
  *
- * ## The failure this guards, measured
+ * ## What this file is, and what it is not
+ *
+ * A review of this PR found this test does not execute the acceptance path its name implies, and
+ * that finding was correct — the docstring here previously stopped one step short of saying so.
+ * It calls `vite.loadConfigFromFile(..., "bundle")`, so it proves the config graph loads under
+ * *Vite's* bundle loader. It cannot speak for the `vp dev` **command**: this file imports
+ * `vite@8.3.0`, while `vp dev` resolves `vite` to `@voidzero-dev/vite-plus-core` — different
+ * packages — so a regression in Vite+'s target selection or its forwarding would leave this green.
+ *
+ * The command half lives in `vp-dev-command.test.ts`, which spawns `vp dev` and expects the
+ * plugin's mount node and entry in the served page. Keep both: this file explains and pins the
+ * *mechanism* (which loader resolves what, and why the extension convention is what makes it
+ * work), and that one asserts the public command. Deleting this in favour of the command test
+ * would lose the assertions below about how far the config's workspace closure actually reaches;
+ * deleting that one in favour of this would let the command regress unnoticed.
+ *
+ * The repo-wide *convention* is a third scope again — `relative-import-extension.test.ts` — since
+ * neither of these sees an extensionless import in `cell-compiler`, `dependency-resolver` or
+ * `mcp-sync`.
+ *
+ * ## The failure this explains, measured
  *
  * Vite's default `configLoader` is `bundle`. It bundles `vite.config.ts` and **externalizes every
  * bare import that resolves into `node_modules`** — which includes this repository's workspace
@@ -36,18 +55,17 @@ import { DEV_HARNESS_PLUGIN_NAME } from "./vite-plugin.ts";
  *
  * That is why every relative import in `packages/**` and `examples/**` names its file with a
  * `.ts`/`.tsx` extension, and why the root `tsconfig.json` sets `allowImportingTsExtensions`.
- * Neither fact is self-enforcing, which is what this file is for.
  *
- * ## Why this is a behavioural test and not a grep for the convention
+ * ## Why this is behavioural and not a grep for the convention
  *
- * A test that read the sources and looked for extensionless specifiers would be a *second copy*
- * of the rule, and it would answer the wrong question: it would describe what the sources look
- * like, not whether the toolchain can load them. This calls `loadConfigFromFile` with
- * `configLoader: "bundle"` — Vite's documented default, and the exact value bare `vp dev` uses —
- * so it fails for the reason `vp dev` would fail.
+ * A test that read the sources looking for extensionless specifiers would be a *second copy* of
+ * the rule, and it would answer the wrong question: it would describe what the sources look like,
+ * not whether the toolchain can load them. This calls `loadConfigFromFile` with
+ * `configLoader: "bundle"` — Vite's documented default — so it fails for the reason the loader
+ * would fail.
  *
  * That is also why the assertion is on the *evaluated* config rather than on "did not throw".
- * Evaluating this config import `forguncy.config.ts` (which imports `core`) and
+ * Evaluating this config imports `forguncy.config.ts` (which imports `core`) and
  * `@forguncy-react-workspace/dev-harness` (which imports `runtime` and `vite-plugin-fgc`), so the
  * harness plugin appearing in the result with its host substitution plan filled in is evidence
  * that four workspace packages of TypeScript *ran*. A config that resolved to an empty object
@@ -56,9 +74,9 @@ import { DEV_HARNESS_PLUGIN_NAME } from "./vite-plugin.ts";
  * The config path is read from `examples/dev-harness` rather than invented, because that example
  * *is* the case #22 names.
  *
- * Deliberately **not** asserted: that the server starts, that a Cell mounts, or that HMR works.
- * Those are the rest of #23's criteria and they are still owed to a real page. This covers the
- * load-the-config step, which is the one that was failing.
+ * Deliberately **not** asserted: that the server starts (that is `vp-dev-command.test.ts`), that
+ * a Cell mounts in a browser, or that HMR preserves state. The latter two were verified by hand
+ * for this PR and are still owed to a real page; #20/#25 own that.
  */
 const here = dirname(fileURLToPath(import.meta.url));
 const exampleRoot = join(here, "..", "..", "..", "examples", "dev-harness");
