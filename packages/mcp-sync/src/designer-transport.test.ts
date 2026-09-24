@@ -17,7 +17,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { createDesignerSyncPort, DESIGNER_EXECUTE_TOOL } from "./designer-transport.ts";
+import { createDesignerSyncPort, DESIGNER_EXECUTE_TOOL, runtimePageUrl } from "./designer-transport.ts";
 import type { DesignerCallTool, DesignerPermissionMode } from "./designer-transport.ts";
 import { issueSetCellsRequest } from "./port.ts";
 import type { ReadCellSourceResult } from "./port.ts";
@@ -151,6 +151,7 @@ describe("the designer transport", () => {
       if (script.includes("getCells")) return ok({ cells: [] });
       if (script.includes("listFrontendLibraries")) return ok([]);
       if (script.includes("checkProjectErrors")) return ok({ errorCount: 0 });
+      if (script.includes("getProjectSaveStatus")) return ok({ containsUnsavedChanges: false });
       return ok({});
     });
     const port = createDesignerSyncPort({ callTool });
@@ -203,6 +204,46 @@ describe("mapping a read", () => {
     const result = await readWith([{ row: 0, col: 0, cellType: "TextCellType" }]);
 
     expect(result).toEqual({ kind: "occupied", code: "a TextCellType cell" });
+  });
+
+  // The reviewer's fourth finding. `react-cell` claims "this Cell *is* a managed
+  // ReactCellType", and inferring that from the presence of a `code` property would claim it
+  // from a weaker fact. These cases all have a `code` and are still not ours.
+  it("reads a non-React cell type that carries a code as occupied, not as ours", async () => {
+    for (const cellType of ["UserControlPageCellType", "SomeOtherCellType", "TextCellType"]) {
+      const result = await readWith([{ row: 0, col: 0, cellType, cellTypeProps: { code: "function App(){}" } }]);
+
+      expect(result.kind, cellType).toBe("occupied");
+      if (result.kind !== "occupied") continue;
+      expect(result.code).toContain(cellType);
+    }
+  });
+
+  // The dangerous variant of the same: a foreign cell whose `code` is *empty* would become a
+  // managed React Cell with empty source, classify `vacant`, and be overwritten.
+  it("reads a foreign cell with an empty code as occupied, never as a vacant React Cell", async () => {
+    const result = await readWith([
+      { row: 0, col: 0, cellType: "UserControlPageCellType", cellTypeProps: { code: "" } },
+    ]);
+
+    expect(result.kind).toBe("occupied");
+    expect(result).not.toEqual({ kind: "react-cell", code: "", frontendLibraries: [] });
+  });
+
+  // The other direction, so the stricter check is not simply stricter: the exact type with a
+  // code is still read as ours.
+  it("reads the exact React Cell type as a managed React Cell", async () => {
+    const result = await readWith([
+      { row: 0, col: 0, cellType: "ReactCellTypeCellType", cellTypeProps: { code: "x" } },
+    ]);
+
+    expect(result.kind).toBe("react-cell");
+  });
+
+  it("says a React-typed Cell with no readable code is damage, not a designer edit", async () => {
+    const result = await readWith([{ row: 0, col: 0, cellType: "ReactCellTypeCellType", cellTypeProps: {} }]);
+
+    expect(result).toEqual({ kind: "occupied", code: "a ReactCellType cell with no readable code" });
   });
 
   // The direction that must not happen: mapping an occupied Cell onto an empty read.
@@ -277,12 +318,30 @@ describe("reading results that must not be guessed", () => {
       containsUnsavedChanges: true,
     });
 
-    // The status response normally has no `saved` at all — #5's evidence and #20's both
-    // show that field set only by `saveProject`.
-    const clean = recorder(() => ok({ currentFilePath: "x", canSave: true, message: "ok" }));
+    const clean = recorder(() => ok({ currentFilePath: "x", canSave: true, containsUnsavedChanges: false }));
     expect(await createDesignerSyncPort({ callTool: clean.callTool }).getProjectSaveStatus({})).toEqual({
       containsUnsavedChanges: false,
     });
+  });
+
+  // The fail-open the review caught: `containsUnsavedChanges === true` turns a missing or
+  // renamed field into "the project is clean", the executor then skips `saveProject`, and a
+  // mutation that was never persisted is reported as a successful sync. The product's own
+  // response set cannot be distinguished from a truncated one by shape alone, so absence has
+  // to be refused rather than interpreted.
+  it("refuses a save status without a boolean rather than reading it as clean", async () => {
+    // Exactly the shape #5's evidence shows for the *status* call: no `saved` field at all,
+    // and — in this case — no dirtiness field either.
+    const missing = recorder(() => ok({ currentFilePath: "x", canSave: true, message: "ok" }));
+    await expect(createDesignerSyncPort({ callTool: missing.callTool }).getProjectSaveStatus({})).rejects.toThrow(
+      /boolean `containsUnsavedChanges`/,
+    );
+
+    // A field of the wrong type is the same failure: not a boolean is not an answer.
+    const wrongType = recorder(() => ok({ containsUnsavedChanges: "true" }));
+    await expect(createDesignerSyncPort({ callTool: wrongType.callTool }).getProjectSaveStatus({})).rejects.toThrow(
+      /boolean `containsUnsavedChanges`/,
+    );
   });
 
   it("reports a generation with no url as an empty locator, for the gate to catch", async () => {
@@ -290,6 +349,77 @@ describe("reading results that must not be guessed", () => {
     const port = createDesignerSyncPort({ callTool });
 
     expect(await port.generatePageAsync({ pageName: "P" })).toEqual({ pageName: "P", pageUrl: "" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The runtime locator
+// ---------------------------------------------------------------------------
+
+/**
+ * The response shape these tests use is the one #20 measured, not a convenient one.
+ *
+ * The previous version of this file stubbed `url` as `http://localhost:63982/Forguncy/OrderPage`
+ * — already assembled — so the mapping from the product's answer to a page URL was never
+ * exercised, and a real run returned the runtime *base* instead of the page. A stub that
+ * only has the shape the code wants cannot find that class of bug.
+ */
+describe("turning the generation answer into a page locator", () => {
+  const BASE = "http://localhost:63982/Forguncy";
+
+  async function generateFor(pageName: string): Promise<string> {
+    // Exactly what the product answers: `url` is the base, page argument or not.
+    const { callTool } = recorder(() => ok({ success: true, url: BASE, message: "ok" }));
+    const port = createDesignerSyncPort({ callTool });
+    return (await port.generatePageAsync({ pageName })).pageUrl;
+  }
+
+  it("names the page the product's own answer leaves out", async () => {
+    // The measured behaviour: `generatePageAsync` ignores its page argument and answers with
+    // the base. Returning that base would send a caller to the project's start page.
+    expect(await generateFor("OrderPage")).toBe(`${BASE}/OrderPage`);
+  });
+
+  it("encodes a page name, so a space or a non-ASCII name stays one path segment", async () => {
+    // #20 opened the encoded form of a Chinese page name in a browser and got the page.
+    expect(await generateFor("Tanstack Query拓展包示例")).toBe(
+      `${BASE}/Tanstack%20Query%E6%8B%93%E5%B1%95%E5%8C%85%E7%A4%BA%E4%BE%8B`,
+    );
+    // A `/` in a name must not become a path segment.
+    expect(await generateFor("a/b")).toBe(`${BASE}/a%2Fb`);
+  });
+
+  it("does not double a trailing slash on the base", async () => {
+    const { callTool } = recorder(() => ok({ url: `${BASE}/` }));
+    const port = createDesignerSyncPort({ callTool });
+
+    expect((await port.generatePageAsync({ pageName: "P" })).pageUrl).toBe(`${BASE}/P`);
+  });
+
+  // If a future product version honours the argument, its answer is more specific than this
+  // mapping's guess and must win.
+  it("leaves an answer that already names a page alone", async () => {
+    const { callTool } = recorder(() => ok({ url: `${BASE}/OrderPage` }));
+    const port = createDesignerSyncPort({ callTool });
+
+    expect((await port.generatePageAsync({ pageName: "OrderPage" })).pageUrl).toBe(`${BASE}/OrderPage`);
+  });
+
+  it("maps a base with no url to the empty locator the gate refuses", async () => {
+    const { callTool } = recorder(() => ok({ success: false, url: "" }));
+    const port = createDesignerSyncPort({ callTool });
+
+    // Empty stays empty: appending a page name to nothing would invent a locator, and the
+    // generation gate is what reports the failure.
+    expect((await port.generatePageAsync({ pageName: "P" })).pageUrl).toBe("");
+  });
+
+  it("is the pure mapping, asserted directly", () => {
+    expect(runtimePageUrl(BASE, "OrderPage")).toBe(`${BASE}/OrderPage`);
+    expect(runtimePageUrl(BASE, "")).toBe(BASE);
+    expect(runtimePageUrl("", "OrderPage")).toBe("");
+    expect(runtimePageUrl(`${BASE}/`, "OrderPage")).toBe(`${BASE}/OrderPage`);
+    expect(runtimePageUrl(`${BASE}/OrderPage`, "OrderPage")).toBe(`${BASE}/OrderPage`);
   });
 });
 

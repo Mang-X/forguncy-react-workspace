@@ -216,6 +216,20 @@ async function main() {
   ];
 
   // --- The flow, per target ---------------------------------------------------------
+  //
+  // The port is wrapped so the *actual* request that crossed to the designer is captured.
+  // That is what makes the byte-identity check below meaningful: it compares what was
+  // persisted against what was sent, not against another read of the same thing (which is
+  // tautologically equal and would pass even if the product truncated or rewrote the code).
+  const dispatched = [];
+  const observingPort = {
+    ...port,
+    setCells: async request => {
+      dispatched.push(request);
+      return port.setCells(request);
+    },
+  };
+
   const targets = [
     { pageName: PAGE, cell: "A1" },
     { pageName: PAGE, cell: "B1" },
@@ -223,16 +237,15 @@ async function main() {
 
   const runs = [];
   for (const target of targets) {
-    const { state } = await readCellState(port, target);
-    record(`2. read ${target.cell} before the write`, state);
+    // Read for the *report only*: the executor reads for itself, which is the property the
+    // review asked for. Recording the same read here lets the log show what it saw.
+    record(`2. read ${target.cell} before the write`, (await readCellState(port, target)).state);
 
     const run = await executeCellSync({
       target,
       artifact,
       decisions,
-      deployed: state,
-      listings,
-      port,
+      port: observingPort,
     });
     runs.push(run);
     record(`3. executeCellSync ${target.cell}`, {
@@ -264,6 +277,18 @@ async function main() {
     console.log(`  ${ok ? "PASS" : "FAIL"} ${name}${detail === undefined ? "" : ` — ${detail}`}`);
   };
 
+  // What was *actually sent* to the designer, captured off the port. Everything below
+  // compares the persisted state against this, so a product that truncated, normalized or
+  // rewrote the code would fail rather than pass by being compared against itself.
+  const sentA = dispatched[0]?.cells?.[0]?.cellTypeProps?.code;
+  const sentB = dispatched[1]?.cells?.[0]?.cellTypeProps?.code;
+  record("4b. the code the port actually dispatched", {
+    count: dispatched.length,
+    sentBytes: typeof sentA === "string" ? sentA.length : null,
+    sentSha256: typeof sentA === "string" ? sha256(sentA) : null,
+    persistedSha256: typeof cellA.code === "string" ? sha256(cellA.code) : null,
+  });
+
   console.log("\n### 5. acceptance checks");
   check(
     "no manual copy/paste: the persisted code is the artifact's, banner and all",
@@ -274,21 +299,33 @@ async function main() {
     cellA.code?.includes("fgc-sync") === true,
   );
   check(
-    "the persisted code is byte-identical to what was written",
-    cellA.code === readBack[0].code && sha256(cellA.code) === sha256(readBack[0].code),
+    "the write actually crossed the port, with a value to compare",
+    typeof sentA === "string" && sentA.length > 0,
+    `${dispatched.length} write(s) observed`,
+  );
+  // The real check: persisted vs *dispatched*, not persisted vs itself. The previous
+  // version compared `readBack[0]` to `readBack[0]` and so passed unconditionally — it
+  // could not have failed however the product behaved.
+  check(
+    "the persisted code is byte-identical to what was dispatched",
+    typeof sentA === "string" && cellA.code === sentA,
+    `sent ${typeof sentA === "string" ? sentA.length : "?"} bytes, persisted ${typeof cellA.code === "string" ? cellA.code.length : "?"} bytes, hashes ${sha256(cellA.code) === sha256(sentA ?? "") ? "match" : "DIFFER"}`,
   );
   check(
-    "both Cells carry the artifact (one artifact, N targets)",
-    cellB.code === cellA.code,
+    "both Cells carry the artifact, and B2's persisted code matches B2's dispatch",
+    cellB.code === cellA.code && cellB.code === sentB,
   );
   check(
     "the library reference persisted, keyed by libraryId and nothing else",
     cellA.frontendLibraries?.length === 1 && cellA.frontendLibraries[0].libraryId === MAPPING.libraryId,
     JSON.stringify(cellA.frontendLibraries),
   );
+  // The locator must name this page, not the runtime root: #20 measured that
+  // `generatePageAsync` answers with the base regardless of any page argument, so a locator
+  // equal to the base is the bug the review found, not a quirk.
   check(
-    "runtime locator returned for browser verification",
-    typeof first.runtime.pageUrl === "string" && first.runtime.pageUrl.length > 0,
+    "runtime locator points at the synchronized page, not the runtime base",
+    first.runtime.pageUrl.includes(encodeURIComponent(PAGE)),
     first.runtime.pageUrl,
   );
 
@@ -313,14 +350,9 @@ async function main() {
     `${secondPlan.divergence.kind} / ${secondPlan.writeAction}`,
   );
 
-  const secondRun = await executeCellSync({
-    target: targets[0],
-    artifact,
-    decisions,
-    deployed: secondState.state,
-    listings,
-    port,
-  });
+  // No `deployed`: the executor reads the target itself, which is the property the review
+  // asked for. Supplying a state here is not expressible any more.
+  const secondRun = await executeCellSync({ target: targets[0], artifact, decisions, port });
   record("7. second run", {
     status: secondRun.status,
     steps: secondRun.steps.map(step => `${step.order}.${step.stepId}=${step.status}`),
@@ -336,15 +368,7 @@ async function main() {
     return true;
   `);
   const foreignTarget = { pageName: PAGE, cell: "C1" };
-  const foreignState = await readCellState(port, foreignTarget);
-  const foreignRun = await executeCellSync({
-    target: foreignTarget,
-    artifact,
-    decisions,
-    deployed: foreignState.state,
-    listings,
-    port,
-  });
+  const foreignRun = await executeCellSync({ target: foreignTarget, artifact, decisions, port });
   record("8. a hand-written Cell", {
     divergence: foreignRun.plan.divergence.kind,
     status: foreignRun.status,
@@ -390,8 +414,10 @@ async function main() {
     target: { pageName: PAGE, cell: "E1" },
     artifact,
     decisions,
-    deployed: (await readCellState(port, { pageName: PAGE, cell: "E1" })).state,
-    listings,
+    // `overwrite: "force"` because this Cell was written by the script's own hand with
+    // different code, so the default policy refuses it — which is correct, and which the
+    // checkpoint above already asserts for the `foreign-code` case. This one is about
+    // geometry, so it forces deliberately and is recorded as an override.
     overwrite: "force",
     port,
   });
@@ -421,8 +447,8 @@ async function main() {
     { root: process.cwd(), requireEntryFiles: false },
   );
   const batchRuns = await executeCellSyncTargets(registry, [
-    { cellId: "probeA", artifact, decisions, listings, port },
-    { cellId: "probeB", artifact, decisions, listings, port },
+    { cellId: "probeA", artifact, decisions, port },
+    { cellId: "probeB", artifact, decisions, port },
   ]);
   const batchRead = await designer(`
     const g = await api.page.getCells({ pageName: ${JSON.stringify(PAGE)}, range: "F1:G1" });

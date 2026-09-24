@@ -59,7 +59,7 @@ export {
 export type { CellSyncTargetPlan, ResolvedCellSyncTarget } from "./registry-target.ts";
 
 // The designer surface the flow needs, and the operations it deliberately lacks
-export { FORGUNCY_SYNC_PORT_METHODS } from "./port.ts";
+export { FORGUNCY_SYNC_PORT_METHODS, REACT_CELL_TYPE_NAME } from "./port.ts";
 export type {
   ForguncySyncPort,
   ForguncySyncPortMethod,
@@ -265,5 +265,5 @@ export type {
 } from "./executor.ts";
 
 // The designer, as the port — the transport half of #20
-export { createDesignerSyncPort, DESIGNER_EXECUTE_TOOL } from "./designer-transport.ts";
+export { createDesignerSyncPort, DESIGNER_EXECUTE_TOOL, runtimePageUrl } from "./designer-transport.ts";
 export type { DesignerCallTool, DesignerPermissionMode, DesignerSyncPortOptions } from "./designer-transport.ts";

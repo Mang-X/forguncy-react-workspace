@@ -28,7 +28,7 @@ import type { CompileCellResult } from "@forguncy-react-workspace/cell-compiler"
 import { createCellRegistry } from "@forguncy-react-workspace/core";
 
 import { executeCellSync, executeCellSyncTargets, formatCellSyncRun, deployedStateOfRead, readCellState } from "./executor.ts";
-import type { CellSyncRun, SyncRunStepStatus } from "./executor.ts";
+import type { CellSyncRun, ExecuteCellSyncOptions, SyncRunStepStatus } from "./executor.ts";
 import { stampSyncMarker } from "./fingerprint.ts";
 import type {
   ForguncySyncPort,
@@ -40,9 +40,8 @@ import type {
   ReadCellSourceResult,
 } from "./port.ts";
 import { planCellSync, planSetCellsDispatch } from "./sync-plan.ts";
-import type { CellSyncPlan } from "./sync-plan.ts";
+import type { CellSyncPlan, PlanCellSyncOptions } from "./sync-plan.ts";
 import type { CellTarget } from "./target.ts";
-import type { DeployedCellState } from "./divergence.ts";
 
 const TARGET: CellTarget = { pageName: "OrderPage", cell: "A1" };
 const CODE_BODY = "function App() { return null; }\n";
@@ -142,23 +141,33 @@ function stepStatuses(run: CellSyncRun): Record<string, SyncRunStepStatus> {
 }
 
 /**
- * The options one run needs, with the read supplied as the *caller* would: the executor
- * sequences the calls, and a caller supplies what its own read found.
+ * The options one run needs.
+ *
+ * There is deliberately no `deployed` or `listings` parameter, because the executor's own
+ * type has no field for either: a test that wants the flow to see a particular target state
+ * has to make the *port* answer with it (`recordingPort({ read })`), which is the same path
+ * a real run takes. That is the point of the shape — a test cannot fabricate state any more
+ * than a caller can.
  */
-function runOptions(
-  port: ForguncySyncPort,
-  deployed: DeployedCellState = { kind: "read", code: "" },
-  overrides: Record<string, unknown> = {},
-) {
+function runOptions(port: ForguncySyncPort, overrides: Record<string, unknown> = {}) {
   return {
     target: TARGET,
     artifact: generated(),
     decisions: [],
-    deployed,
-    listings: [],
     port,
     ...overrides,
   } as Parameters<typeof executeCellSync>[0];
+}
+
+/**
+ * A port whose read reports an occupied Cell, for the "someone else's work" cases.
+ *
+ * The product reports an occupied Cell without a `code`, which is why this is expressed as a
+ * read *result* rather than as a code string: the adapter's translation is the thing under
+ * test in `designer-transport.test.ts`, and here the flow only cares that the plan saw it.
+ */
+function occupiedPort(detail: string, other: RecordingPortOptions = {}): RecordingPort {
+  return recordingPort({ ...other, read: { kind: "occupied", code: detail } });
 }
 
 // ---------------------------------------------------------------------------
@@ -166,20 +175,48 @@ function runOptions(
 // ---------------------------------------------------------------------------
 
 describe("executing a sync", () => {
-  it("runs the flow's calls in #19's order", async () => {
+  // The reviewer's first finding, as a test: the executor must read the project's live
+  // state itself, *before* the mutation, rather than trusting a caller. "The caller says it
+  // read this" is not what `before mutation` means, and the failure it allows — a stale
+  // `{ kind: "read", code: "" }` for a Cell a designer has since edited — is silent.
+  it("reads the extension listing and the target before it writes anything", async () => {
     const { port, calls } = recordingPort();
 
     const run = await executeCellSync(runOptions(port));
 
     expect(run.status).toBe("written");
-    // The write is between the read and the error check, and generation is last. Nothing
-    // here is decorative: each of these orderings is a safety rule #19 states.
+    // Both reads precede the write, and they are the executor's own calls — a run that
+    // trusted a caller's state would have no `readCellSource` here at all.
     expect(methodOrder(calls)).toEqual([
+      "listFrontendLibraries",
+      "readCellSource",
       "setCells",
       "getProjectSaveStatus",
       "checkProjectErrors",
       "generatePageAsync",
     ]);
+    expect(stepStatuses(run)["verify-extension-metadata"]).toBe("ran");
+    expect(stepStatuses(run)["read-target-state"]).toBe("ran");
+  });
+
+  // The enforcement is the type, so the assertion is the type. `ExecuteCellSyncOptions`
+  // omits `deployed` and `listings`, which is what makes the bypass *unrepresentable*
+  // rather than discouraged — a caller has nowhere to put a fabricated observation. This
+  // test is mostly its annotations: widen the type and the file stops compiling.
+  it("cannot be handed a caller's observation of the project", () => {
+    /** Compile-time only: whether `T` has a field named `K`. */
+    type HasField<T, K extends string> = K extends keyof T ? true : false;
+
+    const hasDeployed: HasField<ExecuteCellSyncOptions, "deployed"> = false;
+    const hasListings: HasField<ExecuteCellSyncOptions, "listings"> = false;
+    // The plan, by contrast, *must* keep them: planning is a pure function of a state
+    // someone supplies, and the read is the executor's obligation rather than the planner's.
+    const planTakesDeployed: HasField<PlanCellSyncOptions, "deployed"> = true;
+
+    // Read at runtime so a passing compile is not the whole story.
+    expect(hasDeployed).toBe(false);
+    expect(hasListings).toBe(false);
+    expect(planTakesDeployed).toBe(true);
   });
 
   it("returns the runtime locator only after the write and the gates", async () => {
@@ -236,17 +273,18 @@ describe("executing a sync", () => {
 // ---------------------------------------------------------------------------
 
 describe("when the plan holds", () => {
-  it("sends nothing for a diverged target, and runs no designer call at all", async () => {
-    const { port, calls } = recordingPort();
+  it("sends nothing for a diverged target, though it did read it", async () => {
+    const { port, calls } = recordingPort({ read: { kind: "react-cell", code: "designer work", frontendLibraries: [] } });
 
-    const run = await executeCellSync(runOptions(port, { kind: "read", code: "designer work" }));
+    const run = await executeCellSync(runOptions(port));
 
     expect(run.status).toBe("held");
     if (run.status !== "held") return;
     expect(run.dispatch.reason).toBe("gate-refused");
-    // The load-bearing assertion: not one call reached the designer. A refusal that still
-    // called `setCells` would be the exact failure #19's safety section describes.
-    expect(calls).toEqual([]);
+    // The load-bearing assertion: the two reads happened, and *nothing that mutates* did. A
+    // refusal that still called `setCells` would be the exact failure #19's safety section
+    // describes, and the reads are what made the refusal possible.
+    expect(methodOrder(calls)).toEqual(["listFrontendLibraries", "readCellSource"]);
     expect(stepStatuses(run)).toEqual({
       "resolve-cell-target": "ran",
       "verify-extension-metadata": "ran",
@@ -259,46 +297,33 @@ describe("when the plan holds", () => {
     });
   });
 
-  it("holds a target it could not read, rather than writing over it", async () => {
-    const { port, calls } = recordingPort();
-
-    const run = await executeCellSync(runOptions(port, { kind: "unread", reason: "read-failed" }));
-
-    expect(run.status).toBe("held");
-    if (run.status !== "held") return;
-    expect(run.diagnostics.map(diagnostic => diagnostic.code)).toContain("cell-state-unverifiable");
-    expect(calls).toEqual([]);
-    expect(stepStatuses(run)["read-target-state"]).toBe("skipped");
-  });
-
   it("holds a Cell holding something that is not a React Cell", async () => {
-    const { port, calls } = recordingPort();
+    const { port, calls } = occupiedPort("the value \"designer note\"");
 
-    const run = await executeCellSync(runOptions(port, { kind: "occupied", detail: "a text value" }));
+    const run = await executeCellSync(runOptions(port));
 
     expect(run.status).toBe("held");
     if (run.status !== "held") return;
     expect(run.plan.divergence.kind).toBe("foreign-code");
-    expect(calls).toEqual([]);
+    expect(methodOrder(calls)).toEqual(["listFrontendLibraries", "readCellSource"]);
+    expect(stepStatuses(run)["write-cell-source"]).toBe("not-reached");
   });
 
   it("sends nothing when the artifact is not compiler output", async () => {
     const { port, calls } = recordingPort();
 
-    const run = await executeCellSync(
-      runOptions(port, { kind: "read", code: "" }, { artifact: { code: CODE_BODY, frontendLibraries: [] } }),
-    );
+    const run = await executeCellSync(runOptions(port, { artifact: { code: CODE_BODY, frontendLibraries: [] } }));
 
     expect(run.status).toBe("held");
     if (run.status !== "held") return;
     expect(run.dispatch.reason).toBe("nothing-to-write");
-    expect(calls).toEqual([]);
+    expect(methodOrder(calls)).toEqual(["listFrontendLibraries", "readCellSource"]);
   });
 
   it("reports a held run as held, never as written", async () => {
-    const { port } = recordingPort();
+    const { port } = recordingPort({ read: { kind: "react-cell", code: "designer work", frontendLibraries: [] } });
 
-    const run = await executeCellSync(runOptions(port, { kind: "read", code: "designer work" }));
+    const run = await executeCellSync(runOptions(port));
     const text = formatCellSyncRun(run);
 
     expect(text).toContain("held");
@@ -314,25 +339,27 @@ describe("syncing the same artifact twice", () => {
   it("is a skip the second time, with no write", async () => {
     // The first run's *own output* is what the second run reads back — the round trip
     // through the designer is what a real project performs, and #20 measured it byte-identical.
+    // The read comes from the port, which is the only way a run can learn a target's state.
     const artifact = generated();
     const stamped = stampSyncMarker(artifact);
-    const { port, calls } = recordingPort();
+    const { port, calls } = recordingPort({
+      read: { kind: "react-cell", code: stamped, frontendLibraries: artifact.frontendLibraries },
+    });
 
-    const run = await executeCellSync(
-      runOptions(port, { kind: "read", code: stamped, frontendLibraries: artifact.frontendLibraries }, { artifact }),
-    );
+    const run = await executeCellSync(runOptions(port, { artifact }));
 
     expect(run.status).toBe("held");
     if (run.status !== "held") return;
     expect(run.plan.divergence.kind).toBe("identical");
     expect(run.dispatch.reason).toBe("already-identical");
-    expect(calls).toEqual([]);
+    // Read, then decide not to write. Nothing that mutates was called.
+    expect(methodOrder(calls)).toEqual(["listFrontendLibraries", "readCellSource"]);
   });
 
-  it("plans a byte-identical payload for a second run of a changed artifact", async () => {
+  it("plans a byte-identical payload for two runs of the same artifact", async () => {
     // Two runs of the same artifact must assemble the same bytes, or the second run would
-    // report a change that is not one. Asserted on the plan's serialization because that is
-    // the value the write carries.
+    // report a change that is not one. Asserted on what the port actually received, because
+    // that value is what crosses the wire.
     const first = recordingPort();
     const second = recordingPort();
 
@@ -356,7 +383,10 @@ describe("the conditional save", () => {
     expect(run.status).toBe("written");
     // The status read is what makes the save conditional; without it the step would have to
     // guess, and "always save" would make a clean project's state depend on sync running.
+    // The two pre-mutation reads lead, as they must.
     expect(methodOrder(calls)).toEqual([
+      "listFrontendLibraries",
+      "readCellSource",
       "setCells",
       "getProjectSaveStatus",
       "saveProject",
@@ -484,8 +514,11 @@ describe("turning a read into a plan input", () => {
 
     expect(state.kind).toBe("occupied");
     expect(state).not.toEqual({ kind: "read", code: "" });
-    // And the classification agrees: it is a conflict, not a vacant target.
-    expect(planCellSync(runOptions(recordingPort().port, state)).divergence.kind).toBe("foreign-code");
+    // And the classification agrees: it is a conflict, not a vacant target. Planned from the
+    // translated state, which is the only value the executor ever passes on.
+    expect(planCellSync({ target: TARGET, artifact: generated(), decisions: [], deployed: state }).divergence.kind).toBe(
+      "foreign-code",
+    );
   });
 
   it("performs the read the flow needs, and passes the request the platform takes", async () => {
@@ -527,8 +560,8 @@ describe("executing a batch of declared Cells", () => {
     const { port, written } = recordingPort();
 
     const runs = await executeCellSyncTargets(registryOf(), [
-      { cellId: "orderList", artifact: generated(), decisions: [], listings: [], port },
-      { cellId: "orderBoard", artifact: generated(), decisions: [], listings: [], port },
+      { cellId: "orderList", artifact: generated(), decisions: [], port },
+      { cellId: "orderBoard", artifact: generated(), decisions: [], port },
     ]);
 
     expect(runs.map(run => run.status)).toEqual(["written", "written"]);
@@ -540,21 +573,35 @@ describe("executing a batch of declared Cells", () => {
     ]);
   });
 
-  it("reads each target immediately before its own write", async () => {
+  it("reads each target and the listing immediately before its own write", async () => {
     const { port, calls } = recordingPort();
 
     await executeCellSyncTargets(registryOf(), [
-      { cellId: "orderList", artifact: generated(), decisions: [], listings: [], port },
-      { cellId: "orderBoard", artifact: generated(), decisions: [], listings: [], port },
+      { cellId: "orderList", artifact: generated(), decisions: [], port },
+      { cellId: "orderBoard", artifact: generated(), decisions: [], port },
     ]);
 
-    // Per target, not once for the batch: the state a plan classifies has to be the state
-    // its own write would replace.
+    // Per target, not once for the batch: a listing or a read taken at the start would be a
+    // weaker claim by the time the last Cell was written, and `before mutation` means before
+    // *this* one. Each read is immediately followed by that target's write.
+    expect(methodOrder(calls)).toEqual([
+      "listFrontendLibraries",
+      "readCellSource",
+      "setCells",
+      "getProjectSaveStatus",
+      "checkProjectErrors",
+      "generatePageAsync",
+      "listFrontendLibraries",
+      "readCellSource",
+      "setCells",
+      "getProjectSaveStatus",
+      "checkProjectErrors",
+      "generatePageAsync",
+    ]);
     expect(calls.filter(call => call.method === "readCellSource").map(call => call.argument)).toEqual([
       { pageName: "销售订单", cell: "A1" },
       { pageName: "销售订单", cell: "D4" },
     ]);
-    expect(calls.filter(call => call.method === "setCells")).toHaveLength(2);
   });
 
   // The batch-wide guard, exercised through the executor rather than through the resolver
@@ -565,8 +612,8 @@ describe("executing a batch of declared Cells", () => {
 
     await expect(
       executeCellSyncTargets(registryOf(), [
-        { cellId: "orderList", artifact: generated(), decisions: [], listings: [], port },
-        { cellId: "orderList", artifact: generated(), decisions: [], listings: [], port },
+        { cellId: "orderList", artifact: generated(), decisions: [], port },
+        { cellId: "orderList", artifact: generated(), decisions: [], port },
       ]),
     ).rejects.toThrow(/cell sync request|claim/i);
     // The batch's whole-request guard, not two guards racing: nothing reached the designer,
@@ -580,20 +627,22 @@ describe("executing a batch of declared Cells", () => {
     const { port, calls } = recordingPort();
 
     await expect(
-      executeCellSyncTargets(registryOf(), [
-        { cellId: "notDeclared", artifact: generated(), decisions: [], listings: [], port },
-      ]),
+      executeCellSyncTargets(registryOf(), [{ cellId: "notDeclared", artifact: generated(), decisions: [], port }]),
     ).rejects.toThrow();
     expect(calls).toEqual([]);
   });
 });
 
 
+// ---------------------------------------------------------------------------
+// The dispatch barrier, at the call site the executor uses
+// ---------------------------------------------------------------------------
+
 describe("the executor cannot send what the plan held", () => {
   it("only reaches `setCells` through the dispatch's own request", async () => {
     // Read from the same function the executor reads, so "what may be sent" and "what is
     // sent" cannot drift: an `issue` dispatch is the only case with a request to send.
-    const plan = planCellSync(runOptions(recordingPort().port));
+    const plan = planCellSync({ target: TARGET, artifact: generated(), decisions: [], deployed: { kind: "read", code: "" } });
     const dispatch = planSetCellsDispatch(plan);
 
     expect(dispatch.kind).toBe("issue");
@@ -604,9 +653,13 @@ describe("the executor cannot send what the plan held", () => {
     expect(written[0]).toBe(dispatch.request);
   });
 
-  it("has no request to send for a held plan", async () => {
-    const { port } = recordingPort();
-    const plan: CellSyncPlan = planCellSync(runOptions(port, { kind: "read", code: "designer work" }));
+  it("has no request to send for a held plan", () => {
+    const plan: CellSyncPlan = planCellSync({
+      target: TARGET,
+      artifact: generated(),
+      decisions: [],
+      deployed: { kind: "read", code: "designer work" },
+    });
     const dispatch = planSetCellsDispatch(plan);
 
     expect(dispatch.kind).toBe("hold");

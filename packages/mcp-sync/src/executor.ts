@@ -36,12 +36,19 @@
  * 6. generate the page **after** the errors are known to be zero;
  * 7. return the runtime locator.
  *
- * Steps 1–2 are the ones whose *evidence* is the caller's obligation — the executor
- * cannot invent a listing or a read it was not given — so the plan receives them and
- * the executor only sequences the calls. Step 3 is the only mutating call, and it is
- * reachable only through `planSetCellsDispatch`: handing the plan's payload straight
- * to the port does not compile, which is what makes "the payload is not the
- * permission" a check rather than a convention.
+ * Steps 1–2 are the executor's own calls, and that placement is the design: it reads the
+ * extension listing and the target's current state through the port *immediately* before
+ * planning, so "before mutation" means *at this moment* rather than *per the caller*. The
+ * options type has no field for either observation, so a stale or fabricated read is not
+ * expressible — the alternative, accepting a caller's `deployed`, would let a run write over
+ * a Cell a designer had edited since the caller looked, and would call that a verified sync.
+ * Step 3 is the only mutating call, and it is reachable only through `planSetCellsDispatch`:
+ * handing the plan's payload straight to the port does not compile, which is what makes "the
+ * payload is not the permission" a check rather than a convention.
+ *
+ * `planCellSync` still takes a required `deployed`, and deliberately: planning is a pure
+ * function of a state someone supplies (a dry run, a review, a test) and has to stay
+ * callable with one. Reading is the executor's obligation, not the planner's.
  *
  * ## What it will not do
  *
@@ -64,7 +71,7 @@
  *   `step-outcomes.ts` for the same rule stated on the other side.
  */
 
-import type { ExtensionLibraryListing, CellRegistry } from "@forguncy-react-workspace/core";
+import type { CellRegistry } from "@forguncy-react-workspace/core";
 
 import {
   assertMcpSyncFlowIsCoherent,
@@ -225,14 +232,23 @@ export type CellSyncRun =
 /**
  * Everything the executor needs to plan and then execute one target's sync.
  *
- * Extends {@link PlanCellSyncOptions} with the port, so a caller cannot plan with one
- * set of facts and execute with another: the plan and the run are constructed from
- * the same object. The listing and the read are still the *caller's* inputs — the
- * executor does not discover them itself — because deciding a project's extension
- * metadata or a target's state is a separate, evidence-bearing step, and an executor
- * that inferred them would be a second answer to a question the plan already owns.
+ * Deliberately **without** `deployed` or `listings`. Both are things #19 requires to be
+ * true *at the moment of the write* — the target's current state, and the project's
+ * installed extensions — and a caller-supplied copy of either is a value nobody just
+ * observed. An executor that trusted them could be handed a stale `{ kind: "read", code: "" }`
+ * for a Cell a designer had since edited, or a fabricated listing, and would write anyway;
+ * "the caller says it read this" is not what `before mutation` means. So the executor reads
+ * both through the port itself, immediately before planning, and the types make the
+ * bypass unrepresentable rather than discouraged.
+ *
+ * That is why the plan's own `PlanCellSyncOptions` keeps its required `deployed`: planning
+ * is a pure function of a state someone supplies (a dry run, a review, a test), and it must
+ * stay callable with one. The read is the *executor's* obligation, not the planner's.
+ *
+ * `mappings` remains accepted because it is configuration — a table to audit against, not
+ * an observation of the project.
  */
-export interface ExecuteCellSyncOptions extends PlanCellSyncOptions {
+export interface ExecuteCellSyncOptions extends Omit<PlanCellSyncOptions, "deployed" | "listings"> {
   readonly port: ForguncySyncPort;
 }
 
@@ -249,17 +265,24 @@ function runSteps(
 }
 
 /**
- * Execute one target's sync: plan it, then run the flow the plan permits.
+ * Execute one target's sync: read the project's live state, plan it, then run the flow.
  *
- * The plan is built first and its dispatch consulted before any mutating call, so a
- * refused or skipped target never reaches `setCells`. That ordering is not an
- * optimization — it is the safety rule: a write must be preceded by both a verified
- * extension listing and a read of the target, and both of those are the caller's
- * inputs *to the plan*, so "we skipped the check" is not a state this function can be
- * in.
+ * The order is load-bearing and it is why this function is the safe entry point:
  *
- * A resolved-but-unusable post-mutation result fails the run rather than being
- * returned as a success: see the module docstring.
+ * 1. **read** the installed extensions (`listFrontendLibraries`) and the target Cell's
+ *    current state (`readCellSource`) through the port;
+ * 2. **plan** from exactly what was just read;
+ * 3. **execute** what the plan permits.
+ *
+ * Steps 1 and 2 are not separable by a caller — the options type has no `deployed` or
+ * `listings` to supply — so "the extensions were verified before the mutation" and "the
+ * target's current state was read before the mutation" are properties of the code path
+ * rather than claims about a caller's diligence. A caller cannot hand this function a stale
+ * read, and cannot skip the read: there is nowhere to put one.
+ *
+ * The plan is then consulted before any mutating call, so a refused or skipped target never
+ * reaches `setCells`. A resolved-but-unusable post-mutation result fails the run rather than
+ * being returned as a success: see the module docstring.
  */
 export async function executeCellSync(options: ExecuteCellSyncOptions): Promise<CellSyncRun> {
   // The flow's own coherence before anything is executed: a run over a registry that
@@ -267,8 +290,20 @@ export async function executeCellSync(options: ExecuteCellSyncOptions): Promise<
   // the same guard `planCellSync` runs so the two cannot disagree about the flow.
   assertMcpSyncFlowIsCoherent();
 
-  const plan = planCellSync(options);
   const { port, target } = options;
+
+  // Step 1a: the project's installed extensions, read now. Unconditional: the plan is what
+  // decides whether an artifact's references matter, and it can only decide that against a
+  // real listing.
+  const listings = await port.listFrontendLibraries({});
+
+  // Step 1b: the target's live state, read now, through the one three-way translation the
+  // product requires. Reading through the port rather than accepting a caller's value is
+  // what makes `before mutation` mean *at this moment* instead of *per the caller*.
+  const { state: deployed } = await readCellState(port, target);
+
+  // Step 2: the plan, from exactly what was just read.
+  const plan = planCellSync({ ...options, deployed, listings });
 
   const performed = new Map<McpSyncStepId, SyncRunStepStatus>();
   const details = new Map<McpSyncStepId, string>();
@@ -294,20 +329,11 @@ export async function executeCellSync(options: ExecuteCellSyncOptions): Promise<
     };
   }
 
-  // Step 2: the extension metadata. The plan already verified the *supplied* listing;
-  // recording the step as run is what makes the executor's report distinguish "the
-  // extension check happened" from "no listing was supplied".
-  performed.set("verify-extension-metadata", options.listings === undefined ? "skipped" : "ran");
-  if (options.listings === undefined) {
-    details.set("verify-extension-metadata", "No listing was supplied, so no extension identity was confirmed.");
-  }
-
-  // Step 3: the read. The caller supplies what it read (`deployed`); the executor
-  // records that a state was supplied, and whether it was a read at all.
-  performed.set("read-target-state", options.deployed.kind === "unread" ? "skipped" : "ran");
-  if (options.deployed.kind === "unread") {
-    details.set("read-target-state", `No read was performed (${options.deployed.reason}).`);
-  }
+  // Both pre-mutation checks ran, in the two lines above the plan. The plan models the
+  // "no listing supplied" state for dry runs; this entry point cannot reach it, which is
+  // why the statuses are unconditional here.
+  performed.set("verify-extension-metadata", "ran");
+  performed.set("read-target-state", "ran");
 
   const dispatch = planSetCellsDispatch(plan);
   if (dispatch.kind === "hold") {
@@ -443,18 +469,19 @@ export async function readCellState(
 // ---------------------------------------------------------------------------
 
 /**
- * One target's sync in a batch: everything *except* what the batch reads for itself.
+ * One target's sync in a batch: a declared Cell id, an artifact, and the port.
  *
- * `deployed` is deliberately absent rather than optional. {@link executeCellSyncTargets}
- * performs the read, so accepting a caller's `deployed` would let a batch plan a write
- * against a state nobody just observed — and the two ways that goes wrong (a stale
- * snapshot missing a designer's edit, a fabricated one claiming a Cell is blank) are both
- * silent. Requiring it here and ignoring it there would be worse still: a caller would pass
- * one and believe it was used.
+ * Nothing observable about the project is accepted — no `deployed`, no `listings`.
+ * {@link executeCellSync} reads both itself, per target, so a batch cannot be handed a
+ * snapshot from the start of the run (which by the second target would already be stale) and
+ * cannot be handed a fabricated one. The type makes that structural rather than a rule:
+ * there is no field for a caller to put an observation in.
+ *
+ * `mappings` and `overwrite` remain, because they are configuration rather than
+ * observations: a table to audit against, and a policy decision the caller owns.
  */
-export interface ExecuteCellSyncTargetOptions extends Omit<CellSyncTargetPlan, "deployed"> {
+export interface ExecuteCellSyncTargetOptions extends Omit<CellSyncTargetPlan, "deployed" | "listings"> {
   readonly port: ForguncySyncPort;
-  readonly listings?: readonly ExtensionLibraryListing[];
 }
 
 /**
@@ -463,12 +490,14 @@ export interface ExecuteCellSyncTargetOptions extends Omit<CellSyncTargetPlan, "
  * The batch's targets are resolved — and their uniqueness re-asserted across all of
  * them — *before* any read or write, so a project where two ids claim one destination
  * fails as a whole instead of writing N-1 Cells and one overwrite. That is
- * `planCellSyncTargets`'s rule, and running it here is what keeps the executor from
+ * `resolveCellSyncTargets`'s rule, and running it here is what keeps the executor from
  * being a path around it.
  *
- * Each target is read immediately before its own plan is built, so the state the plan
- * classifies is the state the write would replace rather than a snapshot from the
- * start of the batch.
+ * Each target then goes through {@link executeCellSync}, which reads that target and the
+ * project's extension listing immediately before planning it. The reads are per target
+ * rather than once for the batch on purpose: a listing taken at the start would be a weaker
+ * claim by the time the last Cell was written, and the whole point of `before mutation` is
+ * that it is *before this one*.
  */
 export async function executeCellSyncTargets(
   registry: CellRegistry,
@@ -492,17 +521,12 @@ export async function executeCellSyncTargets(
       throw new Error(`No resolved target for Cell ${planOptions.cellId}.`);
     }
 
-    // Each target is read immediately before its own plan is built, so the state the plan
-    // classifies is the state its write would replace rather than a snapshot from the start.
-    const { state } = await readCellState(planOptions.port, target.target);
     runs.push(
       await executeCellSync({
         target: target.target,
         artifact: planOptions.artifact,
         decisions: planOptions.decisions,
-        deployed: state,
         port: planOptions.port,
-        ...(planOptions.listings === undefined ? {} : { listings: planOptions.listings }),
         ...(planOptions.mappings === undefined ? {} : { mappings: planOptions.mappings }),
         ...(planOptions.overwrite === undefined ? {} : { overwrite: planOptions.overwrite }),
       }),

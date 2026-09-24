@@ -150,6 +150,22 @@ export type ReadCellSourceResult =
 export type SetCellsCellType = "ReactCellTypeCellType";
 
 /**
+ * The same cell-type name, as a *value*.
+ *
+ * A runtime constant rather than only the type above, because the read path has to check
+ * it: `ReadCellSourceResult`'s `react-cell` means "this Cell *is* a managed ReactCellType",
+ * and a reader that accepted any cell with a string `code` would be claiming that from a
+ * weaker fact. The product's other supported cell type (`UserControlPageCellType`) carries
+ * no `code`, so the confusion is not currently reachable — but a future one might, and
+ * `readOneCell`'s safety branch has to be able to say what it is looking for.
+ *
+ * One constant for both directions: the write sends this name and the read requires it, so
+ * a divergence between "what sync writes" and "what sync recognises as its own" is a
+ * one-line edit rather than two spellings that drift.
+ */
+export const REACT_CELL_TYPE_NAME: SetCellsCellType = "ReactCellTypeCellType";
+
+/**
  * The `cellTypeProps` half of one Cell.
  *
  * Exactly the two fields #19 requires sync to write, and they are exactly the two
@@ -294,11 +310,12 @@ export interface ProjectErrorReport {
 /**
  * Which page to generate.
  *
- * The argument shape of `api.app.generatePageAsync` is **not** recorded in the
- * evidence — #5 records the call as the *source* of the dev runtime URL
- * (`http://localhost:63982/Forguncy`, page route `.../Forguncy/<PageName>`), not its
- * parameters. The field name below is therefore this contract's, and the adapter
- * owns mapping it onto whatever the product accepts.
+ * `pageName` is this contract's field, and #20 measured that the product **ignores** it:
+ * `api.app.generatePageAsync({ pageName: "…" })` and `api.app.generatePageAsync({})`
+ * returned byte-identical results. The product's only parameter is `skipCheckProjectError`;
+ * generation is project-wide, not per-page. The field is carried anyway because the
+ * *locator* has to name a page (see {@link GeneratedPage}), and the adapter is what turns
+ * the project-wide call's base URL into a page-specific one.
  */
 export interface GeneratePageRequest {
   readonly pageName: string;
@@ -307,10 +324,17 @@ export interface GeneratePageRequest {
 /**
  * The runtime locator #19 requires sync to return for browser verification.
  *
- * `pageUrl` is this contract's name for the generated runtime URL, not a field the
- * product is known to return: #5 observed the *URL* (through `location.href` on the
- * generated page), not the response object it came in. `pageName` travels with it so
- * a caller holding several sync results can tell which page each locator belongs to.
+ * `pageUrl` is this contract's name for the generated runtime URL, not a field the product
+ * returns: #5 observed the *URL* (through `location.href` on the generated page), not the
+ * response object it came in, and #20 measured that the response's own `url` is the runtime
+ * **base** (`http://localhost:63982/Forguncy`) with no page in it. So the correspondence —
+ * base plus the page route `/<encoded pageName>` — is the adapter's to get right, and it is
+ * the one thing that decides whether `pageUrl` opens the page that was just synchronized or
+ * the project's start page. A caller that gets it wrong verifies the wrong page and reports
+ * success, which is why `designer-transport.ts` states the measurement next to the mapping.
+ *
+ * `pageName` travels with it so a caller holding several sync results can tell which page
+ * each locator belongs to.
  */
 export interface GeneratedPage {
   readonly pageName: string;

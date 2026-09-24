@@ -51,6 +51,7 @@
 import { EXTENSION_LIBRARY_REFERENCE_FIELD_NAME } from "@forguncy-react-workspace/core";
 import type { ExtensionLibraryListing } from "@forguncy-react-workspace/core";
 
+import { REACT_CELL_TYPE_NAME } from "./port.ts";
 import type {
   ForguncySyncPort,
   GeneratedPage,
@@ -303,7 +304,20 @@ export function createDesignerSyncPort(options: DesignerSyncPortOptions): Forgun
         permissionMode: "readAuto",
       });
       const result = valueOf(resultOf(response, "getProjectSaveStatus"), "getProjectSaveStatus");
-      return { containsUnsavedChanges: result.containsUnsavedChanges === true };
+      // A boolean or a throw — never a default. `=== true` would turn a missing field, a
+      // renamed field or a truncated response into "the project is clean", and the executor
+      // would then skip `saveProject` and still report `written`: a mutation the repository
+      // never persisted, reported as a successful sync. #20 measured an explicit boolean in
+      // both the save-status and the save response, so interpreting *absence* as `false` has
+      // no evidence behind it. Same rule as `checkProjectErrors`' error count, and for the
+      // same reason.
+      const containsUnsavedChanges = result.containsUnsavedChanges;
+      if (typeof containsUnsavedChanges !== "boolean") {
+        throw new Error(
+          `\`api.app.getProjectSaveStatus\` answered without a boolean \`containsUnsavedChanges\`, so the sync cannot tell a clean project from an unread answer.`,
+        );
+      }
+      return { containsUnsavedChanges };
     },
 
     // api.app.saveProject
@@ -349,10 +363,48 @@ export function createDesignerSyncPort(options: DesignerSyncPortOptions): Forgun
       // `skipCheckProjectError` is deliberately not sent: the executor calls
       // `checkProjectErrors` itself and gates on it, so asking the product to skip its own
       // check would let generation proceed past a project the sync already failed on.
-      const url = typeof result.url === "string" ? result.url : "";
-      return { pageName: request.pageName, pageUrl: url };
+      const base = typeof result.url === "string" ? result.url : "";
+      return { pageName: request.pageName, pageUrl: runtimePageUrl(base, request.pageName) };
     },
   };
+}
+
+/**
+ * The runtime locator for one page, from the base `generatePageAsync` returns.
+ *
+ * `api.app.generatePageAsync` **ignores** any page argument and answers with the runtime
+ * *base* — measured: `generatePageAsync({ pageName: "…" })` and `generatePageAsync({})`
+ * returned byte-identical results, `{ url: "http://localhost:63982/Forguncy" }`, because
+ * the only parameter the product accepts is `skipCheckProjectError`. Returning that base as
+ * the locator would send a caller to the project's start page instead of the page just
+ * synchronized, which is the failure this function exists to prevent.
+ *
+ * The page route is `base/<encoded pageName>`: #5 observed it as
+ * `.../Forguncy/<PageName>` through `location.href` on a generated page, and #20 opened
+ * the URL-encoded form of a Chinese page name in a browser and got the page
+ * (`/Forguncy/Tanstack%20Query%E6%8B%93%E5%B1%95%E5%8C%85%E7%A4%BA%E4%BE%8B` rendered the
+ * extension demo). So the mapping is `encodeURIComponent`, and it is applied to the whole
+ * name — including any `/` a name contained, which would otherwise read as a path segment.
+ *
+ * A base that already names a page is left alone: if a future product version honours the
+ * argument, its answer is more specific than this function's guess and must win. The base
+ * arriving with a trailing slash is normalized rather than doubled.
+ */
+export function runtimePageUrl(baseUrl: string, pageName: string): string {
+  const base = baseUrl.trim();
+  if (base.length === 0) return base;
+  if (pageName.trim().length === 0) return base;
+
+  const hadTrailingSlash = base.endsWith("/");
+  const trimmed = hadTrailingSlash ? base.replace(/\/+$/, "") : base;
+  if (trimmed.length === 0) return base;
+
+  // The base already carries more than a host and the runtime root; someone (or a later
+  // product version) has already located a page, so do not append a second one.
+  const alreadyLocated = /\/Forguncy\/.+/i.test(trimmed);
+  if (alreadyLocated) return base;
+
+  return `${trimmed}/${encodeURIComponent(pageName)}`;
 }
 
 /**
@@ -385,19 +437,27 @@ function mutationPayloadOf(request: IssuedSetCellsRequest): SetCellsRequest {
 /**
  * One Cell from a `getCells` response, as the contract's read result.
  *
- * The three-way split #20 measured. The order of the checks is the safety property: a
- * Cell is a managed React Cell only when it *has* a `code`, and everything else — a plain
- * value, another cell type, a name — is occupied. Testing for `occupied` first and
- * falling back to `react-cell` would be the same thing here, but the reverse fallback
- * (`code` absent ⇒ treat as empty) is the one that overwrites designer work, so the
- * branch that could make that mistake does not exist.
+ * Two conditions, not one, and the second is the safety property the reviewer was right to
+ * insist on: a Cell is a managed React Cell only when its `cellType` is *exactly* the type
+ * sync writes **and** it carries a string `code`. The contract's `react-cell` means "this
+ * Cell is a ReactCellType", and inferring that from `code` alone would claim it from a
+ * weaker fact — a different cell type that happened to carry a `code` property would be
+ * read as a managed Cell, and if that `code` were empty it would classify `vacant` and be
+ * overwritten. Anything that fails either condition is `occupied`, which is refused.
+ *
+ * The product's other supported cell type (`UserControlPageCellType`) carries no `code` at
+ * all — measured, not assumed — so the stricter test costs nothing today and is what keeps
+ * the *claim* true rather than merely currently-unfalsified.
+ *
+ * The branch order matters for the same reason: the checker for "is this ours" runs first,
+ * and there is no path that falls back from "not recognised" to "treat as empty".
  */
 function readOneCell(cell: Record<string, unknown>): ReadCellSourceResult {
   const props = cell.cellTypeProps;
   const propsRecord = typeof props === "object" && props !== null ? (props as Record<string, unknown>) : undefined;
   const code = propsRecord?.code;
 
-  if (typeof code !== "string") {
+  if (cell.cellType !== REACT_CELL_TYPE_NAME || typeof code !== "string") {
     // Not a managed React Cell. Say what it does hold, so the conflict is actionable
     // rather than a generic "not ours".
     return { kind: "occupied", code: describeOccupant(cell) };
@@ -414,7 +474,14 @@ function readOneCell(cell: Record<string, unknown>): ReadCellSourceResult {
 }
 
 function describeOccupant(cell: Record<string, unknown>): string {
-  if (typeof cell.cellType === "string") return `a ${cell.cellType} cell`;
+  if (typeof cell.cellType === "string") {
+    // A cell of the right type whose `code` is missing is damage, not a designer edit, and
+    // saying so is the difference between "look at what someone wrote" and "look at a
+    // broken Cell".
+    return cell.cellType === REACT_CELL_TYPE_NAME
+      ? "a ReactCellType cell with no readable code"
+      : `a ${cell.cellType} cell`;
+  }
   if (cell.value !== undefined) {
     return typeof cell.value === "string" ? `the value ${JSON.stringify(cell.value)}` : "a non-text value";
   }
