@@ -42,7 +42,7 @@
  * being accepted, and that is the whole point.
  */
 
-import type { FgcLockDocument } from "./lock";
+import type { FgcLockDocument } from "./lock.ts";
 import {
   assertFgcLockDocument,
   FGC_LOCK_FILE_NAME,
@@ -50,7 +50,7 @@ import {
   FgcLockSchemaVersionError,
   FgcLockValidationError,
   inspectFgcLockDocument,
-} from "./lock";
+} from "./lock.ts";
 
 // ---------------------------------------------------------------------------
 // The step contract

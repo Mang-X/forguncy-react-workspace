@@ -65,7 +65,7 @@ import {
   hostPackageVersionMismatches,
   unavailableHostModuleOf,
   unavailableHostModuleSource,
-} from "./host-modules";
+} from "./host-modules.ts";
 
 /** The DOM element the mount script renders into. */
 export const HARNESS_MOUNT_ELEMENT_ID = "forguncy-cell-root";

@@ -42,7 +42,7 @@ import { dirname, join } from "node:path";
 import type { ProbeFact, ProbeValidationEntry } from "@forguncy-react-workspace/core";
 import { rolldown, type OutputAsset, type OutputChunk } from "rolldown";
 
-import { describeBuildFailureLines, portableText, safePathSegment } from "./scan-utils";
+import { describeBuildFailureLines, portableText, safePathSegment } from "./scan-utils.ts";
 
 /**
  * The declared inputs of the build half of a probe — what `LockProbeEvidence.fingerprint`

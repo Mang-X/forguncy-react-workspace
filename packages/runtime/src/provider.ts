@@ -58,7 +58,7 @@
  * of it so a declared code cannot become one nothing ever emits.
  */
 
-import type { RuntimeFacadeProvider, RuntimeFacadeProviderKind } from "./contract";
+import type { RuntimeFacadeProvider, RuntimeFacadeProviderKind } from "./contract.ts";
 
 // ---------------------------------------------------------------------------
 // Refusals

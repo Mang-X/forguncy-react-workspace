@@ -10,9 +10,9 @@ import {
   type ExtensionLibraryListing,
 } from "@forguncy-react-workspace/core";
 
-import { compileCell } from "./artifact";
-import type { CellBundlerPort, CompileCellOutcome } from "./artifact";
-import { CELL_ENTRY_COMPONENT_BINDING } from "./entry";
+import { compileCell } from "./artifact.ts";
+import type { CellBundlerPort, CompileCellOutcome } from "./artifact.ts";
+import { CELL_ENTRY_COMPONENT_BINDING } from "./entry.ts";
 import {
   extensionExternalModuleIds,
   formatExtensionExternalsPlan,
@@ -20,8 +20,8 @@ import {
   planExtensionExternals,
   renderExtensionExternalModule,
   EXTENSION_EXTERNAL_GENERATED_BANNER,
-} from "./extension-externals";
-import { frontendLibraryReference } from "./frontend-libraries";
+} from "./extension-externals.ts";
+import { frontendLibraryReference } from "./frontend-libraries.ts";
 
 // ---------------------------------------------------------------------------
 // The page object the extension publishes

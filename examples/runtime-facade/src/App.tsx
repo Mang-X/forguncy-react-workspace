@@ -17,7 +17,7 @@
  * package's test suite.
  */
 
-import { canReadOrders, readOrderPermissions, refreshOrders, useOrdersSummary } from "./orders";
+import { canReadOrders, readOrderPermissions, refreshOrders, useOrdersSummary } from "./orders.ts";
 
 export function App() {
   const summary = useOrdersSummary(3);

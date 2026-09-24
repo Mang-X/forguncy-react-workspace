@@ -6,13 +6,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { afterAll, describe, expect, it } from "vitest";
 
-import { ForguncyConfigError } from "./cell-registry";
+import { ForguncyConfigError } from "./cell-registry.ts";
 import {
   findForguncyConfigFile,
   importForguncyConfigModule,
   loadForguncyConfig,
-} from "./config-loader";
-import type { ForguncyConfigModuleLoader } from "./config-loader";
+} from "./config-loader.ts";
+import type { ForguncyConfigModuleLoader } from "./config-loader.ts";
 
 const fixturesRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "tests", "fixtures");
 const validMultiRoot = join(fixturesRoot, "valid-multi");

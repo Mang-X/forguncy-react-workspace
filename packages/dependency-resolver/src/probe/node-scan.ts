@@ -65,12 +65,12 @@ import {
   browserFieldRedirectsSpecifier,
   resolveBrowserEntryPaths,
   selfReferenceResolver,
-} from "./browser-entry";
-import type { ResolvedPackageIdentity } from "./identity";
-import { locateManifest } from "./identity";
-import type { PackageSourceFile } from "./module-source";
-import { collectReachableSourceFiles, isInside, readSourceFile, sourceWithoutCommentsLenient } from "./module-source";
-import { compareStrings } from "./scan-utils";
+} from "./browser-entry.ts";
+import type { ResolvedPackageIdentity } from "./identity.ts";
+import { locateManifest } from "./identity.ts";
+import type { PackageSourceFile } from "./module-source.ts";
+import { collectReachableSourceFiles, isInside, readSourceFile, sourceWithoutCommentsLenient } from "./module-source.ts";
+import { compareStrings } from "./scan-utils.ts";
 
 /**
  * Builtins with no browser environment and no ordinary polyfill path.

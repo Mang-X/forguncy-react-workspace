@@ -78,18 +78,18 @@
 // The browser-safe modules, in the order index.ts cites them. The two that read
 // the project off disk (`cell-registry`, `config-loader`) are the only ones absent,
 // and `browser.test.ts` asserts the filesystem contact rather than this comment.
-export * from "./ownership";
-export * from "./rejection";
-export * from "./platform-conflicts";
-export * from "./strategy";
-export * from "./governance";
-export * from "./runtime-contract";
-export * from "./host-bridge";
-export * from "./extension-externals";
-export * from "./lock";
-export * from "./lock-migration";
-export * from "./lock-freshness";
-export * from "./selection-signals";
-export * from "./probe-protocol";
-export * from "./selection-policy";
-export * from "./forguncy-config";
+export * from "./ownership.ts";
+export * from "./rejection.ts";
+export * from "./platform-conflicts.ts";
+export * from "./strategy.ts";
+export * from "./governance.ts";
+export * from "./runtime-contract.ts";
+export * from "./host-bridge.ts";
+export * from "./extension-externals.ts";
+export * from "./lock.ts";
+export * from "./lock-migration.ts";
+export * from "./lock-freshness.ts";
+export * from "./selection-signals.ts";
+export * from "./probe-protocol.ts";
+export * from "./selection-policy.ts";
+export * from "./forguncy-config.ts";

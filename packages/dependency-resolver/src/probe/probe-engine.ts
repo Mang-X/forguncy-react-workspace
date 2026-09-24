@@ -79,27 +79,27 @@ import {
 
 import type { OutputAsset, OutputChunk } from "rolldown";
 
-import { observeArtifact } from "./artifact-scan";
-import { observeAssets } from "./asset-inventory";
-import { runCandidateBuild } from "./build";
-import type { ProbeCache } from "./cache";
-import { createFileProbeCache, probeCacheRelativePath } from "./cache";
-import { observeExportMetadata } from "./export-metadata";
-import { composeProbeFingerprint } from "./fingerprint";
-import type { ResolvedPackageIdentity } from "./identity";
+import { observeArtifact } from "./artifact-scan.ts";
+import { observeAssets } from "./asset-inventory.ts";
+import { runCandidateBuild } from "./build.ts";
+import type { ProbeCache } from "./cache.ts";
+import { createFileProbeCache, probeCacheRelativePath } from "./cache.ts";
+import { observeExportMetadata } from "./export-metadata.ts";
+import { composeProbeFingerprint } from "./fingerprint.ts";
+import type { ResolvedPackageIdentity } from "./identity.ts";
 import {
   buildProbeEnvironment,
   defaultProbeTarget,
   ProbeIdentityError,
   readToolchainIdentity,
   resolvePackageIdentity,
-} from "./identity";
-import { observeNodeBuiltins } from "./node-scan";
-import { observeRuntimePatterns } from "./runtime-pattern-scan";
-import { compareStrings } from "./scan-utils";
-import { observeSize } from "./size";
-import { resolveInstalledVersions } from "../install-graph";
-import { recordedPackageNames } from "../lock-store";
+} from "./identity.ts";
+import { observeNodeBuiltins } from "./node-scan.ts";
+import { observeRuntimePatterns } from "./runtime-pattern-scan.ts";
+import { compareStrings } from "./scan-utils.ts";
+import { observeSize } from "./size.ts";
+import { resolveInstalledVersions } from "../install-graph.ts";
+import { recordedPackageNames } from "../lock-store.ts";
 
 // ---------------------------------------------------------------------------
 // Options and result

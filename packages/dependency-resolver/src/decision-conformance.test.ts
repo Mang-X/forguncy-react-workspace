@@ -10,7 +10,7 @@ import type {
   ForguncyTargetIdentity,
   HostBridgeManifest,
   LockedDependencyDecision,
-} from "./index";
+} from "./index.ts";
 import {
   auditLockDecisionConformance,
   conformanceErrors,
@@ -21,7 +21,7 @@ import {
   PRESET_PROVIDED_HOST_GLOBALS,
   validateFgcLockDocument,
   validateLockDecisionConformance,
-} from "./index";
+} from "./index.ts";
 
 const FINGERPRINT = "probe=inline-bundle;entry=src/cells/orders-table/App.tsx";
 

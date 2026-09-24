@@ -63,14 +63,14 @@ import { rolldown, type OutputAsset, type OutputChunk } from "rolldown";
 // {@link resolveEntrySpecifiersWithRolldown}.
 import { scan } from "rolldown/experimental";
 
-import type { BundledCellModule, CellBundlerPort, CellBundlingRequest, CellResolveRequest } from "./artifact";
-import { findDependencyDecision, packageNameOfSpecifier } from "./specifier";
-import type { CellArtifactDiagnostic } from "./diagnostics";
-import { createCellArtifactDiagnostic, dedupeCellArtifactDiagnostics } from "./diagnostics";
-import type { ExtensionExternalsPlan } from "./extension-externals";
-import { planExtensionExternals } from "./extension-externals";
-import type { HostBridgeDiagnostic, HostBridgePlan } from "./host-bridge";
-import { planHostBridge } from "./host-bridge";
+import type { BundledCellModule, CellBundlerPort, CellBundlingRequest, CellResolveRequest } from "./artifact.ts";
+import { findDependencyDecision, packageNameOfSpecifier } from "./specifier.ts";
+import type { CellArtifactDiagnostic } from "./diagnostics.ts";
+import { createCellArtifactDiagnostic, dedupeCellArtifactDiagnostics } from "./diagnostics.ts";
+import type { ExtensionExternalsPlan } from "./extension-externals.ts";
+import { planExtensionExternals } from "./extension-externals.ts";
+import type { HostBridgeDiagnostic, HostBridgePlan } from "./host-bridge.ts";
+import { planHostBridge } from "./host-bridge.ts";
 
 // ---------------------------------------------------------------------------
 // Options

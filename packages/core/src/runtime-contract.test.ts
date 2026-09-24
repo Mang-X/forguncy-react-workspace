@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import * as contract from "./runtime-contract";
+import * as contract from "./runtime-contract.ts";
 import {
   CELL_DATA_SOURCE_CONTRACT,
   CELL_ENTRY_RESOLUTION_ORDER,
@@ -38,15 +38,15 @@ import {
   rejectedCellSourceConstructs,
   RUNTIME_CONTRACT_TARGET,
   RUNTIME_CONTRACT_UNKNOWNS,
-} from "./runtime-contract";
-import type { RuntimeEvidenceChannel } from "./runtime-contract";
+} from "./runtime-contract.ts";
+import type { RuntimeEvidenceChannel } from "./runtime-contract.ts";
 import {
   citesDecision,
   citesEveryArchitectureDecision,
   GOVERNING_ARCHITECTURE_SPEC_REFERENCE_LINE,
   RUNTIME_CONTRACT_DECISION,
   RUNTIME_CONTRACT_DECISION_REFERENCE,
-} from "./governance";
+} from "./governance.ts";
 
 /**
  * The evidence vocabulary, read from the module rather than restated here, so a

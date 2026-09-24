@@ -25,8 +25,8 @@
 import { FRONTEND_LIBRARY_REFERENCE_CONTRACT, FRONTEND_LIBRARY_REFERENCE_EXAMPLE } from "@forguncy-react-workspace/core";
 import type { DependencyDecision, FrontendLibraryReference } from "@forguncy-react-workspace/core";
 
-import type { CellArtifactDiagnostic } from "./diagnostics";
-import { createCellArtifactDiagnostic } from "./diagnostics";
+import type { CellArtifactDiagnostic } from "./diagnostics.ts";
+import { createCellArtifactDiagnostic } from "./diagnostics.ts";
 
 /** The persisted field name this metadata is written to. */
 export const FRONTEND_LIBRARIES_FIELD_NAME = "frontendLibraries";

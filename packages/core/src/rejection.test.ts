@@ -10,8 +10,8 @@ import {
   isTechnicalRejection,
   isTechnicalRejectionCode,
   TECHNICAL_REJECTION_CODES,
-} from "./rejection";
-import type { DependencyRejection } from "./rejection";
+} from "./rejection.ts";
+import type { DependencyRejection } from "./rejection.ts";
 
 const architectural: DependencyRejection = {
   kind: "architectural",

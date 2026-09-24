@@ -11,8 +11,8 @@
  * compatibility database. Both are non-goals of #4.
  */
 
-import type { DependencyRejection } from "./rejection";
-import { DEPENDENCY_REJECTION_RESPONSE } from "./rejection";
+import type { DependencyRejection } from "./rejection.ts";
+import { DEPENDENCY_REJECTION_RESPONSE } from "./rejection.ts";
 
 export const DEPENDENCY_STRATEGIES = ["host", "inline", "extension", "replace"] as const;
 export type DependencyStrategy = (typeof DEPENDENCY_STRATEGIES)[number];

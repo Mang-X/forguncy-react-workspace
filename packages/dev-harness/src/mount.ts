@@ -54,7 +54,7 @@ import {
 } from "@forguncy-react-workspace/runtime";
 import type { CellFixtureContext, MockRuntimeFacadeOptions, RuntimeFacadeProvider } from "@forguncy-react-workspace/runtime";
 
-import type { DevHarnessMountableCell, DevHarnessMountTarget } from "./types";
+import type { DevHarnessMountableCell, DevHarnessMountTarget } from "./types.ts";
 
 /** What {@link mountCell} hands back, so a test or a console can inspect the loop. */
 export interface DevHarnessMountedCell {

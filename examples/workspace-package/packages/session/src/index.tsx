@@ -69,7 +69,7 @@ import { createContext, useContext, useState } from "react";
 // Re-exported from `./state`, which holds it in a React-free file so the Cell
 // compiler's isolation test can import *this* module's instance directly and assert
 // that a compiled artifact cannot observe a write to it. See that file's header.
-import { recordVisit, seenLabels } from "./state";
+import { recordVisit, seenLabels } from "./state.ts";
 
 export { recordVisit, seenLabels };
 

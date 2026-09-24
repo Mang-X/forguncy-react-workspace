@@ -33,8 +33,8 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { auditWorkspaceSource, classifyWorkspaceModule, traceWorkspaceSourceClosure, workspacePackageFor } from "./workspace-source";
-import { loadPnpmWorkspaceGraph, PNPM_WORKSPACE_FILE } from "./workspace-graph";
+import { auditWorkspaceSource, classifyWorkspaceModule, traceWorkspaceSourceClosure, workspacePackageFor } from "./workspace-source.ts";
+import { loadPnpmWorkspaceGraph, PNPM_WORKSPACE_FILE } from "./workspace-graph.ts";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = join(packageRoot, "..", "..");

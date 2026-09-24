@@ -1,4 +1,4 @@
-import { defineForguncyConfig } from "../../../src/forguncy-config";
+import { defineForguncyConfig } from "../../../src/forguncy-config.ts";
 
 /**
  * Fixture: two logical Cells whose targets differ only by case.

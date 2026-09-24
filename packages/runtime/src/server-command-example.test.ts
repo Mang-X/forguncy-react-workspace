@@ -27,14 +27,14 @@ import {
   readOrderPermissions,
   refreshOrders,
   useOrdersSummary,
-} from "../../../examples/runtime-facade/src/orders";
-import { createLocalDevProvider } from "../../../examples/runtime-facade/src/localDev";
-import type { OrdersSummary } from "../../../examples/runtime-facade/src/orders";
+} from "../../../examples/runtime-facade/src/orders.ts";
+import { createLocalDevProvider } from "../../../examples/runtime-facade/src/localDev.ts";
+import type { OrdersSummary } from "../../../examples/runtime-facade/src/orders.ts";
 
-import type { DataSourceBinding, RuntimeFacadeCellProps, RuntimeFacadeProvider } from "./contract";
-import { runtimeFacade } from "./facade";
-import { createHostRuntimeFacadeProvider } from "./host-provider";
-import { installRuntimeFacadeProvider, uninstallRuntimeFacadeProvider } from "./provider";
+import type { DataSourceBinding, RuntimeFacadeCellProps, RuntimeFacadeProvider } from "./contract.ts";
+import { runtimeFacade } from "./facade.ts";
+import { createHostRuntimeFacadeProvider } from "./host-provider.ts";
+import { installRuntimeFacadeProvider, uninstallRuntimeFacadeProvider } from "./provider.ts";
 
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const exampleRoot = join(packageRoot, "..", "..", "examples", "runtime-facade", "src");

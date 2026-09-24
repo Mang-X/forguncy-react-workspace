@@ -33,16 +33,16 @@
  * guesses in favour of the newer claim.
  */
 
-import type { LockedDependencyDecision, LockEvidenceProfile, LockEvidencePolicy } from "./lock";
+import type { LockedDependencyDecision, LockEvidenceProfile, LockEvidencePolicy } from "./lock.ts";
 import {
   forguncyTargetIdentity,
   LOCK_EVIDENCE_POLICY,
   lockEvidenceProfileOf,
   matchesForguncyTargetIdentity,
   requiresRuntimeValidation,
-} from "./lock";
-import type { ForguncyTargetIdentity, ToolchainIdentity } from "./lock";
-import type { RuntimeContractTarget } from "./runtime-contract";
+} from "./lock.ts";
+import type { ForguncyTargetIdentity, ToolchainIdentity } from "./lock.ts";
+import type { RuntimeContractTarget } from "./runtime-contract.ts";
 
 export const LOCK_STALENESS_REASONS = [
   "probe-never-run",

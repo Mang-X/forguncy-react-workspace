@@ -46,7 +46,7 @@ import {
   unavailableHostModuleOf,
   unavailableHostModuleSource,
   unavailableHostModules,
-} from "./host-modules";
+} from "./host-modules.ts";
 
 /** Every module id the real bridge table intercepts, in table order. */
 const interceptedIds = HOST_BRIDGE_MAPPINGS.flatMap(hostBridgeModuleIds);

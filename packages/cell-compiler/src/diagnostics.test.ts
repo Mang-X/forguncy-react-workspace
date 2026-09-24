@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { CELL_ARTIFACT_GUARANTEE_IDS } from "./guarantees";
+import { CELL_ARTIFACT_GUARANTEE_IDS } from "./guarantees.ts";
 import {
   CELL_ARTIFACT_DIAGNOSTIC_CODES,
   CELL_ARTIFACT_DIAGNOSTIC_RULES,
@@ -13,7 +13,7 @@ import {
   formatCellArtifactDiagnostic,
   formatCellArtifactDiagnostics,
   isCellArtifactDiagnosticCode,
-} from "./diagnostics";
+} from "./diagnostics.ts";
 
 describe("the error model's required vocabulary", () => {
   // #6 lists six failure modes the compiler must be able to report. Pinned in

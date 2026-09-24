@@ -8,7 +8,15 @@
     "jsx": "react-jsx",
     "noEmit": true,
     "allowJs": false,
-    "verbatimModuleSyntax": true
+    "verbatimModuleSyntax": true,
+    // Every relative import in this repository names its file with an extension (#67), so that
+    // Node's ESM loader can resolve a `vite.config.ts` that imports workspace TypeScript: Vite's
+    // default `bundle` config loader externalizes those imports and Node does not do extension
+    // resolution. `allowImportingTsExtensions` is what makes `"./foo.ts"` legal in TypeScript,
+    // and it requires `noEmit` — which is already set, because `vp pack`/Rolldown emit rather
+    // than `tsc`. The setting is not a relaxation of type checking; it changes only whether
+    // TypeScript accepts an extension in a specifier.
+    "allowImportingTsExtensions": true
   },
   "include": ["packages/**/*.ts", "packages/**/*.tsx", "examples/**/*.ts", "examples/**/*.tsx", "vite.config.ts"]
 }

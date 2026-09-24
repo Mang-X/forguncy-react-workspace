@@ -82,8 +82,8 @@ import type {
   OwnershipConcernId,
 } from "@forguncy-react-workspace/core/browser";
 
-import { LOCAL_DEV_RUNTIME_DECISION, RUNTIME_FACADE_DECISION } from "./provenance";
-import type { RuntimeFacadeHostBindings, RuntimeFacadeProvider } from "./contract";
+import { LOCAL_DEV_RUNTIME_DECISION, RUNTIME_FACADE_DECISION } from "./provenance.ts";
+import type { RuntimeFacadeHostBindings, RuntimeFacadeProvider } from "./contract.ts";
 
 // ---------------------------------------------------------------------------
 // The loop, and which half of it may claim anything

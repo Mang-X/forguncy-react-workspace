@@ -16,9 +16,9 @@ import {
   DEFAULT_CELL_OVERWRITE_POLICY,
   formatCellDivergence,
   resolveCellWriteAction,
-} from "./divergence";
-import type { CellDivergenceKind, DeployedCellState } from "./divergence";
-import { fingerprintArtifact, stampSyncMarker } from "./fingerprint";
+} from "./divergence.ts";
+import type { CellDivergenceKind, DeployedCellState } from "./divergence.ts";
+import { fingerprintArtifact, stampSyncMarker } from "./fingerprint.ts";
 
 /**
  * #19's safety rule is one sentence — "Before overwriting a target that does not match

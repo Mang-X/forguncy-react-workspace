@@ -88,8 +88,8 @@ import type {
   WorkspaceGraph,
   WorkspaceGraphIndexResult,
   WorkspacePackageRecord,
-} from "./workspace-source";
-import { indexWorkspaceGraph } from "./workspace-source";
+} from "./workspace-source.ts";
+import { indexWorkspaceGraph } from "./workspace-source.ts";
 
 /** The manifest pnpm reads its member globs from. */
 export const PNPM_WORKSPACE_FILE = "pnpm-workspace.yaml";

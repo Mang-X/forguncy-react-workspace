@@ -47,10 +47,10 @@
 
 import type { ProbeFact, ProbeRejectionFinding, ProbeRisk, ProbeValidationEntry } from "@forguncy-react-workspace/core";
 
-import { applyBrowserField, resolveBrowserEntryPaths, selfReferenceResolver } from "./browser-entry";
-import type { ResolvedPackageIdentity } from "./identity";
-import { collectReachableSourceFiles } from "./module-source";
-import { compareStrings } from "./scan-utils";
+import { applyBrowserField, resolveBrowserEntryPaths, selfReferenceResolver } from "./browser-entry.ts";
+import type { ResolvedPackageIdentity } from "./identity.ts";
+import { collectReachableSourceFiles } from "./module-source.ts";
+import { compareStrings } from "./scan-utils.ts";
 
 /**
  * Patterns this step observes. `wasm` is intentionally absent — see the module

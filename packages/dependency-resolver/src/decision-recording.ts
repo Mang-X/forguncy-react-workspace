@@ -59,7 +59,7 @@ import type {
 } from "@forguncy-react-workspace/core";
 import { compareEvidenceLinks } from "@forguncy-react-workspace/core";
 
-import { findExactLockDecision, readFgcLock, upsertLockDecision, writeFgcLock } from "./lock-store";
+import { findExactLockDecision, readFgcLock, upsertLockDecision, writeFgcLock } from "./lock-store.ts";
 
 /**
  * One observation, expressed as a change to the lock.

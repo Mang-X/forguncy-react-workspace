@@ -46,7 +46,7 @@ import type { ProbeReport } from "@forguncy-react-workspace/core";
 import { canonicalizeProbeReport } from "@forguncy-react-workspace/core";
 import { describe, expect, it } from "vitest";
 
-import { runDependencyProbe } from "./probe-engine";
+import { runDependencyProbe } from "./probe-engine.ts";
 
 const FIXTURES_ROOT = fileURLToPath(new URL("../__fixtures__/probe", import.meta.url));
 
@@ -312,7 +312,7 @@ describe("frozen scanner behaviour", () => {
     // cannot compare a number to a diff — but it fails loudly if the constant is ever removed
     // or reverted while these expectations still encode post-revision behaviour, which is the
     // shape a "bumped it back by accident" edit takes.
-    const { PROBE_ANALYSIS_REVISION } = await import("./fingerprint");
+    const { PROBE_ANALYSIS_REVISION } = await import("./fingerprint.ts");
 
     expect(PROBE_ANALYSIS_REVISION).toBeGreaterThanOrEqual(6);
   });

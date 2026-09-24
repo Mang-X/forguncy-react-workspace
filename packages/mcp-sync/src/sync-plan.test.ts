@@ -8,9 +8,9 @@ import {
 } from "@forguncy-react-workspace/cell-compiler";
 import type { CompileCellResult } from "@forguncy-react-workspace/cell-compiler";
 
-import { syncDiagnosticCodes } from "./diagnostics";
-import { fingerprintArtifact, readSyncMarker, stampSyncMarker } from "./fingerprint";
-import * as mcpSync from "./index";
+import { syncDiagnosticCodes } from "./diagnostics.ts";
+import { fingerprintArtifact, readSyncMarker, stampSyncMarker } from "./fingerprint.ts";
+import * as mcpSync from "./index.ts";
 import {
   CELL_SYNC_HOLD_REASONS,
   formatCellSyncPlan,
@@ -20,16 +20,16 @@ import {
   serializeCellSyncMutation,
   SYNC_MUTATION_GEOMETRY_NOTE,
   SYNC_MUTATION_OMITTED_FIELDS,
-} from "./sync-plan";
+} from "./sync-plan.ts";
 import type {
   CellSyncDispatch,
   CellSyncMutation,
   CellSyncPlan,
   CellSyncWrite,
   PlanCellSyncOptions,
-} from "./sync-plan";
-import type { ForguncySyncPort, IssuedSetCellsRequest } from "./port";
-import type { CellTarget } from "./target";
+} from "./sync-plan.ts";
+import type { ForguncySyncPort, IssuedSetCellsRequest } from "./port.ts";
+import type { CellTarget } from "./target.ts";
 
 /**
  * The plan is where #19's decisions that need no live project are made: what the mutation

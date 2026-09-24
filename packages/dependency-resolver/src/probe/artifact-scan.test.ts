@@ -14,7 +14,7 @@ import { describe, expect, it } from "vitest";
 
 import type { OutputAsset, OutputChunk } from "rolldown";
 
-import { observeArtifact } from "./artifact-scan";
+import { observeArtifact } from "./artifact-scan.ts";
 
 function chunk(partial: Partial<OutputChunk> & { readonly code: string }): OutputChunk {
   return {

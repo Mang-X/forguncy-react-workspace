@@ -33,8 +33,27 @@ Ownership boundaries are role-sensitive: a state library used for one cell's loc
 
 ## Local development
 
-`vp run dev` in a Cell project mounts one Cell's authored source as ordinary React, with the
-project's `fixture` installed as a mock provider. It is the fast loop: edit, see, no sync.
+`vp dev` — the bare command, no flags — in a Cell project mounts one Cell's authored source as
+ordinary React, with the project's `fixture` installed as a mock provider. It is the fast loop:
+edit, see, no sync.
+
+That it needs no flag is a property of this repository's *source*, not of the harness: every
+relative import in `packages/**` and `examples/**` names its file with a `.ts`/`.tsx` extension,
+so Node's ESM loader can resolve a `vite.config.ts` that imports workspace TypeScript after
+Vite's default config bundler externalizes it. Write relative imports with the extension, and do
+not remove `allowImportingTsExtensions` from the root `tsconfig.json` — a single extensionless
+import among them breaks bare `vp dev` before Vite starts. A project with extensionless workspace
+imports will not get bare `vp dev` for free; the rest of the reasoning is in
+`examples/dev-harness/package.json` under `//scripts`.
+
+Three checks in `dev-harness` hold that up, at three different scopes — do not delete one
+because another looks like it covers the case:
+
+| test | what it fails on |
+| --- | --- |
+| `vp-dev-command.test.ts` | the `vp dev` **command** no longer serving the harness (spawns it, expects the plugin's mount node and entry) |
+| `bare-vp-dev.test.ts` | Vite's default **loader** no longer resolving the example's config graph, which is the mechanism the convention exists for |
+| `relative-import-extension.test.ts` | any **extensionless relative import anywhere** under `packages/**` or `examples/**`, including `.tsx` |
 
 It is **not** a Forguncy emulator, and its output is `local` evidence only. In particular a
 green local render says nothing about: whether the designer accepts the source (it refuses

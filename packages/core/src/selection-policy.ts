@@ -39,24 +39,24 @@
  * the opposite — the probe reports, the Agent decides, and the lock records why.
  */
 
-import type { ArchitectureDecisionSource } from "./governance";
+import type { ArchitectureDecisionSource } from "./governance.ts";
 import {
   DEPENDENCY_LOCK_DECISION,
   DEPENDENCY_SELECTION_DECISION,
   formatGoverningSpecReferenceLine,
   GOVERNING_ARCHITECTURE_DECISIONS,
-} from "./governance";
-import type { LockProbeRequirement, ProbeStatus } from "./lock";
-import { LOCK_EVIDENCE_POLICY, lockEvidenceProfileForDecision } from "./lock";
-import type { PlatformConflictAssessment } from "./platform-conflicts";
-import { isPlatformConflict } from "./platform-conflicts";
-import type { ProbeAssessment, ProbeReport } from "./probe-protocol";
-import { assessProbeReport, PROBE_DEPLOYMENT_REQUIRED_STEPS, validateProbeReport } from "./probe-protocol";
-import { DEPENDENCY_REJECTION_RESPONSE } from "./rejection";
-import type { SelectionSignalId } from "./selection-signals";
-import { findReplacementSignalRejection } from "./selection-signals";
-import type { DependencyDecision, DependencyStrategy } from "./strategy";
-import { strategySemantics, validateDependencyDecisionShape } from "./strategy";
+} from "./governance.ts";
+import type { LockProbeRequirement, ProbeStatus } from "./lock.ts";
+import { LOCK_EVIDENCE_POLICY, lockEvidenceProfileForDecision } from "./lock.ts";
+import type { PlatformConflictAssessment } from "./platform-conflicts.ts";
+import { isPlatformConflict } from "./platform-conflicts.ts";
+import type { ProbeAssessment, ProbeReport } from "./probe-protocol.ts";
+import { assessProbeReport, PROBE_DEPLOYMENT_REQUIRED_STEPS, validateProbeReport } from "./probe-protocol.ts";
+import { DEPENDENCY_REJECTION_RESPONSE } from "./rejection.ts";
+import type { SelectionSignalId } from "./selection-signals.ts";
+import { findReplacementSignalRejection } from "./selection-signals.ts";
+import type { DependencyDecision, DependencyStrategy } from "./strategy.ts";
+import { strategySemantics, validateDependencyDecisionShape } from "./strategy.ts";
 
 // ---------------------------------------------------------------------------
 // Provenance

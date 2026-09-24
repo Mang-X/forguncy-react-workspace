@@ -50,7 +50,7 @@ import { frontendLibraryIds } from "@forguncy-react-workspace/cell-compiler";
 import type { CompileCellResult } from "@forguncy-react-workspace/cell-compiler";
 import type { FrontendLibraryReference } from "@forguncy-react-workspace/core";
 
-import { fingerprintArtifact, fingerprintArtifactCode, readSyncMarker } from "./fingerprint";
+import { fingerprintArtifact, fingerprintArtifactCode, readSyncMarker } from "./fingerprint.ts";
 
 // ---------------------------------------------------------------------------
 // The observed state

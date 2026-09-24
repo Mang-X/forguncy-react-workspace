@@ -59,11 +59,11 @@ import {
   EXTENSION_EXTERNALS_DECISION,
   formatGoverningSpecReferenceLine,
   GOVERNING_ARCHITECTURE_DECISIONS,
-} from "./governance";
-import type { ArchitectureDecisionSource } from "./governance";
-import { hostBridgeGlobalMappings, hostBridgeModuleIds } from "./host-bridge";
-import { CELL_PRESET_LIBRARIES, FRONTEND_LIBRARY_REFERENCE_CONTRACT } from "./runtime-contract";
-import type { RuntimeEvidenceChannel } from "./runtime-contract";
+} from "./governance.ts";
+import type { ArchitectureDecisionSource } from "./governance.ts";
+import { hostBridgeGlobalMappings, hostBridgeModuleIds } from "./host-bridge.ts";
+import { CELL_PRESET_LIBRARIES, FRONTEND_LIBRARY_REFERENCE_CONTRACT } from "./runtime-contract.ts";
+import type { RuntimeEvidenceChannel } from "./runtime-contract.ts";
 
 // ---------------------------------------------------------------------------
 // The mechanism

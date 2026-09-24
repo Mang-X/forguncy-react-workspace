@@ -48,8 +48,8 @@ import type {
   RuntimeFacadeHostBindings,
   RuntimeFacadePortChannel,
   RuntimeFacadeProvider,
-} from "./contract";
-import { RUNTIME_FACADE_PORT_CHANNELS, RUNTIME_FACADE_PORT_CHANNEL_MEMBERS } from "./contract";
+} from "./contract.ts";
+import { RUNTIME_FACADE_PORT_CHANNELS, RUNTIME_FACADE_PORT_CHANNEL_MEMBERS } from "./contract.ts";
 
 export interface HostRuntimeFacadeProviderInput {
   /**

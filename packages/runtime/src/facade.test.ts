@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { CELL_FORGUNCY_PROP_KEYS, CELL_PROPS_BASE_KEYS } from "@forguncy-react-workspace/core";
 
-import { RUNTIME_FACADE_CAPABILITY_IDS, RuntimeFacadeContractError } from "./capabilities";
+import { RUNTIME_FACADE_CAPABILITY_IDS, RuntimeFacadeContractError } from "./capabilities.ts";
 import {
   assertRuntimeFacadeSurfaceIsExposed,
   auditRuntimeFacadeSurface,
@@ -16,12 +16,12 @@ import {
   runtimeFacadeExposedAddressNames,
   runtimeFacadeMemberCarriesBinding,
   runtimeFacadeSurface,
-} from "./facade";
-import type { RuntimeFacade, RuntimeFacadeSurfaceMember } from "./facade";
-import type { DataSourceResult, RuntimeFacadeCellProps } from "./contract";
-import { createHostRuntimeFacadeProvider } from "./host-provider";
-import { createMockDataSource, createMockRuntimeFacadeProvider } from "./mock-provider";
-import { installRuntimeFacadeProvider, uninstallRuntimeFacadeProvider } from "./provider";
+} from "./facade.ts";
+import type { RuntimeFacade, RuntimeFacadeSurfaceMember } from "./facade.ts";
+import type { DataSourceResult, RuntimeFacadeCellProps } from "./contract.ts";
+import { createHostRuntimeFacadeProvider } from "./host-provider.ts";
+import { createMockDataSource, createMockRuntimeFacadeProvider } from "./mock-provider.ts";
+import { installRuntimeFacadeProvider, uninstallRuntimeFacadeProvider } from "./provider.ts";
 
 afterEach(() => {
   uninstallRuntimeFacadeProvider();

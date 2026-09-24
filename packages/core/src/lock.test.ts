@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import type { FgcLockDocument, ForguncyTargetIdentity, LockedDependencyDecision } from "./index";
+import type { FgcLockDocument, ForguncyTargetIdentity, LockedDependencyDecision } from "./index.ts";
 import {
   assertFgcLockDocument,
   canonicalizeFgcLock,
@@ -41,7 +41,7 @@ import {
   serializeFgcLock,
   SUPPORTED_FGC_LOCK_SCHEMA_VERSIONS,
   validateFgcLockDocument,
-} from "./index";
+} from "./index.ts";
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 

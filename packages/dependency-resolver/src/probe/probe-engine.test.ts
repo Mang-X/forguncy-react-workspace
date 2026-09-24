@@ -37,15 +37,15 @@ import {
   validateProbeReport,
 } from "@forguncy-react-workspace/core";
 
-import type { DependencyProbeResult, RunDependencyProbeOptions } from "./probe-engine";
+import type { DependencyProbeResult, RunDependencyProbeOptions } from "./probe-engine.ts";
 import {
   ProbeIdentityError,
   probeLockEnvironment,
   probeRunLockEvidence,
   runDependencyProbe,
-} from "./probe-engine";
-import { probeCacheRelativePath } from "./cache";
-import { composeProbeFingerprint } from "./fingerprint";
+} from "./probe-engine.ts";
+import { probeCacheRelativePath } from "./cache.ts";
+import { composeProbeFingerprint } from "./fingerprint.ts";
 
 const FIXTURES_ROOT = fileURLToPath(new URL("../__fixtures__/probe", import.meta.url));
 

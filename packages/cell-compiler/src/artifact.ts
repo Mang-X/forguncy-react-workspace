@@ -39,20 +39,20 @@ import type {
   FrontendLibraryReference,
 } from "@forguncy-react-workspace/core";
 
-import type { CellArtifactDiagnostic } from "./diagnostics";
+import type { CellArtifactDiagnostic } from "./diagnostics.ts";
 import {
   createCellArtifactDiagnostic,
   dedupeCellArtifactDiagnostics,
   formatCellArtifactDiagnostics,
-} from "./diagnostics";
-import { CELL_ENTRY_COMPONENT_BINDING, renderCellEntryWrapper } from "./entry";
+} from "./diagnostics.ts";
+import { CELL_ENTRY_COMPONENT_BINDING, renderCellEntryWrapper } from "./entry.ts";
 import {
   auditFrontendLibraries,
   collectFrontendLibraries,
   FRONTEND_LIBRARIES_FIELD_NAME,
   frontendLibraryIds,
-} from "./frontend-libraries";
-import { auditCellSource } from "./source-guard";
+} from "./frontend-libraries.ts";
+import { auditCellSource } from "./source-guard.ts";
 // The shared specifier/decision primitives. Imported for this module's own use *and*
 // re-exported below: the extraction to a leaf module is an internal restructuring, so
 // every existing caller of the boundary keeps working.
@@ -61,13 +61,13 @@ import {
   findDependencyDecision,
   isSourceSpecifier,
   packageNameOfSpecifier,
-} from "./specifier";
+} from "./specifier.ts";
 import type {
   WorkspaceGraph,
   WorkspaceSourceAudit,
   WorkspaceSourceDiagnostic,
-} from "./workspace-source";
-import { auditWorkspaceSource, formatWorkspaceSourceAudit } from "./workspace-source";
+} from "./workspace-source.ts";
+import { auditWorkspaceSource, formatWorkspaceSourceAudit } from "./workspace-source.ts";
 
 // ---------------------------------------------------------------------------
 // The finalized public interfaces
@@ -348,7 +348,7 @@ export {
   findDependencyDecision,
   isSourceSpecifier,
   packageNameOfSpecifier,
-} from "./specifier";
+} from "./specifier.ts";
 
 /**
  * The bindings a `host` dependency may be mapped onto.

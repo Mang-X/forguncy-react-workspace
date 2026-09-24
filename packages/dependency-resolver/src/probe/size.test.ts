@@ -15,7 +15,7 @@ import { describe, expect, it } from "vitest";
 
 import type { OutputAsset, OutputChunk } from "rolldown";
 
-import { measureArtifactSize, observeSize } from "./size";
+import { measureArtifactSize, observeSize } from "./size.ts";
 
 function chunk(code: string, fileName = "entry.js"): OutputChunk {
   return {

@@ -14,14 +14,14 @@ import {
   serializeFgcLock,
 } from "@forguncy-react-workspace/core";
 
-import type { DependencyDecisionUpdate } from "./index";
+import type { DependencyDecisionUpdate } from "./index.ts";
 import {
   fgcLockPath,
   mergeDependencyDecisionUpdate,
   readFgcLock,
   recordDependencyDecision,
   recordDependencyDecisions,
-} from "./index";
+} from "./index.ts";
 
 const CELL_FINGERPRINT = "probe=inline-bundle;entry=src/cells/orders-table/App.tsx";
 

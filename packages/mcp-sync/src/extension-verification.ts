@@ -47,8 +47,8 @@ import type {
   ExtensionLibraryListing,
 } from "@forguncy-react-workspace/core";
 
-import { createSyncDiagnostic, syncDiagnosticFromExtensionAudit } from "./diagnostics";
-import type { SyncDiagnostic } from "./diagnostics";
+import { createSyncDiagnostic, syncDiagnosticFromExtensionAudit } from "./diagnostics.ts";
+import type { SyncDiagnostic } from "./diagnostics.ts";
 
 /**
  * Whether the project's extension metadata was available to check against.

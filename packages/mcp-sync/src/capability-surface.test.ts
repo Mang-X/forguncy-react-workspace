@@ -16,9 +16,9 @@ import {
   SYNC_CAPABILITIES,
   syncMutationStep,
   unestablishedSyncCapabilities,
-} from "./capability-surface";
-import type { McpSyncStep, SyncCapability } from "./capability-surface";
-import { FORGUNCY_SYNC_PORT_METHODS } from "./port";
+} from "./capability-surface.ts";
+import type { McpSyncStep, SyncCapability } from "./capability-surface.ts";
+import { FORGUNCY_SYNC_PORT_METHODS } from "./port.ts";
 
 describe("the MCP sync flow", () => {
   it("is internally coherent", () => {

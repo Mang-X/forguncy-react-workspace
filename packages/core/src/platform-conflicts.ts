@@ -13,9 +13,9 @@
  * evaluated against the role the dependency is being asked to fill.
  */
 
-import { findOwnershipConcern } from "./ownership";
-import type { ApplicationOwner, OwnershipConcernId } from "./ownership";
-import type { ArchitecturalRejectionCode, DependencyRejection } from "./rejection";
+import { findOwnershipConcern } from "./ownership.ts";
+import type { ApplicationOwner, OwnershipConcernId } from "./ownership.ts";
+import type { ArchitecturalRejectionCode, DependencyRejection } from "./rejection.ts";
 
 export type DependencyRole =
   // Application-owned roles: may not be filled by a React cell.
