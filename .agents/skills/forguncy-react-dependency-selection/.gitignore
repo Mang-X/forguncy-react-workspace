@@ -1,0 +1,20 @@
+# Probe scratch space, and any lock a local run writes into this Skill's own
+# directory. `.fgc/` is #17's cache and build scratch, and `fgc.lock.json` belongs to
+# the *project* being decided, not to the Skill.
+.fgc/
+fgc.lock.json
+
+# Deliberately NOT ignored: `fgc-evidence/`, which sits beside the lock and holds the
+# probe reports the lock cites. It is the durable half of a decision — a record whose
+# evidence cannot travel with it keeps reporting `fresh`/`validated` on a machine that
+# never received the bytes, and a `runtime-smoke` result in particular may not be
+# reproducible on a reviewer's machine at all. `status` reports an unresolvable
+# citation as `evidence-missing` for the same reason. Not listed here on purpose, so a
+# future edit to this file does not quietly re-ignore it.
+
+# Local decision files an Agent writes while working. The recording contract is
+# `references/decision-recording.md`; a working file is not a delivered artifact.
+*.decision.json
+
+node_modules/
+*.log

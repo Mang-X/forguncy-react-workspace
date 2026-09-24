@@ -1,0 +1,226 @@
+{
+  "version": "1.0.0",
+  "capability": "为活字格 ReactCellType 的 Cell 做依赖选型：判定能力归属、研究并实测候选库、决定 host/inline/extension/replace 策略，并把决策与证据记入 fgc.lock.json",
+  "positive_concepts": {
+    "selection_intent": {
+      "weight": 1.2,
+      "phrases": [
+        "选型",
+        "选个库",
+        "哪个库",
+        "用哪个",
+        "用什么",
+        "选哪个",
+        "哪个好",
+        "比较好",
+        "评估",
+        "候选",
+        "依赖",
+        "值得选",
+        "这个包",
+        "许可证",
+        "维护",
+        "dependency selection",
+        "library selection"
+      ]
+    },
+    "capability_request": {
+      "weight": 0.9,
+      "phrases": [
+        "pdf",
+        "3d",
+        "查看器",
+        "图表",
+        "编辑器",
+        "地图",
+        "缓存",
+        "状态库",
+        "路由",
+        "工具库"
+      ]
+    },
+    "candidate_research": {
+      "weight": 0.9,
+      "phrases": [
+        "许可证",
+        "维护情况",
+        "维护",
+        "活跃",
+        "分发",
+        "分布形态",
+        "exports",
+        "browser-first",
+        "esm"
+      ]
+    },
+    "forguncy_cell": {
+      "weight": 1,
+      "phrases": [
+        "活字格",
+        "forguncy",
+        "cell",
+        "reactcelltype",
+        "宿主"
+      ]
+    },
+    "strategy_or_ownership": {
+      "weight": 1,
+      "phrases": [
+        "host",
+        "inline",
+        "extension",
+        "replace",
+        "依赖策略",
+        "能不能用",
+        "能不能 inline",
+        "归属",
+        "react router",
+        "zustand",
+        "redux",
+        "tanstack query",
+        "业务状态",
+        "共享",
+        "单例",
+        "适配层",
+        "换一个",
+        "换库",
+        "看不出来",
+        "不能用"
+      ]
+    },
+    "probe_evidence": {
+      "weight": 0.9,
+      "phrases": [
+        "probe",
+        "探测",
+        "实测",
+        "证据",
+        "兼容",
+        "worker",
+        "wasm",
+        "风险",
+        "这个库"
+      ]
+    },
+    "decision_lock": {
+      "weight": 0.9,
+      "phrases": [
+        "fgc.lock.json",
+        "fgc.lock",
+        "决策记录",
+        "决策",
+        "记到",
+        "记录",
+        "stale",
+        "新鲜度",
+        "rationale",
+        "锁"
+      ]
+    }
+  },
+  "negative_concepts": {
+    "frontend_package_build": {
+      "weight": 0.5,
+      "exclusive": false,
+      "phrases": [
+        "扩展包",
+        "manifest.json",
+        "bundle.js",
+        "types.d.ts",
+        "globalname",
+        "上传",
+        "补全"
+      ]
+    },
+    "dotnet_plugin": {
+      "weight": 0.5,
+      "exclusive": false,
+      "phrases": [
+        "serverscommand",
+        "服务端命令",
+        "celltype",
+        "clientcommand",
+        "serverapi",
+        "middleware",
+        "插件",
+        "单元格类型"
+      ]
+    },
+    "summary_only": {
+      "weight": 0.5,
+      "exclusive": true,
+      "phrases": [
+        "总结",
+        "要点",
+        "summarize"
+      ]
+    },
+    "translation_only": {
+      "weight": 0.5,
+      "exclusive": true,
+      "phrases": [
+        "翻译",
+        "translate"
+      ]
+    },
+    "explain_only": {
+      "weight": 0.6,
+      "exclusive": true,
+      "phrases": [
+        "解释一下什么是",
+        "只要解释机制",
+        "不要替我决定",
+        "只讲机制"
+      ]
+    },
+    "brainstorm_only": {
+      "weight": 0.5,
+      "exclusive": true,
+      "phrases": [
+        "头脑风暴",
+        "brainstorm",
+        "点子"
+      ]
+    },
+    "meta_skill_authoring": {
+      "weight": 0.5,
+      "exclusive": true,
+      "phrases": [
+        "可复用的 skill",
+        "做成一个 skill",
+        "做一个 skill"
+      ]
+    },
+    "unrelated_frontend": {
+      "weight": 0.4,
+      "exclusive": false,
+      "phrases": [
+        "vue 组件库",
+        "ci 配置",
+        "页面性能",
+        "重构",
+        "待办事项"
+      ]
+    },
+    "forguncy_other_config": {
+      "weight": 0.4,
+      "exclusive": false,
+      "phrases": [
+        "数据库连接字符串",
+        "配置数据库",
+        "连接字符串"
+      ]
+    },
+    "unrelated_generic": {
+      "weight": 0.4,
+      "exclusive": false,
+      "phrases": [
+        "peer dependency",
+        "周报模板"
+      ]
+    }
+  },
+  "fallback_positive_concepts": [
+    "selection_intent"
+  ]
+}
