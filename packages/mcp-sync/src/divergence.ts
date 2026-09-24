@@ -29,7 +29,12 @@
  * for. Collapsing them into an empty string would silently convert every unreadable
  * target into an overwrite. The three reasons are distinct for the same purpose — the
  * third is a transport problem, the first two are the sync's own limitation, and the
- * diagnostic's remediation differs.
+ * diagnostic's remediation differs. `occupied` is the third state and the same
+ * argument taken one step further: #20 measured that the designer reports a Cell
+ * holding a value or another cell type *without* a `code` property, and mapping that
+ * onto an empty string would classify a designer's text cell as `vacant` and overwrite
+ * it. The read that establishes these states is `api.page.getCells` (#20's evidence),
+ * and the adapter maps the product's three spellings onto these three states.
  *
  * ## The asymmetric metadata comparison
  *
@@ -59,11 +64,16 @@ import { fingerprintArtifact, fingerprintArtifactCode, readSyncMarker } from "./
 /**
  * Why a target's current source is not available.
  *
- * Three reasons, and they are not interchangeable: the first two are this contract's
- * own limitation and the third is the environment's. `no-established-read-capability`
- * is the honest one today — the designer operation that reads a Cell has no recorded
- * call name (see `capability-surface.ts`) — and it is separate from `not-attempted`,
- * which is what a dry run or a caller that skipped the read reports.
+ * Three reasons, and they are not interchangeable: the first is this contract's own
+ * limitation, the second is a caller that chose not to look, and the third is the
+ * environment's.
+ *
+ * `no-established-read-capability` is retained although #20 established the read
+ * (`api.page.getCells`), because the *state* still exists: a caller running the plan
+ * without the port — a dry run, a review, a test that only assembles a payload —
+ * genuinely has no read, and this is the honest name for why. It is separate from
+ * `not-attempted`, which is a caller that had the capability and skipped the read.
+ * Collapsing them would make the two look like the same failure.
  */
 export const CELL_READ_UNAVAILABLE_REASONS = [
   "no-established-read-capability",
@@ -76,10 +86,18 @@ export type CellReadUnavailableReason = (typeof CELL_READ_UNAVAILABLE_REASONS)[n
 /**
  * What the target Cell currently holds, as far as the caller could see.
  *
- * `frontendLibraries` is optional because whether a read reports the cell's whole
- * properties or only its source is not established either — the read operation itself
- * has no recorded call name. Omitting it is "not stated", never "empty": see the module
- * docstring for why that distinction decides whether a skip may be claimed.
+ * Three states, and the middle one is why this is not a boolean: `blank` and
+ * `occupied` are both "not our generated output", but they call for different
+ * answers. #20 measured that the designer reports a Cell holding a plain value or a
+ * different cell type *without* a `code` property, so a reader that mapped it onto
+ * an empty string would classify a designer's text cell as `vacant` and overwrite
+ * it — the exact silent destruction #19's safety rule forbids. `occupied` says what
+ * the product reported instead of pretending the Cell was empty.
+ *
+ * `frontendLibraries` is optional on `read` because whether a read reports the
+ * Cell's whole properties or only its source is not established either. Omitting it
+ * is "not stated", never "empty": see the module docstring for why that distinction
+ * decides whether a skip may be claimed.
  */
 export type DeployedCellState =
   | {
@@ -87,6 +105,13 @@ export type DeployedCellState =
       readonly code: string;
       readonly frontendLibraries?: readonly FrontendLibraryReference[];
     }
+  /**
+   * The Cell holds something that is not a managed ReactCellType.
+   *
+   * `detail` names what the product reported — a value, another cell type — so the
+   * conflict message is actionable rather than a generic "not ours".
+   */
+  | { readonly kind: "occupied"; readonly detail: string }
   | { readonly kind: "unread"; readonly reason: CellReadUnavailableReason };
 
 // ---------------------------------------------------------------------------
@@ -149,7 +174,7 @@ function sameLibrarySet(
 function describeUnreadReason(reason: CellReadUnavailableReason): string {
   switch (reason) {
     case "no-established-read-capability":
-      return "the designer operation that reads a Cell's current source has no established call name, so nothing could be read";
+      return "no read of the target was performed, so nothing about its current state is known";
     case "not-attempted":
       return "the target was not read before this plan was made";
     case "read-failed":
@@ -173,6 +198,17 @@ export function classifyCellDivergence(state: DeployedCellState, artifact: Compi
     return {
       kind: "unverifiable",
       detail: `The target's current source is unknown: ${describeUnreadReason(state.reason)}.`,
+      metadataComparison: "not-applicable",
+    };
+  }
+
+  if (state.kind === "occupied") {
+    // Not `vacant`, and the distinction is the whole point: the product reported a cell
+    // that holds something — a value, another cell type — which is designer work or a
+    // cell this flow never wrote. Reporting it as empty would let a sync overwrite it.
+    return {
+      kind: "foreign-code",
+      detail: `The target Cell holds something this flow did not write and that is not a managed React Cell (${state.detail}), so overwriting it would destroy work the repository cannot reproduce.`,
       metadataComparison: "not-applicable",
     };
   }

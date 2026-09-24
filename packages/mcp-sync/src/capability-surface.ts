@@ -32,12 +32,16 @@
  *    (verify extensions before writing, check project errors after writing, generate
  *    after checking) become invariants a guard enforces, because the failure mode of
  *    getting them wrong is a project that was mutated and never validated.
- * 3. **Two required operations have no name, and that is stated rather than
- *    papered over.** Reading a Cell's current source is what #19's
- *    "surface a conflict instead of destroying probable designer edits" depends on;
- *    saving the project is what its step 4 depends on. Neither call name is recorded
- *    in the evidence (#5 read persisted cell props back but did not record the call
- *    it used), so both are `unestablished` with the evidence that would settle them.
+ * 3. **Two required operations were unnamed, and are now established by execution.** Reading
+ *    a Cell's current source is what #19's "surface a conflict instead of destroying
+ *    probable designer edits" depends on; saving the project is what its step 4 depends on.
+ *    Neither call name was recorded in the evidence available when this contract was written
+ *    (#5 read persisted cell props back but did not record the call it used), so both were
+ *    `unestablished` and every plan refused. #20 performed both against a real Forguncy
+ *    12.0.100.0 session and recorded the calls: `api.page.getCells` to read, `api.app.saveProject`
+ *    to persist. The evidence source records what was executed and, just as importantly, which
+ *    *other* call was rejected and why — `readCellCode` is real but truncated at 12,000
+ *    characters, so it cannot be the divergence reader.
  *
  * Scope note: this module states the flow, its evidence, and whether it can be
  * executed. It does not call anything — the transport is #20's — and it does not
@@ -65,7 +69,11 @@ import type { ForguncySyncPortMethod } from "./port.ts";
  * repository's single vocabulary for "how was this observed", and inventing a
  * parallel one for the designer surface would be two answers to one question.
  */
-export const SYNC_EVIDENCE_SOURCE_IDS = ["issue-5-designer-probe", "forguncy-library-guide"] as const;
+export const SYNC_EVIDENCE_SOURCE_IDS = [
+  "issue-5-designer-probe",
+  "forguncy-library-guide",
+  "issue-20-designer-execution",
+] as const;
 
 export type SyncEvidenceSourceId = (typeof SYNC_EVIDENCE_SOURCE_IDS)[number];
 
@@ -95,6 +103,14 @@ export const SYNC_EVIDENCE_SOURCES: Readonly<Record<SyncEvidenceSourceId, SyncEv
       "The product guide the Forguncy frontend-library Skill ships in this repository: `.agents/skills/forguncy-frontend-library/references/upload-and-integrate.md` (§上传与覆盖, §ReactCellType 引用写法, §完整 MCP 验证流程), whose own header cites 指南 §12–15.",
     scope:
       "The argument shapes the product documents — in particular `api.page.setCells`'s request envelope (`pageName`, `cells[].cell`/`cellType`/`cellTypeProps`) — and the order the guide's own end-to-end flow runs in. It is documentation, not an execution: nothing in it was run in this repository, and a documented field is not a measured one.",
+  },
+  "issue-20-designer-execution": {
+    id: "issue-20-designer-execution",
+    channel: "designer-api",
+    citation:
+      "#20's own executed evidence against a real designer session — recorded on the Issue (https://github.com/Mang-X/forguncy-react-workspace/issues/20). Environment: MCP `http://localhost:11234/mcp`, `serverInfo = Forguncy 12.0.100.0`, designer assembly `12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623`; project `前端拓展包集成示例.fgcc`; the product's own API reference, which the designer serves over MCP VFS at `/apis/**`.",
+    scope:
+      "The two operations #5 left unnamed, *performed* (this source is an execution, not a reading of one) and the product reference that documents them: `api.page.getCells` and `api.page.getCellCodeContext` (both read a Cell's persisted state) and `api.app.saveProject` (persists it). It also records what `api.page.readCellCode` does — the segmented reader — and the measurement that decides which of the two readers the divergence check uses: `readCellCode` returned exactly 12,000 characters with `hasMore: true` for a 17,125-character cell, while `getCells` returned all 17,125 characters of the same `cellTypeProps.code`. It records the designer's own `baseHash` equals `sha256` of the stored code string byte-for-byte (LF line endings, trailing newline preserved). What it does **not** record: any claim that these calls are stable across Forguncy versions other than 12.0.100.0, or that `getCells` has no size budget — only that none was observed at 17,125 characters.",
   },
 };
 
@@ -127,7 +143,10 @@ export type SyncCapabilityId = (typeof SYNC_CAPABILITY_IDS)[number];
  *
  * There is deliberately no third, weaker level such as "documented equivalent" or
  * "expected": a level between the two would be where a guess lives, and the point of
- * the axis is that a guess has no name here.
+ * the axis is that a guess has no name here. The axis survives its own success — every
+ * required capability is `established` today, so the guards' `unestablished` branches are
+ * exercised against supplied records in `capability-surface.test.ts` rather than against
+ * the shipped table, which is how a check would otherwise stop checking anything.
  */
 export type SyncCapabilityConfirmation = "established" | "unestablished";
 
@@ -161,12 +180,12 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
   {
     id: "read-cell-source",
     summary: "Read the source and library references a target Cell currently holds.",
-    evidenceSources: ["issue-5-designer-probe", "forguncy-library-guide"],
-    confirmation: "unestablished",
+    evidenceSources: ["issue-5-designer-probe", "forguncy-library-guide", "issue-20-designer-execution"],
+    confirmation: "established",
+    method: "api.page.getCells",
+    portMethod: "readCellSource",
     usedByStepIds: ["read-target-state"],
-    blockedBy:
-      "Recording the call name. #5's probe did read persisted cell state back — it reports the persisted `cellTypeProps.frontendLibraries: [{ libraryId }]` shape — but the comment records the *observation*, not the request that produced it, and the guide's flow has no read step either. Either the designer session's API surface has to be enumerated for the operation, or a fresh probe has to perform one read and record it. #19's \"probable designer-side divergence is detected before overwrite\" cannot be established until then: without a read there is nothing to compare a fingerprint against.",
-    note: "This is the capability #19's `pull` non-goal is often confused with. Reading one target's own current source, to refuse an overwrite, is not designer-to-repository synchronisation: nothing read here reaches repository source.",
+    note: "Established by #20's execution rather than by #5's probe, which is why the call is `getCells` and not `readCellCode`. Both read a Cell's persisted state and both were run; `readCellCode` was rejected as the divergence reader on evidence, not on preference: it is a segmented reader (`一次最多返回 200 行和 12000 个字符`) and returned `hasMore: true` at 12,000 characters of a 17,125-character cell, so using it would splice a truncated prefix into the marker parse and report a whole generated Cell as `malformed-marker` — the one refusal that tells a person their source was edited. `getCells` returned that same cell's full 17,125 characters. It also reports the two things the divergence check needs *together* — `cellTypeProps.code` and `cellTypeProps.frontendLibraries` — where the code readers return source alone, and it distinguishes 'the Cell is blank' (absent from `cells`) from 'the Cell holds something that is not a ReactCellType' (present, with a `value` or another `cellType`).",
   },
   {
     id: "write-cell-source",
@@ -181,11 +200,12 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
   {
     id: "save-project",
     summary: "Persist the project after a mutation.",
-    evidenceSources: ["issue-5-designer-probe", "forguncy-library-guide"],
-    confirmation: "unestablished",
+    evidenceSources: ["forguncy-library-guide", "issue-20-designer-execution"],
+    confirmation: "established",
+    method: "api.app.saveProject",
+    portMethod: "saveProject",
     usedByStepIds: ["save-project-if-required"],
-    blockedBy:
-      "Recording the call name. #19's step 4 requires a save when the MCP contract requires one, and the guide's flow has a step 保存工程 — but neither names the operation. The only save-adjacent call #5 executed is `api.app.getProjectSaveStatus`, which reports whether the project is dirty rather than persisting it (recorded below as `project-save-status` precisely so it is not mistaken for this one). #5 also records that its probe left the project unsaved on purpose, so the effect of skipping a required save is unmeasured as well as unnamed.",
+    note: "The call #5 left unnamed, established by #20's execution. `api.app.saveProject({})` resolved `{ saved: true, message: \"工程保存成功。\" }` and the save status read back `containsUnsavedChanges: false`; the product reference documents its permission as `write/safe` and its return type as `ProjectSaveStatusResponse` — the *same* type `getProjectSaveStatus` returns, with `saved` set only by `saveProject`. The guide's step 保存工程 is therefore real and named, not a paraphrase.",
   },
   {
     id: "check-project-errors",
@@ -210,11 +230,12 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
   {
     id: "project-save-status",
     summary: "Read whether the project has unsaved changes.",
-    evidenceSources: ["issue-5-designer-probe"],
+    evidenceSources: ["issue-5-designer-probe", "issue-20-designer-execution"],
     confirmation: "established",
     method: "api.app.getProjectSaveStatus",
-    usedByStepIds: [],
-    note: "Recorded although no step needs it, because it is the one save-adjacent operation the probe actually ran and leaving it out is how a later reader concludes that `getProjectSaveStatus` saves. It does not: #5 used it to report that its probe project was left unsaved. Its result shape is not recorded either, so it is not on the port.",
+    portMethod: "getProjectSaveStatus",
+    usedByStepIds: ["save-project-if-required"],
+    note: "Recorded by #5, and made *required* by #20's execution rather than merely recorded. The step is named `save-project-if-required`, and #20 measured what makes it required: a `setCells` write leaves `containsUnsavedChanges: true`, and `saveProject` clears it. Without this read the step could only guess, and guessing 'always save' would make a clean project's state depend on sync having run. The same execution keeps #5's warning true — this call *reports* dirtiness and does not persist anything; `saveProject` is the call that does, and it is the only one whose response sets `saved`.",
   },
 ];
 
@@ -311,7 +332,7 @@ export const MCP_SYNC_STEPS: readonly McpSyncStep[] = [
     phase: "after-mutation",
     transport: "designer-api",
     summary: "Persist the project when the MCP contract requires it after a mutation.",
-    capabilityIds: ["save-project"],
+    capabilityIds: ["project-save-status", "save-project"],
   },
   {
     id: "check-project-errors",

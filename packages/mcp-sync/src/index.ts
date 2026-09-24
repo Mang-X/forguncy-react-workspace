@@ -16,22 +16,25 @@
  *   — https://github.com/Mang-X/forguncy-react-workspace/issues/12
  *
  * Scope note: this package states *what a sync writes, from where, in what order, what it
- * refuses, and what it may not claim*. It does not issue a designer call — #20 owns the
- * transport — does not compile an artifact (#6/#7), does not resolve dependencies (#8),
- * and does not package a Forguncy extension (that is `MangMax/forguncy-frontend-library`'s,
- * which is also where #19 sends a missing extension). Reading a project's Cell targets is
- * delegated, not owned: `registry-target` resolves an explicit Cell id through `core`'s
- * #26 registry — the one place "which entry is which Forguncy Cell" is answered — so this
- * package never parses a config or scans a project for something to overwrite. What it
- * owns is every question that separates a deployment step from a file copy, so a caller
- * cannot deploy by accident.
+ * refuses, and what it may not claim*, and — since #20 — executes that flow against an
+ * injected {@link ForguncySyncPort}. It does not ship a *transport*: which MCP session,
+ * URL or retry policy is the adapter's, and #20's evidence about the designer's wire shape
+ * lives there rather than here. It does not compile an artifact (#6/#7), does not resolve
+ * dependencies (#8), and does not package a Forguncy extension (that is
+ * `MangMax/forguncy-frontend-library`'s, which is also where #19 sends a missing extension).
+ * Reading a project's Cell targets is delegated, not owned: `registry-target` resolves an
+ * explicit Cell id through `core`'s #26 registry — the one place "which entry is which
+ * Forguncy Cell" is answered — so this package never parses a config or scans a project for
+ * something to overwrite. What it owns is every question that separates a deployment step
+ * from a file copy, so a caller cannot deploy by accident.
  *
- * The two things a caller should read first are `unestablishedSyncCapabilities()` — which
- * designer operations have no recorded call name, and therefore block the flow end to end
- * — and `realRuntimeSyncGuarantees()` — which promises a green local run says nothing
- * about. A green `vp test` here establishes the *contract*; it establishes nothing about
- * Forguncy runtime behaviour, and #20's own validation plan says a local mock is
- * insufficient for final acceptance.
+ * The one thing a caller should read before reporting a sync as done is
+ * `realRuntimeSyncGuarantees()` — which promises a green local run says nothing about. A
+ * green `vp test` here establishes the *contract* and the executor's call sequence; it
+ * establishes nothing about Forguncy runtime behaviour on its own. #20's validation is the
+ * real-designer half, and its evidence is recorded on the Issue and in the
+ * `issue-20-designer-execution` evidence source, deliberately kept separate from this
+ * package's local checks.
  */
 
 // Provenance
@@ -56,7 +59,7 @@ export {
 export type { CellSyncTargetPlan, ResolvedCellSyncTarget } from "./registry-target.ts";
 
 // The designer surface the flow needs, and the operations it deliberately lacks
-export { FORGUNCY_SYNC_PORT_METHODS } from "./port.ts";
+export { FORGUNCY_SYNC_PORT_METHODS, REACT_CELL_TYPE_NAME } from "./port.ts";
 export type {
   ForguncySyncPort,
   ForguncySyncPortMethod,
@@ -66,6 +69,11 @@ export type {
   ListFrontendLibrariesRequest,
   ListFrontendLibrariesResult,
   ProjectErrorReport,
+  ProjectSaveResult,
+  ProjectSaveStatus,
+  ProjectSaveStatusRequest,
+  ReadCellSourceRequest,
+  ReadCellSourceResult,
   SetCellsCell,
   SetCellsCellType,
   SetCellsCellTypeProps,
@@ -143,11 +151,13 @@ export type {
 
 // What a sync promises
 export {
+  EXECUTED_AGAINST_DESIGNER,
   findSyncGuarantee,
   locallyCheckableSyncGuarantees,
   realRuntimeSyncGuarantees,
   SYNC_GUARANTEE_IDS,
   SYNC_GUARANTEES,
+  unexecutedRealRuntimeSyncGuarantees,
 } from "./guarantees.ts";
 export type { SyncGuarantee, SyncGuaranteeId } from "./guarantees.ts";
 
@@ -232,3 +242,28 @@ export type {
   SyncStepPlan,
   SyncStepStatus,
 } from "./sync-plan.ts";
+
+// The flow, executed
+export {
+  CELL_SYNC_RUN_STATUSES,
+  deployedStateOfRead,
+  executeCellSync,
+  executeCellSyncTargets,
+  formatCellSyncRun,
+  formatCellSyncRuns,
+  readCellState,
+} from "./executor.ts";
+export type {
+  CellReadOutcome,
+  CellSyncRun,
+  CellSyncRunStatus,
+  ExecuteCellSyncOptions,
+  ExecuteCellSyncTargetOptions,
+  SyncRunStep,
+  SyncRunStepStatus,
+  SyncRunSteps,
+} from "./executor.ts";
+
+// The designer, as the port — the transport half of #20
+export { createDesignerSyncPort, DESIGNER_EXECUTE_TOOL, runtimePageUrl } from "./designer-transport.ts";
+export type { DesignerCallTool, DesignerPermissionMode, DesignerSyncPortOptions } from "./designer-transport.ts";
