@@ -1,0 +1,12 @@
+# Probe scratch space, and any lock a local run writes into this Skill's own
+# directory. Neither is an artifact: `.fgc/probe-cache/` is #17's cache and
+# `fgc.lock.json` belongs to the *project* being decided, not to the Skill.
+.fgc/
+fgc.lock.json
+
+# Local decision files an Agent writes while working. The recording contract is
+# `references/decision-recording.md`; a working file is not a delivered artifact.
+*.decision.json
+
+node_modules/
+*.log
