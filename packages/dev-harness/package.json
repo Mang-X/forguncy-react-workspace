@@ -32,10 +32,28 @@
     "harness plugin includes it in the Vite config it returns: React Fast Refresh is what makes",
     "an edit to a Cell's source keep the component's state, and without it `vp dev` degrades to",
     "a full page reload. It is loaded from this package's own tree, so a project does not have",
-    "to install it to get the loop #23 defines."
+    "to install it to get the loop #23 defines.",
+    "",
+    "`@forguncy-react-workspace/dependency-resolver` is a *runtime* dependency, and where it is",
+    "imported from is the point: `local-decision-projection.ts` reaches `dependency-resolver/local`",
+    "from `src/`, during normal `devHarness()` startup, so the plugin does not work unless this",
+    "package's install provides it. It was a devDependency while `src/` did not import it and only",
+    "a test did — that boundary was crossed when the harness began sharing the compiler's lock",
+    "validity pipeline, and this records the move rather than leaving a stale claim in `//devDependencies`.",
+    "",
+    "`/local` is the entry that makes this affordable: the barrel re-exports `probe/build.ts`, which",
+    "imports `rolldown`, so importing the barrel from `src/` would put a bundler in every project's",
+    "`vite.config.ts` graph — measured at ~570 ms against 7-11 ms for the rolldown-free modules.",
+    "`dependency-resolver-local.test.ts` asserts this entry's transitive graph reaches no `rolldown`",
+    "and exports nothing the barrel does not, so the cheap edge stays cheap.",
+    "",
+    "A package-boundary test asserts both halves of this rule from here on: every package `src/`",
+    "imports is declared in `dependencies`, and nothing declared in `devDependencies` is reachable",
+    "from `src/` (`package-boundaries.test.ts`)."
   ],
   "dependencies": {
     "@forguncy-react-workspace/core": "workspace:*",
+    "@forguncy-react-workspace/dependency-resolver": "workspace:*",
     "@forguncy-react-workspace/runtime": "workspace:*",
     "@forguncy-react-workspace/vite-plugin-fgc": "workspace:*",
     "@vitejs/plugin-react-swc": "4.3.3",
@@ -48,25 +66,11 @@
     "./mount": "./src/mount.ts"
   },
   "//devDependencies": [
-    "`@forguncy-react-workspace/dependency-resolver` is test-only, and the arrangement is the",
-    "whole point of the edge. `local-dev-audit.ts` reads `fgc.lock.json` itself rather than",
-    "through that package's `readFgcLock`, because its barrel re-exports `probe/build.ts`, which",
-    "imports `rolldown` — verified by reading the import graph, not by timing it. This package's",
-    "lock reader is loaded from `vite.config.ts`'s module graph, so that would be a bundler",
-    "pulled into every project that loads the harness plugin, to read a file of a few kilobytes.",
-    "",
-    "A duplication is a place for two readers of one file to disagree, so `local-dev-audit.test.ts`",
-    "runs *both* over the same real files — absent, legal, malformed — and requires equal results.",
-    "`src/` must not import this package; a test may, which is exactly this edge: paid once by the",
-    "suite rather than by every dev server. `packages/cell-compiler/package.json` records the same",
-    "pattern for the same reason.",
-    "",
     "`@types/react` / `@types/react-dom` are pinned to the host versions the harness substitutes.",
     "Nothing in `src/` is a React component, but `mount.ts` calls `createRoot` and `createElement`,",
     "so its types come from here rather than from a project's own install."
   ],
   "devDependencies": {
-    "@forguncy-react-workspace/dependency-resolver": "workspace:*",
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.7"
   }
