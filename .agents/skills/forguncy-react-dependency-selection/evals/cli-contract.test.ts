@@ -588,3 +588,199 @@ describe("CLI contract: conformance is checked before anything is written", () =
     });
   }, CASE_TIMEOUT_MS);
 });
+
+// ---------------------------------------------------------------------------
+// Review round 2 — the extension-catalog wiring
+// ---------------------------------------------------------------------------
+
+/**
+ * `--extension-catalog` accepts the two sources #12 names, and they are not
+ * interchangeable: a *verified mapping catalog* states which npm package each row
+ * answers for, while a raw `api.app.listFrontendLibraries` listing does not.
+ *
+ * Both defects these cover came from treating a listing as though it did — reading its
+ * display `name` as a package name — and from projecting the shipped table so narrowly
+ * that a declared sibling module id became unverifiable. Both made *legitimate* input
+ * fail, which is the direction a gate must never fail in.
+ */
+describe("CLI contract: a raw listing is not a mapping catalog", () => {
+  /** One real `listFrontendLibraries` row: the fields the platform actually returns. */
+  const listing = (overrides: Record<string, unknown> = {}) => [
+    {
+      id: "tanstack-query",
+      name: "TanStack Query for ReactCellType",
+      globalName: "TanStackQuery",
+      exists: true,
+      typeDefinitionAvailable: true,
+      ...overrides,
+    },
+  ];
+
+  async function listingFile(
+    rows: readonly Record<string, unknown>[],
+  ): Promise<{ path: string; cleanup: () => Promise<void> }> {
+    const directory = await mkdtemp(join(tmpdir(), "fgc-cli-listing-"));
+    const path = join(directory, "listing.json");
+    await writeFile(path, JSON.stringify(rows, null, 2), "utf8");
+    return { path, cleanup: () => rm(directory, { recursive: true, force: true }) };
+  }
+
+  const extensionDecision = (packageName: string, overrides: Record<string, unknown> = {}) => ({
+    packageName,
+    role: "cell-local-data-access",
+    strategy: "extension",
+    libraryId: "tanstack-query",
+    globalName: "TanStackQuery",
+    extensionVersion: "5.102.8",
+    rationale: "A bundled copy would give every Cell its own QueryClient, so the shared page global is required.",
+    ...overrides,
+  });
+
+  it("verifies a decision against the listing's stable id, not its display name", async () => {
+    // The defect: the listing's `name` was read as `packageName`, so a real listing became
+    // `packageName: "TanStack Query for ReactCellType"` — a string that is not an npm
+    // package and can never match `@tanstack/react-query`. Every legitimate decision
+    // through a real listing was therefore refused as `extension-library-not-verified`.
+    await withScratch(EXTENSION_QUERY, async root => {
+      const catalog = await listingFile(listing());
+      const decision = await decisionFile(extensionDecision("@tanstack/react-query"));
+      try {
+        const recorded = await cli(["record", "--project", root, "--extension-catalog", catalog.path, "--decision", decision.path]);
+        expect(recorded.code, recorded.stderr).toBe(0);
+        const record = (await readLock(root)).decisions.find(entry => entry.packageName === "@tanstack/react-query")!;
+        expect(record.libraryId).toBe("tanstack-query");
+        expect(record.globalName).toBe("TanStackQuery");
+      } finally {
+        await catalog.cleanup();
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("keeps the bundle and type-definition findings a raw listing can actually establish", async () => {
+    // #12's listing carries `exists` and `typeDefinitionAvailable`, and the review's point
+    // was that dropping them loses the metadata audit entirely. They are checked through
+    // `core`'s own `auditExtensionLibraryMetadata`, so the CLI and the compiler agree
+    // about what those two fields mean.
+    await withScratch(EXTENSION_QUERY, async root => {
+      const decision = await decisionFile(extensionDecision("@tanstack/react-query"));
+      const cases: readonly { readonly rows: readonly Record<string, unknown>[]; readonly code: string }[] = [
+        { rows: listing({ exists: false }), code: "extension-bundle-missing" },
+        { rows: listing({ typeDefinitionAvailable: false }), code: "extension-types-missing" },
+        { rows: listing({ globalName: "WrongGlobal" }), code: "extension-global-mismatch" },
+        { rows: listing({ id: "some-other-library" }), code: "extension-library-unverified" },
+      ];
+      try {
+        for (const { rows, code } of cases) {
+          const catalog = await listingFile(rows);
+          try {
+            const recorded = await cli(["record", "--project", root, "--extension-catalog", catalog.path, "--decision", decision.path]);
+            expect(recorded.code, `${code} should refuse`).not.toBe(0);
+            expect(json<{ conformanceProblems: readonly string[] }>(recorded).conformanceProblems.join(" ")).toContain(code);
+            expect(existsSync(join(root, "fgc.lock.json"))).toBe(false);
+          } finally {
+            await catalog.cleanup();
+          }
+        }
+      } finally {
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("refuses to let a listing imply a mapping the shipped table does not declare", async () => {
+    // A listing confirms an identity; it cannot establish which npm package an extension
+    // provides, because that relation is recorded only in the declared table. Reporting
+    // this as a plain "not verified" would send the caller looking for a row to add
+    // rather than at the input that was wrong for the question.
+    await withScratch(PROVING_CASES, async root => {
+      const catalog = await listingFile(listing());
+      const decision = await decisionFile(
+        extensionDecision("es-toolkit", { libraryId: "es-toolkit-ext", globalName: "EsToolkit" }),
+      );
+      try {
+        const recorded = await cli(["record", "--project", root, "--extension-catalog", catalog.path, "--decision", decision.path]);
+        expect(recorded.code).not.toBe(0);
+        expect(json<{ conformanceProblems: readonly string[] }>(recorded).conformanceProblems.join(" ")).toContain(
+          "extension-mapping-not-declared",
+        );
+        expect(existsSync(join(root, "fgc.lock.json"))).toBe(false);
+      } finally {
+        await catalog.cleanup();
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("still accepts a verified mapping catalog, which does state its package", async () => {
+    // The other accepted input, so the fix is not "a listing is now refused instead".
+    await withScratch(EXTENSION_QUERY, async root => {
+      const catalog = await listingFile([
+        { packageName: "@tanstack/react-query", libraryId: "tanstack-query", globalName: "TanStackQuery" },
+      ]);
+      const decision = await decisionFile(extensionDecision("@tanstack/react-query"));
+      try {
+        const recorded = await cli(["record", "--project", root, "--extension-catalog", catalog.path, "--decision", decision.path]);
+        expect(recorded.code, recorded.stderr).toBe(0);
+      } finally {
+        await catalog.cleanup();
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("refuses a file that mixes mapping rows and listing rows", async () => {
+    await withScratch(EXTENSION_QUERY, async root => {
+      const catalog = await listingFile([
+        { packageName: "@tanstack/react-query", libraryId: "tanstack-query", globalName: "TanStackQuery" },
+        { id: "tanstack-query", name: "x", globalName: "TanStackQuery" },
+      ]);
+      const decision = await decisionFile(extensionDecision("@tanstack/react-query"));
+      try {
+        const recorded = await cli(["record", "--project", root, "--extension-catalog", catalog.path, "--decision", decision.path]);
+        expect(recorded.code).not.toBe(0);
+        expect(recorded.stderr).toContain("mixes mapping rows");
+        expect(recorded.stderr).not.toContain("at async");
+      } finally {
+        await catalog.cleanup();
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+});
+
+describe("CLI contract: a declared sibling module id is verifiable", () => {
+  it("projects every module id a mapping covers, not only its primary package", async () => {
+    // #12's canonical row is `@tanstack/react-query` with `moduleIds: ["@tanstack/query-core"]`,
+    // because the vendor package re-exports query-core. A projection that kept only
+    // `packageName` would report a legitimate `@tanstack/query-core` decision as
+    // `extension-library-not-verified` — refused for a declared relationship.
+    //
+    // Asserted through `policy`, because the projection is the thing that was wrong and
+    // `policy` is where the CLI publishes the catalog it will actually use. A full
+    // `record` of this package is not reachable: query-core is a transitive dependency,
+    // resolvable from no project root, so the probe refuses before conformance is asked.
+    const policy = await cli(["policy"]);
+    expect(policy.code, policy.stderr).toBe(0);
+
+    const surface = json<{
+      extensionCatalog: {
+        mappings: readonly { packageName: string; libraryId: string; globalName: string }[];
+        declaredRows: readonly { packageName: string; moduleIds: readonly string[]; libraryId: string; globalName: string }[];
+      };
+    }>(policy);
+
+    const row = surface.extensionCatalog.declaredRows.find(entry => entry.packageName === "@tanstack/react-query");
+    expect(row, "@tanstack/react-query is a declared row").toBeDefined();
+    expect(row!.moduleIds).toContain("@tanstack/query-core");
+
+    // Every declared module id has a catalog entry of its own, carrying the same identity
+    // as the row it came from.
+    for (const moduleId of [row!.packageName, ...row!.moduleIds]) {
+      const entry = surface.extensionCatalog.mappings.find(mapping => mapping.packageName === moduleId);
+      expect(entry, `${moduleId} must be verifiable`).toBeDefined();
+      expect(entry!.libraryId).toBe(row!.libraryId);
+      expect(entry!.globalName).toBe(row!.globalName);
+    }
+  }, CASE_TIMEOUT_MS);
+});

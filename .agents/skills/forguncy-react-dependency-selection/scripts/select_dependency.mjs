@@ -204,6 +204,28 @@ async function policySurface() {
     replacementRejections: core.REPLACEMENT_SIGNAL_REJECTIONS.map((entry) => ({ ...entry })),
     repairRecipeConditions: core.REPAIR_RECIPE_CONDITIONS.map((condition) => ({ ...condition })),
     noAdapterRegistryInvariant: core.NO_PACKAGE_ADAPTER_REGISTRY_INVARIANT,
+    // The verified extension catalog the CLI checks `extension` decisions against,
+    // emitted in the shape it is actually used so the expansion is inspectable instead
+    // of only observable through a record attempt. A row covering several module ids
+    // (`@tanstack/query-core` riding on the `@tanstack/react-query` row) appears once per
+    // id, which is what makes "the projection does not drop `moduleIds`" checkable here.
+    extensionCatalog: {
+      source: "core EXTENSION_EXTERNAL_MAPPINGS",
+      mappings: catalogEntriesFor(core.EXTENSION_EXTERNAL_MAPPINGS),
+      declaredRows: core.EXTENSION_EXTERNAL_MAPPINGS.map((mapping) => ({
+        packageName: mapping.packageName,
+        moduleIds: mapping.moduleIds ?? [],
+        libraryId: mapping.libraryId,
+        globalName: mapping.globalName,
+        metadataSource: mapping.metadataSource,
+        metadataReference: mapping.metadataReference,
+      })),
+    },
+    extensionListingContract: {
+      source: "api.app.listFrontendLibraries",
+      fields: ["id", "name", "globalName", "exists", "typeDefinitionAvailable"],
+      note: "`name` is a display name and is never read as an npm package; a raw listing is checked against the declared rows above via auditExtensionLibraryMetadata rather than turned into mappings.",
+    },
     probeSteps: core.PROBE_STEP_IDS,
     probeDeploymentRequiredSteps: core.PROBE_DEPLOYMENT_REQUIRED_STEPS,
     probeAssessmentStatuses: core.PROBE_ASSESSMENT_STATUSES,
@@ -515,56 +537,158 @@ function runtimeTargetFor(document, probe) {
 }
 
 /**
+ * One extension mapping as the conformance audit reads it, expanded over the module ids
+ * it covers.
+ *
+ * `[packageName, ...moduleIds]` because #12 lets one extension stand in for more than
+ * one npm package — `@tanstack/query-core` rides on the `@tanstack/react-query` row
+ * because the vendor package re-exports it. The shipped row expresses that with
+ * `moduleIds`, but a conformance mapping is a single package→extension pair, so a
+ * projection that kept only `packageName` would report a legitimate
+ * `@tanstack/query-core` decision as `extension-library-not-verified`. Reading the
+ * expansion from `extensionModuleIds`-style logic here rather than hard-coding it keeps
+ * a row that gains a module id from needing a second edit.
+ */
+function catalogEntriesFor(mappings) {
+  return mappings.flatMap(mapping =>
+    [mapping.packageName, ...(mapping.moduleIds ?? [])].map(packageName => ({
+      packageName,
+      libraryId: mapping.libraryId,
+      globalName: mapping.globalName,
+    })),
+  );
+}
+
+/**
  * The verified extension catalog a conformance audit checks `extension` records against.
  *
- * Defaults to this repository's verified mappings, projected from
- * `EXTENSION_EXTERNAL_MAPPINGS` by name so a moved or added row moves here too —
- * restating the table would be the second source of truth the rest of this script
- * avoids. `--extension-catalog` overrides it with a real
- * `api.app.listFrontendLibraries` listing or a verified catalog artifact, which is
- * what discharges #12's rule that a `libraryId` comes from one of those two sources
- * rather than from a display name someone typed.
+ * Defaults to this repository's verified mappings, expanded from
+ * `EXTENSION_EXTERNAL_MAPPINGS` so a moved or added row moves here too — restating the
+ * table would be the second source of truth the rest of this script avoids.
+ *
+ * `--extension-catalog` accepts either of the two sources #12 names, and they are
+ * handled differently on purpose:
+ *
+ * - **A verified mapping catalog** (`{ packageName, libraryId, globalName }` rows, the
+ *   same shape the compiler's tests supply) is used directly. It already states which
+ *   npm package each row answers for.
+ * - **A raw `api.app.listFrontendLibraries` listing** does *not*, and reading its `name`
+ *   as one would fabricate a mapping: the listing's real shape is
+ *   `id` / `name` / `globalName` / `exists` / `typeDefinitionAvailable`, where `name` is
+ *   a display name — `"TanStack Query for ReactCellType"` is not an npm package, and a
+ *   catalog built from it can never match `@tanstack/react-query`. So a listing is used
+ *   for what it can actually establish: this repository's declared rows for the packages
+ *   the lock decides are checked against it through `auditExtensionLibraryMetadata`,
+ *   which is #12's own id/global/bundle/types audit. The packages come from the shipped
+ *   table because that is the only place the package→extension relation is recorded; the
+ *   listing confirms the identity, it does not invent the mapping.
+ *
+ * Returns refusal problems separately from the catalog so the caller reports them in the
+ * same channel as every other refusal — `audit` and `record` have to agree, and a
+ * verification failure is a refusal, not a crash.
  */
-async function extensionCatalogFor(options) {
+async function extensionCatalogFor(options, lock) {
   const override = options["extension-catalog"];
-  if (override !== undefined) {
-    const document = await readJson(override, "extension catalog");
-    const rows = Array.isArray(document) ? document : (document.mappings ?? document.libraries);
-    if (!Array.isArray(rows)) {
-      fail(
-        `The --extension-catalog file at "${fromWorkingDirectory(override)}" must be an array of extensions, or an object with a "mappings" (or "libraries") array. ` +
-          `\`api.app.listFrontendLibraries\` returns the listing; only \`id\`, \`name\`/\`globalName\` are read.`,
-      );
-    }
-    // Validated here rather than left to the audit: a catalog whose rows are missing
-    // their id would reach `mappings.filter(...)` inside the conformance module and come
-    // back as a native TypeError, which reads as a crash in the tool rather than as a
-    // problem with the file the caller handed in.
+  if (override === undefined) {
+    return { extensionCatalog: { mappings: catalogEntriesFor(core.EXTENSION_EXTERNAL_MAPPINGS) }, problems: [] };
+  }
+
+  const at = fromWorkingDirectory(override);
+  const document = await readJson(override, "extension catalog");
+  const rows = Array.isArray(document) ? document : (document.mappings ?? document.libraries);
+  if (!Array.isArray(rows)) {
+    fail(
+      `The --extension-catalog file at "${at}" must be an array, or an object with a "mappings" (or "libraries") array. ` +
+        `Pass a verified mapping catalog (\`packageName\`/\`libraryId\`/\`globalName\` rows) or the raw \`api.app.listFrontendLibraries\` listing (\`id\`/\`name\`/\`globalName\`).`,
+    );
+  }
+
+  // Rows that name the npm package they answer for are a mapping catalog; rows that only
+  // carry a platform `id` are a listing. The distinction is the presence of the package
+  // field, because that is exactly the fact a listing does not have.
+  const mappingRows = rows.filter(row => typeof row?.packageName === "string");
+  if (mappingRows.length === rows.length) {
+    // Validated here rather than left to the audit: an incomplete row would reach
+    // `mappings.filter(...)` inside the conformance module and come back as a native
+    // TypeError, which reads as a crash in the tool rather than as a problem with the
+    // file the caller handed in.
     const mappings = rows.map((row, index) => {
-      const entry = {
-        packageName: row?.packageName ?? row?.name,
-        libraryId: row?.libraryId ?? row?.id,
-        globalName: row?.globalName,
-      };
+      const entry = { packageName: row?.packageName, libraryId: row?.libraryId, globalName: row?.globalName };
       const missing = Object.entries(entry).filter(([, value]) => typeof value !== "string" || value.length === 0);
       if (missing.length > 0) {
         fail(
-          `The --extension-catalog file at "${fromWorkingDirectory(override)}" has an incomplete entry at index ${index}: ` +
-            `${missing.map(([field]) => field).join(", ")} must be a non-empty string. A row needs the package it maps, the stable \`libraryId\`, and the \`globalName\` the extension publishes.`,
+          `The --extension-catalog file at "${at}" has an incomplete entry at index ${index}: ` +
+            `${missing.map(([field]) => field).join(", ")} must be a non-empty string. A mapping row needs the package it maps, the stable \`libraryId\`, and the \`globalName\` the extension publishes.`,
         );
       }
       return entry;
     });
-    return { mappings };
+    return { extensionCatalog: { mappings }, problems: [] };
   }
 
-  return {
-    mappings: core.EXTENSION_EXTERNAL_MAPPINGS.map((mapping) => ({
-      packageName: mapping.packageName,
-      libraryId: mapping.libraryId,
-      globalName: mapping.globalName,
-    })),
-  };
+  if (mappingRows.length > 0) {
+    fail(
+      `The --extension-catalog file at "${at}" mixes mapping rows (with \`packageName\`) and listing rows (without). Pass one or the other: a listing or a verified mapping catalog.`,
+    );
+  }
+
+  const listings = rows.map((row, index) => {
+    if (typeof row?.id !== "string" || row.id.length === 0 || typeof row?.globalName !== "string" || row.globalName.length === 0) {
+      fail(
+        `The --extension-catalog file at "${at}" has an entry at index ${index} without a usable \`id\` and \`globalName\`. ` +
+          `A raw listing row needs the stable \`id\` and the \`globalName\` the extension publishes; \`name\` is a display name and is never read as a package.`,
+      );
+    }
+    return {
+      id: row.id,
+      globalName: row.globalName,
+      ...(typeof row.name === "string" ? { name: row.name } : {}),
+      ...(typeof row.exists === "boolean" ? { exists: row.exists } : {}),
+      ...(typeof row.typeDefinitionAvailable === "boolean" ? { typeDefinitionAvailable: row.typeDefinitionAvailable } : {}),
+    };
+  });
+
+  // Only the rows the lock actually decides are audited: a listing is one project's
+  // designer state, and holding it to every row of the shipped table would report a
+  // finding for each extension this project legitimately does not use.
+  const decided = new Set(
+    lock.decisions.filter(decision => decision.strategy === "extension").map(decision => decision.packageName),
+  );
+  const relevant = core.EXTENSION_EXTERNAL_MAPPINGS.filter(
+    mapping => decided.has(mapping.packageName) || (mapping.moduleIds ?? []).some(id => decided.has(id)),
+  );
+
+  // `auditExtensionLibraryMetadata` is #12's own audit of a mapping against real metadata:
+  // stable id, published global, bundle presence, type definitions. Reused rather than
+  // re-derived so the CLI and the compiler cannot disagree about what "verified" means.
+  const diagnostics = core.auditExtensionLibraryMetadata(listings, { mappings: relevant });
+  if (diagnostics.length > 0) {
+    return {
+      extensionCatalog: { mappings: [] },
+      // Formatted like `validateLockDecisionConformance`'s problems so every refusal this
+      // command prints reads the same way.
+      problems: diagnostics.map(diagnostic => `${diagnostic.subject}: [${diagnostic.code}] ${diagnostic.detail}`),
+    };
+  }
+
+  const unverifiable = [...decided].filter(
+    packageName => !relevant.some(mapping => mapping.packageName === packageName || (mapping.moduleIds ?? []).includes(packageName)),
+  );
+  if (unverifiable.length > 0) {
+    // A listing confirms identities; it cannot establish which npm package an extension
+    // provides, and that relation lives in the shipped table. Saying so here is better
+    // than letting the conformance audit report the same package as merely "not
+    // verified" — the caller needs to know the *listing* was the wrong input for this.
+    return {
+      extensionCatalog: { mappings: [] },
+      problems: unverifiable.map(
+        packageName =>
+          `${packageName}: [extension-mapping-not-declared] A raw listing cannot establish that an extension provides "${packageName}": only a declared mapping records which npm package an extension answers for, and this repository declares none for it. Pass a verified mapping catalog with a \`packageName\` row instead, or use a package the shipped table declares.`,
+      ),
+    };
+  }
+
+  return { extensionCatalog: { mappings: catalogEntriesFor(relevant) }, problems: [] };
 }
 
 /**
@@ -581,7 +705,10 @@ async function extensionCatalogFor(options) {
  * configuration unwritable.
  */
 async function conformanceProblems(lock, options) {
-  const extensionCatalog = await extensionCatalogFor(options);
+  const { extensionCatalog, problems } = await extensionCatalogFor(options, lock);
+  if (problems.length > 0) {
+    return problems;
+  }
   return resolver.validateLockDecisionConformance(lock, { extensionCatalog });
 }
 
@@ -962,8 +1089,13 @@ Options:
   --runtime-smoke-export <name>
                     Which export of that module is the hook (default: \`default\`).
   --extension-catalog <file>
-                    Verify \`extension\` records against a real listing or catalog
-                    artifact instead of this repository's verified mappings.
+                    Verify \`extension\` records against a real source instead of this
+                    repository's declared mappings. Accepts either a verified mapping
+                    catalog (\`packageName\`/\`libraryId\`/\`globalName\` rows) or the raw
+                    \`api.app.listFrontendLibraries\` listing (\`id\`/\`name\`/\`globalName\`/
+                    \`exists\`/\`typeDefinitionAvailable\`). A listing is checked against
+                    the declared rows via #12's metadata audit; its display \`name\` is
+                    never read as an npm package.
   --json            Machine-readable output (default for policy, probe and status).
 
 audit and record run the same checks, including conformance against the verified target;

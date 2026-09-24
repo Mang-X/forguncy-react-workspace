@@ -46,6 +46,15 @@
 - **conformance**：把决策放进候选锁，跑 `validateLockDecisionConformance`——`extension` 的 `libraryId` 必须来自已验证目录或真实 `listFrontendLibraries` 清单；`host` 的 `globalName` 必须是目标真的提供的全局。**只拦 error**，warning 是"关于 Cell 的事实"，不阻断。
 - **写入**：读锁 → 合并 → 过上述全部检查 → 才 `writeFgcLock`。**任一检查不通过就不落盘**。
 
+`--extension-catalog` 可覆盖默认目录，且接受 #12 的两种来源，二者**不可互换**：
+
+| 输入 | shape | 怎么用 |
+|---|---|---|
+| 已验证 mapping 目录 | `packageName` / `libraryId` / `globalName` 行 | 直接作为目录用——它**声明了**每个 npm 包由哪个扩展提供 |
+| 原始 `listFrontendLibraries` 清单 | `id` / `name` / `globalName` / `exists` / `typeDefinitionAvailable` | 拿**本仓库声明的行**去比对该清单（`auditExtensionLibraryMetadata`）；`name` 是显示名，**绝不**当作 npm 包名 |
+
+清单**不能**用来建立"某个扩展提供某个包"这条关系——那条关系只记录在声明的表里。所以清单里出现一个本仓库未声明的包时，会报 `extension-mapping-not-declared`，告诉你该换输入，而不是让你去找一行来加。
+
 脚本会**自动**为决策补两条 `spec-issue` 链接：#16（决策所依据的 Spec），以及架构拒绝时的 #4（#8 规则 5 要求架构冲突可追溯到归属决策）。URL 从 `core` 读出，不硬编码。
 
 ## 证据必须真实存在
