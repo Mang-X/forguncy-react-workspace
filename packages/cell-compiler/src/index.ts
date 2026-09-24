@@ -160,6 +160,7 @@ export {
   renderHostBridgeModule,
 } from "./host-bridge.ts";
 export type {
+  CreateHostBridgeDiagnosticOptions,
   HostBridgeActivation,
   HostBridgeAdapterExportName,
   HostBridgeDiagnostic,

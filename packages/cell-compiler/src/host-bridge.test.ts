@@ -9,9 +9,18 @@ import {
   HOST_BRIDGE_MAPPINGS,
   type DependencyDecision,
   type HostBridgeGlobalMapping,
+  type HostBridgeMapping,
 } from "@forguncy-react-workspace/core";
 
+// Imported from the package root rather than from `./host-bridge.ts`, and only here:
+// the constructor's fourth parameter is a *public* surface, so the compatibility
+// regression below has to go through the export that makes it public. An import from the
+// module would pass even if the re-export were dropped.
+import { createHostBridgeDiagnostic as createHostBridgeDiagnosticFromRoot } from "@forguncy-react-workspace/cell-compiler";
+
 import {
+  createHostBridgeDiagnostic,
+  formatHostBridgeDiagnostic,
   formatHostBridgePlan,
   interceptedHostBridgeModuleIds,
   planHostBridge,
@@ -621,7 +630,25 @@ describe("planning the bridge", () => {
     // activate" is unknown, and the plan says so rather than handing back the whole
     // catalog as if it had been decided.
     expect(plan.activation).toBe("unstated");
+    expect(plan.wireable).toBe(false);
     expect(plan.interceptions).toEqual([]);
+  });
+
+  // "The caller did not say what this artifact uses" and "the caller said it uses
+  // nothing" are different answers, and `activation` is the field that distinction
+  // exists for. Pre-defaulting `options.decisions` to `[]` classified the second as
+  // the first, while the same input through `referencedSpecifiers` was classified as
+  // `stated` — two explicit empties disagreeing. `decisions: []` is now threaded
+  // through as supplied, so both options behave alike.
+  it("reads an explicitly empty input as stated, not as unstated", () => {
+    const knownEmpty = planHostBridge({ decisions: [] });
+    const alsoKnownEmpty = planHostBridge({ referencedSpecifiers: [] });
+    const unspecified = planHostBridge();
+
+    expect(knownEmpty.activation).toBe("stated");
+    expect(knownEmpty.interceptions).toEqual([]);
+    expect(alsoKnownEmpty.activation).toBe("stated");
+    expect(unspecified.activation).toBe("unstated");
   });
 
   it("gives each module id the source its own shape needs", () => {
@@ -820,6 +847,258 @@ describe("the plan activates only what the decisions select", () => {
     ]) {
       const plan = planHostBridge({ decisions, referencedSpecifiers: ["react-dom/client"] });
       expect(plan.interceptions.map(entry => entry.moduleId)).toEqual(["react-dom"]);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wireability — Issue #52
+// ---------------------------------------------------------------------------
+
+describe("the plan refuses to be wired from contradictory mapping information", () => {
+  // Two rows claiming one module id. Before this, both survived the activation
+  // filter and carried different generated sources, so a resolver hooked from the
+  // list would resolve that import by table order — the state the ambiguity guard
+  // exists to prevent, reached through the plan instead of through a report.
+  //
+  // The second row is admissible on its own terms — it binds its own ids and names a
+  // global of its own — so the collision is the *only* thing wrong with the table,
+  // and the two `antd` sources differ (`globalThis["antd"]` vs `globalThis["antdLegacy"]`).
+  const collidingTable = (): readonly HostBridgeMapping[] => [
+    ...HOST_BRIDGE_MAPPINGS,
+    {
+      ...globalMapping("antd"),
+      specifier: "antd-legacy",
+      globalName: "antdLegacy",
+      moduleIds: ["antd"],
+      binds: [
+        { moduleId: "antd-legacy", shape: "host-identity" },
+        { moduleId: "antd", shape: "host-identity" },
+      ],
+    },
+  ];
+
+  it("makes a table in which two rows claim one module id non-wireable", () => {
+    const plan = planHostBridge({ mappings: collidingTable(), decisions: [hostDecision("antd", "antd")] });
+
+    expect(plan.activation).toBe("stated");
+    expect(plan.wireable).toBe(false);
+    expect(plan.interceptions).toEqual([]);
+    // The catalog is what a diagnosis is read from, so suppressing it would hide the
+    // reason for the refusal rather than report it.
+    expect(plan.catalog.filter(entry => entry.moduleId === "antd")).toHaveLength(2);
+    expect(plan.diagnostics.map(diagnostic => diagnostic.code)).toContain("host-mapping-conflict");
+  });
+
+  // The review's finding on #52's first PR. The table can be perfectly coherent and the
+  // *decision* can still contradict the row it selects, which is the same "two answers"
+  // state reached from the other side — #12's plan refuses it for `libraryId` and
+  // `globalName` alike, and #52 asks for parity rather than a second opinion.
+  //
+  // This one is the reason the field has to exist rather than only the table collision:
+  // the row is fine and the decision is fine on its own terms, and the generated module
+  // reads the row's global while the lock records the decision's. A later audit cannot
+  // see it, because the global the decision names *does* exist as a host identity.
+  it("refuses a `host` decision whose globalName is not the row's", () => {
+    const plan = planHostBridge({ decisions: [{ strategy: "host", packageName: "react", globalName: "ReactDOM" }] });
+
+    expect(plan.activation).toBe("stated");
+    expect(plan.wireable).toBe(false);
+    expect(plan.interceptions).toEqual([]);
+    expect(plan.diagnostics.map(diagnostic => diagnostic.code)).toEqual(["host-mapping-conflict"]);
+    expect(plan.diagnostics[0]?.detail).toContain('"ReactDOM"');
+    expect(plan.diagnostics[0]?.detail).toContain('"React"');
+    // The row is not the problem, so the catalog still says how the bridge would bind it.
+    expect(plan.catalog.find(entry => entry.moduleId === "react")?.source).toContain('globalThis["React"]');
+  });
+
+  // The bound, and the reason the check is keyed on the decision naming the global at all:
+  // a decision that agrees with its row is the ordinary case and must stay wireable, or the
+  // rule above would refuse every legal `host` decision.
+  it("stays wireable when the decision agrees with its row", () => {
+    const plan = planHostBridge({
+      decisions: [hostDecision("react", "React"), hostDecision("react-dom", "ReactDOM"), hostDecision("antd", "antd")],
+    });
+
+    expect(plan.diagnostics).toEqual([]);
+    expect(plan.wireable).toBe(true);
+    expect(plan.interceptions.map(entry => entry.moduleId)).toEqual(["react", "react-dom", "antd"]);
+  });
+
+  // A subpath decision is checked against the row it selects, not against the row's
+  // first id: `react-dom/client` and `react-dom` share a row and both bind `ReactDOM`.
+  it("checks a subpath decision against the row that covers it", () => {
+    const agreeing = planHostBridge({ decisions: [hostDecision("react-dom/client", "ReactDOM")] });
+    const disagreeing = planHostBridge({ decisions: [hostDecision("react-dom/client", "React")] });
+
+    expect(agreeing.diagnostics).toEqual([]);
+    expect(agreeing.wireable).toBe(true);
+    expect(disagreeing.diagnostics.map(diagnostic => diagnostic.code)).toEqual(["host-mapping-conflict"]);
+    expect(disagreeing.wireable).toBe(false);
+  });
+
+  // The review's non-blocking follow-up. `host-mapping-conflict` covers two origins —
+  // a table that contradicts itself, and a decision that contradicts its row — and the
+  // code's static rule can only state one owner. Left unoverridden, the report below
+  // would send an Agent to edit the mapping table for a problem whose bad input is the
+  // dependency decision, which is the misdirection the field exists to prevent.
+  it("names the dependency decision as the owner of a decision-origin conflict", () => {
+    const decisionOrigin = planHostBridge({ decisions: [hostDecision("react", "ReactDOM")] }).diagnostics[0];
+    const rendered = formatHostBridgeDiagnostic(decisionOrigin!);
+
+    expect(decisionOrigin?.fixOwner).toBe("dependency-decision");
+    // No table edit repairs this, which is the same statement from the other side: the
+    // caller must not go looking for a row to add.
+    expect(decisionOrigin?.fixableByMapping).toBe(false);
+    expect(rendered).toContain("fix owner: dependency-decision");
+    expect(rendered).not.toContain("fix owner: bridge-mapping");
+
+    // The fallback still holds for an occurrence that says nothing: the code's own rule,
+    // which is the table-level origin a `formatHostBridgeDiagnostic` on a hand-built
+    // diagnostic gets.
+    expect(createHostBridgeDiagnostic("host-mapping-conflict", "x", "y").fixOwner).toBeUndefined();
+    expect(formatHostBridgeDiagnostic(createHostBridgeDiagnostic("host-mapping-conflict", "x", "y"))).toContain(
+      "fix owner: bridge-mapping",
+    );
+  });
+
+  // The other origin, so the override is not mistaken for "this code always means the
+  // decision": a table that claims one module id twice is still the mapping's problem.
+  it("keeps the mapping table as the owner of a table-origin conflict", () => {
+    const plan = planHostBridge({ mappings: collidingTable(), decisions: [hostDecision("antd", "antd")] });
+    const tableOrigin = plan.diagnostics.find(diagnostic => diagnostic.code === "host-mapping-conflict");
+
+    expect(tableOrigin?.fixOwner).toBeUndefined();
+    expect(formatHostBridgeDiagnostic(tableOrigin!)).toContain("fix owner: bridge-mapping");
+  });
+
+  // Review regression on the commit that added the overrides. `createHostBridgeDiagnostic`
+  // is exported from this package's root, so its fourth parameter is a public surface:
+  // `member?: string` before the overrides existed. It is a union now, and a caller
+  // written against the old signature has to keep working.
+  //
+  // Asserted *through the package root* rather than through the module, because the root
+  // is what makes it public — an import from `./host-bridge.ts` would pass even if the
+  // re-export were dropped.
+  it("keeps the legacy fourth-string argument meaning the member", () => {
+    const legacy = createHostBridgeDiagnosticFromRoot("host-member-not-verified", "react-dom/client", "detail", "version");
+
+    // The field survives, which is the whole point: read as an options object it would
+    // have been dropped, and a caller in plain JS would have seen a diagnostic that
+    // silently lost the one part of its message it could branch on.
+    expect(legacy).toEqual({
+      code: "host-member-not-verified",
+      specifier: "react-dom/client",
+      detail: "detail",
+      member: "version",
+    });
+    // The old form carries no overrides, so it takes the rule's owner as before.
+    expect(legacy.fixOwner).toBeUndefined();
+  });
+
+  it("still accepts the options form alongside the legacy one", () => {
+    const withOptions = createHostBridgeDiagnostic("host-mapping-conflict", "x", "y", {
+      fixOwner: "dependency-decision",
+      fixableByMapping: false,
+    });
+
+    expect(withOptions.member).toBeUndefined();
+    expect(withOptions.fixOwner).toBe("dependency-decision");
+    expect(withOptions.fixableByMapping).toBe(false);
+  });
+
+  // The decision audit and the missing-mapping audit must not both fire for one decision:
+  // a module with no row at all has nothing to disagree with, so it stays a truthful
+  // absence rather than being reported twice.
+  it("reports only `host-mapping-missing` for a decision with no row to contradict", () => {
+    const plan = planHostBridge({ decisions: [hostDecision("lodash", "React")] });
+
+    expect(plan.diagnostics.map(diagnostic => diagnostic.code)).toEqual(["host-mapping-missing"]);
+    expect(plan.wireable).toBe(true);
+  });
+
+  it("never hands back a list a caller may not wire from", () => {
+    // The direction that is load-bearing: `wireable: false` always comes with an empty
+    // `interceptions`, so a caller that reads the list without checking the flag cannot
+    // resolve an import by table order.
+    //
+    // The converse does not hold, and that is not a defect: `{ decisions: [] }` is
+    // `wireable` with an empty list, because "the artifact uses nothing" is a known
+    // answer while "the answer is unknown" is not. The two fields are different
+    // questions — `wireable` decides whether wiring is allowed at all, `interceptions`
+    // says what to wire — which is why a caller branches on the flag, never on this
+    // array's length.
+    const cases: readonly Parameters<typeof planHostBridge>[0][] = [
+      {},
+      { decisions: [] },
+      { referencedSpecifiers: [] },
+      { decisions: [hostDecision("react", "React")] },
+      { decisions: [hostDecision("react", "React")], referencedSpecifiers: ["react"] },
+      { decisions: [inlineDecision("antd")] },
+      { decisions: [hostDecision("lodash", "_")] },
+      { mappings: collidingTable() },
+      { mappings: collidingTable(), decisions: [hostDecision("antd", "antd")] },
+      { mappings: collidingTable(), referencedSpecifiers: ["antd"] },
+      { decisions: [hostDecision("react", "ReactDOM")] },
+      { decisions: [hostDecision("react-dom/client", "React")] },
+    ];
+
+    for (const options of cases) {
+      const plan = planHostBridge(options);
+      if (plan.wireable) continue;
+      expect(plan.interceptions, JSON.stringify(options)).toEqual([]);
+    }
+
+    // And the states where a non-empty list is expected, so the loop above cannot pass
+    // by never reaching a wireable plan.
+    expect(planHostBridge({ decisions: [hostDecision("react", "React")] }).interceptions).toHaveLength(1);
+  });
+
+  it("stays wireable for an explicitly empty decision list", () => {
+    // The bound on the rule above: nothing contradicts itself merely because there is
+    // nothing to do, so a known-empty artifact is still a legitimate thing to wire.
+    const plan = planHostBridge({ decisions: [] });
+
+    expect(plan.wireable).toBe(true);
+    expect(plan.interceptions).toEqual([]);
+  });
+
+  it("stays wireable when the only finding is a `host` decision with no mapping", () => {
+    // The other half of the bound: `host-mapping-missing` is a truthful absence, not a
+    // contradiction. The artifact's other imports are still precisely known, so the
+    // interceptions it does have remain usable — the same line #12's plan draws.
+    const plan = planHostBridge({ decisions: [hostDecision("lodash", "_"), hostDecision("react", "React")] });
+
+    expect(plan.diagnostics.map(diagnostic => diagnostic.code)).toEqual(["host-mapping-missing"]);
+    expect(plan.wireable).toBe(true);
+    expect(plan.interceptions.map(entry => entry.moduleId)).toEqual(["react"]);
+  });
+
+  it("names which of the two reasons a plan is not wireable", () => {
+    // "Tell me what this cell uses" and "your mapping table is broken" are different
+    // next actions, so a report that said only "refused" would send a reader to the
+    // wrong one.
+    const unspecified = formatHostBridgePlan(planHostBridge());
+    const contradictory = formatHostBridgePlan(
+      planHostBridge({ mappings: collidingTable(), decisions: [hostDecision("antd", "antd")] }),
+    );
+
+    expect(unspecified).toContain("Wiring: refused (no decisions and no reference list were supplied");
+    expect(contradictory).toContain("the mapping information contradicts itself");
+  });
+
+  it("renders the shipped table byte-identically, whatever the plan says", () => {
+    // The correction is to the plan's contract only. No mapping row and no generated
+    // module changed, so a plan built over a contradictory table still renders the
+    // entries it *can* render from the same rows, byte for byte.
+    const shipped = planHostBridge({ decisions: [] });
+    const contradictory = planHostBridge({ mappings: collidingTable(), decisions: [] });
+
+    expect(shipped.catalog.map(entry => entry.moduleId)).toEqual(interceptedHostBridgeModuleIds());
+    for (const entry of shipped.catalog) {
+      expect(contradictory.catalog.find(candidate => candidate.moduleId === entry.moduleId)?.source, entry.moduleId).toBe(
+        entry.source,
+      );
     }
   });
 });
