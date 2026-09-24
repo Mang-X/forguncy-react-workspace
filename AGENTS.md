@@ -61,13 +61,27 @@ green local render says nothing about: whether the designer accepts the source (
 lifecycle, routing, permissions, extension load order, cross-Cell isolation, or the generated
 host bridge — the harness resolves the *published* packages and never runs the bridge.
 
+An `extension` dependency has no local equivalent the harness could infer, because the reason a
+package is an `extension` is that its module identity or cross-cell singleton semantics matter —
+so the project declares one of two branches per package (`extensionChoices` in `devHarness`'s
+options): a substitute with its justification, or a `real-runtime-only` acknowledgement with a
+reason *and* a consequence. `vp dev` audits this at server start and **refuses to start** on an
+undeclared one, because the alternative is a Cell that renders correctly from an npm copy while
+the extension's shared cache is never exercised — a wrong conclusion nothing in the output
+contradicts. Both branches, the finding, and whether it blocks belong to the runtime package
+(`LOCAL_DEV_DIAGNOSTIC_RULES`); `dev-harness` reads `blocksLocalDevelopment` off that table
+rather than keeping a list of its own, so a rule the contract marks blocking cannot be downgraded
+here by omission.
+
 Where the loop is *more* permissive than the page it is recorded rather than smoothed over:
 locally `react-dom/client` is the whole published module, while the page narrows it to the
 members the runtime contract observed. So a local pass must never be reported as a stronger
 result than it is.
 
-Run `runtime`'s `formatLocalDevValidationDistinction()` to print what is still owed to a real
-page, instead of enumerating it from memory.
+Run the runtime package's `formatLocalDevValidationDistinction()` to print what is still owed to
+a real page, instead of enumerating it from memory. The harness prints it at server start for the
+same reason — a green local render is when a reader is most likely to mistake local for
+compatible.
 
 ## Workflow
 

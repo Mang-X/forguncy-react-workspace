@@ -47,7 +47,26 @@
     ".": "./src/index.ts",
     "./mount": "./src/mount.ts"
   },
+  "//devDependencies": [
+    "`@forguncy-react-workspace/dependency-resolver` is test-only, and the arrangement is the",
+    "whole point of the edge. `local-dev-audit.ts` reads `fgc.lock.json` itself rather than",
+    "through that package's `readFgcLock`, because its barrel re-exports `probe/build.ts`, which",
+    "imports `rolldown` — verified by reading the import graph, not by timing it. This package's",
+    "lock reader is loaded from `vite.config.ts`'s module graph, so that would be a bundler",
+    "pulled into every project that loads the harness plugin, to read a file of a few kilobytes.",
+    "",
+    "A duplication is a place for two readers of one file to disagree, so `local-dev-audit.test.ts`",
+    "runs *both* over the same real files — absent, legal, malformed — and requires equal results.",
+    "`src/` must not import this package; a test may, which is exactly this edge: paid once by the",
+    "suite rather than by every dev server. `packages/cell-compiler/package.json` records the same",
+    "pattern for the same reason.",
+    "",
+    "`@types/react` / `@types/react-dom` are pinned to the host versions the harness substitutes.",
+    "Nothing in `src/` is a React component, but `mount.ts` calls `createRoot` and `createElement`,",
+    "so its types come from here rather than from a project's own install."
+  ],
   "devDependencies": {
+    "@forguncy-react-workspace/dependency-resolver": "workspace:*",
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.7"
   }

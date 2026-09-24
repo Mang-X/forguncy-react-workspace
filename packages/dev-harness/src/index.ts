@@ -44,6 +44,13 @@
  * says what that proves — which is `local` evidence only. `runtime`'s
  * `formatLocalDevValidationDistinction()` is the report of what remains owed, and this package
  * prints it rather than paraphrasing it.
+ *
+ * That last sentence was false when it was written, and the way it was false is worth keeping:
+ * nothing in this package called `formatLocalDevValidationDistinction()`, so the report existed,
+ * was tested, and was never shown to anybody. `local-dev-audit.ts` now prints it at server start.
+ * The general shape — a rule that is correct and that nothing acts on — is the one this package
+ * keeps meeting, and it is why the extension audit lives behind a `configureServer` hook rather
+ * than behind an exported function a project may call.
  */
 
 // The loop's stage record and the distinction it exists to make (#22)
@@ -99,6 +106,16 @@ export {
   reactFastRefresh,
 } from "./vite-plugin.ts";
 export type { DevHarnessOptions, DevHarnessVitePlugin } from "./vite-plugin.ts";
+
+// The project's local-dev configuration, audited at server start (#23 plan step 5)
+export {
+  auditHarnessConfiguration,
+  blockingLocalDevFindings,
+  BlockingLocalDevFindingError,
+  formatHarnessAudit,
+  readProjectDependencyDecisions,
+} from "./local-dev-audit.ts";
+export type { HarnessAuditInput } from "./local-dev-audit.ts";
 
 // The seam between the node half and the browser half. Types only: the modules themselves
 // are reached by path (`./mount`), because the browser half must not be pulled in here.

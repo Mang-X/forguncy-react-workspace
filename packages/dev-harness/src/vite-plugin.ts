@@ -57,6 +57,7 @@ import react from "@vitejs/plugin-react-swc";
 // file, which would have been a second answer to a question the Cell seam already answers.
 import { ForguncyConfigError } from "@forguncy-react-workspace/core";
 import type { CellRegistry, ForguncyConfig, RegisteredCell } from "@forguncy-react-workspace/core";
+import type { LocalDevExtensionChoice } from "@forguncy-react-workspace/runtime";
 import { cellVirtualModuleId, forguncy } from "@forguncy-react-workspace/vite-plugin-fgc";
 
 import {
@@ -66,6 +67,13 @@ import {
   unavailableHostModuleOf,
   unavailableHostModuleSource,
 } from "./host-modules.ts";
+import {
+  auditHarnessConfiguration,
+  blockingLocalDevFindings,
+  BlockingLocalDevFindingError,
+  formatHarnessAudit,
+  readProjectDependencyDecisions,
+} from "./local-dev-audit.ts";
 
 /** The DOM element the mount script renders into. */
 export const HARNESS_MOUNT_ELEMENT_ID = "forguncy-cell-root";
@@ -100,6 +108,29 @@ export interface DevHarnessOptions {
    * belongs in the fixture, where it is typed and where its absence is a recorded decision.
    */
   readonly props?: Partial<Record<string, unknown>>;
+  /**
+   * What the project decided about each of its `extension` dependencies, in local development.
+   *
+   * The second half of #23's plan step 5, and the reason it is a *declaration from the project*
+   * rather than something the harness works out: `runtime`'s `LOCAL_DEV_STRATEGY_HANDLINGS`
+   * records that an `extension` package has no local equivalent the harness could infer — its
+   * module identity or its cross-cell singleton semantics are the reason it is an `extension` —
+   * so the two branches #22 allows are both statements only the project can make. A substitute
+   * carries a justification; a `real-runtime-only` acknowledgement carries a reason *and* a
+   * consequence, because the second answers "what will I not be able to see".
+   *
+   * Supplied here rather than in `forguncy.config.ts`, and the boundary is #26's: the project
+   * config is deployment state, while this is a local-development decision that says nothing
+   * about the artifact. A project with no `extension` dependency omits it and gets an audit that
+   * reports no findings.
+   *
+   * An `extension` dependency with no entry here is a **blocking** finding, not a warning:
+   * `local-dev-extension-needs-substitute` carries `blocksLocalDevelopment: true`, and the
+   * harness enforces that at server start — see `configureServer` in the implementation. That is
+   * deliberately stricter than the version mismatch beside it, which warns, and the asymmetry is
+   * the contract's rather than this package's.
+   */
+  readonly extensionChoices?: readonly LocalDevExtensionChoice[];
   /** Verify declared entries exist on disk while normalizing. Defaults to `true`. */
   readonly requireEntryFiles?: boolean;
 }
@@ -123,6 +154,17 @@ export interface DevHarnessVitePlugin {
     mountedCell(): RegisteredCell | undefined;
   };
   configResolved(config: { readonly root: string; readonly plugins: readonly { readonly name: string }[] }): void;
+  /**
+   * Audits the project's local-dev configuration once, and refuses the server on a blocking finding.
+   *
+   * Dev-only by construction: Vite calls this hook when a dev server is created and never during
+   * a build, which is exactly the scope of the audit. Wiring the audit into `buildStart` instead
+   * would be the tempting choice — it also runs once, for the client environment, in dev — but it
+   * runs on the *build* path too, and a `real-runtime-only` acknowledgement or a missing
+   * substitute is not a reason to refuse a production compile. Verified rather than assumed: a
+   * throw here rejects `createServer`, and a throw in `buildStart` does not distinguish the two.
+   */
+  configureServer(): Promise<void>;
   /**
    * The host-substitution aliases, the dedupe list and the optimizer inclusions.
    *
@@ -649,6 +691,56 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
         );
       }
       mounted = first;
+    },
+
+    async configureServer() {
+      // #23's plan step 5, executed. `runtime` owns every rule here — which branches an
+      // `extension` choice may take, what makes one incomplete, and which findings block local
+      // development — so this hook reads the project's two declarations, hands them to the audit,
+      // and splits the answer by the contract's own `blocksLocalDevelopment` flag. Nothing below
+      // decides what a problem is.
+      //
+      // `registry === undefined` means `configResolved` never ran, which only happens outside a
+      // Vite server, and the audit has no lock path to read without it. Returning is the honest
+      // answer there: a hook that invented a default would audit a path it was never told about.
+      if (registry === undefined) {
+        return;
+      }
+
+      const decisions = await readProjectDependencyDecisions(registry.runtime.dependencyLockPathAbsolute);
+      const audit = auditHarnessConfiguration({
+        decisions,
+        extensionChoices: options.extensionChoices ?? [],
+      });
+
+      const report = formatHarnessAudit(audit);
+      const blocking = blockingLocalDevFindings(audit);
+
+      if (blocking.length > 0) {
+        // Refusal carries the report, and *only* the refusal does.
+        //
+        // The first version wrote the report to stderr here as well, on the reasoning that a
+        // blocking run should still show the full picture. That printed everything twice —
+        // measured against a real `vp dev`: the report appeared once from the write below and
+        // again inside this message, which Vite prints itself when a hook rejects. Two identical
+        // copies of a six-line report, one after the other, in the one output a developer is
+        // already unhappy to be reading.
+        //
+        // So the two paths are now exclusive and each prints once. The report is the message
+        // because the alternative — "1 local dev diagnostic", with the finding somewhere else —
+        // sends the reader to a second command for the remediation and the fix owner they need
+        // now. It carries the distinction as well, so a blocked start is not the one path that
+        // drops the local-versus-real caveat.
+        throw new BlockingLocalDevFindingError(
+          blocking,
+          `The local dev harness refused to start: ${blocking.length} finding(s) that this project's configuration has to resolve first.\n${report}`,
+        );
+      }
+
+      // The non-blocking path, and the common one. To stderr for the reason the version and Fast
+      // Refresh warnings go there: this is output *about* the loop, and a page that carried it
+      // would read as the Cell's own.
+      process.stderr.write(`${report}\n`);
     },
 
     config(userConfig) {
