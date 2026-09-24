@@ -93,10 +93,12 @@ function assembledWrite(plan: CellSyncPlan): Extract<CellSyncWrite, { kind: "ass
 /**
  * A plan shaped so that a write would be issued.
  *
- * Synthetic on purpose: `planCellSync` cannot produce an issuable plan today, because the two
- * designer operations with no established call name make every plan refuse. That is the
- * honest state, and it is exactly why the permission logic has to be testable without it —
- * otherwise the only path to `issue` would be an unverifiable one.
+ * Synthetic on purpose: it exists so the permission logic is testable *without* the
+ * flow being runnable at all — the value of a gate is that it can be asserted against a
+ * plan the author built, not only against one the current rule table happens to produce.
+ * Before #20 every real plan refused (two operations had no established call), which is
+ * why this helper was the only path to `issue`; now a real plan can reach `issue` too,
+ * and the tests below assert both — the synthesized shape *and* the real one.
  */
 function issuablePlan(overrides: Partial<CellSyncPlan> = {}): CellSyncPlan {
   return { ...planFor(), gate: "ready", writeAction: "write", diagnostics: [], ...overrides };
@@ -155,19 +157,23 @@ describe("the two questions the plan answers", () => {
   // The property that makes them separate fields: a Cell may be writable while the flow
   // still cannot be validated afterwards, and a caller reading one "executable" flag would
   // deploy without knowing that.
-  it("reports a writable target and an unexecutable flow at the same time", () => {
+  it("reports a writable target and a runnable flow at the same time", () => {
     const plan = planFor();
 
     expect(plan.writeAction).toBe("write");
     expect(plan.divergence.kind).toBe("vacant");
-    expect(plan.gate).toBe("refused");
-    expect([...plan.unestablishedCapabilities]).toEqual(["read-cell-source", "save-project"]);
+    expect(plan.gate).toBe("ready");
+    // #20 established both operations the flow needed, so no plan refuses on a missing
+    // call any more. The two questions are still separate fields — a plan can still hold a
+    // write for a divergence or an unverified extension — but they no longer disagree by
+    // default.
+    expect([...plan.unestablishedCapabilities]).toEqual([]);
     expect(
       syncDiagnosticCodes(plan.diagnostics).filter(code => code === "sync-capability-unestablished"),
-    ).toHaveLength(2);
+    ).toHaveLength(0);
   });
 
-  it("stops the step plan at the first step whose call has no name", () => {
+  it("reaches every step of the flow, none of them blocked", () => {
     const plan = planFor();
 
     expect(plan.steps.map(step => step.order)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
@@ -184,22 +190,23 @@ describe("the two questions the plan answers", () => {
     expect(statusByStep(plan)).toEqual({
       "resolve-cell-target": "ready",
       "verify-extension-metadata": "ready",
-      "read-target-state": "blocked",
-      "write-cell-source": "not-reached",
-      "save-project-if-required": "blocked",
-      "check-project-errors": "not-reached",
-      "generate-page": "not-reached",
-      "return-runtime-locator": "not-reached",
+      "read-target-state": "ready",
+      "write-cell-source": "ready",
+      "save-project-if-required": "ready",
+      "check-project-errors": "ready",
+      "generate-page": "ready",
+      "return-runtime-locator": "ready",
     });
 
-    // A `not-reached` step is not a problem in itself; it is the consequence of one that is.
+    // No step is blocked, so none is not-reached either: the flow runs end to end.
     for (const step of plan.steps) {
-      expect(step.unestablished.length > 0, step.stepId).toBe(step.status === "blocked");
+      expect(step.unestablished, step.stepId).toEqual([]);
+      expect(step.status, step.stepId).toBe("ready");
     }
     expect(formatCellSyncSteps(plan)).toBe(
-      "1.resolve-cell-target=ready 2.verify-extension-metadata=ready 3.read-target-state=blocked(read-cell-source) " +
-        "4.write-cell-source=not-reached 5.save-project-if-required=blocked(save-project) " +
-        "6.check-project-errors=not-reached 7.generate-page=not-reached 8.return-runtime-locator=not-reached",
+      "1.resolve-cell-target=ready 2.verify-extension-metadata=ready 3.read-target-state=ready " +
+        "4.write-cell-source=ready 5.save-project-if-required=ready " +
+        "6.check-project-errors=ready 7.generate-page=ready 8.return-runtime-locator=ready",
     );
   });
 });
@@ -219,7 +226,9 @@ describe("what an executor may send", () => {
   });
 
   it("holds a refused plan even though it carries a payload", () => {
-    const plan = planFor();
+    // A real refusal now comes from the target, not from a missing call: a foreign Cell is
+    // refused by the divergence rule, which is the refusal #19's safety section is about.
+    const plan = planFor({ deployed: { kind: "read", code: "designer work" } });
 
     expect(plan.gate).toBe("refused");
     expect(plan.write.kind).toBe("assembled");
@@ -227,18 +236,25 @@ describe("what an executor may send", () => {
     expect(dispatch.kind).toBe("hold");
     if (dispatch.kind !== "hold") return;
     expect(dispatch.reason).toBe("gate-refused");
-    // Named once, not once per detector: two capabilities are unestablished, and the
-    // subjects and their remediation live on the plan's own diagnostics.
-    expect(dispatch.detail.match(/sync-capability-unestablished/g)).toHaveLength(1);
+    expect(dispatch.detail).toContain("cell-diverged");
   });
 
   it("holds a skipped target even though it carries an assembled payload", () => {
-    // The idempotency half of the review: `writeAction === "skip"` with a payload present.
-    // Built to the shape the contract allows rather than read off a real plan, because a real
-    // identical target is still refused today — see the test below — so the plan is
-    // synthesized the same way the conflict case above is.
-    const dispatch = planSetCellsDispatch(issuablePlan({ gate: "skipped", writeAction: "skip" }));
+    // The idempotency half: `writeAction === "skip"` with a payload present. Built to the
+    // shape the real rule table now produces — a target holding this artifact's own output
+    // is classified `identical`, not refused — which is what #20's real-runtime evidence
+    // confirmed end to end.
+    const first = planFor();
+    const second = planFor({
+      deployed: {
+        kind: "read",
+        code: assembledWrite(first).stampedCode,
+        frontendLibraries: generated().frontendLibraries,
+      },
+    });
+    const dispatch = planSetCellsDispatch(second);
 
+    expect(second.gate).toBe("skipped");
     expect(dispatch.kind).toBe("hold");
     if (dispatch.kind !== "hold") return;
     expect(dispatch.reason).toBe("already-identical");
@@ -246,17 +262,18 @@ describe("what an executor may send", () => {
 
   it("reports the refusal, not the idempotency, when an identical target is also refused", () => {
     // Pinned because it is easy to get backwards, and because it states where the two
-    // defences sit relative to each other. A real identical target never reaches
-    // `already-identical`: the two designer operations with no established call name refuse
-    // the plan first, so this is what an executor actually sees today. The write-action table
-    // is the second line of defence, not the first — `already-identical` becomes reachable
-    // once those operations are established.
-    const first = planFor();
+    // defences sit relative to each other. A plan that is both identical *and* refused
+    // (here: the artifact's references could not be confirmed, so the plan refuses on
+    // `extension-metadata-unverified` while the target still reads as a skip) must report
+    // the refusal: the write-action table is the second line of defence, not the first —
+    // and a caller told "already identical" would never learn the plan was refused.
+    const first = planFor({ artifact: generated(["lib-echarts"]) });
     const second = planFor({
+      artifact: generated(["lib-echarts"]),
       deployed: {
         kind: "read",
         code: assembledWrite(first).stampedCode,
-        frontendLibraries: generated().frontendLibraries,
+        frontendLibraries: generated(["lib-echarts"]).frontendLibraries,
       },
     });
 
@@ -337,9 +354,12 @@ describe("what an executor may send", () => {
     const calls: SetCellsParameter[] = [];
     const port: ForguncySyncPort = {
       listFrontendLibraries: async () => [],
+      readCellSource: async () => ({ kind: "blank" }),
       setCells: async request => {
         calls.push(request);
       },
+      getProjectSaveStatus: async () => ({ containsUnsavedChanges: false }),
+      saveProject: async () => ({ saved: true }),
       checkProjectErrors: async () => ({ errorCount: 0 }),
       generatePageAsync: async () => ({ pageName: TARGET.pageName, pageUrl: "http://localhost:63982/Forguncy" }),
     };
@@ -522,11 +542,12 @@ describe("reporting a plan", () => {
     expect(text).toContain("Sync target: OrderPage!cell-1");
     expect(text).toContain(`Artifact fingerprint: ${plan.fingerprint}`);
     expect(text).toContain("Target state: vacant");
-    expect(text).toContain("Write action: write (gate: refused)");
+    expect(text).toContain("Write action: write (gate: ready)");
     expect(text).toContain("Libraries to write: (none)");
-    expect(text).toContain(
-      "Flow cannot be executed end to end: read-cell-source, save-project have no established call name.",
-    );
+    // #20 established both operations, so a real plan reports a runnable flow and an
+    // issuable dispatch rather than the two refusals it used to report.
+    expect(text).toContain("Every required designer operation has an established call name.");
+    expect(text).toContain("Dispatch: issue the `setCells` call.");
     // The one thing a green local plan must not be read as, stated in the plan itself.
     expect(text).toContain("It does not establish Forguncy runtime behaviour.");
   });

@@ -62,6 +62,20 @@ describe("classifying what the target holds", () => {
     expect(classifyCellDivergence({ kind: "read", code: "  \n" }, generated()).kind).toBe("vacant");
   });
 
+  // The state #20 measured into existence: the product reports a Cell holding a value or
+  // another cell type *without* a `code` property, and mapping that onto an empty string
+  // would classify a designer's text cell as vacant and overwrite it.
+  it("reports a Cell holding something that is not a React Cell as foreign, not vacant", () => {
+    const divergence = classifyCellDivergence({ kind: "occupied", detail: "a text value" }, generated());
+
+    expect(divergence.kind).toBe("foreign-code");
+    expect(divergence.metadataComparison).toBe("not-applicable");
+    expect(divergence.detail).toContain("a text value");
+    expect(CELL_DIVERGENCE_ACTIONS[divergence.kind]).toBe("conflict");
+    // Not `vacant`, which is what it would be if the read had been flattened to "".
+    expect(divergence.kind).not.toBe("vacant");
+  });
+
   it("reports source with no marker as foreign code", () => {
     const divergence = classifyCellDivergence({ kind: "read", code: CODE_BODY }, generated());
 
@@ -211,13 +225,17 @@ describe("what may be done about it", () => {
 // module can say "unread" at all, and it is the caller-supplied state #19's safety rule is
 // about. Asserted here so the package's public name for it cannot drift.
 describe("the state a caller supplies", () => {
-  it("distinguishes a read Cell from one that was not read", () => {
+  it("distinguishes a read Cell from one that was not read, and from one that is occupied", () => {
     const states: readonly DeployedCellState[] = [
       { kind: "read", code: "" },
+      { kind: "occupied", detail: "a text value" },
       { kind: "unread", reason: "no-established-read-capability" },
     ];
 
-    expect(states.map(state => state.kind)).toEqual(["read", "unread"]);
+    // "nothing is there", "something else is there" and "we did not look" are three
+    // different answers with three different consequences, which is why the state is a
+    // union rather than a string that could be empty for two of them.
+    expect(states.map(state => state.kind)).toEqual(["read", "occupied", "unread"]);
   });
 });
 
