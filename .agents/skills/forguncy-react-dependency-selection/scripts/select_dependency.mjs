@@ -81,7 +81,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { register } from "node:module";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -417,6 +417,16 @@ async function loadRuntimeSmokeHook(options) {
  */
 const EVIDENCE_DIRECTORY = "fgc-evidence";
 
+/**
+ * The content-addressed evidence reference form: `fgc-evidence/<64 hex>.json`.
+ *
+ * Matched rather than assumed, because only this form claims integrity. A lock is free to
+ * cite an ordinary committed path (the repository's own fixture cites `docs/probes/*.md`),
+ * and re-hashing one of those against its name would be meaningless — the name says nothing
+ * about the bytes. For a content address the name *is* the claim, so it is checkable.
+ */
+const EVIDENCE_REFERENCE_PATTERN = new RegExp(`^${EVIDENCE_DIRECTORY}/([0-9a-f]{64})\\.json$`);
+
 function evidenceRelativePath(report) {
   const digest = createHash("sha256").update(core.serializeProbeReport(report), "utf8").digest("hex");
   return `${EVIDENCE_DIRECTORY}/${digest}.json`;
@@ -427,40 +437,100 @@ function evidenceRelativePath(report) {
  *
  * A failed write is fatal rather than best-effort, unlike the engine's cache: the lock is
  * about to cite this path, and a citation nothing can follow is the defect this exists to
- * prevent. An existing file is left alone — the path is a function of the bytes, so an
- * existing file already holds exactly this content.
+ * prevent.
+ *
+ * An existing file is only acceptable when it holds **these** bytes. The earlier revision
+ * treated `EEXIST` as proof of that, on the reasoning that the name is a function of the
+ * content — which is true of the name and false of whatever is sitting there. A committed
+ * evidence file that a merge resolved badly, a hand-edit, or a directory at that path would
+ * all satisfy `EEXIST` while not being the report at all. So the existing bytes are re-hashed
+ * and compared, and a mismatch is refused rather than silently cited.
  */
 async function persistEvidence(projectRoot, report) {
   const relative = evidenceRelativePath(report);
   const absolute = join(projectRoot, ...relative.split("/"));
+  const expected = core.serializeProbeReport(report);
+
   try {
     await mkdir(dirname(absolute), { recursive: true });
-    await writeFile(absolute, core.serializeProbeReport(report), { encoding: "utf8", flag: "wx" });
+    await writeFile(absolute, expected, { encoding: "utf8", flag: "wx" });
+    return { relative, created: true };
   } catch (error) {
-    // `wx` makes a concurrent run's identical write a no-op rather than a clobber, which is
-    // the one error worth tolerating; anything else means the evidence is not on disk and the
-    // citation about to be written would be unresolvable.
     if (error?.code !== "EEXIST") {
       fail(`Cannot persist probe evidence at "${absolute}": ${error.message}`);
     }
   }
-  return relative;
+
+  // The path is taken. It has to be this content or the citation is a lie — including the
+  // case where the path is a directory, which `readFile` refuses and which would otherwise
+  // count as "present".
+  let existing;
+  try {
+    existing = await readFile(absolute, "utf8");
+  } catch (error) {
+    fail(
+      `The evidence path "${relative}" already exists but cannot be read as a file (${error.code ?? error.message}). ` +
+        `Remove it so the run can write the report it measured.`,
+    );
+  }
+  if (existing !== expected) {
+    fail(
+      `The evidence path "${relative}" already exists with different content, so it is not the report this run measured. ` +
+        `A content-addressed path is only trustworthy while its bytes hash to its name; remove the file to re-measure, or treat the difference as the finding it is.`,
+    );
+  }
+  return { relative, created: false };
 }
 
 /**
- * Whether a cited evidence reference resolves against the project root.
+ * Whether a cited evidence reference resolves against the project root, and whether a
+ * content-addressed one still hashes to its own name.
+ *
+ * Three answers rather than a boolean, because "not there" and "there but wrong" are
+ * different findings with different fixes: the first means the evidence never travelled with
+ * the lock, the second means what travelled is not what was measured.
  *
  * Only repository-relative references are checked. A URL — the form the repository's own
  * committed lock fixture uses for its runtime observations — is a claim about somewhere this
  * command cannot reach, and reporting it as "missing" would be a claim of its own.
  */
-function evidenceReferenceResolves(projectRoot, reference) {
+function inspectEvidenceReference(projectRoot, reference) {
   if (!core.isRepositoryRelativeReference(reference)) {
-    return true;
+    return "ok";
   }
-  return existsSync(join(projectRoot, ...reference.trim().split(/[\\/]/)));
+  const absolute = join(projectRoot, ...reference.trim().split(/[\\/]/));
+
+  // A plain committed path: its existence is all this command can check.
+  const contentAddressed = EVIDENCE_REFERENCE_PATTERN.exec(reference.trim());
+  if (contentAddressed === null) {
+    return existsSync(absolute) ? "ok" : "missing";
+  }
+
+  let bytes;
+  try {
+    bytes = readFileSync(absolute);
+  } catch {
+    // Absent, a directory, or unreadable. For a citation, "I cannot read the bytes you cited"
+    // is the same finding as "they are not here".
+    return "missing";
+  }
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  return digest === contentAddressed[1] ? "ok" : "integrity-mismatch";
 }
 
+/**
+ * Measures a package. **Persists nothing.**
+ *
+ * Measurement and persistence are separated deliberately, because they belong to different
+ * outcomes: a probe is a read that may end in a decision nobody accepts, while writing
+ * evidence changes a working tree. The earlier revision persisted here, inside the only
+ * probe entry point, which meant `audit` — documented as the read-only counterpart — created
+ * committable files, and a `record` refused by the selection or conformance audit left an
+ * orphan behind under a message saying nothing had been written.
+ *
+ * So this returns the report and the path it *would* be cited at, and
+ * {@link commitEvidence} is called only once a decision has been accepted.
+ */
 async function runProbe(options, packageName) {
   const projectRoot = fromWorkingDirectory(options.project ?? ".");
   const runtimeSmoke = await loadRuntimeSmokeHook(options);
@@ -471,8 +541,6 @@ async function runProbe(options, packageName) {
       projectRoot,
       packageName,
       // `false` means "do not consult a cached report", which is all `--no-cache` claims.
-      // The measurement is persisted below either way, so nothing this run cites can be a
-      // file that was never written.
       cache: options.noCache === true ? false : undefined,
       // Passing the hook is what makes the `runtime-smoke` step run at all; without
       // it the step is `skipped` with a reason, which is the honest local-only record.
@@ -492,12 +560,10 @@ async function runProbe(options, packageName) {
     fail(`Probing "${packageName}" failed: ${error.message}`);
   }
 
-  // Persist the measurement as immutable evidence, whatever mode produced it. Doing this
-  // for every run — hookless included — is what makes one citation rule true everywhere,
-  // and it is why this script does not write into the engine's fingerprint-keyed cache:
-  // that key is shared between smoke modes, and this one is not.
-  const evidencePath = await persistEvidence(projectRoot, result.report);
-  return { projectRoot, result, evidencePath };
+  // Where this report would be cited, without writing anything. `probe` reports it so a
+  // caller can see the address before deciding; `record` commits it after the decision is
+  // accepted.
+  return { projectRoot, result, evidencePath: evidenceRelativePath(result.report) };
 }
 
 /**
@@ -1067,10 +1133,6 @@ async function commandRecord(options) {
   }
   const { projectRoot, candidate, existing } = built;
 
-  // The measurement is already persisted as an immutable artifact by `runProbe` — one
-  // place, so `probe` and `record` cannot disagree about whether a cited report exists,
-  // and so nothing here can write into the engine's fingerprint-keyed cache.
-
   // The gate that makes "only when supported by evidence" true at the point a strategy
   // is persisted. #8's lock-shape validation cannot answer "is this record *true*", and
   // for an `extension` decision the answer lives in an extension catalog this
@@ -1092,6 +1154,17 @@ async function commandRecord(options) {
     process.exitCode = 1;
     return;
   }
+
+  // Every check has passed, so this decision is about to exist and the report it cites has
+  // to exist with it. Written here rather than during measurement: before this point a
+  // refusal is still possible, and an evidence file left behind by a decision nobody
+  // accepted would be an orphan in a working tree under a message saying nothing was
+  // written.
+  //
+  // Ordered before the lock write on purpose. Evidence is a precondition of the citation
+  // the lock will contain, so a failure to write it must abort before the lock is touched —
+  // the reverse order could leave a lock citing a file that this run then failed to write.
+  const evidence = probeResult === null ? null : await persistEvidence(projectRoot, probeResult.report);
 
   try {
     await resolver.writeFgcLock(projectRoot, candidate);
@@ -1131,6 +1204,11 @@ async function commandRecord(options) {
       record,
       freshness: core.assessLockDecision(record, environment),
       runtimeValidation: runtimeValidationOf(entry.document, probe),
+      // What evidence this write produced, so a caller can see whether it has a new file to
+      // commit — the answer is `created: true` on the first record of a report, and
+      // `created: false` when an identical report was already there. Stated rather than
+      // implied because the file is committable and a reviewer has to know to add it.
+      evidence: evidence === null ? null : { path: evidence.relative, created: evidence.created },
     },
     { ...options, json: true },
   );
@@ -1176,15 +1254,16 @@ async function commandStatus(options) {
   const decisions = lock.decisions.map((record) => {
     const assessment = core.assessLockDecision(record, environment);
 
-    // A citation that does not resolve is a blocker, and it is reported *beside* the core
-    // assessment rather than through it: `assessLockDecision` answers "do the versions,
-    // fingerprints and runtime still match", which is a different question from "are the
-    // bytes the record rests on still here". Core cannot answer the second — it is handed a
-    // parsed document, not a working directory — and the gap is exactly how a fresh checkout
-    // could keep reporting `fresh`/`validated` for a record whose evidence never arrived.
-    const unresolvedEvidence = record.evidence
-      .filter(link => !evidenceReferenceResolves(projectRoot, link.reference))
-      .map(link => link.reference);
+    // A citation problem is a blocker, and it is reported *beside* the core assessment
+    // rather than through it: `assessLockDecision` answers "do the versions, fingerprints and
+    // runtime still match", which is a different question from "are the bytes the record
+    // rests on still here, and are they the bytes that were measured". Core cannot answer the
+    // second — it is handed a parsed document, not a working directory — and the gap is
+    // exactly how a fresh checkout, or a bad merge of a committed evidence file, could keep
+    // reporting `fresh`/`validated` for a record whose evidence is absent or altered.
+    const evidenceFindings = record.evidence
+      .map(link => ({ reference: link.reference, state: inspectEvidenceReference(projectRoot, link.reference) }))
+      .filter(finding => finding.state !== "ok");
 
     return {
       packageName: record.packageName,
@@ -1200,9 +1279,14 @@ async function commandStatus(options) {
       // here would be a second copy of a rule core already states.
       blockers: [
         ...core.lockDecisionBlockers(assessment),
-        ...unresolvedEvidence.map(reference => `evidence-missing:${reference}`),
+        ...evidenceFindings.map(finding => `evidence-${finding.state}:${finding.reference}`),
       ],
-      unresolvedEvidence,
+      // Named separately so a consumer can tell "the evidence never arrived" from "what
+      // arrived is not what was measured" — different causes, different fixes.
+      unresolvedEvidence: evidenceFindings.filter(finding => finding.state === "missing").map(finding => finding.reference),
+      alteredEvidence: evidenceFindings
+        .filter(finding => finding.state === "integrity-mismatch")
+        .map(finding => finding.reference),
     };
   });
 
@@ -1217,9 +1301,14 @@ async function commandStatus(options) {
     options,
   );
 
-  // Non-zero when anything a caller has to act on is wrong: a stale record or a citation
-  // nothing can follow. Both mean "do not treat this lock as verified as it stands".
-  if (decisions.some((entry) => entry.freshness === "stale" || entry.unresolvedEvidence.length > 0)) {
+  // Non-zero when anything a caller has to act on is wrong: a stale record, or a citation
+  // that is absent or no longer matches its own name. All of them mean "do not treat this
+  // lock as verified as it stands".
+  if (
+    decisions.some(
+      entry => entry.freshness === "stale" || entry.unresolvedEvidence.length > 0 || entry.alteredEvidence.length > 0,
+    )
+  ) {
     process.exitCode = 1;
   }
 }
@@ -1266,8 +1355,10 @@ record refuses to write anything the checks reject. Unknown options are refused 
 ignored, and an option that needs a value must have one.
 
 Evidence: record writes the report it cites to \`fgc-evidence/<content-hash>.json\` beside
-fgc.lock.json, and status reports a citation that does not resolve as \`evidence-missing\`.
-Commit that directory with the lock — an ignored one would not survive a fresh checkout.
+fgc.lock.json, once the decision is accepted — probe and audit measure only and write
+nothing. status verifies those bytes against their name, reporting \`evidence-missing\` or
+\`evidence-integrity-mismatch\`. Commit that directory with the lock; an ignored one would
+not survive a fresh checkout.
 
 The script measures, audits and persists. It never chooses a strategy, never picks a
 replacement package and never classifies ownership — #16 puts all three on the Agent.

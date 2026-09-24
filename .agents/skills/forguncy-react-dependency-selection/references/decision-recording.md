@@ -61,7 +61,9 @@
 
 锁里 cite 的 `probe` 链接形如 `fgc-evidence/<sha256>.json`——**与锁并列的一个目录**，不是 `.fgc/` 下。三条要求各自逼出这个设计：
 
-**一、跑过的测量必须落盘。** `--no-cache` 只强制"不读缓存里的旧 report"，不会丢弃本次测量——否则锁会指向一个从未写过的文件。`probe` 与 `record` 都保证这一点。
+**一、跑过的测量必须落盘——但只在决策被接受时。** `--no-cache` 只强制"不读缓存里的旧 report"，不会丢弃本次测量。但**测量与持久化是分开的**：`probe`/`audit` 只测量并算出"会被 cite 的地址"，不写文件；`record` 在 selection 与 conformance **全部通过之后**才写证据，然后才写锁。
+
+这个顺序是刻意的：证据是可提交的文件，写它就是改动工作树。若在测量阶段就写，`audit`（文档明确称其为 read-only counterpart）会弄脏仓库；而被拒绝的 `record` 会在"Nothing was written"这句话下面留下一个孤儿文件。先写证据再写锁，也能保证任一步失败时不会出现"锁引用了本次没能写出的文件"。
 
 **二、路径按内容寻址，不按 probe fingerprint。** fingerprint 不包含 smoke 模式：`--runtime-smoke` 跑出的 report 与同一次普通 probe 的 report 会是**相同 fingerprint、不同内容**。若按 fingerprint 存，后一次 hookless 运行会覆盖前一次带 smoke 的证据——锁仍写着 `target != null`／`validated`，但它 cite 的文件里已经没有当初那条 `runtime-smoke: passed`。读侧守卫（`cacheHitAnswersThisRun`）只能防"误读"，防不了"覆写"，所以证据不能与缓存共用路径：
 
@@ -72,9 +74,18 @@
 
 **三、必须在锁旁边，而不是 .fgc/ 里。** `fgc.lock.json` 是要被 review、被提交的，而本仓库全局忽略 `.fgc/`。证据放在那里意味着**全新 checkout 后锁 cite 的文件根本不存在**——锁仍显示 `probe.status: passed` 与非 null `target`，而引用指向空气，且没有任何读取方会察觉。对 runtime-smoke 尤其致命：静态 probe 可以在任何机器上重测，真机 smoke 结果未必能在 reviewer 机器上复现，这正是需要持久化证据的场景。
 
-因此 `fgc-evidence/` **要随锁一起提交**。`status` 对无法解析的引用报 `evidence-missing:<reference>` 并列入 `blockers`、以非零退出码结束——它不会在证据缺失时继续说 `fresh`／`validated`。URL 形式的引用（如 `runtime-observation` 指向外部报告）不检查，因为它断言的是本命令够不到的地方。
+因此 `fgc-evidence/` **要随锁一起提交**。`status` 报两类问题，都列入 `blockers` 并以非零码退出：
 
-同一份 report 重复测量得到同一路径（幂等），不同 report 永远不同路径。
+| 字段 | 含义 |
+|---|---|
+| `unresolvedEvidence` | 引用不存在、读不出（含被同名目录占据） |
+| `alteredEvidence` | 文件在，但**内容 hash 与文件名不符**——被误改、合并冲突解决错了 |
+
+后者是 content-addressed 语义的核心：文件名**就是**对内容的断言，因此必须重算 hash 校验，不能只看"路径存在"。URL 形式的引用（如 `runtime-observation` 指向外部报告）不检查，因为它断言的是本命令够不到的地方。
+
+`record` 写证据时同样校验：若目标路径已存在但内容不同（或被目录占据），直接拒绝而不是接受——否则会把错误的字节挂到新记录上，还报告成功。
+
+同一份 report 重复测量得到同一路径（幂等，`created: false`），不同 report 永远不同路径。
 
 ## 真机验证怎么落地
 

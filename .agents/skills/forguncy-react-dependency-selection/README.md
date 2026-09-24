@@ -70,8 +70,9 @@
 `record` 会把自己 cite 的 probe report 写到**锁旁边**的 `fgc-evidence/<content-hash>.json`。请把它与 `fgc.lock.json` 一起提交：
 
 - 位置与 `.fgc/`（被 git 忽略）无关。放在那里等于全新 checkout 后锁的引用指向空气，而锁仍显示 `validated`。
-- 按内容寻址，所以不同 report 不会互相覆盖，相同 report 复用同一路径。
-- `status` 会把无法解析的引用报成 `evidence-missing` 并列入 `blockers`、以非零码退出——它不会在证据缺失时继续说 fresh/validated。
+- **只在决策被接受时写**：`probe`/`audit` 只测量并算出会被 cite 的地址，不写文件（`audit` 是 read-only 的，被拒绝的 `record` 也不该留下孤儿）。
+- 按内容寻址，且**读取端会校验**：不同 report 不会互相覆盖；文件名就是内容断言，被误改/合并坏的文件会被报成 `alteredEvidence`（`evidence-integrity-mismatch`），而不是仅因路径存在就算通过。
+- `status` 会把 `evidence-missing`（引用不存在）与 `evidence-integrity-mismatch`（内容不符）都列入 `blockers`、以非零码退出——它不会在证据缺失或变样时继续说 fresh/validated。
 
 ## 用法示例
 

@@ -195,16 +195,18 @@ describe("CLI contract: a recorded probe link resolves to real evidence", () => 
     });
   }, CASE_TIMEOUT_MS);
 
-  it("makes `probe --no-cache` report a path that exists, not only `record`", async () => {
-    // The sibling command had the same bug and was not in the review: `probe --no-cache`
-    // printed a path for a file the suppression had prevented writing. It reports
-    // `evidencePath` now, which is what a lock would cite.
+  it("reports the path a lock would cite, without writing it", async () => {
+    // `probe` measures and reports; `record` persists. That split is deliberate: a probe is a
+    // read that may end in a decision nobody accepts, and evidence is a committable file, so
+    // writing it during measurement would let `audit` — the read-only counterpart — dirty a
+    // working tree. The address is still reported here so a caller can see it before deciding.
     await withScratch(PROVING_CASES, async root => {
       const probed = await cli(["probe", "--project", root, "--no-cache", "es-toolkit"]);
       expect(probed.code, probed.stderr).toBe(0);
 
       const report = json<{ evidencePath: string }>(probed);
-      expect(existsSync(join(root, ...report.evidencePath.split("/")))).toBe(true);
+      expect(report.evidencePath.startsWith("fgc-evidence/")).toBe(true);
+      expect(existsSync(join(root, ...report.evidencePath.split("/"))), "probe must not write evidence").toBe(false);
     });
   }, CASE_TIMEOUT_MS);
 
@@ -378,7 +380,10 @@ describe("CLI contract: a validated runtime target requires a real hook", () => 
         expect(probed.code, probed.stderr).toBe(0);
         const report = json<{ validation: readonly { step: string; outcome: string }[]; evidencePath: string }>(probed);
         expect(report.validation.find(entry => entry.step === "runtime-smoke")?.outcome).toBe("passed");
-        expect(existsSync(join(root, ...report.evidencePath.split("/")))).toBe(true);
+        // Still measured only: the smoke result is in the report the caller just received, and
+        // `record` is what will persist it if the decision it supports is accepted.
+        expect(report.evidencePath.startsWith("fgc-evidence/")).toBe(true);
+        expect(existsSync(join(root, ...report.evidencePath.split("/")))).toBe(false);
       } finally {
         await rm(hookDirectory, { recursive: true, force: true });
       }
@@ -1171,6 +1176,182 @@ describe("CLI contract: an unrecognised option is refused", () => {
         expect(policy.code, policy.stderr).toBe(0);
       } finally {
         await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+});
+
+// ---------------------------------------------------------------------------
+// Review round 5 — evidence is written only for an accepted decision, and only
+// when its bytes match its name
+// ---------------------------------------------------------------------------
+
+/**
+ * Evidence is a committable file, so *when* it is written matters as much as what it holds.
+ *
+ * The defect this covers is a side effect that moved from invisible to visible: while
+ * evidence lived under an ignored directory, `audit` writing it merely filled scratch
+ * space; once it became durable, the same write dirtied a working tree. A read-only command
+ * has to stay read-only, and a refusal that says "nothing was written" has to be true.
+ */
+describe("CLI contract: evidence appears only when a decision is accepted", () => {
+  async function evidenceFiles(example: string): Promise<readonly string[]> {
+    return readdir(join(example, "fgc-evidence")).catch(() => []);
+  }
+
+  it("writes nothing for `audit`, which is the read-only counterpart", async () => {
+    // Run against the real example root, because that is where evidence is committable —
+    // inside the `.fgc/` scratch root the same file is invisible and the assertion would pass
+    // whichever way the command behaved.
+    const extensionExample = EXTENSION_QUERY;
+    const before = await evidenceFiles(extensionExample);
+    const decision = await decisionFile({
+      packageName: "@tanstack/react-query",
+      role: "cell-local-data-access",
+      strategy: "extension",
+      libraryId: "tanstack-query",
+      globalName: "TanStackQuery",
+      extensionVersion: "5.102.8",
+      rationale: "x",
+    });
+    try {
+      const audited = await cli(["audit", "--project", extensionExample, "--decision", decision.path]);
+      expect(audited.code, audited.stderr).toBe(0);
+      expect(await evidenceFiles(extensionExample)).toEqual(before);
+    } finally {
+      await decision.cleanup();
+    }
+  }, CASE_TIMEOUT_MS);
+
+  it("writes nothing when `record` is refused, so its 'Nothing was written' is true", async () => {
+    const extensionExample = EXTENSION_QUERY;
+    const before = await evidenceFiles(extensionExample);
+    // A fabricated `libraryId`: refused by the conformance gate, which runs *after* the probe.
+    const decision = await decisionFile({
+      packageName: "@tanstack/react-query",
+      role: "cell-local-data-access",
+      strategy: "extension",
+      libraryId: "completely-invented",
+      globalName: "Invented",
+      rationale: "x",
+    });
+    try {
+      const refused = await cli(["record", "--project", extensionExample, "--decision", decision.path]);
+      expect(refused.code).not.toBe(0);
+      expect(refused.stderr).toContain("Nothing was written");
+      expect(await evidenceFiles(extensionExample), "a refused record must leave no orphan").toEqual(before);
+    } finally {
+      await decision.cleanup();
+    }
+  }, CASE_TIMEOUT_MS);
+});
+
+/**
+ * A content address is a claim about bytes, not about a filename.
+ *
+ * The previous revision derived the path from the report's hash and then trusted `EEXIST` to
+ * mean "the file already holds this content" — true of the name, false of whatever is
+ * actually there. A committed evidence file that a merge resolved badly, a hand-edit, or a
+ * directory at that path all satisfied it, and `status` checked only that the path existed.
+ * Both now verify the bytes.
+ */
+describe("CLI contract: a content-addressed citation is verified, not assumed", () => {
+  const decision = {
+    packageName: "es-toolkit",
+    role: "cell-local-ui",
+    strategy: "inline",
+  };
+
+  /** Records once and returns the cited evidence reference. */
+  async function recordOnce(root: string, file: { path: string }): Promise<string> {
+    const recorded = await cli(["record", "--project", root, "--decision", file.path]);
+    expect(recorded.code, recorded.stderr).toBe(0);
+    const record = (await readLock(root)).decisions.find(entry => entry.packageName === "es-toolkit")!;
+    return probeLink(record)!;
+  }
+
+  it("reports altered bytes as an integrity blocker rather than as resolved", async () => {
+    await withScratch(PROVING_CASES, async root => {
+      const file = await decisionFile(decision);
+      try {
+        const reference = await recordOnce(root, file);
+        const absolute = join(root, ...reference.split("/"));
+
+        // Untouched: nothing to report.
+        const clean = await cli(["status", "--project", root]);
+        expect(json<{ decisions: readonly { alteredEvidence: readonly string[]; unresolvedEvidence: readonly string[] }[] }>(clean).decisions[0]!.alteredEvidence).toEqual([]);
+
+        await writeFile(absolute, '{"tampered":true}\n', "utf8");
+
+        const tampered = await cli(["status", "--project", root]);
+        expect(tampered.code, "altered evidence is actionable").not.toBe(0);
+        const finding = json<{ decisions: readonly { alteredEvidence: readonly string[]; unresolvedEvidence: readonly string[]; blockers: readonly string[] }[] }>(tampered).decisions[0]!;
+
+        expect(finding.alteredEvidence).toEqual([reference]);
+        // Distinct from "missing": the file is there, and what is there is not what was measured.
+        expect(finding.unresolvedEvidence).toEqual([]);
+        expect(finding.blockers).toContain(`evidence-integrity-mismatch:${reference}`);
+      } finally {
+        await file.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("treats a directory at the evidence path as unresolved rather than as present", async () => {
+    // `existsSync` is what "resolved" used to mean, and a directory satisfies it while holding
+    // no report at all — the same class of assumption as trusting `EEXIST`.
+    await withScratch(PROVING_CASES, async root => {
+      const file = await decisionFile(decision);
+      try {
+        const reference = await recordOnce(root, file);
+        const absolute = join(root, ...reference.split("/"));
+        await rm(absolute, { force: true });
+        await mkdir(absolute, { recursive: true });
+
+        const status = await cli(["status", "--project", root]);
+        expect(status.code).not.toBe(0);
+        const finding = json<{ decisions: readonly { alteredEvidence: readonly string[]; unresolvedEvidence: readonly string[] }[] }>(status).decisions[0]!;
+        expect(finding.unresolvedEvidence).toEqual([reference]);
+        expect(finding.alteredEvidence).toEqual([]);
+      } finally {
+        await file.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("refuses to cite a path already holding different content, instead of accepting it", async () => {
+    // The write-side half. Accepting the existing file is what would silently attach the wrong
+    // bytes to a new record, and it would do so under a message reporting success.
+    await withScratch(PROVING_CASES, async root => {
+      const file = await decisionFile(decision);
+      try {
+        const reference = await recordOnce(root, file);
+        await writeFile(join(root, ...reference.split("/")), "not a report\n", "utf8");
+
+        const refused = await cli(["record", "--project", root, "--decision", file.path]);
+        expect(refused.code).not.toBe(0);
+        expect(refused.stderr).toContain("already exists with different content");
+        expect(refused.stderr).not.toContain("at async");
+      } finally {
+        await file.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("reuses an identical report's path without rewriting it", async () => {
+    // The other direction, so the integrity check is not simply refusing every second write:
+    // same report, same address, and the run reports that it created nothing.
+    await withScratch(PROVING_CASES, async root => {
+      const file = await decisionFile(decision);
+      try {
+        const first = await cli(["record", "--project", root, "--decision", file.path]);
+        expect(json<{ evidence: { created: boolean } }>(first).evidence.created).toBe(true);
+
+        const second = await cli(["record", "--project", root, "--decision", file.path]);
+        expect(second.code, second.stderr).toBe(0);
+        expect(json<{ evidence: { created: boolean } }>(second).evidence.created).toBe(false);
+      } finally {
+        await file.cleanup();
       }
     });
   }, CASE_TIMEOUT_MS);
