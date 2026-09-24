@@ -43,7 +43,7 @@
 
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1761,53 +1761,25 @@ describe("CLI contract: a CRLF checkout is not a content mismatch", () => {
  * CLI half they *do* pin: after a failed write the evidence this run created is gone, the
  * evidence a previous run left is not, the lock bytes are unchanged, and nothing is left behind.
  */
-describe("CLI contract: a failed lock write leaves the project as it was", () => {
+describe("CLI contract: the lock write leaves no debris behind", () => {
+  /**
+   * A narrower claim than atomicity, and deliberately so.
+   *
+   * **Where atomicity is proven:** `packages/dependency-resolver/src/lock-store.test.ts`, which
+   * injects a `writeFile` that truncates its target before throwing — the behaviour a mid-write
+   * I/O failure produces. That injection needs the module seam, which the CLI does not have.
+   * An earlier version of this suite tried to force the failure from outside by making the lock
+   * read-only; it passed on Windows and **failed on CI**, because `rename` needs write permission
+   * on the *parent directory* on Linux but on the *target file* on Windows. A test whose
+   * injection is platform-dependent is worse than no test, so that case now lives where the
+   * failure can be injected portably.
+   *
+   * What remains here is the observation the CLI can make on a successful write: nothing is left
+   * beside the lock, and the lock is written where the read path expects it.
+   */
   const decision = (packageName: string) => ({ packageName, role: "cell-local-ui", strategy: "inline" });
 
-  async function evidenceCount(root: string): Promise<number> {
-    return (await readdir(join(root, "fgc-evidence")).catch(() => [])).length;
-  }
-
-  it("preserves the existing lock and rolls back only this run's evidence", async () => {
-    await withScratch(PROVING_CASES, async root => {
-      const first = await decisionFile(decision("es-toolkit"));
-      const second = await decisionFile(decision("@embedpdf/pdfium"));
-      try {
-        const recorded = await cli(["record", "--project", root, "--decision", first.path]);
-        expect(recorded.code, recorded.stderr).toBe(0);
-        const lockAfterFirst = await readFile(join(root, "fgc.lock.json"), "utf8");
-        expect(await evidenceCount(root)).toBe(1);
-
-        // Fail the next write at its last step: the lock becomes unwritable, so the staged
-        // rename cannot land. This is a real failure of the replacement, not of validation.
-        await chmod(join(root, "fgc.lock.json"), 0o444);
-        let refused: Awaited<ReturnType<typeof cli>>;
-        try {
-          refused = await cli(["record", "--project", root, "--decision", second.path]);
-        } finally {
-          await chmod(join(root, "fgc.lock.json"), 0o666);
-        }
-
-        expect(refused.code).not.toBe(0);
-        expect(refused.stderr).toContain("Nothing was written");
-
-        // The old lock is byte-identical: the failed replacement never touched it.
-        expect(await readFile(join(root, "fgc.lock.json"), "utf8")).toBe(lockAfterFirst);
-        // The first record's evidence survives — it belongs to a record that still exists.
-        expect(await evidenceCount(root), "the existing record's evidence must not be deleted").toBe(1);
-        // And the next run can still read the lock, so the project is usable.
-        const status = await cli(["status", "--project", root]);
-        expect(json<{ decisions: readonly { packageName: string }[] }>(status).decisions.map(entry => entry.packageName)).toEqual([
-          "es-toolkit",
-        ]);
-      } finally {
-        await first.cleanup();
-        await second.cleanup();
-      }
-    });
-  }, CASE_TIMEOUT_MS);
-
-  it("leaves no staging file behind after a successful write", async () => {
+  it("leaves no staging file beside the lock after a successful write", async () => {
     // The temporary file is an implementation detail a caller must never have to clean up, and a
     // stray one beside a lock is a file a reviewer would have to explain.
     await withScratch(PROVING_CASES, async root => {
@@ -1815,10 +1787,10 @@ describe("CLI contract: a failed lock write leaves the project as it was", () =>
       try {
         const recorded = await cli(["record", "--project", root, "--decision", file.path]);
         expect(recorded.code, recorded.stderr).toBe(0);
+
         // `.fgc/` is the probe engine's own scratch — not this command's, and not evidence.
         const entries = (await readdir(root)).filter(name => name !== "node_modules" && name !== ".fgc").sort();
         expect(entries).toEqual(["fgc-evidence", "fgc.lock.json"]);
-        // No staging file: the temporary the writer used to replace the lock is gone.
         expect((await readdir(root)).filter(name => name.endsWith(".tmp"))).toEqual([]);
       } finally {
         await file.cleanup();
