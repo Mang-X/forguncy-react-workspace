@@ -8,7 +8,9 @@ import { describe, expect, it, onTestFinished } from "vitest";
 import { createServer } from "vite";
 
 import type { LockedDependencyDecision } from "@forguncy-react-workspace/core";
+import { createEmptyFgcLock } from "@forguncy-react-workspace/core";
 
+import { readProjectDependencyDecisions } from "./local-dev-audit.ts";
 import { devHarness, HARNESS_ENTRY_URL_PATH } from "./vite-plugin.ts";
 
 /**
@@ -126,6 +128,84 @@ const AUDITED_CONFIG = {
   cells: { probe: { entry: "./cells/probe/src/App.tsx", target: { pageName: "审计", cell: "A1" } } },
   runtime: { dependencyLockPath: "./fgc.lock.json" },
 } as const;
+
+/**
+ * The divergence that is the *whole* reason this package has its own reader, asserted rather
+ * than asserted-in-a-comment.
+ *
+ * `local-dev-audit.ts` reads the path `registry.runtime.dependencyLockPathAbsolute` names —
+ * which honours a project that declared `runtime.dependencyLockPath` — while
+ * `dependency-resolver`'s `readFgcLock(projectRoot)` takes a root and always appends
+ * `fgc.lock.json`. So this is the one input where the two readers must *disagree*, and every
+ * other test in this file would pass just as well if the harness had called `readFgcLock` and
+ * quietly ignored the project's declaration.
+ *
+ * Without this test, "we read the declared path" is a claim nothing checks: a config pointing at
+ * `./locks/fgc.lock.json` would be audited against a *different* file, and the failure mode is
+ * the quiet one — a project whose real decisions live where it said would be audited as having
+ * none, so its `extension` dependencies would silently pass.
+ */
+describe("the declared lock path is honoured, which `readFgcLock(projectRoot)` could not do", () => {
+  it("reads where the config points, not `<root>/fgc.lock.json`", async () => {
+    const { mkdtemp, mkdir, rm, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { readFgcLock } = await import("@forguncy-react-workspace/dependency-resolver");
+
+    const root = await mkdtemp(join(tmpdir(), "dev-harness-lockpath-"));
+    onTestFinished(() => rm(root, { recursive: true, force: true }));
+
+    // The decisions live in a subdirectory the project declared, and *nothing* is at the default
+    // location — so a reader that ignored the declaration would find no file at all.
+    await mkdir(join(root, "locks"), { recursive: true });
+    const declaredPath = join(root, "locks", "fgc.lock.json");
+    await writeFile(
+      declaredPath,
+      JSON.stringify({ schemaVersion: 1, decisions: [extensionDecision("@tanstack/react-query")] }),
+      "utf8",
+    );
+    // A Cell entry that exists, so the only thing that can refuse this server is the audit.
+    await mkdir(join(root, "cells", "probe", "src"), { recursive: true });
+    await writeFile(join(root, "cells", "probe", "src", "App.tsx"), "export function App() { return null; }\n", "utf8");
+
+    // The harness's reader finds them.
+    expect((await readProjectDependencyDecisions(declaredPath)).map(decision => decision.packageName)).toEqual([
+      "@tanstack/react-query",
+    ]);
+
+    // The other reader, given the same project root, finds nothing — which is the divergence.
+    await expect(readFgcLock(root)).resolves.toEqual(createEmptyFgcLock());
+
+    // And the divergence matters at the level above, not only in the reader: a config declaring
+    // the subdirectory path must block, because the audit has to *see* the decision to require a
+    // choice for it. Same project, same lock, only the declared path differs from the default.
+    let refusal: unknown;
+    try {
+      const server = await createServer({
+        root,
+        configFile: false,
+        logLevel: "silent",
+        appType: "spa",
+        plugins: [
+          devHarness({
+            config: {
+              cells: { probe: { entry: "./cells/probe/src/App.tsx", target: { pageName: "审计", cell: "A1" } } },
+              runtime: { dependencyLockPath: "./locks/fgc.lock.json" },
+            },
+          }) as never,
+        ],
+        server: { middlewareMode: true, hmr: false, watch: null },
+      });
+      await server.close();
+    } catch (error) {
+      refusal = error;
+    }
+
+    expect(
+      refusal === undefined ? undefined : String((refusal as Error).message),
+      "a project declaring a non-default lock path was audited as having no decisions",
+    ).toContain("local-dev-extension-needs-substitute");
+  }, 120_000);
+});
 
 describe("a blocking local-dev finding refuses a real dev server", () => {
   it("rejects `createServer`, and the report appears exactly once", async () => {
