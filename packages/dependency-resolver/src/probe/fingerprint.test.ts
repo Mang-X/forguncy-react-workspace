@@ -14,7 +14,7 @@
 import { describe, expect, it } from "vitest";
 
 import { BUILD_CONFIGURATION_FINGERPRINT } from "./build";
-import { composeProbeFingerprint } from "./fingerprint";
+import { composeProbeFingerprint, PROBE_ANALYSIS_REVISION } from "./fingerprint";
 
 describe("composeProbeFingerprint", () => {
   it("composes the documented format from the declared inputs", () => {
@@ -26,10 +26,23 @@ describe("composeProbeFingerprint", () => {
     });
 
     expect(composed.fingerprint).toBe(
-      'probe="inline-bundle";entry="es-toolkit";config={"format":"iife"};bundler={"format":"iife","platform":"browser"}',
+      'probe="inline-bundle";entry="es-toolkit";analysis=10;config={"format":"iife"};bundler={"format":"iife","platform":"browser"}',
     );
     expect(composed.probeConfig).toEqual({ format: "iife" });
     expect(composed.bundlerInput).toEqual({ format: "iife", platform: "browser" });
+  });
+
+  // The analysis revision is a declared input because nothing else on a lock record
+  // can express "the scanner now reads what a browser build reaches". Without it in
+  // the fingerprint, a report cached under the old scanning behaviour is served
+  // forever and the staleness rules never see the change.
+  it("carries the analysis revision, so a scanner change invalidates cached evidence", () => {
+    const composed = composeProbeFingerprint({ probeId: "inline-bundle", entry: "es-toolkit" });
+
+    expect(composed.fingerprint).toContain(`analysis=${String(PROBE_ANALYSIS_REVISION)}`);
+    // Greater than the revision every pre-fix report was composed under, so no
+    // existing cache entry can be mistaken for current evidence.
+    expect(PROBE_ANALYSIS_REVISION).toBeGreaterThan(1);
   });
 
   it("defaults the bundler input to the build module's configuration", () => {

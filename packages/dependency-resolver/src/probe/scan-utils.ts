@@ -26,8 +26,7 @@
  *   rather than audited after the fact.
  */
 
-import { readdir } from "node:fs/promises";
-import { join, sep } from "node:path";
+import { sep } from "node:path";
 
 /** Code-unit comparison — never `localeCompare`, which would sort differently per machine. */
 export function compareStrings(a: string, b: string): number {
@@ -162,54 +161,20 @@ export function describeBuildFailureLines(error: unknown, projectRoot: string): 
   return lines.length > 0 ? lines : ["The bundler failed without a readable message."];
 }
 
-/** Source file extensions the graph scanners read. Type declarations end in `.ts` and are not shipped code. */
-const SOURCE_EXTENSIONS: readonly string[] = [".js", ".mjs", ".cjs", ".jsx"];
-
 /**
- * Every source file under `root`, in sorted order, excluding `node_modules`
- * (a package's installed dependencies are scanned as their own graph nodes, so
- * descending here would double-count them under whichever package hoisted them)
- * and hidden directories (`.git`, and the probe's own `.fgc` output).
+ * Removed, deliberately: `walkPackageSourceFiles` lived here and returned every source
+ * file under a package directory in sorted order. It is what the scanners used, and it
+ * is the mechanism behind the three false `platform-api-unavailable` rejections that
+ * #16's end-to-end acceptance criterion uncovered — "every file the package ships" is
+ * not "every file a browser build reaches", and the difference is where `three`'s
+ * optional draco loaders and `@embedpdf/pdfium`'s Node builds live.
  *
- * Sorted during the walk rather than at the end so the read order is the same
- * order the report records — a scanner that read files in readdir order could
- * produce the same set in a different sequence on two filesystems.
+ * `module-source.ts`'s `collectReachableSourceFiles` replaces it: same determinism
+ * guarantees, bounded by the manifest's browser entries. This note stays so that a
+ * future reader who needs a directory walk finds the reason it was withdrawn rather
+ * than re-adding it — a whole-tree walk is exactly the shape a scanner reaches for
+ * first, and it silently over-reports findings ever after.
  */
-export async function walkPackageSourceFiles(root: string): Promise<readonly string[]> {
-  const files: string[] = [];
-
-  async function visit(directory: string): Promise<void> {
-    const entries = await readdir(directory, { withFileTypes: true });
-    entries.sort((left, right) => compareStrings(left.name, right.name));
-    for (const entry of entries) {
-      if (entry.name === "node_modules" || entry.name.startsWith(".")) {
-        continue;
-      }
-      const absolute = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        await visit(absolute);
-      } else if (entry.isFile() && SOURCE_EXTENSIONS.some(extension => entry.name.endsWith(extension))) {
-        files.push(absolute);
-      }
-    }
-  }
-
-  await visit(root);
-  return files;
-}
-
-/** A path as it appears in report evidence: forward slashes, relative to `base`. */
-export function relativePortablePath(base: string, absolute: string): string {
-  const from = base.split(sep).join("/");
-  const to = absolute.split(sep).join("/");
-  if (to.startsWith(`${from}/`)) {
-    return to.slice(from.length + 1);
-  }
-  // An unexpected layout (the file escaped `base` somehow) still yields
-  // something portable rather than letting an absolute path into the report.
-  const segments = to.split("/");
-  return segments[segments.length - 1] ?? to;
-}
 
 /** A path usable as a directory-name component of the probe's scratch space. */
 export function safePathSegment(name: string): string {

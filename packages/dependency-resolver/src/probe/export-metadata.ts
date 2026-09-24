@@ -31,6 +31,7 @@
 
 import type { ProbeFact, ProbeRejectionFinding, ProbeRisk, ProbeValidationEntry } from "@forguncy-react-workspace/core";
 
+import { ACTIVE_EXPORT_CONDITIONS, isPortablePackagePath } from "./browser-entry";
 import type { ResolvedPackageIdentity } from "./identity";
 import { compareStrings } from "./scan-utils";
 
@@ -44,7 +45,7 @@ export interface ExportMetadataObservation {
 /** Entry fields a browser resolver would consult, in precedence order when `exports` is absent. */
 const FALLBACK_BROWSER_FIELDS = ["browser", "module", "main"] as const;
 
-const BROWSER_EXPORT_CONDITIONS: readonly string[] = ["browser", "import", "default", "require"];
+
 
 function isSubpathExports(exportsValue: unknown): boolean {
   if (exportsValue === null || typeof exportsValue !== "object" || Array.isArray(exportsValue)) {
@@ -56,25 +57,50 @@ function isSubpathExports(exportsValue: unknown): boolean {
 /**
  * Whether an exports target resolves to something a browser can execute.
  *
- * Strings resolve; arrays resolve if any alternative does; a subpath map is
- * tried at `.` then `*`; a conditions map tries the browser-first order. `null`
- * is an explicit exclusion and never resolves.
+ * Strings resolve *if they name an executable file*; arrays resolve if any alternative
+ * does; a subpath map is tried at `.` then `*`; a conditions map tries the browser-first
+ * order. `null` is an explicit exclusion and never resolves.
+ *
+ * The executable check on a string is not decoration: a conditions map may point its
+ * `browser` condition at a native addon (`{ browser: "./addon.node", import: "./real.js" }`),
+ * and counting that as browser-resolvable asserted that a browser build has an entry
+ * while naming a file no browser can load. `module-source.test.ts` keeps this function
+ * and `resolveBrowserEntryPaths` in agreement over a table of shapes, which is what
+ * caught it — the two had disagreed, and the disagreement let a package be reported
+ * browser-resolvable while the scanner reached zero files and drew its conclusion from
+ * an empty set.
  */
 function exportsTargetResolvesBrowser(target: unknown): boolean {
-  if (typeof target === "string") return true;
+  if (typeof target === "string") {
+    // An absolute, escaping or scheme-prefixed target cannot name a file inside the
+    // package, so it is not an entry — the same judgement `browser-entry.ts` makes, and
+    // the two have to agree or this step reports a resolvable entry the scanner cannot
+    // reach a single file from.
+    if (!isPortablePackagePath(target)) return false;
+    return fieldLooksExecutable(target);
+  }
   if (target === null) return false;
-  if (Array.isArray(target)) return target.some(entry => exportsTargetResolvesBrowser(entry));
+  if (Array.isArray(target)) {
+    // Any executable alternative answers "is there a browser entry" affirmatively, which
+    // is the question this function asks. `browser-entry.ts` asks the *narrower* "which
+    // file" and takes the first executable alternative, so for
+    // `["./addon.node", "./real.js"]` it names `real.js` while this reports resolvable —
+    // different questions, consistent answers, which is what the agreement table in
+    // `module-source.test.ts` asserts.
+    return target.some(entry => exportsTargetResolvesBrowser(entry));
+  }
   if (typeof target !== "object") return false;
   const record = target as Record<string, unknown>;
   if (Object.keys(record).some(key => key.startsWith("."))) {
     const subpath = record["."] ?? record["*"];
     return subpath !== undefined && exportsTargetResolvesBrowser(subpath);
   }
-  for (const condition of BROWSER_EXPORT_CONDITIONS) {
-    if (condition in record) {
-      // The first present condition in the browser order decides, matching how
-      // a resolver stops at the first match rather than falling through.
-      return exportsTargetResolvesBrowser(record[condition]);
+  // Key order, not a preference ranking — the same rule `browser-entry.ts` implements, from
+  // the same set, so the two steps cannot agree with each other while both disagreeing with
+  // Node. See `ACTIVE_EXPORT_CONDITIONS` for the measured evidence.
+  for (const [condition, value] of Object.entries(record)) {
+    if (ACTIVE_EXPORT_CONDITIONS.has(condition)) {
+      return exportsTargetResolvesBrowser(value);
     }
   }
   return false;
@@ -101,9 +127,20 @@ function exportsResolveForBrowser(exportsField: unknown): boolean {
   return exportsTargetResolvesBrowser(exportsField);
 }
 
+/**
+ * True when a manifest entry string names a file a browser could execute.
+ *
+ * The query is stripped **before** the extension is tested, so this agrees with
+ * `browser-entry.ts`'s `looksExecutable`, which does the same. Both orderings have to
+ * match or the two steps disagree about a manifest like `{ ".": "./a.node?x" }`:
+ * `browser-entry` strips the query and finds no usable entry while this called it
+ * executable, which is the "browser-resolvable verdict, zero files scanned" shape the
+ * agreement table in `module-source.test.ts` exists to catch.
+ */
 function fieldLooksExecutable(value: unknown): boolean {
-  if (typeof value !== "string" || value.trim().length === 0) return false;
-  const trimmed = value.trim();
+  if (typeof value !== "string") return false;
+  const trimmed = value.replace(/\?.*$/, "").trim();
+  if (trimmed.length === 0) return false;
   if (trimmed.endsWith(".node")) return false;
   return true;
 }
@@ -145,8 +182,24 @@ export function observeExportMetadata(identity: ResolvedPackageIdentity): Export
   const browserField = manifest["browser"];
   const typesField = manifest["types"] ?? manifest["typings"];
 
+  // `exports` is authoritative when present, so a `browser` field does **not** rescue
+  // a package whose exports map hides every browser entry. It used to: the condition
+  // was `exportsResolveForBrowser(exportsField) || browserField !== undefined`, and
+  // that `||` contradicted this module's own header ("when `exports` exists it is
+  // authoritative"). The consequence surfaced once the scanners became
+  // reachability-bounded: `{ exports: { ".": { node: "./index.js" } }, browser: {
+  // "./lib/x.js": "./x.browser.js" } }` with `node:fs` in `index.js` was reported
+  // browser-resolvable here while the entry resolution (correctly) named no
+  // browser-executable root, so the dependency step reached zero files and drew its
+  // conclusion from an empty set. The two steps now agree, which is what the shared
+  // condition order and the agreement test in `module-source.test.ts` exist for.
+  //
+  // The object form of `browser` is a *path substitution* map, not a new entry: it
+  // remaps a request that resolution already found. It therefore cannot create a
+  // browser entry where `exports` publishes none, and a string `browser` is ignored
+  // for the same reason — `exports` wins outright in both cases.
   const browserResolvable = hasExports
-    ? exportsResolveForBrowser(exportsField) || browserField !== undefined
+    ? exportsResolveForBrowser(exportsField)
     : FALLBACK_BROWSER_FIELDS.some(field => fieldLooksExecutable(manifest[field])) &&
       !(typeof browserField === "object" && browserFieldExcludesRoot(manifest));
 

@@ -196,6 +196,36 @@ export type { CandidateBuildOptions, CandidateBuildResult } from "./probe/build"
 export { findNodeOnlySpecifiers, observeNodeBuiltins } from "./probe/node-scan";
 export type { NodeScanObservation } from "./probe/node-scan";
 
+// Which files a browser build can reach, and what a package's source actually says.
+// Exported because both are answers a consumer may want to re-check independently of
+// a probe report — the reachability rule is what makes a "no Node builtins" finding
+// mean "not in the artifact" rather than "not in any file the package ships".
+export {
+  ACTIVE_EXPORT_CONDITIONS,
+  FALLBACK_BROWSER_FIELDS,
+  resolveBrowserEntryPaths,
+  resolveSelfReferenceSubpath,
+  selfReferenceResolver,
+} from "./probe/browser-entry";
+export type { BrowserEntryResolution } from "./probe/browser-entry";
+
+export {
+  analyzeModuleSource,
+  collectReachableSourceFiles,
+  isRelativeSpecifier,
+  maskComments,
+  sourceWithoutComments,
+} from "./probe/module-source";
+export type {
+  CommentRange,
+  ImportReference,
+  ImportReferenceKind,
+  ModuleSourceAnalysis,
+  PackageSourceFile,
+  ReachableSourceResult,
+  SelfReferenceResolver,
+} from "./probe/module-source";
+
 export { observeExportMetadata } from "./probe/export-metadata";
 export type { ExportMetadataObservation } from "./probe/export-metadata";
 

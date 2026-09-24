@@ -1,0 +1,6 @@
+{
+  "name": "probe-fixture-nested-package-attribution",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module"
+}

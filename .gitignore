@@ -10,3 +10,12 @@ coverage/
 .fgc/
 *.log
 .DS_Store
+
+# One probe fixture ships a directory literally named `.fgc/`, because a package is free
+# to have one and the artifact bound must not treat that name as the probe's scratch
+# space. The blanket `.fgc/` rule above would drop it from the commit, so the fixture is
+# re-included **after** that rule — git applies these in order, and a negation that comes
+# earlier loses. Without this the fixture exists locally and is absent on CI, so the test
+# passes here and fails there, which is worse than having no test at all.
+!packages/dependency-resolver/src/__fixtures__/probe/dot-fgc-directory/node_modules/dot-fgc/src/.fgc/
+!packages/dependency-resolver/src/__fixtures__/probe/dot-fgc-directory/node_modules/dot-fgc/src/.fgc/**

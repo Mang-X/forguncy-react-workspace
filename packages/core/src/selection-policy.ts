@@ -594,12 +594,28 @@ export const SELECTION_ACCEPTANCE_CRITERIA: readonly SelectionAcceptanceCriterio
   {
     id: "end-to-end-proof",
     criterion: "At least one simple ESM package and one Worker/WASM-risk package are evaluated end-to-end.",
-    // Deliberately not phrased as "enforcedBy". This criterion is *evidence*, and no
-    // PR against #16 can produce it: it needs the probe engine (#17) to run and the
-    // selection flow (#18) to exercise both cases. `SPEC_PROVING_CASES` only fixes
-    // which two cases have to appear in that evaluation, so that neither can be
-    // dropped — which is why #16 stays open until they are discharged.
-    enforcedBy: `Not enforced in this repository yet. SPEC_PROVING_CASES fixes both cases for the evaluation that #17 and #18 produce; this criterion is outstanding.`,
+    // This one is *evidence* rather than a mechanism, and it took a while to be
+    // discharged: it needs the probe engine (#17) to run against something other than
+    // a fixture, which no PR against #16 itself could produce. `SPEC_PROVING_CASES`
+    // fixes which two cases have to appear, so that neither can be dropped.
+    //
+    // The evaluation is `packages/dependency-resolver/src/selection-proving-cases.test.ts`,
+    // which runs the two cases — `es-toolkit` and `@embedpdf/pdfium`, installed at
+    // exact versions from `examples/probe-proving-cases` — through the whole selection
+    // flow: ownership gate, probe, audit, lock record, freshness read-back.
+    //
+    // It is a test rather than a report because of what the first real-package run
+    // uncovered: three false `platform-api-unavailable` rejections that every synthetic
+    // fixture had passed, because each fixture ships one source file per package and so
+    // could not distinguish "the whole tree" from "what a browser build reaches". Only a
+    // genuine published artifact separates those sets, and a report cannot be re-run when
+    // someone next changes a scanner.
+    //
+    // What this does not cover: #18's Skill-level evaluation of the same cases (candidate
+    // research, ranking, the choice among alternatives) is a separate deliverable and
+    // remains open. This criterion is about the evidence the policy requires, which now
+    // exists and is executed on every run.
+    enforcedBy: `packages/dependency-resolver/src/selection-proving-cases.test.ts — the two cases SPEC_PROVING_CASES fixes (es-toolkit for the plain case, @embedpdf/pdfium for the Worker/WASM-risk case), each run end to end against a real installed artifact.`,
   },
 ];
 

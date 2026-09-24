@@ -1,0 +1,6 @@
+{
+  "name": "probe-fixture-unreachable-optional-loader",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module"
+}

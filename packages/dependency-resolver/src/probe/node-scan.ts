@@ -15,15 +15,36 @@
  *
  * The scan walks the package and its dependency/optional/peer-resolvable graph
  * with a cycle guard, sorted at every level so two runs of the same install read
- * files in the same order. Detection is textual on purpose — parsing every module
- * system the ecosystem ships would be a second resolver — and conservative in both
- * directions: only call-site shapes that *name* a builtin count (an `import`
- * binding called `fs` means nothing), and the Node-only set excludes universal
- * builtins (`path`, `os`, `crypto`, streams, `buffer`, `url`, `util`, `assert`)
- * whose browser polyfills are ordinary bundler behaviour rather than a platform
- * requirement. Native-addon indicators come from the manifest (`gypfile`, known
- * native tooling packages), from `.node` files on disk, and from `dlopen` /
- * `require("*.node")` in source.
+ * files in the same order.
+ *
+ * **What counts as evidence changed after the first real-package probe.** This step
+ * used to read every source file in each graph member's directory with plain regular
+ * expressions, and reported `platform-api-unavailable` for three real packages whose
+ * browser artifacts contain no Node builtins at all: `@embedpdf/pdfium` (every
+ * `fs`/`module` reference lives in the Node builds beside `index.browser.js`),
+ * `three` (the references live in optional draco/basis/ammo loaders under
+ * `examples/jsm/libs/`, unreachable from `build/three.module.js`) and `es-toolkit`
+ * (the references live in `dist/server/*`, behind a `./server` subpath the root entry
+ * never imports, *and* inside JSDoc `@example` blocks). Two ways to be about text
+ * rather than code, one outcome: a package the platform can run perfectly well,
+ * refused for a file the browser build never opens.
+ *
+ * So the step now scans what a browser build can actually reach, and reads each file
+ * through the same parser the target uses, which is what makes "this is comment
+ * text" a parse result rather than a guess. `module-source.ts` holds both mechanisms
+ * and the reasoning; this module holds the Node-specific judgement about what the
+ * reachable code means.
+ *
+ * The conservative direction is preserved, because it is not what was wrong: only
+ * call-site shapes that *name* a builtin count (an `import` binding called `fs` means
+ * nothing), the Node-only set still excludes universal builtins (`path`, `os`,
+ * `crypto`, streams, `buffer`, `url`, `util`, `assert`) whose browser polyfills are
+ * ordinary bundler behaviour, and native-addon indicators still come from the
+ * manifest (`gypfile`, known native tooling packages), from `.node` files on disk,
+ * and from `dlopen` / `require("*.node")` in source. Manifest- and disk-level
+ * indicators are deliberately **not** filtered by reachability: `gypfile` and a
+ * shipped `.node` file are properties of the published package, not of one file's
+ * import graph, so they remain rejections wherever they are found.
  *
  * When nothing is found the step records the positive signal `no-node-builtins`
  * as a **fact**, never as a finding: a preference cannot accept a candidate, and
@@ -33,15 +54,23 @@
  * latter maps to a `replace` decision's code.
  */
 
-import { readFile, readdir } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 
 import type { ProbeFact, ProbeRejectionFinding, ProbeRisk, ProbeValidationEntry } from "@forguncy-react-workspace/core";
 
+import {
+  applyBrowserField,
+  browserFieldRedirectsSpecifier,
+  resolveBrowserEntryPaths,
+  selfReferenceResolver,
+} from "./browser-entry";
 import type { ResolvedPackageIdentity } from "./identity";
 import { locateManifest } from "./identity";
-import { compareStrings, walkPackageSourceFiles } from "./scan-utils";
+import type { PackageSourceFile } from "./module-source";
+import { collectReachableSourceFiles, isInside, readSourceFile, sourceWithoutCommentsLenient } from "./module-source";
+import { compareStrings } from "./scan-utils";
 
 /**
  * Builtins with no browser environment and no ordinary polyfill path.
@@ -113,14 +142,34 @@ function isNodeOnlySpecifier(specifier: string): boolean {
   return NODE_ONLY_BUILTINS.has(specifier) || NODE_ONLY_BUILTINS.has(bare);
 }
 
-/** Every Node-only specifier named in `source`, in first-seen order, deduplicated. */
+/**
+ * Every Node-only specifier named in `source`, in first-seen order, deduplicated.
+ *
+ * Parses rather than scans, for the reason `module-source.ts` records at length:
+ * `es-toolkit` names `node:fs` and `node:vm` only inside JSDoc `@example` blocks, and
+ * a text match cannot tell that from a real import. Comments are blanked before the
+ * patterns run, so a specifier in prose is documentation rather than a dependency.
+ *
+ * **The parse may fail open, but the masking may not.** An earlier version ran the patterns
+ * over the raw text when the file would not parse, on the theory that a missed real import is
+ * worse than a false positive. That was wrong twice over: it restored the exact defect this
+ * function exists to remove — measured, a package whose entry used the `accessor` field had its
+ * doc comment read as a `require("node:child_process")` and was refused while the bundler built
+ * it cleanly — and the trade-off it named is not even the one being made, because the build step
+ * independently catches a builtin that is really there. Comments are therefore stripped by a
+ * text masker that needs no successful parse, so an unparseable file still yields its real
+ * imports and only its real ones.
+ */
 export function findNodeOnlySpecifiers(source: string): readonly string[] {
+  // Always masked, parse or no parse: skipping the mask on a parse failure restored the very
+  // defect this function exists to remove.
+  const searchable = sourceWithoutCommentsLenient(source);
   const found: string[] = [];
   const seen = new Set<string>();
   for (const pattern of BUILTIN_SPECIFIER_PATTERNS) {
     pattern.lastIndex = 0;
     let match: RegExpExecArray | null;
-    while ((match = pattern.exec(source)) !== null) {
+    while ((match = pattern.exec(searchable)) !== null) {
       const specifier = match[1];
       if (specifier === undefined || !isNodeOnlySpecifier(specifier) || seen.has(specifier)) {
         continue;
@@ -130,6 +179,35 @@ export function findNodeOnlySpecifiers(source: string): readonly string[] {
     }
   }
   return found;
+}
+
+/**
+ * Node-only specifiers named by a call site this step can attribute, in sorted order.
+ *
+ * Reads the parsed import list when the file parsed, and falls back to
+ * {@link findNodeOnlySpecifiers} when it did not. Either way a comment is never a
+ * call site: the parsed path has no comment nodes at all, and the fallback masks them.
+ */
+function nodeOnlySpecifiersOf(
+  file: PackageSourceFile,
+  manifest: Readonly<Record<string, unknown>>,
+): readonly string[] {
+  // A specifier the manifest's `browser` map excludes or redirects never reaches its original
+  // target in a browser build, so it is not a builtin the artifact contains. Measured on
+  // `{"browser":{"fs":false}}` with `import fs from "fs"`, where rolldown built cleanly while
+  // the scan refused the package.
+  const redirected = (specifier: string): boolean => browserFieldRedirectsSpecifier(manifest, specifier);
+
+  if (file.analysis === undefined) {
+    return findNodeOnlySpecifiers(file.source).filter(specifier => !redirected(specifier));
+  }
+  const found = new Set<string>();
+  for (const reference of file.analysis.imports) {
+    if (isNodeOnlySpecifier(reference.specifier) && !redirected(reference.specifier)) {
+      found.add(reference.specifier);
+    }
+  }
+  return [...found].sort(compareStrings);
 }
 
 /** Native-addon indicators visible in source text (paths are found separately, from disk). */
@@ -143,6 +221,15 @@ function findNativeIndicatorsInSource(source: string): readonly string[] {
     found.push("source:require-*.node");
   }
   return found;
+}
+
+/** The same indicators, read from the parse instead of from text. */
+function nativeIndicatorsOf(file: PackageSourceFile): readonly string[] {
+  const parsed = file.analysis?.nativeIndicators;
+  if (parsed !== undefined) {
+    return parsed;
+  }
+  return findNativeIndicatorsInSource(file.masked);
 }
 
 function nativeIndicatorsFromManifest(manifest: Readonly<Record<string, unknown>>): readonly string[] {
@@ -286,36 +373,199 @@ function portableEvidence(specifier: string): string {
   return `builtin:${specifier}`;
 }
 
+/**
+ * Scans the resolved graph for Node builtins and native indicators.
+ *
+ * `bundledFiles` is the probed package's files the build actually included, or `undefined` when
+ * no build ran. It bounds the scan for the same reason `runtime-pattern-scan` is bounded:
+ * reachability is not bundling. rolldown drops a module whose bindings are unused, and it can
+ * drop it *before* resolving what that module imports or calls — so a scan over the full
+ * reachable set reports a Node dependency from a file the artifact does not contain.
+ *
+ * The native-indicator channel is where that bites hardest, because a native indicator needs no
+ * `import` at all: measured on an unused named import whose module called
+ * `process.dlopen` — the build passed, the artifact contained no `dlopen`, and the report
+ * refused the package. A builtin *import* in the same position usually escapes this because
+ * rolldown descends into the module and fails on the builtin itself, which is why the
+ * asymmetry is easy to miss.
+ */
+/**
+ * The files of one graph member to scan for findings.
+ *
+ * With an artifact: the package's files that the build **actually included**, taken from the
+ * bundler's own module list rather than from a walk. That is what makes a dependency's
+ * `exports`-subpath file and a `browser`-redirect target visible to the scan — measured, both
+ * were missed while the scan walked only from the package's root entry.
+ *
+ * Without an artifact (a failed build): the reachable set, which is the honest answer when
+ * there is nothing to bound by.
+ *
+ * Either way the files are attributed to the package whose directory contains them, so a file
+ * the bundler pulled in from somewhere else is not reported under this package's name.
+ */
+async function filesToScan(
+  package_: GraphPackage,
+  graph: readonly GraphPackage[],
+  reachableFiles: readonly PackageSourceFile[],
+  bundledFiles: ReadonlySet<string> | undefined,
+): Promise<readonly PackageSourceFile[]> {
+  if (bundledFiles === undefined) {
+    return reachableFiles;
+  }
+  const fromArtifact: PackageSourceFile[] = [];
+  for (const absolutePath of bundledFiles) {
+    if (!isInside(package_.directory, absolutePath)) {
+      continue;
+    }
+    // Attribution goes to the **deepest** graph package whose directory contains the file, not
+    // to every package that does. A nested dependency's directory sits inside its parent's, so
+    // an `isInside` test alone matched both: measured on `outer` depending on
+    // `outer/node_modules/inner`, the `node:fs` in `inner/index.js` was filed once and reported
+    // against **both** `inner@1.0.0` and `outer@1.0.0` — a package named in evidence it did not
+    // contribute to, which is exactly what a reviewer checks first.
+    if (deepestOwningPackage(graph, absolutePath) !== package_.directory) {
+      continue;
+    }
+    const file = await readSourceFile(package_.directory, absolutePath);
+    if (file !== undefined) {
+      fromArtifact.push(file);
+    }
+  }
+  return fromArtifact.sort((left, right) => compareStrings(left.relativePath, right.relativePath));
+}
+
+/**
+ * The graph package whose directory most specifically contains `absolutePath`.
+ *
+ * "Most specifically" means the longest matching directory: a file under
+ * `outer/node_modules/inner/` belongs to `inner` even though it is also inside `outer`. Comparing
+ * lengths is enough because a containing directory is a prefix of the path, so the longest
+ * match is the deepest one.
+ */
+function deepestOwningPackage(graph: readonly GraphPackage[], absolutePath: string): string | null {
+  let owner: string | null = null;
+  for (const candidate of graph) {
+    if (!isInside(candidate.directory, absolutePath)) {
+      continue;
+    }
+    if (owner === null || candidate.directory.length > owner.length) {
+      owner = candidate.directory;
+    }
+  }
+  return owner;
+}
+
+/** The contributor token for a graph member: the same shape `builtinHits` records. */
+function nativeOwner(package_: GraphPackage): string {
+  return `package:${package_.name}@${package_.version ?? "?"}`;
+}
+
+/** Adds one contributor to a native indicator's display key without dropping the ones already there. */
+function addNativeHit(hits: Map<string, Set<string>>, key: string, owner: string): void {
+  let owners = hits.get(key);
+  if (owners === undefined) {
+    owners = new Set<string>();
+    hits.set(key, owners);
+  }
+  owners.add(owner);
+}
+
 export async function observeNodeBuiltins(
   projectRoot: string,
   identity: ResolvedPackageIdentity,
+  bundledFiles?: ReadonlySet<string>,
 ): Promise<NodeScanObservation> {
   const facts: ProbeFact[] = [];
   const rejectionFindings: ProbeRejectionFinding[] = [];
   const graph = await collectGraph(identity);
 
   const builtinHits = new Map<string, Set<string>>(); // specifier -> package evidence set
-  const nativeHits = new Set<string>();
+  /**
+   * Native indicators — the display text is the key, and every **contributor identity** that
+   * produced it is a member of the value set.
+   *
+   * A set rather than a single identity, because two versions of one name can produce the same
+   * indicator at the same relative path: `shared-util@1.0.0` and `shared-util@2.0.0` both calling
+   * `process.dlopen` in `index.js` yield one key, `source:process.dlopen [shared-util] index.js`.
+   * Storing one identity meant the second write replaced the first, so the evidence named a single
+   * version and silently dropped the other contributor. Measured.
+   *
+   * Deduplicating the *display* key is right — the facts list is a set of indicators, not one row
+   * per installed copy — but it must not also collapse who contributed.
+   */
+  const nativeHits = new Map<string, Set<string>>();
   const scannedPackages: string[] = [];
+  const unreachableEntryHits: string[] = [];
+  let reachableFileCount = 0;
+  let skippedShakenOut = 0;
 
   for (const package_ of graph) {
     scannedPackages.push(`${package_.name}@${package_.version ?? "?"}`);
     for (const indicator of nativeIndicatorsFromManifest(package_.manifest)) {
-      nativeHits.add(`${indicator} [${package_.name}]`);
+      addNativeHit(nativeHits, `${indicator} [${package_.name}]`, nativeOwner(package_));
     }
     if (await hasNodeFile(package_.directory)) {
-      nativeHits.add(`filesystem:*.node [${package_.name}]`);
+      addNativeHit(nativeHits, `filesystem:*.node [${package_.name}]`, nativeOwner(package_));
     }
 
-    const files = await walkPackageSourceFiles(package_.directory);
-    for (const file of files) {
-      let source: string;
-      try {
-        source = await readFile(file, "utf8");
-      } catch {
-        continue;
+    // Only what a browser build can reach from this package's published entries.
+    // A file outside that set cannot disqualify the artifact, because the artifact
+    // does not contain it — see the module header for the three packages that made
+    // this a defect rather than a preference.
+    const { entries } = resolveBrowserEntryPaths(package_.manifest);
+    const reachable = await collectReachableSourceFiles(
+      package_.directory,
+      entries,
+      selfReferenceResolver(package_.manifest),
+      request => applyBrowserField(package_.manifest, request),
+    );
+    // Every way the walk could fail to reach a file is recorded, because a smaller file count
+    // is otherwise the only trace and it reads the same as a healthy package.
+    for (const reason of [
+      ["missing", reachable.missingEntries],
+      ["escaped", reachable.escapedSpecifiers],
+      ["unresolved", reachable.unresolvedSpecifiers],
+      ["unparseable", reachable.unparseableFiles],
+    ] as const) {
+      const [label, values] = reason;
+      if (values.length > 0) {
+        unreachableEntryHits.push(`${package_.name}:${label}:${values.join(",")}`);
       }
-      for (const specifier of findNodeOnlySpecifiers(source)) {
+    }
+
+    reachableFileCount += reachable.files.length;
+
+    // The files this package actually contributes to the artifact.
+    //
+    // Reachability from the package's **own root entry** is not the same set, and using it as
+    // the scan source loses a file the build genuinely loaded. Two measured shapes:
+    //
+    // - a dependency's `exports` subpath (`import "dep/sub"` where `.` resolves to a clean file
+    //   and `./sub` to a native one) — rolldown bundles `dep/native.js`, but a walk from `dep`'s
+    //   root entry only ever sees `clean.js`, so the `dlopen` in `native.js` was never scanned
+    //   and the package reported `supports-deployment`;
+    // - a `browser` field redirecting a bare specifier to a module that itself needs `node:fs`
+    //   — the redirect target is loaded by the build but is not reachable from the root entry
+    //   either, so the report said `supports-rejection-only` with **no** rejection finding.
+    //
+    // So when a build ran, the artifact's own file list is the **positive** source for this
+    // package: those files exist in the artifact by definition, so a finding drawn from one is
+    // a statement about the artifact. Reachability still supplies the files for the
+    // no-artifact case, and still bounds *which* of a package's files can be attributed to it.
+    const scanned = await filesToScan(package_, graph, reachable.files, bundledFiles);
+    // Counted as a **set difference**, not by subtracting cardinalities. `scanned` is no longer a
+    // subset of `reachable` — when a build ran it is taken from the artifact's own module list,
+    // which can contain a file the walk never reached (a dependency's `exports` subpath) — so
+    // the two lengths no longer describe one set against another. Measured on the
+    // `dependency-subpath-native` fixture, where the two sets are `{clean.js}` and
+    // `{native.js}`: both length 1, so a subtraction reported 0 while `clean.js` genuinely is
+    // reached-but-not-in-the-artifact.
+    if (bundledFiles !== undefined) {
+      skippedShakenOut += reachable.files.filter(file => !bundledFiles.has(file.absolutePath)).length;
+    }
+
+    for (const file of scanned) {
+      for (const specifier of nodeOnlySpecifiersOf(file, package_.manifest)) {
         let set = builtinHits.get(specifier);
         if (set === undefined) {
           set = new Set();
@@ -323,14 +573,20 @@ export async function observeNodeBuiltins(
         }
         set.add(`package:${package_.name}@${package_.version ?? "?"}`);
       }
-      for (const indicator of findNativeIndicatorsInSource(source)) {
-        nativeHits.add(`${indicator} [${package_.name}]`);
+      for (const indicator of nativeIndicatorsOf(file)) {
+        // The **file** is part of the evidence, not just the package. A native indicator is
+        // reached through no import — `process.dlopen` is a call — so when one is reported from
+        // a module that was shaken out, "which file" is the only thing that makes the claim
+        // falsifiable. Measured: without the path, the evidence read
+        // `native:source:process.dlopen [oracle]`, which names neither the file the indicator
+        // came from nor, for an oracle or a reviewer, which file to check.
+        addNativeHit(nativeHits, `${indicator} [${package_.name}] ${file.relativePath}`, nativeOwner(package_));
       }
     }
   }
 
   const builtinSpecifiers = [...builtinHits.keys()].sort(compareStrings);
-  const nativeIndicators = [...nativeHits].sort(compareStrings);
+  const nativeIndicators = [...nativeHits.keys()].sort(compareStrings);
 
   facts.push({
     step: "node-builtin-scan",
@@ -347,8 +603,49 @@ export async function observeNodeBuiltins(
     name: "graph.native-indicators",
     value: nativeIndicators,
   });
+  // Coverage, recorded so a reader can tell "nothing was found" apart from "nothing
+  // was looked at" — the distinction the reachability rule makes load-bearing, and
+  // the one that was invisible while the step scanned whole directories.
+  facts.push({
+    step: "node-builtin-scan",
+    name: "graph.entry-resolutions",
+    value: [...new Set(unreachableEntryHits)].sort(compareStrings),
+  });
+  facts.push({
+    step: "node-builtin-scan",
+    name: "graph.reachable-file-count",
+    value: reachableFileCount,
+  });
+  // Coverage: reached but not in the artifact, and therefore not scanned for findings. Recorded
+  // so the bound is visible rather than an unexplained absence of findings.
+  facts.push({
+    step: "node-builtin-scan",
+    name: "graph.files-shaken-out",
+    value: skippedShakenOut,
+  });
 
-  if (builtinSpecifiers.length === 0 && nativeIndicators.length === 0) {
+  /**
+   * Whether the scan actually read any source.
+   *
+   * Reachability made this a question with two answers rather than one. The scan reads what a
+   * browser build reaches, so a package whose tree it could reach nothing in produces *no*
+   * specifiers — and "no builtins" is exactly the wrong conclusion to draw from that, because
+   * the two situations are:
+   *
+   * - nothing reachable was published (the package is browser-unresolvable, which
+   *   `export-metadata` reports as `ssr-or-server-only-without-browser-build`), or
+   * - the manifest names an entry this walk cannot follow, so the question was never asked.
+   *
+   * Measured: `{ exports: { ".": { node: "./index.js" } }, browser: { "./lib/x.js":
+   * "./x.browser.js" } }` with `node:fs` in `index.js` — `export-metadata` counted the bare
+   * `browser` field as browser-resolvable, so it filed no rejection, while this step's entry
+   * resolution (correctly) found no browser-resolvable root and reached zero files. Reporting
+   * `no-node-builtins: true` there would have been a blanket amnesty: any server-only package
+   * laundered into a clean bill of health by attaching a `browser` field.
+   */
+  const reachedAnySource = reachableFileCount > 0;
+
+  if (builtinSpecifiers.length === 0 && nativeIndicators.length === 0 && reachedAnySource) {
     // The positive signal, as a fact: `no-node-builtins` can never be a finding
     // that accepts the candidate, and recording it as one would put a preference
     // in a bucket the validator treats as observation-backed findings.
@@ -359,16 +656,44 @@ export async function observeNodeBuiltins(
     });
   }
 
+  if (!reachedAnySource) {
+    // Not a rejection — this step does not decide that — but not a clean result either.
+    // `graph.reachable-file-count: 0` plus this fact is what lets a reader tell "the package
+    // is fine" from "no browser entry could be followed".
+    facts.push({
+      step: "node-builtin-scan",
+      name: "signal.no-node-builtins",
+      value: false,
+    });
+    facts.push({
+      step: "node-builtin-scan",
+      name: "scan.no-reachable-source",
+      value: true,
+    });
+  }
+
   if (builtinSpecifiers.length > 0 || nativeIndicators.length > 0) {
-    // Name every package that contributed a hit, not just the probed root:
-    // the review regression is a *nested* dependency reaching a builtin, and
-    // evidence that only says the root's name hides which graph member did it.
-    const contributingPackages = new Set<string>([
-      `package:${identity.packageName}@${identity.packageVersion}`,
-    ]);
+    // Name every package that **contributed** a hit — derived from the hits, not seeded with the
+    // probed root.
+    //
+    // Seeding the root unconditionally was wrong in the same way the file attribution was: it
+    // named a package in the evidence whatever that package's files actually said. Measured on
+    // `outer` depending on `outer/node_modules/inner`, where only `inner/index.js` imports
+    // `node:fs`: the evidence listed `package:outer@1.0.0` as well, so a reviewer checking the
+    // claim against `outer`'s own source would find nothing. A root that genuinely contributes
+    // its own hit is still named — by this same loop.
+    const contributingPackages = new Set<string>();
     for (const packagesForSpecifier of builtinHits.values()) {
       for (const packageEvidence of packagesForSpecifier) {
         contributingPackages.add(packageEvidence);
+      }
+    }
+    // Native indicators are keyed by `"<indicator> [<name>] <file>"`, so the package is read off
+    // the token rather than re-derived; an indicator with no package token (a manifest- or
+    // filesystem-level one) is still evidence about the root it was found under.
+    for (const owners of nativeHits.values()) {
+      for (const owner of owners) {
+        contributingPackages.add(owner);
       }
     }
     const evidence: string[] = [

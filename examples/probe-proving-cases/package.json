@@ -1,0 +1,39 @@
+{
+  "name": "@examples/probe-proving-cases",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "//dependencies": [
+    "The two packages #16's fifth acceptance criterion requires to be evaluated",
+    "end to end: one simple ESM package and one Worker/WASM-risk package. Both are",
+    "installed from npm at an exact version, never a range, because the probe's",
+    "evidence is about *this* published artifact — a range that could resolve",
+    "differently would silently change what was measured, and the whole point of the",
+    "criterion is that the verdict rests on a real artifact rather than on packaging",
+    "the evaluator wrote itself.",
+    "",
+    "`es-toolkit` is the simple case. It is also the package `#10`'s PoC already",
+    "proved inlineable end to end (examples/inline-es-toolkit +",
+    "packages/cell-compiler/src/inline-es-toolkit-poc.test.ts), which makes a",
+    "rejection of it self-evidently wrong rather than a judgement call.",
+    "",
+    "`@embedpdf/pdfium` is the Worker/WASM-risk case, and it is the package #16's own",
+    "\"Example policy: PDF\" section names: \"Do not default to low-level pdfjs-dist",
+    "merely because it is famous. The Agent should compare higher-level modern",
+    "browser/React alternatives (for example an EmbedPDF-style package), probe actual",
+    "WASM/Worker/asset behavior\". Choosing it keeps the proving case an instance of",
+    "the Spec's policy rather than a counter-example to it. It ships a 4.6 MB",
+    "`pdfium.wasm` and resolves it through `new URL('pdfium.wasm', import.meta.url)`,",
+    "which is exactly the shape that must surface as a *risk* to be weighed rather",
+    "than as an automatic rejection.",
+    "",
+    "Neither package is imported by any cell in this repository. The dependency exists",
+    "so the probe has a real installed artifact to measure, and the probe is run from",
+    "this package's directory so Node resolution anchors where the packages are",
+    "declared."
+  ],
+  "dependencies": {
+    "@embedpdf/pdfium": "2.15.1",
+    "es-toolkit": "1.52.0"
+  }
+}

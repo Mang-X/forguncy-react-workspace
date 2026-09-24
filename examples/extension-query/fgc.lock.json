@@ -10,7 +10,7 @@
       "libraryId": "tanstack-query",
       "probe": {
         "status": "passed",
-        "fingerprint": "probe=\"inline-bundle\";entry=\"@tanstack/react-query\";config={};bundler={\"attachDebugInfo\":\"none\",\"codeSplitting\":\"false\",\"format\":\"iife\",\"jsx\":\"react-jsx\",\"platform\":\"browser\"}",
+        "fingerprint": "probe=\"inline-bundle\";entry=\"@tanstack/react-query\";analysis=10;config={};bundler={\"attachDebugInfo\":\"none\",\"codeSplitting\":\"false\",\"format\":\"iife\",\"jsx\":\"react-jsx\",\"platform\":\"browser\"}",
         "versionIndependent": false
       },
       "target": null,
