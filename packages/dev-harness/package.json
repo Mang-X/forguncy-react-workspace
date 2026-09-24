@@ -32,10 +32,28 @@
     "harness plugin includes it in the Vite config it returns: React Fast Refresh is what makes",
     "an edit to a Cell's source keep the component's state, and without it `vp dev` degrades to",
     "a full page reload. It is loaded from this package's own tree, so a project does not have",
-    "to install it to get the loop #23 defines."
+    "to install it to get the loop #23 defines.",
+    "",
+    "`@forguncy-react-workspace/dependency-resolver` is a *runtime* dependency, and where it is",
+    "imported from is the point: `local-decision-projection.ts` reaches `dependency-resolver/local`",
+    "from `src/`, during normal `devHarness()` startup, so the plugin does not work unless this",
+    "package's install provides it. It was a devDependency while `src/` did not import it and only",
+    "a test did — that boundary was crossed when the harness began sharing the compiler's lock",
+    "validity pipeline, and this records the move rather than leaving a stale claim in `//devDependencies`.",
+    "",
+    "`/local` is the entry that makes this affordable: the barrel re-exports `probe/build.ts`, which",
+    "imports `rolldown`, so importing the barrel from `src/` would put a bundler in every project's",
+    "`vite.config.ts` graph — measured at ~570 ms against 7-11 ms for the rolldown-free modules.",
+    "`dependency-resolver-local.test.ts` asserts this entry's transitive graph reaches no `rolldown`",
+    "and exports nothing the barrel does not, so the cheap edge stays cheap.",
+    "",
+    "A package-boundary test asserts both halves of this rule from here on: every package `src/`",
+    "imports is declared in `dependencies`, and nothing declared in `devDependencies` is reachable",
+    "from `src/` (`package-boundaries.test.ts`)."
   ],
   "dependencies": {
     "@forguncy-react-workspace/core": "workspace:*",
+    "@forguncy-react-workspace/dependency-resolver": "workspace:*",
     "@forguncy-react-workspace/runtime": "workspace:*",
     "@forguncy-react-workspace/vite-plugin-fgc": "workspace:*",
     "@vitejs/plugin-react-swc": "4.3.3",
@@ -47,6 +65,11 @@
     ".": "./src/index.ts",
     "./mount": "./src/mount.ts"
   },
+  "//devDependencies": [
+    "`@types/react` / `@types/react-dom` are pinned to the host versions the harness substitutes.",
+    "Nothing in `src/` is a React component, but `mount.ts` calls `createRoot` and `createElement`,",
+    "so its types come from here rather than from a project's own install."
+  ],
   "devDependencies": {
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.7"

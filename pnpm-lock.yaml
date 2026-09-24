@@ -139,6 +139,9 @@ importers:
       '@forguncy-react-workspace/core':
         specifier: workspace:*
         version: link:../core
+      '@forguncy-react-workspace/dependency-resolver':
+        specifier: workspace:*
+        version: link:../dependency-resolver
       '@forguncy-react-workspace/runtime':
         specifier: workspace:*
         version: link:../runtime

@@ -61,13 +61,43 @@ green local render says nothing about: whether the designer accepts the source (
 lifecycle, routing, permissions, extension load order, cross-Cell isolation, or the generated
 host bridge — the harness resolves the *published* packages and never runs the bridge.
 
+An `extension` dependency has no local equivalent the harness could infer, because the reason a
+package is an `extension` is that its module identity or cross-cell singleton semantics matter — so
+the project declares one of two branches per package (`extensionChoices` in `devHarness`'s options):
+a substitute with its justification, or a `real-runtime-only` acknowledgement with a reason *and* a
+consequence. Both branches are **enforced**, not merely recorded: a substitute resolves the id to the
+named package or shim file, and `real-runtime-only` resolves it to a module that throws, so the
+dependency is never exercised by an npm copy the project said it could not validate. A declaration
+that cannot be honoured — a shim that is not there, a package that is not installed — throws for the
+same reason: resolving somewhere else is worse than failing, because the Cell renders and the
+developer concludes the substitute ran.
+
+`vp dev` audits the same declaration at server start and **refuses to start** on an undeclared one.
+Only the choices that audit says matched are applied: a choice whose decision moved to another
+strategy is reported as unmatched and is never used for resolution, because applying it would make
+the dev server serve a substitute while the compiler follows the lock and bundles the real package —
+the dev/compiler drift this layer exists to prevent. The lock is projected onto the mounted Cell
+first, because a decision is keyed by `(package, cellTarget)` and one Cell's record must not govern
+another's, and then through the same validity pipeline the compiler runs — conformance audit plus
+freshness — because `compileCell` refuses an artifact whose decision was withheld. Two freshness axes
+(an extension's version/identity, and a probe fingerprint) are not observable from a local process,
+so a record stale only on those is kept and reported rather than withheld: withholding it would drop
+every extension decision and resolve the import silently through npm, which is the defect this whole
+layer exists to prevent. Both branches, the finding, and whether it blocks belong to the runtime
+package (`LOCAL_DEV_DIAGNOSTIC_RULES`); `dev-harness` reads `blocksLocalDevelopment` off that table
+rather than keeping a list of its own, so a rule the contract marks blocking cannot be downgraded here
+by omission. Matching is exact, not a prefix, so a subpath the extension does not provide is not
+answered locally — the same rule the compiler's extension table applies.
+
 Where the loop is *more* permissive than the page it is recorded rather than smoothed over:
 locally `react-dom/client` is the whole published module, while the page narrows it to the
 members the runtime contract observed. So a local pass must never be reported as a stronger
 result than it is.
 
-Run `runtime`'s `formatLocalDevValidationDistinction()` to print what is still owed to a real
-page, instead of enumerating it from memory.
+Run the runtime package's `formatLocalDevValidationDistinction()` to print what is still owed to
+a real page, instead of enumerating it from memory. The harness prints it at server start for the
+same reason — a green local render is when a reader is most likely to mistake local for
+compatible.
 
 ## Workflow
 

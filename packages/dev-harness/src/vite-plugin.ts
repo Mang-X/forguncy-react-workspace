@@ -55,10 +55,20 @@ import react from "@vitejs/plugin-react-swc";
 // `forguncy()` (#28) and reads the registry that plugin produced. `createCellRegistry` and
 // `isCellRegistry` were imported here in an earlier draft that normalized the config in this
 // file, which would have been a second answer to a question the Cell seam already answers.
-import { ForguncyConfigError } from "@forguncy-react-workspace/core";
+import { ForguncyConfigError, RUNTIME_CONTRACT_TARGET } from "@forguncy-react-workspace/core";
 import type { CellRegistry, ForguncyConfig, RegisteredCell } from "@forguncy-react-workspace/core";
+import type { LocalDevExtensionChoice } from "@forguncy-react-workspace/runtime";
+import { resolveInstalledVersions } from "@forguncy-react-workspace/dependency-resolver/local";
 import { cellVirtualModuleId, forguncy } from "@forguncy-react-workspace/vite-plugin-fgc";
 
+import {
+  extensionSubstitutionModuleId,
+  extensionSubstitutionModuleOf,
+  extensionSubstitutionModuleSource,
+  extensionSubstitutions,
+  substitutionForModuleId,
+} from "./extension-substitutions.ts";
+import type { ExtensionSubstitution } from "./extension-substitutions.ts";
 import {
   hostModuleAliases,
   hostModuleDedupePackages,
@@ -66,6 +76,19 @@ import {
   unavailableHostModuleOf,
   unavailableHostModuleSource,
 } from "./host-modules.ts";
+import {
+  auditHarnessConfiguration,
+  blockingLocalDevFindings,
+  BlockingLocalDevFindingError,
+  formatHarnessAudit,
+  readProjectDependencyDecisions,
+  unmatchedExtensionChoicePackages,
+} from "./local-dev-audit.ts";
+import {
+  formatLocalDecisionProjection,
+  installedVitePlusToolchain,
+  projectLocalDecisions,
+} from "./local-decision-projection.ts";
 
 /** The DOM element the mount script renders into. */
 export const HARNESS_MOUNT_ELEMENT_ID = "forguncy-cell-root";
@@ -100,6 +123,29 @@ export interface DevHarnessOptions {
    * belongs in the fixture, where it is typed and where its absence is a recorded decision.
    */
   readonly props?: Partial<Record<string, unknown>>;
+  /**
+   * What the project decided about each of its `extension` dependencies, in local development.
+   *
+   * The second half of #23's plan step 5, and the reason it is a *declaration from the project*
+   * rather than something the harness works out: `runtime`'s `LOCAL_DEV_STRATEGY_HANDLINGS`
+   * records that an `extension` package has no local equivalent the harness could infer — its
+   * module identity or its cross-cell singleton semantics are the reason it is an `extension` —
+   * so the two branches #22 allows are both statements only the project can make. A substitute
+   * carries a justification; a `real-runtime-only` acknowledgement carries a reason *and* a
+   * consequence, because the second answers "what will I not be able to see".
+   *
+   * Supplied here rather than in `forguncy.config.ts`, and the boundary is #26's: the project
+   * config is deployment state, while this is a local-development decision that says nothing
+   * about the artifact. A project with no `extension` dependency omits it and gets an audit that
+   * reports no findings.
+   *
+   * An `extension` dependency with no entry here is a **blocking** finding, not a warning:
+   * `local-dev-extension-needs-substitute` carries `blocksLocalDevelopment: true`, and the
+   * harness enforces that at server start — see `configureServer` in the implementation. That is
+   * deliberately stricter than the version mismatch beside it, which warns, and the asymmetry is
+   * the contract's rather than this package's.
+   */
+  readonly extensionChoices?: readonly LocalDevExtensionChoice[];
   /** Verify declared entries exist on disk while normalizing. Defaults to `true`. */
   readonly requireEntryFiles?: boolean;
 }
@@ -124,6 +170,17 @@ export interface DevHarnessVitePlugin {
   };
   configResolved(config: { readonly root: string; readonly plugins: readonly { readonly name: string }[] }): void;
   /**
+   * Audits the project's local-dev configuration once, and refuses the server on a blocking finding.
+   *
+   * Dev-only by construction: Vite calls this hook when a dev server is created and never during
+   * a build, which is exactly the scope of the audit. Wiring the audit into `buildStart` instead
+   * would be the tempting choice — it also runs once, for the client environment, in dev — but it
+   * runs on the *build* path too, and a `real-runtime-only` acknowledgement or a missing
+   * substitute is not a reason to refuse a production compile. Verified rather than assumed: a
+   * throw here rejects `createServer`, and a throw in `buildStart` does not distinguish the two.
+   */
+  configureServer(): Promise<void>;
+  /**
    * The host-substitution aliases, the dedupe list and the optimizer inclusions.
    *
    * Takes the user's config because the aliases have to be filtered against it: Vite merges this
@@ -137,7 +194,17 @@ export interface DevHarnessVitePlugin {
     readonly resolve: { readonly alias: Readonly<Record<string, string>>; readonly dedupe: readonly string[] };
     readonly optimizeDeps: { readonly include: readonly string[] };
   };
-  /** Claims the harness entry URL path and any unserved host substitution. */
+  /**
+   * Claims the harness entry URL path, an unserved host substitution, and every declared
+   * extension substitute or unsimulatable extension dependency.
+   *
+   * The extension half is #23's plan step 5 as *enforcement* rather than a report: before this,
+   * a project's `extensionChoices` were audited and then ignored, so a declared shim was never
+   * consulted and a `real-runtime-only` acknowledgement still executed an npm copy. Both are
+   * measured in `extension-substitutions.ts`'s docstring. Exact-id matching and a virtual module,
+   * because that is the only mechanism of the four tried that reaches the browser — see the same
+   * docstring for the three that do not, and why an alias would over-claim subpaths.
+   */
   resolveId(id: string): string | null;
   /** Generates the mount module, or an explanation, or `null` for ids this plugin does not own. */
   load(id: string): string | null;
@@ -599,6 +666,16 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
   // not one per hook call, so it holds one registry.
   const cells = forguncy({ config: options.config, requireEntryFiles });
 
+  // The declared `extensionChoices`, resolved once against the project root. Held rather than
+  // recomputed, so the ids `resolveId` claims and the modules `load` generates come from one list —
+  // the same discipline `host-modules.ts` follows for the bridge table, and for the same reason: a
+  // second derivation is a second place for the answer to differ.
+  //
+  // Populated in `configResolved`, because the project root is not known until the host reveals it.
+  // Before then it is `undefined`, and `resolveId` answering `null` for every extension id is the
+  // honest state: there is no project to read a declaration from yet.
+  let substitutions: readonly ExtensionSubstitution[] | undefined;
+
   return {
     name: DEV_HARNESS_PLUGIN_NAME,
     enforce: "pre",
@@ -649,6 +726,136 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
         );
       }
       mounted = first;
+    },
+
+    async configureServer() {
+      // #23's plan step 5, executed. `runtime` owns every rule here — which branches an
+      // `extension` choice may take, what makes one incomplete, and which findings block local
+      // development — so this hook reads the project's two declarations, hands them to the audit,
+      // and splits the answer by the contract's own `blocksLocalDevelopment` flag. Nothing below
+      // decides what a problem is.
+      //
+      // `registry === undefined` means `configResolved` never ran, which only happens outside a
+      // Vite server, and the audit has no lock path to read without it. Returning is the honest
+      // answer there: a hook that invented a default would audit a path it was never told about.
+      if (registry === undefined) {
+        return;
+      }
+
+      // The lock, projected onto the Cell this server mounts, and the projection is not optional.
+      //
+      // A lock decision is keyed by `(packageName, cellTarget)`, because #4 defines a strategy per
+      // *pair* — the same package may be `inline` in one Cell and `extension` in another. The audit
+      // has no `cellTarget` parameter, so handing it the whole lock lets another Cell's record decide
+      // this one: a mounted Cell with an `inline` override would still be substituted or refused
+      // because of a target-independent `extension` record, while the compiler inlines. Review found
+      // it, and it is the same dev/compiler drift as the stale-choice defect, reached from the other
+      // side — that one applied a decision the lock no longer had, this one applies a decision the
+      // mounted Cell does not have.
+      //
+      // `mounted` is assigned in `configResolved`, which Vite runs before this hook — measured, not
+      // assumed, and `local-dev-audit-server.test.ts` exercises the ordering by mounting a Cell.
+      const lock = await readProjectDependencyDecisions(registry.runtime.dependencyLockPathAbsolute);
+
+      // And the lock is then put through the *validity* projection the compiler applies before it
+      // will compile a dependency — the second half of the same defect. `compileCell` refuses an
+      // artifact whose decision the compiler withheld (`unresolved-dependency-decision`), so a
+      // harness that acted on such a record could render a Cell locally while the identical source
+      // refuses to compile: a green local render for an artifact that cannot exist.
+      //
+      // `projectLocalDecisions` runs the compiler's own conformance audit and local projection, and
+      // splits the result by axis. Axes a local process can judge decide; the two it cannot
+      // (`extension-*`, which only a page's `listFrontendLibraries` answer supplies, and
+      // `probe-fingerprint-*`, whose composer reaches a bundler) are reported as a boundary instead
+      // of silently withholding. Withholding on those would drop every `extension` record, the
+      // harness would see no `extension` strategy, and a Cell importing one would resolve silently
+      // through npm — the first defect this work closed, restored. The module's docstring has the
+      // measurement.
+      //
+      // The three axes this process *can* judge are supplied from what it actually knows, and the
+      // first version of this call got that wrong in a way worth recording: it passed `target: null`
+      // and `toolchain: null` as placeholders, which the projection correctly read as "unknown" —
+      // manufacturing `forguncy-target-changed` and `toolchain-unknown` on records that were
+      // perfectly valid, and so withholding decisions the compiler accepts. `null` in a freshness
+      // axis means *unknown*, never *don't check*, which is the same asymmetry
+      // `local-dev-audit.ts` records for `decisions` versus `referencedSpecifiers`.
+      const projection = projectLocalDecisions({
+        lock,
+        cellTarget: mounted?.id ?? null,
+        resolvedVersions: (await resolveInstalledVersions(
+          registry.root,
+          lock.decisions.map(record => record.packageName),
+        )).versions,
+        // `RUNTIME_CONTRACT_TARGET` is the measured contract, which is what a record's own `target`
+        // was written against — and comparing them is exactly what the freshness rule is for, so a
+        // record recorded against a different build is reported rather than assumed fine. The
+        // project's `runtime.forguncyVersion` is checked against it rather than substituted for it:
+        // it names a version, not a build, so it cannot answer a comparison that asks for the build.
+        target: RUNTIME_CONTRACT_TARGET,
+        // Read through this package's own resolution, so the toolchain a record is compared against
+        // is the one actually driving the loop. Absent means the comparison reports `toolchain-unknown`
+        // rather than passing, which is the honest answer for a harness installed without `vite-plus`.
+        toolchain: installedVitePlusToolchain(),
+      });
+
+      const audit = auditHarnessConfiguration({
+        decisions: projection.decisions,
+        extensionChoices: options.extensionChoices ?? [],
+      });
+
+      // Built *here*, from the audit's own answer about which choices matched, and the ordering is
+      // load-bearing rather than tidy. The first version built these in `configResolved` from
+      // `options.extensionChoices` alone, before any decision was read — so a stale choice (a
+      // package the lock has since moved from `extension` to `inline`) was still applied:
+      // `resolveId` served the substitute while the compiler followed the lock and bundled the real
+      // package. Review found it, and it is the dev/compiler drift this whole layer exists to
+      // prevent, arriving through the layer itself.
+      //
+      // Throwing here rather than at `resolveId` is deliberate for the same reason as before: a
+      // choice naming a package the extension table does not intercept is a configuration error the
+      // reader can fix, and reporting it at startup puts it beside the other startup findings
+      // instead of inside whichever module import happened to be first.
+      substitutions = extensionSubstitutions(
+        options.extensionChoices ?? [],
+        registry.root,
+        unmatchedExtensionChoicePackages(audit),
+      );
+
+      const lockFindings = formatLocalDecisionProjection(projection);
+      const lockRefuses = projection.conformanceErrors.length > 0;
+
+      const auditReport = formatHarnessAudit(audit);
+      const report =
+        lockFindings.length === 0
+          ? auditReport
+          : `${auditReport}\n\nLock decisions, projected the way the compiler projects them:\n${lockFindings}`;
+      const blocking = blockingLocalDevFindings(audit);
+
+      if (blocking.length > 0 || lockRefuses) {
+        // Refusal carries the report, and *only* the refusal does.
+        //
+        // The first version wrote the report to stderr here as well, on the reasoning that a
+        // blocking run should still show the full picture. That printed everything twice —
+        // measured against a real `vp dev`: the report appeared once from the write below and
+        // again inside this message, which Vite prints itself when a hook rejects. Two identical
+        // copies of a six-line report, one after the other, in the one output a developer is
+        // already unhappy to be reading.
+        //
+        // So the two paths are now exclusive and each prints once. The report is the message
+        // because the alternative — "1 local dev diagnostic", with the finding somewhere else —
+        // sends the reader to a second command for the remediation and the fix owner they need
+        // now. It carries the distinction as well, so a blocked start is not the one path that
+        // drops the local-versus-real caveat.
+        throw new BlockingLocalDevFindingError(
+          blocking,
+          `The local dev harness refused to start: ${blocking.length} finding(s) that this project's configuration has to resolve first.\n${report}`,
+        );
+      }
+
+      // The non-blocking path, and the common one. To stderr for the reason the version and Fast
+      // Refresh warnings go there: this is output *about* the loop, and a page that carried it
+      // would read as the Cell's own.
+      process.stderr.write(`${report}\n`);
     },
 
     config(userConfig) {
@@ -717,6 +924,13 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
       if (unavailableHostModuleOf(id) !== undefined) {
         return `\0${id}`;
       }
+      // A declared `extension` choice, answered here rather than by the ordinary npm path. Exact
+      // match only — see `substitutionForModuleId` for why the alias rule would over-claim, and
+      // `extension-substitutions.ts` for the four mechanisms measured and rejected before this one.
+      const substitution = substitutions === undefined ? undefined : substitutionForModuleId(id, substitutions);
+      if (substitution !== undefined) {
+        return extensionSubstitutionModuleId(substitution.moduleId);
+      }
       // Everything else, including the Cell's own `virtual:forguncy/cell/<id>`, is the Cell
       // seam's business. Delegated rather than re-implemented: the seam owns the guards
       // (`unknown-cell-id`, `entry-outside-project-root`, "no component export"), and a second
@@ -728,6 +942,20 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
       const unavailable = unavailableHostModuleOf(id.startsWith("\0") ? id.slice(1) : id);
       if (unavailable !== undefined) {
         return unavailableHostModuleSource(unavailable);
+      }
+
+      // A generated substitution module, for one of the declared choices. Looked up through the
+      // same list `resolveId` claimed from, so a module that served without being claimed — or the
+      // reverse — is not a state this plugin can reach.
+      const substituted = extensionSubstitutionModuleOf(id);
+      if (substituted !== undefined) {
+        const substitution = substitutionForModuleId(substituted, substitutions ?? []);
+        if (substitution === undefined) {
+          throw new Error(
+            `The dev harness generated a substitution module for "${substituted}", which no declared choice in this project answers for. The resolver and this hook read one list; a mismatch means one of them was edited alone.`,
+          );
+        }
+        return extensionSubstitutionModuleSource(substitution);
       }
 
       if (id !== HARNESS_ENTRY_URL_PATH) {
