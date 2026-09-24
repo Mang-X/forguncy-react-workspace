@@ -33,14 +33,43 @@ import { devHarness } from "./vite-plugin.ts";
  * out of the body. The marker is a string only the declared substitute contains, which is what makes
  * "the substitute is what loaded" a fact about the page rather than about the configuration.
  */
-/** A throwaway project with an `extension` decision, a Cell, and a shim the project declares. */
-function projectWithShim(): { root: string; shimMarker: string } {
+/** A throwaway project with a Cell, a shim, and a substitute package the project's tree installs. */
+function projectWithShim(): { root: string; shimMarker: string; substitutePackageMarker: string } {
   const root = mkdtempSync(join(tmpdir(), "dev-harness-subst-"));
   onTestFinished(() => removeTempProject(root));
 
   const shimMarker = "PROJECT_SHIM_MARKER_7f3a";
+  const substitutePackageMarker = "SUBSTITUTE_PACKAGE_MARKER_9c14";
   mkdirSync(join(root, "cells", "probe", "src"), { recursive: true });
   mkdirSync(join(root, "shims"), { recursive: true });
+  mkdirSync(join(root, "node_modules", "@probe", "substitute"), { recursive: true });
+
+  // A substitute *package*, installed in this project's own tree, so the `npm-package` branch is
+  // genuinely exercised. Review found the earlier version of that test passing while the branch threw:
+  // the temp project had no dependency tree, so `@tanstack/query-core` was unresolvable, the
+  // generated module was the *unavailable* one — which throws — and the assertion matched the
+  // package name inside the thrown text. A fixture that cannot resolve the substitute cannot test
+  // the substitute.
+  //
+  // A local package rather than a workspace one because resolution starts at the project root, and
+  // this temp project is outside the workspace by necessity (see the module docstring). Declaring it
+  // in the project's own `node_modules` is what a real project's install produces, and it is the
+  // only arrangement where the test exercises resolution rather than a missing dependency.
+  writeFileSync(
+    join(root, "node_modules", "@probe", "substitute", "package.json"),
+    JSON.stringify({
+      name: "@probe/substitute",
+      version: "1.0.0",
+      type: "module",
+      main: "index.js",
+    }),
+    "utf8",
+  );
+  writeFileSync(
+    join(root, "node_modules", "@probe", "substitute", "index.js"),
+    `export const SUBSTITUTE_PACKAGE_MARKER = ${JSON.stringify(substitutePackageMarker)};\nexport const QueryClient = class SubstitutePackageQueryClient {};\n`,
+    "utf8",
+  );
 
   // The project's own shim: the module the declaration names, and the one the Cell must load.
   writeFileSync(
@@ -94,7 +123,30 @@ function projectWithShim(): { root: string; shimMarker: string } {
     "utf8",
   );
 
-  return { root, shimMarker };
+  return { root, shimMarker, substitutePackageMarker };
+}
+
+/**
+ * The reason out of a Vite error page.
+ *
+ * Vite answers a failed transform with an HTML document whose message lives in an inline
+ * `const error = {"message":"…"}` object, so neither the markup nor a plain slice of it is worth
+ * asserting on — the first attempt at this file truncated 300 characters of `<!DOCTYPE html>` and a
+ * reader learned nothing from the failure. The `message` field is what the test wants.
+ */
+function viteErrorReason(html: string): string {
+  // The object is `{"message":"…","stack":"…","id":"…",…}` and may **span lines**, so a
+  // single-line pattern misses it — which is what the first version of this did, leaving the
+  // truncated HTML in the failure. Only `message` is needed, so it is read directly.
+  const message = /"message"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(html)?.[1];
+  if (message === undefined) {
+    return html.slice(0, 300).split("\n").join(" ");
+  }
+  try {
+    return JSON.parse(`"${message}"`) as string;
+  } catch {
+    return message;
+  }
 }
 
 /**
@@ -154,7 +206,13 @@ async function loadedForSubstitutedImport(root: string, choices: readonly unknow
     const authoredResponse = await fetch(new URL(authoredPath, base));
     const authoredBody = await authoredResponse.text();
     if (authoredResponse.status !== 200) {
-      throw new Error(`the authored entry did not serve (${authoredResponse.status}): ${authoredBody.slice(0, 300)}`);
+      // Vite's error page carries the real message inside a `<script type="module">` block, so the
+      // first 300 characters are HTML boilerplate and the reason is not in them. The message is
+      // pulled out here rather than truncated, because "the entry did not serve (500)" with no
+      // reason is exactly the kind of output that sends a reader to a second command.
+      throw new Error(
+        `the authored entry did not serve (${authoredResponse.status}): ${viteErrorReason(authoredBody)}`,
+      );
     }
 
     // Every import the authored Cell makes, so the substituted one is found by its own module id
@@ -163,9 +221,13 @@ async function loadedForSubstitutedImport(root: string, choices: readonly unknow
     // failure read as "the shim was not loaded".
     const imported = [...authoredBody.matchAll(/from\s+"([^"]+)"/g)].map(match => match[1]!);
     const substituted = imported.find(specifier => specifier.includes("extension-substitution"));
+
+    // No substitution import is a *result*, not an error: the stale-choice test asserts exactly that
+    // — the choice was reported and not applied, so the id took the ordinary path. Returning the
+    // imports lets that test say so, while every other caller asserts `exportedFrom` is defined and
+    // therefore still fails loudly on an unexpected absence.
     if (substituted === undefined) {
-      const flat = authoredBody.slice(0, 700).split("\n").join(" | ");
-      throw new Error(`the authored Cell names no substitution module. imports=${JSON.stringify(imported)} body=${flat}`);
+      return { status: 200, body: "", resolvedBody: "", resolvedStatus: 0, exportedFrom: undefined, imported, substituted };
     }
 
     const response = await fetch(new URL(substituted, base));
@@ -193,6 +255,74 @@ async function loadedForSubstitutedImport(root: string, choices: readonly unknow
     await server.close();
   }
 }
+
+describe("a stale choice is reported but never applied", () => {
+  it("lets the ordinary module path win when the lock no longer says `extension`", async () => {
+    const { root } = projectWithShim();
+
+    // The decision moved to `inline` — the case the contract's own remediation names ("when a
+    // package moves to another strategy — `extension` to `inline`, say — its choice is left
+    // describing a decision that no longer exists"), and the contract reports the leftover choice as
+    // `local-dev-extension-choice-unmatched`, whose subject is the package.
+    //
+    // The substitute package below *is* installed, so if the choice were applied this would resolve
+    // to the shim and the assertion would see the shim's marker. Applying it would be the drift this
+    // layer exists to prevent: the dev server serving a substitute
+    // while the compiler follows the lock and bundles the real package.
+    //
+    // `@tanstack/react-query` is not installed in this temp project, so "the ordinary path" here
+    // means Vite's own resolution answering for the id — which is what the compiler would do too.
+    writeFileSync(
+      join(root, "fgc.lock.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        decisions: [
+          {
+            packageName: "@tanstack/react-query",
+            cellTarget: null,
+            strategy: "inline",
+            resolvedVersion: "5.102.8",
+            probe: { status: "passed", fingerprint: "probe=x", versionIndependent: false },
+            target: {
+              product: "Forguncy",
+              productVersion: "12.0.100.0",
+              productBuild: "b",
+              hostReactVersion: "19.2.7",
+            },
+            probedWith: { vitePlus: "0.3.2" },
+            // Required on every record, and `null` for a strategy that is not `extension` — the
+            // validator says so, and this fixture was rejected without it.
+            extension: null,
+            rejectedCandidate: null,
+            rationale: "fixture: moved from extension to inline",
+            evidence: [{ kind: "runtime-observation", reference: "https://example.invalid/r.md" }],
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    // The assertions are about the failure being the *ordinary* one, and the fetch throws for that
+    // very reason: nothing substituted the id, so Vite tried the normal path and the package is not
+    // installed in this temp project. Before the fix the choice was applied, the id was claimed, and
+    // the shim served — so this fetch succeeded and the shim's marker was in the body.
+    //
+    // Both halves are checked: the request fails, and the failure is about the *original* specifier
+    // rather than the shim. A test that only required "it failed" would pass for the wrong reason —
+    // the same "green while the branch is broken" shape the review found in the npm-package test.
+    await expect(
+      loadedForSubstitutedImport(root, [
+        {
+          packageName: "@tanstack/react-query",
+          mode: "substitute",
+          kind: "project-shim",
+          resolvesTo: "./shims/query-shim.ts",
+          justification: "fixture: a choice whose decision moved to inline",
+        },
+      ]),
+    ).rejects.toThrow(/Failed to resolve import "@tanstack\/react-query"/);
+  }, 120_000);
+});
 
 describe("a declared substitute is the module the Cell loads", () => {
   it("loads the project's own shim, not the npm copy", async () => {
@@ -225,25 +355,35 @@ describe("a declared substitute is the module the Cell loads", () => {
   }, 120_000);
 
   it("loads a named substitute package when the declaration names one", async () => {
-    const { root } = projectWithShim();
+    const { root, substitutePackageMarker } = projectWithShim();
 
-    // `@tanstack/query-core` is installed in this workspace, so a `npm-package` substitute naming it
-    // is a real substitution rather than a missing dependency. `examples/extension-query` installs
-    // both packages, and this temp project resolves through the workspace root's tree.
-    const { status, body } = await loadedForSubstitutedImport(root, [
+    // `@probe/substitute` is installed in this temp project's own tree (see `projectWithShim`), so
+    // this exercises the resolving branch rather than the failing one.
+    const { status, resolvedBody, resolvedStatus, exportedFrom } = await loadedForSubstitutedImport(root, [
       {
         packageName: "@tanstack/react-query",
         mode: "substitute",
         kind: "npm-package",
-        resolvesTo: "@tanstack/query-core",
-        justification: "fixture: any installed package stands in for the extension's global",
+        resolvesTo: "@probe/substitute",
+        justification: "fixture: an installed package stands in for the extension's global",
       },
     ]);
 
     expect(status).toBe(200);
-    // It resolved to *something*, and what it resolved to is the named package's own code — the
-    // substitute was consulted rather than the original package being served.
-    expect(body).toMatch(/QueryClient|query-core|QueryObserver/);
+    // The same two assertions the shim test makes, and for the same reason the review gave: assert
+    // the re-export *target* and follow it, rather than matching a name anywhere in the body.
+    //
+    // The earlier version asserted `toMatch(/QueryClient|query-core|QueryObserver/)` against a body
+    // that could be the **unavailable** module — which throws, and whose thrown text contains the
+    // package name — so it passed while the branch it named was failing. A marker unique to the
+    // substitute package is what tells the two apart.
+    expect(exportedFrom).toBeDefined();
+    expect(resolvedStatus).toBe(200);
+    expect(resolvedBody).toContain(substitutePackageMarker);
+    expect(resolvedBody).toContain("SubstitutePackageQueryClient");
+    // And it is the substitute rather than the original: the extension package's own implementation
+    // would be here if the declaration had not decided anything.
+    expect(resolvedBody).not.toContain("QueryObserver");
   }, 120_000);
 });
 
@@ -304,9 +444,43 @@ describe("a declaration that cannot be honoured fails loudly rather than resolvi
   it("refuses a choice for a package the extension table does not intercept", async () => {
     const { root } = projectWithShim();
 
-    // The compiler refuses this too (`extension-mapping-missing`), and the harness has to agree:
-    // there is no extension for a substitute to stand in for, and silently skipping the choice
-    // would leave the id on the npm path the declaration was written to leave.
+    // A decision *does* cover this package, so the choice is not dropped as unmatched — which is the
+    // state this test is about, and it is a correction: the first version relied on the fixture's
+    // existing decision naming a different package, so the choice was actually reported as
+    // `local-dev-extension-choice-unmatched` and never reached this guard at all.
+    writeFileSync(
+      join(root, "fgc.lock.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        decisions: [
+          {
+            packageName: "not-a-listed-extension",
+            cellTarget: null,
+            strategy: "extension",
+            resolvedVersion: "1.0.0",
+            globalName: "NotListed",
+            libraryId: "not-listed",
+            probe: { status: "passed", fingerprint: "probe=x", versionIndependent: false },
+            target: {
+              product: "Forguncy",
+              productVersion: "12.0.100.0",
+              productBuild: "b",
+              hostReactVersion: "19.2.7",
+            },
+            probedWith: { vitePlus: "0.3.2" },
+            extension: { version: "1.0.0", identity: "sha256:bb" },
+            rejectedCandidate: null,
+            rationale: "fixture: an `extension` decision the table cannot bind",
+            evidence: [{ kind: "runtime-observation", reference: "https://example.invalid/r.md" }],
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    // The compiler refuses this too (`extension-mapping-missing`), and the harness agrees: there is
+    // no extension for a substitute to stand in for, and skipping the choice would leave the id on
+    // the npm path the declaration was written to leave.
     await expect(
       loadedForSubstitutedImport(root, [
         {

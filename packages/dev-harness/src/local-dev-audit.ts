@@ -181,6 +181,29 @@ export function auditHarnessConfiguration(input: HarnessAuditInput): LocalDevAud
 }
 
 /**
+ * The packages whose declared choice matches no `extension` decision, read off the audit.
+ *
+ * The bridge between "the audit reported this" and "the resolver must not apply it", and it exists
+ * so the matching rule has exactly one implementation. `extensionSubstitutions` drops these before
+ * claiming any id, because applying a stale choice would make the dev server serve a substitute
+ * while the compiler bundles the real package — the drift that function's docstring describes, and
+ * a defect review found in the first version of this wiring.
+ *
+ * Read from the audit's `diagnostics` rather than recomputed from `decisions` here, and that is the
+ * whole point: the contract decides which choices matched (it compares `decision.strategy ===
+ * "extension"` over the packages it can read), and a second copy of that comparison would be a
+ * second place for the answer to differ the first time the contract's rule was refined.
+ *
+ * A finding's `subject` is the package name for this code — the audit constructs it that way, and
+ * `local-dev-audit.test.ts` asserts the subject on a real finding rather than trusting the shape.
+ */
+export function unmatchedExtensionChoicePackages(audit: LocalDevAudit): readonly string[] {
+  return audit.diagnostics
+    .filter(finding => finding.code === "local-dev-extension-choice-unmatched")
+    .map(finding => finding.subject);
+}
+
+/**
  * The audit's findings that the contract says block local development.
  *
  * Derived from `LOCAL_DEV_DIAGNOSTIC_RULES` rather than from a list of codes here, and the

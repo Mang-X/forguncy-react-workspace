@@ -163,13 +163,74 @@ export class ExtensionSubstituteError extends Error {
   }
 }
 
-/** Resolve an installed package's directory from a project root, or `undefined`. */
+/**
+ * Resolve an installed package's directory, as the *importing project* would resolve it.
+ *
+ * `projectRoot` decides the resolution scope, and what that does and does not guarantee is worth
+ * stating precisely because the first draft of this comment overclaimed it. `createRequire` on the
+ * project's own `package.json` walks *up* from there, so:
+ *
+ * - a package in the project's own `node_modules` resolves to the project's copy, which is the
+ *   common case for a real project and the one the error message below is written for;
+ * - a *hoisted* copy above the project also resolves — measured, not hypothesised: a nonexistent
+ *   root under a workspace's parent still resolves `@tanstack/query-core` through the workspace
+ *   root's `.pnpm` store. That is node's own answer to "what would this project import", so it is
+ *   the right answer for a dev server, and it is *not* a claim that the copy is unique to the
+ *   project. A project that needs its own copy must install it where its scope finds it first.
+ *
+ * Two attempts, and the second is not a nicety: `<package>/package.json` is only resolvable when the
+ * package's `exports` map declares that subpath — `@tanstack/query-core` does, but a package that
+ * publishes `exports` without it answers `ERR_PACKAGE_PATH_NOT_EXPORTED`. So the second attempt
+ * resolves the package's *entry* and walks up from it to the nearest directory whose manifest names
+ * the package, which is the only way to find the root when the entry sits in a build subdirectory
+ * (`build/modern/index.cjs`).
+ *
+ * That walk-up is `dependency-resolver`'s `nearestNamedManifest`, arrived at independently and for
+ * the same reason: `dirname(entry)` is right only for a flat package, and using it otherwise would
+ * hand back `…/build/modern` as if it were the package — resolving an id to a directory that is not
+ * the package is worse than reporting the declaration unhonourable, which is what `undefined`
+ * becomes at the call site.
+ *
+ * Not shared with that package: it is async and wants the manifest's *version*, while this is
+ * synchronous (it runs inside a resolver hook) and wants only the directory.
+ */
 function resolvePackageDirectory(projectRoot: string, packageName: string): string | undefined {
   const require = createRequire(join(projectRoot, "package.json"));
+
   try {
     return dirname(require.resolve(`${packageName}/package.json`));
   } catch {
+    // Falls through to the entry, which is the form that resolves regardless of an exports map.
+  }
+
+  let entry: string;
+  try {
+    entry = require.resolve(packageName);
+  } catch {
     return undefined;
+  }
+  if (!isAbsolute(entry)) {
+    return undefined;
+  }
+
+  let directory = dirname(entry);
+  for (;;) {
+    const manifestPath = join(directory, "package.json");
+    if (existsSync(manifestPath)) {
+      try {
+        const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { name?: unknown };
+        if (manifest.name === packageName) {
+          return directory;
+        }
+      } catch {
+        // Unreadable or not JSON: this directory contributes nothing and the walk continues.
+      }
+    }
+    const parent = dirname(directory);
+    if (parent === directory) {
+      return undefined;
+    }
+    directory = parent;
   }
 }
 
@@ -233,14 +294,43 @@ export function resolveChoiceTarget(
  * and not a prefix. A row can cover more than one package (`@tanstack/query-core` rides on the
  * `@tanstack/react-query` row), and widening over those siblings would resolve an id to a target
  * the project never named, which is the class of silent divergence this module exists to remove.
+ *
+ * ## Why an unmatched choice is reported but never applied
+ *
+ * A choice is the local half of a dependency *decision*, so a choice whose decision no longer says
+ * `extension` — the classic case being a package moved from `extension` to `inline` — describes a
+ * decision that no longer exists. The contract reports that as
+ * `local-dev-extension-choice-unmatched` and states the consequence: the entry "is used for
+ * nothing".
+ *
+ * Applying it anyway is worse than reporting it, and review found the harness doing exactly that.
+ * A stale choice still in `substitutions` means `resolveId` intercepts the id and serves the
+ * substitute while the **compiler** follows the `inline` decision and bundles the real package — so
+ * the developer's local Cell runs one module and the artifact runs another, which is precisely the
+ * dev/compiler drift this layer exists to prevent. The audit already knows which choices matched,
+ * so this defers to it rather than restating the rule: `unmatched` names the packages the audit
+ * reported, and every one of them is dropped before any id is claimed.
+ *
+ * `unmatched` is required rather than optional, and the signature is the reason: an optional
+ * parameter would let a caller wire substitutions from choices alone and silently reinstate the
+ * defect, which is what the first version of this function did.
  */
 export function extensionSubstitutions(
   choices: readonly LocalDevExtensionChoice[],
   projectRoot: string,
+  unmatched: readonly string[],
 ): readonly ExtensionSubstitution[] {
   const substitutions: ExtensionSubstitution[] = [];
+  const unmatchedPackages = new Set(unmatched);
 
   for (const choice of choices) {
+    if (unmatchedPackages.has(choice.packageName)) {
+      // Reported by the audit and applied by nobody. Skipping rather than throwing: the decision
+      // moved, so the id resolves through the strategy that decision now names — which is the
+      // compiler's answer too, and the two agreeing is the point.
+      continue;
+    }
+
     if (extensionMappingForPackage(choice.packageName) === undefined) {
       // The compiler refuses this too (`extension-mapping-missing`): a decision for a package the
       // table cannot bind would compile to a global nothing publishes. Thrown rather than skipped,

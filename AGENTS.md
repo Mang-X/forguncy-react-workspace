@@ -73,11 +73,15 @@ same reason: resolving somewhere else is worse than failing, because the Cell re
 developer concludes the substitute ran.
 
 `vp dev` audits the same declaration at server start and **refuses to start** on an undeclared one.
-Both branches, the finding, and whether it blocks belong to the runtime package
-(`LOCAL_DEV_DIAGNOSTIC_RULES`); `dev-harness` reads `blocksLocalDevelopment` off that table rather
-than keeping a list of its own, so a rule the contract marks blocking cannot be downgraded here by
-omission. Matching is exact, not a prefix, so a subpath the extension does not provide is not
-answered locally — the same rule the compiler's extension table applies.
+Only the choices that audit says matched are applied: a choice whose decision moved to another
+strategy is reported as unmatched and is never used for resolution, because applying it would make
+the dev server serve a substitute while the compiler follows the lock and bundles the real package —
+the dev/compiler drift this layer exists to prevent. Both branches, the finding, and whether it
+blocks belong to the runtime package (`LOCAL_DEV_DIAGNOSTIC_RULES`); `dev-harness` reads
+`blocksLocalDevelopment` off that table rather than keeping a list of its own, so a rule the contract
+marks blocking cannot be downgraded here by omission. Matching is exact, not a prefix, so a subpath
+the extension does not provide is not answered locally — the same rule the compiler's extension table
+applies.
 
 Where the loop is *more* permissive than the page it is recorded rather than smoothed over:
 locally `react-dom/client` is the whole published module, while the page narrows it to the

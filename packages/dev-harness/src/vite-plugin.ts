@@ -81,6 +81,7 @@ import {
   BlockingLocalDevFindingError,
   formatHarnessAudit,
   readProjectDependencyDecisions,
+  unmatchedExtensionChoicePackages,
 } from "./local-dev-audit.ts";
 
 /** The DOM element the mount script renders into. */
@@ -699,13 +700,6 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
         return;
       }
 
-      // The project root exists now, so the declared choices can be resolved into the ids this
-      // server answers for. Throwing here rather than at `resolveId` is deliberate: a choice that
-      // names a package the extension table does not intercept is a configuration error the reader
-      // can fix, and reporting it at startup puts it next to the other startup findings instead of
-      // inside whichever module import happened to be first.
-      substitutions = extensionSubstitutions(options.extensionChoices ?? [], registry.root);
-
       if (options.cellId !== undefined) {
         mounted = registry.require(options.cellId);
         return;
@@ -747,6 +741,24 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
         decisions,
         extensionChoices: options.extensionChoices ?? [],
       });
+
+      // Built *here*, from the audit's own answer about which choices matched, and the ordering is
+      // load-bearing rather than tidy. The first version built these in `configResolved` from
+      // `options.extensionChoices` alone, before any decision was read — so a stale choice (a
+      // package the lock has since moved from `extension` to `inline`) was still applied:
+      // `resolveId` served the substitute while the compiler followed the lock and bundled the real
+      // package. Review found it, and it is the dev/compiler drift this whole layer exists to
+      // prevent, arriving through the layer itself.
+      //
+      // Throwing here rather than at `resolveId` is deliberate for the same reason as before: a
+      // choice naming a package the extension table does not intercept is a configuration error the
+      // reader can fix, and reporting it at startup puts it beside the other startup findings
+      // instead of inside whichever module import happened to be first.
+      substitutions = extensionSubstitutions(
+        options.extensionChoices ?? [],
+        registry.root,
+        unmatchedExtensionChoicePackages(audit),
+      );
 
       const report = formatHarnessAudit(audit);
       const blocking = blockingLocalDevFindings(audit);
