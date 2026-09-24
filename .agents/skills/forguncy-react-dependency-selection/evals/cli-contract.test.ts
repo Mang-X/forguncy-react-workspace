@@ -1322,8 +1322,9 @@ describe("CLI contract: a content-addressed citation is verified, not assumed", 
   }, CASE_TIMEOUT_MS);
 
   it("refuses to cite a path already holding different content, instead of accepting it", async () => {
-    // The write-side half. Accepting the existing file is what would silently attach the wrong
-    // bytes to a new record, and it would do so under a message reporting success.
+    // The acceptance-check half. Accepting the existing file is what would silently attach the
+    // wrong bytes to a new record, and it would do so under a message reporting success. The
+    // refusal now happens before any write, reported under the unified `problems` key.
     await withScratch(PROVING_CASES, async root => {
       const file = await decisionFile(decision);
       try {
@@ -1332,8 +1333,11 @@ describe("CLI contract: a content-addressed citation is verified, not assumed", 
 
         const refused = await cli(["record", "--project", root, "--decision", file.path]);
         expect(refused.code).not.toBe(0);
-        expect(refused.stderr).toContain("already exists with different content");
-        expect(refused.stderr).not.toContain("at async");
+        expect(json<{ problems: readonly string[] }>(refused).problems.join(" ")).toContain("already exists with different content");
+        expect(refused.stderr).toContain("Nothing was written");
+
+        // Still refused by the write path too, so the preflight is not the only guard.
+        expect(existsSync(join(root, ...reference.split("/")))).toBe(true);
       } finally {
         await file.cleanup();
       }
@@ -1468,6 +1472,126 @@ describe("CLI contract: audit and record apply the same checks, including the lo
         const audited = await cli(["audit", "--project", root, "--decision", decision.path]);
         expect(audited.code).not.toBe(0);
         expect(json<{ recordable: boolean }>(audited).recordable).toBe(false);
+      } finally {
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+});
+
+// ---------------------------------------------------------------------------
+// Review round 7 — the evidence path is part of whether a decision is ready
+// ---------------------------------------------------------------------------
+
+/**
+ * The evidence path is a precondition `record` checks by reading, so `audit` has to check it
+ * too.
+ *
+ * This is the third instance of one pattern rather than a new kind of defect: each round
+ * added the check that had been missing, and the rule is that anything `record` refuses for a
+ * reason it can determine by *reading* belongs in the acceptance checks — otherwise `audit`
+ * reports a decision ready that the write then refuses, which is the disagreement every one of
+ * these rounds has been about.
+ *
+ * The reproducible path: `probe` computes the address an accepted record would cite without
+ * writing anything, so a caller can observe it; then place wrong bytes (or a directory) there;
+ * then a legal decision audits clean even though its citation can never be satisfied.
+ */
+describe("CLI contract: audit checks the evidence path too", () => {
+  const legalExtension = {
+    packageName: "@tanstack/react-query",
+    role: "cell-local-data-access",
+    strategy: "extension",
+    libraryId: "tanstack-query",
+    globalName: "TanStackQuery",
+    extensionVersion: "5.102.8",
+    rationale: "A bundled copy would give every Cell its own QueryClient, so the shared page global is required.",
+  };
+
+  it("refuses when the path it would cite already holds different bytes", async () => {
+    await withScratch(EXTENSION_QUERY, async root => {
+      const decision = await decisionFile(legalExtension);
+      try {
+        // The address comes from `probe`, which measures only — the path is computable before
+        // anything is written, which is exactly why the check belongs on the read side.
+        const probed = json<{ evidencePath: string }>(await cli(["probe", "--project", root, "@tanstack/react-query"]));
+        const occupied = join(root, ...probed.evidencePath.split("/"));
+        await mkdir(dirname(occupied), { recursive: true });
+        await writeFile(occupied, "not a probe report\n", "utf8");
+
+        const audited = await cli(["audit", "--project", root, "--decision", decision.path]);
+        expect(audited.code, "a citation that cannot be satisfied must not audit clean").not.toBe(0);
+        const payload = json<{ recordable: boolean; problems: readonly string[] }>(audited);
+        expect(payload.recordable).toBe(false);
+
+        // And `record` refuses for the same reason, in the same words — so the two agree.
+        const refused = await cli(["record", "--project", root, "--decision", decision.path]);
+        expect(refused.code).not.toBe(0);
+        expect(refused.stderr).toContain("Nothing was written");
+        const reason = payload.problems.find(problem => problem.includes("different content"));
+        expect(reason, "audit names the content mismatch").toBeDefined();
+      } finally {
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("refuses when the path it would cite is a directory", async () => {
+    // A directory is not "absent" — `writeFile` cannot replace it — and `existsSync` alone
+    // would call it present.
+    await withScratch(EXTENSION_QUERY, async root => {
+      const decision = await decisionFile(legalExtension);
+      try {
+        const probed = json<{ evidencePath: string }>(await cli(["probe", "--project", root, "@tanstack/react-query"]));
+        await mkdir(join(root, ...probed.evidencePath.split("/")), { recursive: true });
+
+        const audited = await cli(["audit", "--project", root, "--decision", decision.path]);
+        expect(audited.code).not.toBe(0);
+        expect(json<{ recordable: boolean }>(audited).recordable).toBe(false);
+      } finally {
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("stays recordable when the path is free, and after `record` fills it", async () => {
+    // The other direction, so the preflight is not simply refusing whenever a path exists:
+    // absent is the ordinary case, and `record` is what makes it present.
+    await withScratch(EXTENSION_QUERY, async root => {
+      const decision = await decisionFile(legalExtension);
+      try {
+        const before = await cli(["audit", "--project", root, "--decision", decision.path]);
+        expect(before.code, before.stderr).toBe(0);
+        expect(json<{ recordable: boolean }>(before).recordable).toBe(true);
+
+        const recorded = await cli(["record", "--project", root, "--decision", decision.path]);
+        expect(recorded.code, recorded.stderr).toBe(0);
+        expect(json<{ evidence: { created: boolean } }>(recorded).evidence.created).toBe(true);
+
+        // Now the path holds exactly this report, which is the other acceptable state.
+        const after = await cli(["audit", "--project", root, "--decision", decision.path]);
+        expect(after.code, after.stderr).toBe(0);
+        expect(json<{ recordable: boolean }>(after).recordable).toBe(true);
+      } finally {
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("leaves an architectural rejection alone, since it cites no probe report", async () => {
+    // The preflight needs a report; a rejection has none, and inventing one to check would
+    // fail a decision that is entirely correct.
+    await withScratch(EXTENSION_QUERY, async root => {
+      const decision = await decisionFile({
+        packageName: "react-router-dom",
+        role: "application-navigation",
+        strategy: "replace",
+        rationale: "Navigation and browser history belong to the Forguncy application shell.",
+      });
+      try {
+        const audited = await cli(["audit", "--project", root, "--decision", decision.path]);
+        expect(audited.code, audited.stderr).toBe(0);
+        expect(json<{ recordable: boolean }>(audited).recordable).toBe(true);
       } finally {
         await decision.cleanup();
       }

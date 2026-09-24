@@ -440,18 +440,59 @@ function evidenceRelativePath(report) {
 }
 
 /**
+ * Whether an evidence path is free to cite for this report.
+ *
+ * The rule `record` enforces at write time, expressed as a *preflight* so `audit` can enforce
+ * it too. An existing file is only acceptable when it holds **these** bytes: the earlier
+ * revision treated `EEXIST` as proof of that, on the reasoning that the name is a function of
+ * the content — true of the name, false of whatever is sitting there. A committed evidence
+ * file a merge resolved badly, a hand-edit, or a directory at that path all satisfied it.
+ *
+ * Returns null when the path is free or already holds exactly this report. Those are the two
+ * acceptable states, and they are one answer because the difference does not matter to a
+ * caller: either way the citation will be correct after `record` runs.
+ *
+ * Not reaching the write path at all is the point. `record` refusing here is a rule-based
+ * refusal, not an unpredictable I/O failure, so leaving it out of `audit` made a decision audit
+ * as recordable and then be refused — the same disagreement the candidate-lock validation was
+ * added to close, one layer further out: the *artifact* the record will cite is part of what
+ * `record` requires, so it belongs in the checks that decide whether the decision is ready.
+ */
+async function evidencePreflight(projectRoot, report) {
+  const relative = evidenceRelativePath(report);
+  const absolute = join(projectRoot, ...relative.split("/"));
+  const expected = core.serializeProbeReport(report);
+
+  let existing;
+  try {
+    existing = await readFile(absolute, "utf8");
+  } catch (error) {
+    // Absent is the common case and is fine: `record` will create it. A directory, or anything
+    // else unreadable as a file, is not absent and cannot be replaced by a write — `writeFile`
+    // would meet `EISDIR`.
+    if (error?.code === "ENOENT") {
+      return null;
+    }
+    return `The evidence path "${relative}" already exists but cannot be read as a file (${error.code ?? error.message}). Remove it so the run can write the report it measured.`;
+  }
+
+  if (existing !== expected) {
+    return `The evidence path "${relative}" already exists with different content, so it is not the report this run measured. A content-addressed path is only trustworthy while its bytes hash to its name; remove the file to re-measure, or treat the difference as the finding it is.`;
+  }
+  return null;
+}
+
+/**
  * Writes a report as evidence and returns the portable path to cite.
  *
  * A failed write is fatal rather than best-effort, unlike the engine's cache: the lock is
  * about to cite this path, and a citation nothing can follow is the defect this exists to
  * prevent.
  *
- * An existing file is only acceptable when it holds **these** bytes. The earlier revision
- * treated `EEXIST` as proof of that, on the reasoning that the name is a function of the
- * content — which is true of the name and false of whatever is sitting there. A committed
- * evidence file that a merge resolved badly, a hand-edit, or a directory at that path would
- * all satisfy `EEXIST` while not being the report at all. So the existing bytes are re-hashed
- * and compared, and a mismatch is refused rather than silently cited.
+ * The rules are {@link evidencePreflight}'s, re-checked here rather than trusted: the
+ * preflight ran against a report this command measured, and a concurrent run could have taken
+ * the path in between. `wx` keeps that race honest — an identical report is a no-op, anything
+ * else is refused.
  */
 async function persistEvidence(projectRoot, report) {
   const relative = evidenceRelativePath(report);
@@ -468,23 +509,9 @@ async function persistEvidence(projectRoot, report) {
     }
   }
 
-  // The path is taken. It has to be this content or the citation is a lie — including the
-  // case where the path is a directory, which `readFile` refuses and which would otherwise
-  // count as "present".
-  let existing;
-  try {
-    existing = await readFile(absolute, "utf8");
-  } catch (error) {
-    fail(
-      `The evidence path "${relative}" already exists but cannot be read as a file (${error.code ?? error.message}). ` +
-        `Remove it so the run can write the report it measured.`,
-    );
-  }
-  if (existing !== expected) {
-    fail(
-      `The evidence path "${relative}" already exists with different content, so it is not the report this run measured. ` +
-        `A content-addressed path is only trustworthy while its bytes hash to its name; remove the file to re-measure, or treat the difference as the finding it is.`,
-    );
+  const problem = await evidencePreflight(projectRoot, report);
+  if (problem !== null) {
+    fail(problem);
   }
   return { relative, created: false };
 }
@@ -598,10 +625,12 @@ function probePayload({ projectRoot, result, evidencePath }) {
     lockStatus,
     fingerprint,
     fromCache,
-    // What a lock would cite: the immutable evidence artifact this run wrote. Reported
-    // instead of the engine's `cacheRelativePath`, which is a *cache* entry — it can be
-    // evicted by any other run under the same fingerprint, so it is not what evidence
-    // should point at.
+    // The address a lock would cite for this report. Reported instead of the engine's
+    // `cacheRelativePath`, which is a *cache* entry — it can be evicted or overwritten by any
+    // other run under the same fingerprint, so it is not what evidence should point at.
+    //
+    // An address, not a file: `probe` measures only. `record` persists this path once the
+    // decision is accepted, which is why the path is computable before anything is written.
     evidencePath,
     cacheRelativePath,
     // Stated in the output so a consumer cannot read the payload as a decision.
@@ -910,16 +939,21 @@ async function extensionCatalogFor(options, lock) {
 }
 
 /**
- * Every problem the candidate lock has, from both audits that can see it whole.
+ * Every problem the candidate decision has, from every check that can decide it.
  *
  * `validateLockDecisionConformance` alone was an incomplete answer, and the gap showed up the
- * same way twice. `writeFgcLock` refuses any document `validateFgcLockDocument` rejects, and
- * that validator knows rules the conformance audit does not restate — #8's requirement that an
- * `extension` or `replace` decision carry a written rationale is the one that bites. Because
- * the acceptance checks stopped at conformance, a decision missing its rationale passed
- * `audit` as `recordable: true` and only then failed at the lock write. That made `audit` and
- * `record` disagree, and — since evidence is written before the lock — left a created
- * evidence file behind under a message saying nothing had been written.
+ * same way three times. Each fix added the check that had been missing rather than a new kind
+ * of check, and the pattern is worth stating: **anything `record` refuses for a reason it can
+ * determine by reading is part of whether the decision is ready**, and leaving it out makes
+ * `audit` call a decision recordable that the write then rejects.
+ *
+ * 1. `validateFgcLockDocument` — `writeFgcLock` refuses any document it rejects, and it knows
+ *    rules conformance does not restate (#8's rationale requirement is one). Without it a
+ *    decision missing its rationale audited clean and failed at the write.
+ * 2. The evidence preflight — an evidence path already holding different bytes (or a
+ *    directory) is refused by `record`, and that is checkable from the filesystem, not an
+ *    unpredictable I/O failure. Without it `audit` passed a decision whose citation could not
+ *    be satisfied.
  *
  * Conformance runs over the **whole** document, not the one record, because its rules are not
  * all per-record: `host-inline-conflict` is a fact about a *pair* of records for the same
@@ -928,19 +962,25 @@ async function extensionCatalogFor(options, lock) {
  * on the cell's preset chain), which a lock file is the wrong place to hold, so refusing on one
  * would make a supported configuration unwritable.
  *
- * Both audits run here over the same candidate document, so "the checks `record` applies" is
- * one list. `validateFgcLockDocument` is the pure validator `writeFgcLock` reaches through
+ * `validateFgcLockDocument` is the pure validator `writeFgcLock` reaches through
  * `assertFgcLockDocument`, so this is the same rule set rather than a paraphrase of it.
+ * Canonicalization first is unnecessary: it reports on content, and `writeFgcLock` canonicalizes
+ * before asserting, so an ordering difference cannot change the verdict.
  *
- * Canonicalization first is unnecessary: the validator reports on content, and `writeFgcLock`
- * canonicalizes before asserting, so an ordering difference cannot change the verdict.
+ * `report` is the probe report the decision will cite, or null when it cites none (an
+ * architectural rejection owes no probe). Passed rather than re-derived so the preflight checks
+ * the exact path `record` will use.
  */
-async function candidateProblems(lock, options) {
+async function candidateProblems(lock, options, report) {
   const { extensionCatalog, problems } = await extensionCatalogFor(options, lock);
   const conformance = problems.length > 0
     ? problems
     : resolver.validateLockDecisionConformance(lock, { extensionCatalog });
-  return [...conformance, ...resolver.validateFgcLockDocument(lock)];
+
+  const projectRoot = fromWorkingDirectory(options.project ?? ".");
+  const evidence = report === null ? [] : [await evidencePreflight(projectRoot, report)].filter(problem => problem !== null);
+
+  return [...conformance, ...resolver.validateFgcLockDocument(lock), ...evidence];
 }
 
 /**
@@ -1110,7 +1150,7 @@ async function commandAudit(options) {
   // that only reads `problems` cannot miss a refusal, and both commands speak one vocabulary.
   // `inconclusive` is folded the same way for the same reason.
   const built = await candidateLockFor(entry, probe, probeResult, options);
-  const candidateFindings = built === null ? [] : await candidateProblems(built.candidate, options);
+  const candidateFindings = built === null ? [] : await candidateProblems(built.candidate, options, probe);
   const allProblems = built === null
     ? [...problems, "The probe reached no conclusion, so no lock status can claim its outcome."]
     : [...problems, ...candidateFindings];
@@ -1173,7 +1213,7 @@ async function commandRecord(options) {
   // deliberate: that helper has its own callers and tests, and giving it a default-blocking
   // audit would change a merged contract and strand every caller that does not hold a catalog.
   // The refusal belongs where the Agent hands the decision in.
-  const findings = await candidateProblems(candidate, options);
+  const findings = await candidateProblems(candidate, options, probe);
   if (findings.length > 0) {
     print(
       { command: "record", packageName: entry.decision.packageName, recorded: false, problems: findings },
@@ -1387,10 +1427,11 @@ Options:
                     never read as an npm package.
   --json            Machine-readable output (default for policy, probe and status).
 
-audit and record run the same checks: conformance (is this record true) and the candidate
-lock's own validation (is this document acceptable — the rules writeFgcLock enforces).
-Every refusal is reported under one \`problems\` key. Unknown options are refused rather than
-ignored, and an option that needs a value must have one.
+audit and record run the same checks, covering everything record refuses for a reason it can
+determine by reading: conformance (is this record true), the candidate lock's own validation
+(the rules writeFgcLock enforces), and the evidence path preflight (does the address it would
+cite already hold different bytes). Every refusal is reported under one \`problems\` key.
+Unknown options are refused rather than ignored, and an option that needs a value must have one.
 
 Evidence: record writes the report it cites to \`fgc-evidence/<content-hash>.json\` beside
 fgc.lock.json, once the decision is accepted — probe and audit measure only and write
