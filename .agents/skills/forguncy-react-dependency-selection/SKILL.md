@@ -74,7 +74,7 @@ node $S record --project <projectRoot> --runtime-smoke ./hook.mjs --decision dec
 node $S record --project <projectRoot> --extension-catalog listing.json --decision decision.json
 ```
 
-`audit` 与 `record` 跑**同一套**检查（含 conformance）。`audit` 说 `recordable: true` 而 `record` 拒绝的情况不会发生——否则就等于告诉调用者「可以写了」。
+`audit` 与 `record` 跑**同一套**检查：conformance（这条记录是否**真实**）加上候选锁自身的 validation（这份文档是否**可接受**，即 `writeFgcLock` 会执行的那套，含 #8 对 `extension`/`replace` 的 rationale 要求）。`audit` 说 `recordable: true` 而 `record` 拒绝的情况不会发生——否则就等于告诉调用者「可以写了」。两类问题都汇总在同一个 `problems` 字段里。
 
 决策文件由 **Agent** 产出，脚本从不代填。字段与示例见 `references/decision-recording.md`。
 

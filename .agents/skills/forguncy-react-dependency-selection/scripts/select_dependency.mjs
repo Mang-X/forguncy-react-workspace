@@ -41,12 +41,19 @@
  *   `facts` / `risks` / `validation` / `environment` / `assessment`, and never a
  *   strategy.
  * - `audit`   — check a decision file against the ownership gate, the probe it owes,
- *   #8's evidence profile and conformance against the verified target. Prints
- *   problems; decides nothing.
+ *   #8's evidence profile, conformance against the verified target, and the candidate
+ *   lock's own validation. Prints problems; decides nothing.
  * - `record`  — audit a decision file, then write it into `fgc.lock.json`. Runs the
  *   *same* checks `audit` does and refuses on any of them, so an unrecordable
  *   decision cannot be persisted. `audit` and `record` therefore agree by
  *   construction: a decision one calls ready is one the other writes.
+ *
+ * The candidate lock's validation is part of that list rather than left to the write,
+ * because `writeFgcLock` enforces rules the other audits do not restate (#8's rationale
+ * requirement is one). Leaving it out made `audit` call a decision recordable that the
+ * write then refused — and, since evidence is persisted before the lock, left a created
+ * evidence file behind under a message saying nothing was written.
+ *
  * - `status`  — read the lock back and report each record's freshness.
  *
  * Two of those checks are the CLI's own contribution rather than the resolver's, and
@@ -82,7 +89,7 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { register } from "node:module";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -903,24 +910,37 @@ async function extensionCatalogFor(options, lock) {
 }
 
 /**
- * The conformance problems a candidate lock has, in the audit's own words.
+ * Every problem the candidate lock has, from both audits that can see it whole.
  *
- * Runs over the **whole** candidate document, not the one record, because the rules
- * are not all per-record: `host-inline-conflict` is a fact about a *pair* of records
- * for the same module, so a per-record check cannot express it. That also mirrors how
- * the compiler consumes the lock — one document at a time.
+ * `validateLockDecisionConformance` alone was an incomplete answer, and the gap showed up the
+ * same way twice. `writeFgcLock` refuses any document `validateFgcLockDocument` rejects, and
+ * that validator knows rules the conformance audit does not restate — #8's requirement that an
+ * `extension` or `replace` decision carry a written rationale is the one that bites. Because
+ * the acceptance checks stopped at conformance, a decision missing its rationale passed
+ * `audit` as `recordable: true` and only then failed at the lock write. That made `audit` and
+ * `record` disagree, and — since evidence is written before the lock — left a created
+ * evidence file behind under a message saying nothing had been written.
  *
- * Errors block; warnings do not. A warning is a fact about the *cell* (whether a
- * preset-provided global is on the page depends on the cell's preset chain), which a
- * lock file is the wrong place to hold, so refusing on one would make a supported
- * configuration unwritable.
+ * Conformance runs over the **whole** document, not the one record, because its rules are not
+ * all per-record: `host-inline-conflict` is a fact about a *pair* of records for the same
+ * module, so a per-record check cannot express it. Its errors block and its warnings do not —
+ * a warning is a fact about the *cell* (whether a preset-provided global is on the page depends
+ * on the cell's preset chain), which a lock file is the wrong place to hold, so refusing on one
+ * would make a supported configuration unwritable.
+ *
+ * Both audits run here over the same candidate document, so "the checks `record` applies" is
+ * one list. `validateFgcLockDocument` is the pure validator `writeFgcLock` reaches through
+ * `assertFgcLockDocument`, so this is the same rule set rather than a paraphrase of it.
+ *
+ * Canonicalization first is unnecessary: the validator reports on content, and `writeFgcLock`
+ * canonicalizes before asserting, so an ordering difference cannot change the verdict.
  */
-async function conformanceProblems(lock, options) {
+async function candidateProblems(lock, options) {
   const { extensionCatalog, problems } = await extensionCatalogFor(options, lock);
-  if (problems.length > 0) {
-    return problems;
-  }
-  return resolver.validateLockDecisionConformance(lock, { extensionCatalog });
+  const conformance = problems.length > 0
+    ? problems
+    : resolver.validateLockDecisionConformance(lock, { extensionCatalog });
+  return [...conformance, ...resolver.validateFgcLockDocument(lock)];
 }
 
 /**
@@ -951,7 +971,7 @@ function runtimeValidationOf(document, probe) {
  * from the selection audit alone, which is what let an earlier revision report
  * `recordable: true` beside a non-empty `conformanceProblems` list.
  */
-function auditPayload(entry, probe, problems, conformance = []) {
+function auditPayload(entry, probe, problems) {
   return {
     command: "audit",
     packageName: entry.decision.packageName,
@@ -960,9 +980,12 @@ function auditPayload(entry, probe, problems, conformance = []) {
     ownership: entry.ownership,
     branch: core.branchForOwnership(entry.ownership).id,
     evidenceProfile: core.lockEvidenceProfileForDecision(entry.decision),
-    recordable: problems.length === 0 && conformance.length === 0,
+    // One key for every refusal, from whichever audit produced it. A caller that reads only
+    // this field cannot miss one, and `audit` and `record` speak one vocabulary — an earlier
+    // revision reported conformance in a separate key, which is how a decision could be
+    // `recordable: true` beside a non-empty problem list.
+    recordable: problems.length === 0,
     problems,
-    conformanceProblems: conformance,
   };
 }
 
@@ -1074,21 +1097,28 @@ async function commandAudit(options) {
   const { probe, probeResult } = await probeForDecision(entry, options);
   const problems = core.auditSelectionDecision({ decision: entry.decision, probe, ownership: entry.ownership });
 
-  // The same conformance gate `record` applies, over the lock this decision *would*
-  // produce. `audit` is the read-only check, so the two have to reach the same verdict
-  // — an audit that passed a decision the write then refused would be worse than no
-  // audit, because the caller would have been told it was ready.
+  // The same acceptance checks `record` applies, over the lock this decision *would*
+  // produce. `audit` is the read-only check, so the two have to reach the same verdict —
+  // an audit that passed a decision the write then refused would be worse than no audit,
+  // because the caller would have been told it was ready.
   //
-  // The conformance problems are folded into `problems` rather than reported beside it,
-  // so a consumer that only reads `problems` cannot miss a refusal, and both commands
-  // speak one vocabulary. `inconclusive` is folded the same way for the same reason.
+  // `candidateProblems` covers both audits, including the candidate lock's own validation,
+  // which is what `writeFgcLock` enforces. Stopping at conformance was the gap that let a
+  // decision missing its `rationale` audit as `recordable: true` and then fail on write.
+  //
+  // The problems are folded into `problems` rather than reported beside it, so a consumer
+  // that only reads `problems` cannot miss a refusal, and both commands speak one vocabulary.
+  // `inconclusive` is folded the same way for the same reason.
   const built = await candidateLockFor(entry, probe, probeResult, options);
-  const conformance = built === null ? [] : await conformanceProblems(built.candidate, options);
+  const candidateFindings = built === null ? [] : await candidateProblems(built.candidate, options);
   const allProblems = built === null
     ? [...problems, "The probe reached no conclusion, so no lock status can claim its outcome."]
-    : [...problems, ...conformance];
+    : [...problems, ...candidateFindings];
 
-  print({ ...auditPayload(entry, probe, allProblems, conformance), problems: allProblems }, { ...options, json: true });
+  print(
+    { ...auditPayload(entry, probe, allProblems), problems: allProblems },
+    { ...options, json: true },
+  );
   if (allProblems.length > 0) {
     process.exitCode = 1;
   }
@@ -1133,23 +1163,24 @@ async function commandRecord(options) {
   }
   const { projectRoot, candidate, existing } = built;
 
-  // The gate that makes "only when supported by evidence" true at the point a strategy
-  // is persisted. #8's lock-shape validation cannot answer "is this record *true*", and
-  // for an `extension` decision the answer lives in an extension catalog this
-  // repository does not own — without this, a fabricated `libraryId` records happily.
+  // The acceptance checks, and they are the *whole* set now: conformance ("is this record
+  // true") plus the candidate lock's own validation ("is this document acceptable"), which is
+  // what `writeFgcLock` enforces. #8's rationale requirement lives in the second, and stopping
+  // at the first meant a decision could be refused by the write after evidence had already
+  // been created for it.
   //
   // Composing the read-modify-write rather than changing `recordDependencyDecision` is
-  // deliberate: that helper has its own callers and tests, and giving it a
-  // default-blocking audit would change a merged contract and strand every caller that
-  // does not hold a catalog. The refusal belongs where the Agent hands the decision in.
-  const conformance = await conformanceProblems(candidate, options);
-  if (conformance.length > 0) {
+  // deliberate: that helper has its own callers and tests, and giving it a default-blocking
+  // audit would change a merged contract and strand every caller that does not hold a catalog.
+  // The refusal belongs where the Agent hands the decision in.
+  const findings = await candidateProblems(candidate, options);
+  if (findings.length > 0) {
     print(
-      { command: "record", packageName: entry.decision.packageName, recorded: false, conformanceProblems: conformance },
+      { command: "record", packageName: entry.decision.packageName, recorded: false, problems: findings },
       { ...options, json: true },
     );
     process.stderr.write(
-      `Refused to record "${entry.decision.packageName}": the record does not conform to the verified target for ${conformance.length} reason(s). Nothing was written.\n`,
+      `Refused to record "${entry.decision.packageName}": the record failed ${findings.length} acceptance check(s). Nothing was written.\n`,
     );
     process.exitCode = 1;
     return;
@@ -1169,15 +1200,21 @@ async function commandRecord(options) {
   try {
     await resolver.writeFgcLock(projectRoot, candidate);
   } catch (error) {
-    // `writeFgcLock` validates the whole canonical document on the way out, and it
-    // knows rules this audit does not restate — #8's rationale requirement is the one
-    // that bites a `replace` decision whose file omitted it. Reporting the validator's
-    // own problems is what keeps the refusal actionable: a stack trace here would make
-    // a rule the caller can satisfy look like a crash.
+    // The pure validation above runs the same rules, so reaching here means a genuine write
+    // failure rather than a rule this audit missed. That makes the promise in the message
+    // below something to *restore* rather than merely to state: evidence written moments ago
+    // is rolled back, so "nothing was written" stays true for the whole invocation.
+    //
+    // Only a file this run created is removed. `created: false` means identical bytes were
+    // already there — possibly committed and reviewed — and deleting those would destroy
+    // evidence another lock may cite.
+    if (evidence?.created === true) {
+      await rm(join(projectRoot, ...evidence.relative.split("/")), { force: true });
+    }
     const problems = Array.isArray(error?.problems) ? error.problems : [error.message];
     print({ command: "record", packageName: entry.decision.packageName, recorded: false, problems }, { ...options, json: true });
     process.stderr.write(
-      `Refused to record "${entry.decision.packageName}": the lock rejected the record for ${problems.length} reason(s) this audit does not cover. Nothing was written.\n`,
+      `Refused to record "${entry.decision.packageName}": the lock could not be written for ${problems.length} reason(s). Nothing was written.\n`,
     );
     process.exitCode = 1;
     return;
@@ -1350,8 +1387,9 @@ Options:
                     never read as an npm package.
   --json            Machine-readable output (default for policy, probe and status).
 
-audit and record run the same checks, including conformance against the verified target;
-record refuses to write anything the checks reject. Unknown options are refused rather than
+audit and record run the same checks: conformance (is this record true) and the candidate
+lock's own validation (is this document acceptable — the rules writeFgcLock enforces).
+Every refusal is reported under one \`problems\` key. Unknown options are refused rather than
 ignored, and an option that needs a value must have one.
 
 Evidence: record writes the report it cites to \`fgc-evidence/<content-hash>.json\` beside

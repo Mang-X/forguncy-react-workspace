@@ -414,7 +414,7 @@ describe("CLI contract: conformance is checked before anything is written", () =
       try {
         const recorded = await cli(["record", "--project", root, "--decision", decision.path]);
         expect(recorded.code).not.toBe(0);
-        expect(json<{ conformanceProblems: readonly string[] }>(recorded).conformanceProblems.join(" ")).toContain(
+        expect(json<{ problems: readonly string[] }>(recorded).problems.join(" ")).toContain(
           "extension-library-not-verified",
         );
         expect(existsSync(join(root, "fgc.lock.json"))).toBe(false);
@@ -462,7 +462,7 @@ describe("CLI contract: conformance is checked before anything is written", () =
       try {
         const recorded = await cli(["record", "--project", root, "--decision", decision.path]);
         expect(recorded.code).not.toBe(0);
-        expect(json<{ conformanceProblems: readonly string[] }>(recorded).conformanceProblems.join(" ")).toContain("host-global-not-provided");
+        expect(json<{ problems: readonly string[] }>(recorded).problems.join(" ")).toContain("host-global-not-provided");
         expect(existsSync(join(root, "fgc.lock.json"))).toBe(false);
       } finally {
         await decision.cleanup();
@@ -487,14 +487,16 @@ describe("CLI contract: conformance is checked before anything is written", () =
       try {
         const audited = await cli(["audit", "--project", root, "--decision", fabricated.path]);
         expect(audited.code).not.toBe(0);
-        const payload = json<{ recordable: boolean; problems: readonly string[]; conformanceProblems: readonly string[] }>(audited);
+        const payload = json<{ recordable: boolean; problems: readonly string[] }>(audited);
         // `recordable` must not contradict the problems it reports beside it.
         expect(payload.recordable).toBe(false);
         expect(payload.problems.join(" ")).toContain("extension-library-not-verified");
 
         const refused = await cli(["record", "--project", root, "--decision", fabricated.path]);
         expect(refused.code).not.toBe(0);
-        expect(json<{ conformanceProblems: readonly string[] }>(refused).conformanceProblems).toEqual(payload.conformanceProblems);
+        // Both commands report the same problems, in the same key: one vocabulary, so a caller
+        // does not have to know which audit produced a refusal.
+        expect(json<{ problems: readonly string[] }>(refused).problems).toEqual(payload.problems);
 
         // And the legitimate decision must pass both, so the pair is not merely rejecting
         // everything.
@@ -707,7 +709,7 @@ describe("CLI contract: a raw listing is not a mapping catalog", () => {
           try {
             const recorded = await cli(["record", "--project", root, "--extension-catalog", catalog.path, "--decision", decision.path]);
             expect(recorded.code, `${code} should refuse`).not.toBe(0);
-            expect(json<{ conformanceProblems: readonly string[] }>(recorded).conformanceProblems.join(" ")).toContain(code);
+            expect(json<{ problems: readonly string[] }>(recorded).problems.join(" ")).toContain(code);
             expect(existsSync(join(root, "fgc.lock.json"))).toBe(false);
           } finally {
             await catalog.cleanup();
@@ -732,7 +734,7 @@ describe("CLI contract: a raw listing is not a mapping catalog", () => {
       try {
         const recorded = await cli(["record", "--project", root, "--extension-catalog", catalog.path, "--decision", decision.path]);
         expect(recorded.code).not.toBe(0);
-        expect(json<{ conformanceProblems: readonly string[] }>(recorded).conformanceProblems.join(" ")).toContain(
+        expect(json<{ problems: readonly string[] }>(recorded).problems.join(" ")).toContain(
           "extension-mapping-not-declared",
         );
         expect(existsSync(join(root, "fgc.lock.json"))).toBe(false);
@@ -1352,6 +1354,122 @@ describe("CLI contract: a content-addressed citation is verified, not assumed", 
         expect(json<{ evidence: { created: boolean } }>(second).evidence.created).toBe(false);
       } finally {
         await file.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+});
+
+// ---------------------------------------------------------------------------
+// Review round 6 — the acceptance checks include the candidate lock's own validation
+// ---------------------------------------------------------------------------
+
+/**
+ * `writeFgcLock` refuses any document `validateFgcLockDocument` rejects, and that validator
+ * knows rules the conformance audit does not restate — #8's requirement that an `extension`
+ * or `replace` decision carry a written rationale, for instance.
+ *
+ * The acceptance checks stopped short of it, which produced two symptoms from one cause:
+ * `audit` reported `recordable: true` for a decision the write then refused, and `record`
+ * created durable evidence **before** that refusal, leaving an orphan under a message saying
+ * nothing had been written. Both are asserted here through a single decision file — a legal
+ * `extension` decision that only omits its `rationale`.
+ */
+describe("CLI contract: audit and record apply the same checks, including the lock's own", () => {
+  /** A decision that is legal in every respect except the missing written justification. */
+  const extensionWithoutRationale = {
+    packageName: "@tanstack/react-query",
+    role: "cell-local-data-access",
+    strategy: "extension",
+    libraryId: "tanstack-query",
+    globalName: "TanStackQuery",
+    extensionVersion: "5.102.8",
+  };
+
+  const extensionWithRationale = {
+    ...extensionWithoutRationale,
+    rationale: "A bundled copy would give every Cell its own QueryClient, so the shared page global is required.",
+  };
+
+  it("refuses it in `audit`, naming the rule, instead of reporting it recordable", async () => {
+    await withScratch(EXTENSION_QUERY, async root => {
+      const decision = await decisionFile(extensionWithoutRationale);
+      try {
+        const audited = await cli(["audit", "--project", root, "--decision", decision.path]);
+        expect(audited.code, "a decision the write would refuse must not audit clean").not.toBe(0);
+
+        const payload = json<{ recordable: boolean; problems: readonly string[] }>(audited);
+        expect(payload.recordable).toBe(false);
+        // The rule is named, so the caller knows what to add rather than that something failed.
+        expect(payload.problems.join(" ")).toContain("rationale");
+
+        // And the same decision with its rationale is accepted, so this is not refusing the shape.
+        const fixed = await decisionFile(extensionWithRationale);
+        try {
+          const clean = await cli(["audit", "--project", root, "--decision", fixed.path]);
+          expect(clean.code, clean.stderr).toBe(0);
+          expect(json<{ recordable: boolean }>(clean).recordable).toBe(true);
+        } finally {
+          await fixed.cleanup();
+        }
+      } finally {
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("refuses it in `record` with nothing written — no lock and no evidence", async () => {
+    // The orphan is the part that matters: evidence is a committable file, so creating one for
+    // a decision nobody accepted dirties a working tree under a message denying it happened.
+    await withScratch(EXTENSION_QUERY, async root => {
+      const decision = await decisionFile(extensionWithoutRationale);
+      try {
+        const refused = await cli(["record", "--project", root, "--decision", decision.path]);
+        expect(refused.code).not.toBe(0);
+        expect(refused.stderr).toContain("Nothing was written");
+        expect(refused.stderr).not.toContain("at async");
+
+        expect(existsSync(join(root, "fgc.lock.json")), "no lock").toBe(false);
+        expect(await readdir(join(root, "fgc-evidence")).catch(() => []), "no orphan evidence").toEqual([]);
+      } finally {
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("records the same decision once the rationale is present", async () => {
+    await withScratch(EXTENSION_QUERY, async root => {
+      const decision = await decisionFile(extensionWithRationale);
+      try {
+        const recorded = await cli(["record", "--project", root, "--decision", decision.path]);
+        expect(recorded.code, recorded.stderr).toBe(0);
+        const record = (await readLock(root)).decisions.find(entry => entry.packageName === "@tanstack/react-query")!;
+        expect(record.strategy).toBe("extension");
+        expect(existsSync(join(root, "fgc.lock.json"))).toBe(true);
+      } finally {
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("still refuses conformance problems, which is the other half of the same list", async () => {
+    // The two audits now run together, so this pins that adding the lock validator did not
+    // displace the conformance one.
+    await withScratch(EXTENSION_QUERY, async root => {
+      const decision = await decisionFile({
+        ...extensionWithRationale,
+        libraryId: "completely-invented",
+        globalName: "Invented",
+      });
+      try {
+        const refused = await cli(["record", "--project", root, "--decision", decision.path]);
+        expect(refused.code).not.toBe(0);
+        expect(json<{ problems: readonly string[] }>(refused).problems.join(" ")).toContain("extension-library-mismatch");
+
+        const audited = await cli(["audit", "--project", root, "--decision", decision.path]);
+        expect(audited.code).not.toBe(0);
+        expect(json<{ recordable: boolean }>(audited).recordable).toBe(false);
+      } finally {
+        await decision.cleanup();
       }
     });
   }, CASE_TIMEOUT_MS);
