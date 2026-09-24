@@ -307,13 +307,33 @@ export function harnessHostModulePlan(): {
  * ## The three forms, and what changed for RegExps
  *
  * - **object form** (`{ react: "/path" }`) — the keys, matched by the prefix rule;
- * - **array string `find`** — matched by the prefix rule;
+ * - **array string `find`** — matched by the prefix rule, after {@link normalizeAliasFind};
  * - **array `RegExp` `find`** — matched by `pattern.test(importee)`, which is what Vite itself
  *   does with it. This replaces an earlier conservative version that ignored RegExps, reasoning
  *   that which ids they match is undecidable. It is decidable: the question is not what the
  *   expression *means* but whether it matches each of the finite host ids, and `test` answers
  *   that. Ignoring them was wrong in the direction that matters — a project's `find: /^react$/`
  *   override would have been beaten by the harness exactly as the array string case was.
+ *
+ * ## Why the string form is normalized before matching
+ *
+ * A third review round found that matching the `find` *as written* is still not the same question
+ * as matching the `find` Vite uses, because Vite normalizes a trailing slash off both `find` and
+ * `replacement` when both carry one. `{ find: "react/", replacement: "/patched-react/" }` is a
+ * valid alias, and matching `"react/"` claims neither `react` nor `react/jsx-dev-runtime`, so the
+ * harness kept its exact aliases and the project's override did nothing at all — worse than the
+ * subpath-only failure the previous round found.
+ *
+ * The rule is reproduced rather than approximated: stripping the slash unconditionally would
+ * decline to alias on behalf of `{ find: "react/", replacement: "/patched-react" }`, which Vite
+ * does *not* normalize and whose prefix rule therefore matches nothing — leaving a project with no
+ * React at all. Both conditions are Vite's, so both are reproduced.
+ *
+ * Each round of this filter has shared one shape, and it is worth naming because the next change
+ * here should watch for it: the filter decides by *reimplementing* a rule Vite already owns, so it
+ * is only ever as correct as its reproduction — equality instead of prefix, then prefix without
+ * normalization. The tests that guard it therefore assert through `pluginContainer.resolveId`
+ * rather than against the alias list, since every one of these defects was invisible in the list.
  *
  * An `undefined` or unreadable `userAlias` claims nothing, so a bare `devHarness({ config })`
  * with no `resolve.alias` of its own still gets the full plan.
@@ -327,18 +347,31 @@ function unclaimedHostAliases(userAlias: unknown): Record<string, string> {
 }
 
 /**
- * Every alias `find` the user's config declares, in either shape.
+ * Every alias `find` the user's config declares, as Vite will see it, in either shape.
  *
  * Both forms are read because Vite accepts either and a project may use whichever. A member that
  * is not a usable pattern — an array entry that is not an object, an object key that is empty —
  * is dropped rather than guessed at; an unreadable pattern claims nothing, which leaves the
  * harness's alias in place.
+ *
+ * The array form keeps `replacement` alongside `find` for one reason: `normalizeAliasFind` needs
+ * it to reproduce Vite's trailing-slash rule, which is conditional on *both* fields. The object
+ * form has no such rule — Vite normalizes a `{ key: value }` map by splitting it into entries
+ * first, and this module reads the keys, so there is nothing to normalize. Returning patterns of
+ * one type rather than a `{ find, replacement }` record keeps `isClaimedBy`'s contract as simple
+ * as the string-or-RegExp question it actually asks.
  */
 function readAliasPatterns(userAlias: unknown): readonly unknown[] {
   if (Array.isArray(userAlias)) {
     return userAlias
       .filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
-      .map(entry => entry.find)
+      .map(entry => {
+        const { find, replacement } = entry;
+        if (typeof find === "string") {
+          return normalizeAliasFind(find, replacement);
+        }
+        return find;
+      })
       .filter(find => find !== undefined);
   }
 
@@ -365,6 +398,9 @@ function readAliasPatterns(userAlias: unknown): readonly unknown[] {
  * `find: /react/g` would get an override that applied on every other import. Restoring the
  * property leaves the pattern exactly as the project handed it over, which is what a predicate
  * borrowed from someone else's object owes them.
+ *
+ * The pattern arrives already normalized — see {@link normalizeAliasFind} for why that has to
+ * happen before matching rather than being folded in here.
  */
 function isClaimedBy(pattern: unknown, moduleId: string): boolean {
   if (pattern instanceof RegExp) {
@@ -379,6 +415,60 @@ function isClaimedBy(pattern: unknown, moduleId: string): boolean {
     return false;
   }
   return moduleId === pattern || moduleId.startsWith(`${pattern}/`);
+}
+
+/**
+ * A string alias `find` as Vite will see it, which is not always as the project wrote it.
+ *
+ * Vite 8.3's `normalizeSingleAlias` strips a trailing slash from **both** `find` and
+ * `replacement` when **both** end in one:
+ *
+ * ```js
+ * if (typeof find === "string" && find.endsWith("/") && replacement.endsWith("/")) { … slice both … }
+ * ```
+ *
+ * The filter runs earlier than that, so a project writing the perfectly valid
+ *
+ * ```ts
+ * { find: "react/", replacement: "/patched-react/" }
+ * ```
+ *
+ * handed this module the pattern `"react/"`, which matches neither `react` nor
+ * `react/jsx-dev-runtime`. The harness concluded the project claimed nothing, kept its own exact
+ * aliases, and — because Vite merges the plugin's aliases *before* the user's array and only then
+ * normalizes — those exact entries won the resolution. Measured against Vite 8.3.0: with that
+ * alias in the array form, **both** `react` and `react/jsx-dev-runtime` resolved to the harness's
+ * stock React, so the project's override did nothing at all rather than only failing for subpaths.
+ *
+ * Reproducing the normalization is the whole fix. Two half-versions are worth ruling out
+ * explicitly, because both look reasonable and both are wrong:
+ *
+ * - **Stripping the trailing slash unconditionally** would claim ids on behalf of an entry Vite
+ *   never normalizes. `{ find: "react/", replacement: "/patched-react" }` — one slash, not two —
+ *   keeps `find: "react/"` in Vite, whose prefix rule then matches nothing, so the project has
+ *   claimed nothing and the harness must keep its substitutions. Stripping anyway would leave the
+ *   project with no React at all: the harness would decline to alias on behalf of an entry that
+ *   resolves nothing. (That one-slash form is arguably a project mistake, but it is not this
+ *   module's to correct, and guessing would trade one silent failure for another.)
+ * - **Requiring the slash on `replacement` only** is the same error in a different place; both
+ *   conditions are Vite's, so both are reproduced.
+ *
+ * `replacement` is passed in solely to reproduce that condition — the value is never used for
+ * matching, which is why the parameter is documented rather than typed as optional.
+ *
+ * Exported for `vite-plugin.test.ts` to assert directly, which is unusual for a helper this small
+ * and is deliberate: the *conditionality* is the whole content of the fix, and it is not
+ * observable through resolution. Both the correct implementation and an unconditional strip
+ * produce the same resolved module for `{ find: "react/", replacement: "/patched-react" }` — the
+ * user's entry claims nothing either way, so the harness's own alias serves the id in both. The
+ * difference is only whether the pattern is claimed, which is why the guard asserts on this
+ * function rather than on a resolved id.
+ */
+export function normalizeAliasFind(find: string, replacement: unknown): string {
+  if (find.endsWith("/") && typeof replacement === "string" && replacement.endsWith("/")) {
+    return find.slice(0, -1);
+  }
+  return find;
 }
 
 /**

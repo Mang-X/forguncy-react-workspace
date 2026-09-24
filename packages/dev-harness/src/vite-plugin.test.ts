@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { createServer } from "vite";
 
-import { devHarness, HARNESS_ENTRY_URL_PATH, HARNESS_MOUNT_ELEMENT_ID } from "./vite-plugin";
+import { devHarness, HARNESS_ENTRY_URL_PATH, HARNESS_MOUNT_ELEMENT_ID, normalizeAliasFind } from "./vite-plugin";
 
 /**
  * The harness plugin under a **real Vite dev server**, which is the only place two of its
@@ -322,6 +322,69 @@ describe("alias precedence between the project and the plugin's config() hook", 
     } finally {
       await server.close();
     }
+  });
+
+  /**
+   * **The case the third review round found.** A trailing slash on both `find` and `replacement`
+   * is a valid Vite alias, and Vite strips it from both before matching. Filtering the `find` *as
+   * written* therefore saw `"react/"`, which claims neither `react` nor its subpaths, so the
+   * harness kept its own aliases and the project's override did nothing at all — a worse failure
+   * than the previous round's subpath-only one, since even the bare import went to the harness.
+   *
+   * Asserted at resolution, like the others: at filter time the alias list contains the harness's
+   * entries either way, which is exactly why this defect survived two rounds of list inspection.
+   */
+  it("honours an array alias whose find and replacement both end in a slash", async () => {
+    const server = await createServer({
+      root: join(fixturesRoot, "ordinary"),
+      configFile: false,
+      logLevel: "error",
+      appType: "spa",
+      resolve: { alias: [{ find: "react/", replacement: "/slash-owned/react/" }] },
+      plugins: [devHarness({ config }) as never],
+      server: { middlewareMode: true, hmr: false, watch: null },
+    });
+
+    try {
+      // Vite normalizes both sides, so the bare id and the subpaths all go to the project.
+      expect(await resolveModuleId(server, "react")).toBe("/slash-owned/react");
+      expect(await resolveModuleId(server, "react/jsx-dev-runtime")).toBe("/slash-owned/react/jsx-dev-runtime");
+    } finally {
+      await server.close();
+    }
+  });
+
+  /**
+   * The negative half, and the reason the normalization is conditional rather than a plain strip.
+   *
+   * `{ find: "react/", replacement: "/patched-react" }` has a slash on `find` only, so Vite does
+   * **not** normalize it: the entry keeps `find: "react/"`, whose prefix rule (`=== "react/"` or
+   * `startsWith("react//")`) matches no real import. The project has therefore claimed nothing,
+   * and the harness must keep substituting — stripping the slash anyway would decline to alias on
+   * behalf of an entry that resolves nothing, leaving the project with no React at all.
+   *
+   * **Asserted on the normalization itself, not through resolution, and that distinction was
+   * learned the hard way.** The first version of this test resolved `react` and required it not to
+   * be `/patched-react` — which passed under *both* the correct and the unconditional-strip
+   * implementation, because either way the user's entry claims nothing and the harness's own
+   * `react` alias ends up serving the id. A test that passes for both the right and the wrong
+   * behaviour guards nothing; it just looks like it does. The observable that actually differs is
+   * whether the pattern is claimed, so that is what is asserted.
+   */
+  it("does not normalize a slash on find alone, since Vite does not either", () => {
+    // Slash on find only: Vite leaves it alone, so the pattern still carries its slash...
+    expect(normalizeAliasFind("react/", "/patched-react")).toBe("react/");
+    // ...and a pattern with that slash claims no real module id.
+    expect(normalizeAliasFind("react/", "/patched-react")).not.toBe("react");
+
+    // Both slashed: Vite strips both, so the pattern becomes the plain package id.
+    expect(normalizeAliasFind("react/", "/patched-react/")).toBe("react");
+    // No slashes: unchanged, which is the ordinary case.
+    expect(normalizeAliasFind("react", "/patched-react")).toBe("react");
+    // A slash on replacement only: still not Vite's condition, so still unchanged.
+    expect(normalizeAliasFind("react", "/patched-react/")).toBe("react");
+    // A non-string replacement (a function resolver) cannot satisfy Vite's condition either.
+    expect(normalizeAliasFind("react/", undefined)).toBe("react/");
   });
 
   /**
