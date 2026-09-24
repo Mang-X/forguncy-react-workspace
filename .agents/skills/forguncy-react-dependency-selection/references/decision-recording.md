@@ -46,6 +46,8 @@
 - **conformance**：把决策放进候选锁，跑 `validateLockDecisionConformance`——`extension` 的 `libraryId` 必须来自已验证目录或真实 `listFrontendLibraries` 清单；`host` 的 `globalName` 必须是目标真的提供的全局。**只拦 error**，warning 是"关于 Cell 的事实"，不阻断。
 - **写入**：读锁 → 合并 → 过上述全部检查 → 才 `writeFgcLock`。**任一检查不通过就不落盘**。
 
+`writeFgcLock` 的替换是**原子**的（同目录临时文件 → `rename` 覆盖目标）。这在本流程里是**契约，不是锦上添花**：上面的证据回滚把「写锁抛错」读作「锁没变」，若底层用普通 `writeFile`（以 `w` 打开会**先截断**），中途失败就会留下半份锁——于是回滚删掉本次证据、而 stderr 还说「Nothing was written」，最坏的三件事同时发生。原子替换后目标只可能是旧文档或新文档，绝不会是混合体。
+
 `--extension-catalog` 可覆盖默认目录，且接受 #12 的两种来源，二者**不可互换**：
 
 | 输入 | shape | 怎么用 |

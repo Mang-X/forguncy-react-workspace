@@ -30,7 +30,7 @@
  *   `localCompilationDependencies` is freshness-only and is never a shipping path.
  */
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import type {
@@ -106,6 +106,19 @@ export async function readFgcLock(projectRoot: string): Promise<FgcLockDocument>
  * that a caller pre-sort would push a serialization concern into every producer;
  * then the rules. The pure transforms above stay unchecked on purpose — they are
  * typed, and this is the boundary where a value becomes project state.
+ *
+ * **The replacement is atomic, and that is a contract rather than a nicety.**
+ * `writeFile(path, …)` opens the target with `w`, which truncates it immediately; a
+ * failure part-way through the write — a full disk, an interrupted process — therefore
+ * destroys the previous lock and leaves a partial one, and callers cannot tell that
+ * from a clean write. The bytes go to a sibling temporary file and are then `rename`d
+ * over the target, which is atomic on both POSIX and Windows: the target holds either
+ * the old document or the new one, never a mixture. Callers that treat a throw as
+ * "nothing was written" — the dependency-selection Skill rolls back the evidence it
+ * created on exactly that reading — depend on this.
+ *
+ * The temporary name is unique per call so two writers cannot collide on it, and it is
+ * removed if the rename fails, so a failed write leaves no stray file beside the lock.
  */
 export async function writeFgcLock(projectRoot: string, lock: FgcLockDocument): Promise<void> {
   assertFgcLockDocumentShape(lock);
@@ -113,7 +126,18 @@ export async function writeFgcLock(projectRoot: string, lock: FgcLockDocument): 
   assertFgcLockDocument(canonical);
   const path = fgcLockPath(projectRoot);
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, serializeFgcLock(canonical), "utf8");
+
+  const temporary = `${path}.${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.tmp`;
+  try {
+    await writeFile(temporary, serializeFgcLock(canonical), "utf8");
+    await rename(temporary, path);
+  } catch (error) {
+    // The target is untouched — the rename either happened or did not — so the only
+    // cleanup owed is the temporary file, and a failure to remove it must not mask the
+    // error that caused it.
+    await rm(temporary, { force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 function lockKey(record: Pick<LockedDependencyDecision, "packageName" | "cellTarget">): string {

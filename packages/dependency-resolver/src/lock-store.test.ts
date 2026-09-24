@@ -1,9 +1,10 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { MockInstance } from "vitest";
 
 import type { FgcLockDocument, LockEnvironment, LockedDependencyDecision } from "@forguncy-react-workspace/core";
 import {
@@ -27,6 +28,29 @@ import {
   upsertLockDecision,
   writeFgcLock,
 } from "./index";
+
+/** The subset of `writeFile`'s overloads this file needs to name. */
+type WriteFileLike = (path: string, data: string, options?: string) => Promise<void>;
+
+// Intercepts `writeFile` so a test can make a write fail *after* it has truncated its target —
+// the failure a read-only file cannot produce, and the one that makes the atomicity assertions
+// discriminate. `vi.mock` is hoisted, so this is in place before the module under test loads.
+vi.mock("node:fs/promises", async importOriginal => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, writeFile: vi.fn(actual.writeFile) };
+});
+
+const writeFileMock = writeFile as unknown as MockInstance<WriteFileLike>;
+
+/**
+ * The genuine `writeFile`, captured before the mock replaces the module export.
+ *
+ * `import { writeFile }` above resolves to the mock, so the injection cannot reach the real
+ * implementation through it — using that name inside the injected failure recursed until the
+ * stack ran out.
+ */
+const genuineWriteFile = writeFileMock.getMockImplementation()!;
+
 
 const FIXTURE = fileURLToPath(new URL("./__fixtures__/fgc.lock.json", import.meta.url));
 
@@ -155,6 +179,93 @@ describe("fgc.lock.json as a project artifact", () => {
     });
   });
 
+  /**
+   * The write is an atomic replace, and callers depend on that.
+   *
+   * `writeFile(path, …)` opens the target with `w`, truncating it before a byte is written, so
+   * a failure part-way through that call destroys the previous lock and leaves a partial one.
+   * The dependency-selection Skill reads a throw as "nothing was written" and rolls back the
+   * evidence it created on exactly that understanding, so a non-atomic writer would leave a
+   * damaged lock *and* deleted evidence while reporting neither.
+   *
+   * The failure is injected by intercepting `writeFile` and making it truncate its own target
+   * before throwing — the behaviour a mid-write I/O failure produces, and one a read-only file
+   * cannot produce (that fails at `open`, before anything is destroyed). Without the injection
+   * these tests pass against the old writer too, which is what an earlier version of them did.
+   */
+  describe("atomic replacement", () => {
+    /** Truncates the destination and fails, as an interrupted write does. */
+    function failingWriteFile(): WriteFileLike {
+      return async (path: string) => {
+        await genuineWriteFile(path, "", "utf8"); // the truncation an `open(w)` performs
+        throw new Error("injected write failure after truncation");
+      };
+    }
+
+    it("leaves the previous lock byte-identical when a write fails mid-way", async () => {
+      const projectRoot = await emptyProject();
+      await writeFgcLock(projectRoot, {
+        schemaVersion: FGC_LOCK_SCHEMA_VERSION,
+        decisions: [{ ...inlineRecord, packageName: "dayjs" }],
+      });
+      const before = await readFile(fgcLockPath(projectRoot), "utf8");
+
+      writeFileMock.mockImplementation(failingWriteFile());
+      try {
+        await expect(
+          writeFgcLock(projectRoot, {
+            schemaVersion: FGC_LOCK_SCHEMA_VERSION,
+            decisions: [{ ...inlineRecord, packageName: "dayjs" }, { ...inlineRecord, packageName: "react" }],
+          }),
+        ).rejects.toThrow("injected write failure");
+      } finally {
+        writeFileMock.mockRestore();
+      }
+
+      // Byte-identical, not merely "still parseable": the old writer truncated this file before
+      // throwing, and a lock that lost content is exactly what this prevents.
+      expect(await readFile(fgcLockPath(projectRoot), "utf8")).toBe(before);
+      await expect(readFgcLock(projectRoot)).resolves.toEqual(
+        canonicalizeFgcLock(JSON.parse(before) as FgcLockDocument),
+      );
+    });
+
+    it("leaves no temporary file beside the lock when a write fails mid-way", async () => {
+      // The staging file is an implementation detail the caller must not have to clean up, and a
+      // stray one beside a lock is a file a later review would have to explain.
+      const projectRoot = await emptyProject();
+      await writeFgcLock(projectRoot, { schemaVersion: FGC_LOCK_SCHEMA_VERSION, decisions: [inlineRecord] });
+
+      writeFileMock.mockImplementation(failingWriteFile());
+      try {
+        await expect(
+          writeFgcLock(projectRoot, {
+            schemaVersion: FGC_LOCK_SCHEMA_VERSION,
+            decisions: [inlineRecord, { ...inlineRecord, packageName: "react" }],
+          }),
+        ).rejects.toThrow();
+      } finally {
+        writeFileMock.mockRestore();
+      }
+      expect((await readdir(projectRoot)).sort()).toEqual(["fgc.lock.json"]);
+    });
+
+    it("replaces the lock at the same path when the write succeeds", async () => {
+      // The other direction, so atomicity is not bought by never replacing the file: the bytes
+      // change and the path does not, which is what the read path and the committed example
+      // depend on.
+      const projectRoot = await emptyProject();
+      await writeFgcLock(projectRoot, { schemaVersion: FGC_LOCK_SCHEMA_VERSION, decisions: [inlineRecord] });
+      await writeFgcLock(projectRoot, {
+        schemaVersion: FGC_LOCK_SCHEMA_VERSION,
+        decisions: [{ ...inlineRecord, packageName: "dayjs" }, { ...inlineRecord, packageName: "react" }],
+      });
+
+      const reread = await readFgcLock(projectRoot);
+      expect(reread.decisions.map(record => record.packageName)).toEqual(["dayjs", "react"]);
+      expect((await readdir(projectRoot)).sort()).toEqual(["fgc.lock.json"]);
+    });
+  });
   // Canonicalization assumes the shape — `[...lock.decisions]`,
   // `[...record.evidence]` — so checking it after canonicalizing meant a
   // malformed value threw a native TypeError from inside the canonicalizer.
