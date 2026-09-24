@@ -61,6 +61,14 @@ import type { LocalDevExtensionChoice } from "@forguncy-react-workspace/runtime"
 import { cellVirtualModuleId, forguncy } from "@forguncy-react-workspace/vite-plugin-fgc";
 
 import {
+  extensionSubstitutionModuleId,
+  extensionSubstitutionModuleOf,
+  extensionSubstitutionModuleSource,
+  extensionSubstitutions,
+  substitutionForModuleId,
+} from "./extension-substitutions.ts";
+import type { ExtensionSubstitution } from "./extension-substitutions.ts";
+import {
   hostModuleAliases,
   hostModuleDedupePackages,
   hostPackageVersionMismatches,
@@ -179,7 +187,17 @@ export interface DevHarnessVitePlugin {
     readonly resolve: { readonly alias: Readonly<Record<string, string>>; readonly dedupe: readonly string[] };
     readonly optimizeDeps: { readonly include: readonly string[] };
   };
-  /** Claims the harness entry URL path and any unserved host substitution. */
+  /**
+   * Claims the harness entry URL path, an unserved host substitution, and every declared
+   * extension substitute or unsimulatable extension dependency.
+   *
+   * The extension half is #23's plan step 5 as *enforcement* rather than a report: before this,
+   * a project's `extensionChoices` were audited and then ignored, so a declared shim was never
+   * consulted and a `real-runtime-only` acknowledgement still executed an npm copy. Both are
+   * measured in `extension-substitutions.ts`'s docstring. Exact-id matching and a virtual module,
+   * because that is the only mechanism of the four tried that reaches the browser — see the same
+   * docstring for the three that do not, and why an alias would over-claim subpaths.
+   */
   resolveId(id: string): string | null;
   /** Generates the mount module, or an explanation, or `null` for ids this plugin does not own. */
   load(id: string): string | null;
@@ -641,6 +659,16 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
   // not one per hook call, so it holds one registry.
   const cells = forguncy({ config: options.config, requireEntryFiles });
 
+  // The declared `extensionChoices`, resolved once against the project root. Held rather than
+  // recomputed, so the ids `resolveId` claims and the modules `load` generates come from one list —
+  // the same discipline `host-modules.ts` follows for the bridge table, and for the same reason: a
+  // second derivation is a second place for the answer to differ.
+  //
+  // Populated in `configResolved`, because the project root is not known until the host reveals it.
+  // Before then it is `undefined`, and `resolveId` answering `null` for every extension id is the
+  // honest state: there is no project to read a declaration from yet.
+  let substitutions: readonly ExtensionSubstitution[] | undefined;
+
   return {
     name: DEV_HARNESS_PLUGIN_NAME,
     enforce: "pre",
@@ -670,6 +698,13 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
       if (registry === undefined) {
         return;
       }
+
+      // The project root exists now, so the declared choices can be resolved into the ids this
+      // server answers for. Throwing here rather than at `resolveId` is deliberate: a choice that
+      // names a package the extension table does not intercept is a configuration error the reader
+      // can fix, and reporting it at startup puts it next to the other startup findings instead of
+      // inside whichever module import happened to be first.
+      substitutions = extensionSubstitutions(options.extensionChoices ?? [], registry.root);
 
       if (options.cellId !== undefined) {
         mounted = registry.require(options.cellId);
@@ -809,6 +844,13 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
       if (unavailableHostModuleOf(id) !== undefined) {
         return `\0${id}`;
       }
+      // A declared `extension` choice, answered here rather than by the ordinary npm path. Exact
+      // match only — see `substitutionForModuleId` for why the alias rule would over-claim, and
+      // `extension-substitutions.ts` for the four mechanisms measured and rejected before this one.
+      const substitution = substitutions === undefined ? undefined : substitutionForModuleId(id, substitutions);
+      if (substitution !== undefined) {
+        return extensionSubstitutionModuleId(substitution.moduleId);
+      }
       // Everything else, including the Cell's own `virtual:forguncy/cell/<id>`, is the Cell
       // seam's business. Delegated rather than re-implemented: the seam owns the guards
       // (`unknown-cell-id`, `entry-outside-project-root`, "no component export"), and a second
@@ -820,6 +862,20 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
       const unavailable = unavailableHostModuleOf(id.startsWith("\0") ? id.slice(1) : id);
       if (unavailable !== undefined) {
         return unavailableHostModuleSource(unavailable);
+      }
+
+      // A generated substitution module, for one of the declared choices. Looked up through the
+      // same list `resolveId` claimed from, so a module that served without being claimed — or the
+      // reverse — is not a state this plugin can reach.
+      const substituted = extensionSubstitutionModuleOf(id);
+      if (substituted !== undefined) {
+        const substitution = substitutionForModuleId(substituted, substitutions ?? []);
+        if (substitution === undefined) {
+          throw new Error(
+            `The dev harness generated a substitution module for "${substituted}", which no declared choice in this project answers for. The resolver and this hook read one list; a mismatch means one of them was edited alone.`,
+          );
+        }
+        return extensionSubstitutionModuleSource(substitution);
       }
 
       if (id !== HARNESS_ENTRY_URL_PATH) {

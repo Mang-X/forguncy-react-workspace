@@ -79,17 +79,36 @@ devHarness({
   extensionChoices: [
     // 分支一：本地明确用一个替代品（并说明为何它可接受）
     { packageName: "@tanstack/react-query", mode: "substitute", kind: "npm-package",
-      resolvesTo: "@tanstack/react-query",
+      resolvesTo: "@tanstack/query-core",
       justification: "本地只做 UI 迭代；跨 Cell 单例语义不在此验证。" },
+    // 分支一（另一种 kind）：项目自己提供一个 shim 文件
+    { packageName: "some-extension", mode: "substitute", kind: "project-shim",
+      resolvesTo: "./shims/some-extension.ts",
+      justification: "本机那份包缺了一个我们依赖的导出。" },
     // 分支二：承认该依赖只能留给真实运行验证（并说明看不到什么）
-    { packageName: "some-extension", mode: "real-runtime-only",
+    { packageName: "another-extension", mode: "real-runtime-only",
       reason: "页面全局才是它的模块身份",
-      consequence: "本地渲染用的是 npm 副本，共享缓存不会被走到" },
+      consequence: "本地不会加载任何替代品，这个 import 会直接抛出" },
   ],
 })
 ```
 
-`vp dev` 启动时会审计一遍：**没有声明**的 `extension` 依赖会直接**拒绝启动**（`local-dev-extension-needs-substitute`，契约里 `blocksLocalDevelopment: true`），并把修复方式和 fix owner 一起打出来；声明了 `real-runtime-only` 的则照常启动，但在报告里逐条列出该依赖在本地**完全没有被走到**。这条规则来自 `runtime` 的契约表，而不是 harness 自己的一份清单。
+这两条分支**都是真的被执行**，不只是被记录：
+
+| 声明 | 本地实际加载的模块 |
+| --- | --- |
+| `substitute` + `npm-package` | `resolvesTo` 指定的那个已安装包 |
+| `substitute` + `project-shim` | `resolvesTo` 指定的项目文件 |
+| `real-runtime-only` | 一个**抛出异常**的模块 —— **不会**退回 npm 副本 |
+| 声明了但无法兑现（shim 不存在、包没装） | 同样是抛出异常的模块，并说明缺什么 |
+
+最后一行是刻意的：一个「解析到别处」的声明比一个「直接失败」的声明更危险 —— 开发者会看到一个正常渲染的 Cell，然后得出 shim 跑过了的结论。
+
+`real-runtime-only` 之所以也抛异常，是因为契约原文写的是「no stand-in is used」「the dependency is not exercised at all」。如果它退回 npm 副本，那个依赖就**被走到了**，项目自己写的 `consequence`（"看不到什么"）就是假的。这与本包对宿主桥接的既有做法一致：没有本地副本的被桥接 id 会 alias 到一个抛出解释的模块，因为「走普通 npm 路径更糟 —— 要么报一个含糊的错误，要么绑上一个产物永远不会带的副本」。
+
+匹配是**精确匹配**（与编译器的 `findExtensionExternalMapping` 同一规则），不是前缀 —— 所以 `@tanstack/react-query/persist` 这类扩展并不提供的子路径不会被本地拦截。
+
+`vp dev` 启动时还会审计一遍：**没有声明**的 `extension` 依赖会直接**拒绝启动**（`local-dev-extension-needs-substitute`，契约里 `blocksLocalDevelopment: true`），并把修复方式和 fix owner 一起打出来；声明了 `real-runtime-only` 的则照常启动，但在报告里逐条列出该依赖在本地**完全没有被走到**。这条规则来自 `runtime` 的契约表，而不是 harness 自己的一份清单。
 
 ### 它不是什么
 

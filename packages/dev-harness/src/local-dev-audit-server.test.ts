@@ -11,6 +11,7 @@ import type { LockedDependencyDecision } from "@forguncy-react-workspace/core";
 import { createEmptyFgcLock } from "@forguncy-react-workspace/core";
 
 import { readProjectDependencyDecisions } from "./local-dev-audit.ts";
+import { removeTempProject } from "./temp-project.ts";
 import { devHarness, HARNESS_ENTRY_URL_PATH } from "./vite-plugin.ts";
 
 /**
@@ -108,7 +109,7 @@ function extensionDecision(packageName: string): LockedDependencyDecision {
  * and a config naming a missing file is a different failure than the one under test.
  */
 async function projectWithExtensionLock(): Promise<{ root: string; cleanup: () => Promise<void> }> {
-  const { mkdtemp, mkdir, rm, writeFile } = await import("node:fs/promises");
+  const { mkdtemp, mkdir, writeFile } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const root = await mkdtemp(join(tmpdir(), "dev-harness-audit-"));
 
@@ -120,7 +121,7 @@ async function projectWithExtensionLock(): Promise<{ root: string; cleanup: () =
   await mkdir(join(root, "cells", "probe", "src"), { recursive: true });
   await writeFile(join(root, "cells", "probe", "src", "App.tsx"), "export function App() { return null; }\n", "utf8");
 
-  return { root, cleanup: () => rm(root, { recursive: true, force: true }) };
+  return { root, cleanup: () => removeTempProject(root) };
 }
 
 /** The config both tests hand the plugin, so only `extensionChoices` differs between them. */
@@ -147,12 +148,14 @@ const AUDITED_CONFIG = {
  */
 describe("the declared lock path is honoured, which `readFgcLock(projectRoot)` could not do", () => {
   it("reads where the config points, not `<root>/fgc.lock.json`", async () => {
-    const { mkdtemp, mkdir, rm, writeFile } = await import("node:fs/promises");
+    const { mkdtemp, mkdir, writeFile } = await import("node:fs/promises");
     const { tmpdir } = await import("node:os");
     const { readFgcLock } = await import("@forguncy-react-workspace/dependency-resolver");
 
     const root = await mkdtemp(join(tmpdir(), "dev-harness-lockpath-"));
-    onTestFinished(() => rm(root, { recursive: true, force: true }));
+    // The same cleanup as the other server-starting tests: this one creates a dev server too, so it
+    // races Vite's dependency optimizer exactly as they do.
+    onTestFinished(() => removeTempProject(root));
 
     // The decisions live in a subdirectory the project declared, and *nothing* is at the default
     // location — so a reader that ignored the declaration would find no file at all.

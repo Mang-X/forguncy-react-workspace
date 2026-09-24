@@ -117,6 +117,20 @@ export {
 } from "./local-dev-audit.ts";
 export type { HarnessAuditInput } from "./local-dev-audit.ts";
 
+// The declared `extensionChoices`, resolved rather than only reported (#23 plan step 5)
+export {
+  EXTENSION_SUBSTITUTION_MODULE_PREFIX,
+  ExtensionSubstituteError,
+  extensionSubstitutionModuleId,
+  extensionSubstitutionModuleOf,
+  extensionSubstitutionModuleSource,
+  extensionSubstitutions,
+  resolveChoiceTarget,
+  substitutedExtensionModuleIds,
+  substitutionForModuleId,
+} from "./extension-substitutions.ts";
+export type { ExtensionSubstitution, ExtensionSubstitutionTarget } from "./extension-substitutions.ts";
+
 // The seam between the node half and the browser half. Types only: the modules themselves
 // are reached by path (`./mount`), because the browser half must not be pulled in here.
 export type { DevHarnessMountableCell, DevHarnessMountTarget } from "./types.ts";

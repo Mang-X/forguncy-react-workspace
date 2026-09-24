@@ -62,16 +62,22 @@ lifecycle, routing, permissions, extension load order, cross-Cell isolation, or 
 host bridge — the harness resolves the *published* packages and never runs the bridge.
 
 An `extension` dependency has no local equivalent the harness could infer, because the reason a
-package is an `extension` is that its module identity or cross-cell singleton semantics matter —
-so the project declares one of two branches per package (`extensionChoices` in `devHarness`'s
-options): a substitute with its justification, or a `real-runtime-only` acknowledgement with a
-reason *and* a consequence. `vp dev` audits this at server start and **refuses to start** on an
-undeclared one, because the alternative is a Cell that renders correctly from an npm copy while
-the extension's shared cache is never exercised — a wrong conclusion nothing in the output
-contradicts. Both branches, the finding, and whether it blocks belong to the runtime package
-(`LOCAL_DEV_DIAGNOSTIC_RULES`); `dev-harness` reads `blocksLocalDevelopment` off that table
-rather than keeping a list of its own, so a rule the contract marks blocking cannot be downgraded
-here by omission.
+package is an `extension` is that its module identity or cross-cell singleton semantics matter — so
+the project declares one of two branches per package (`extensionChoices` in `devHarness`'s options):
+a substitute with its justification, or a `real-runtime-only` acknowledgement with a reason *and* a
+consequence. Both branches are **enforced**, not merely recorded: a substitute resolves the id to the
+named package or shim file, and `real-runtime-only` resolves it to a module that throws, so the
+dependency is never exercised by an npm copy the project said it could not validate. A declaration
+that cannot be honoured — a shim that is not there, a package that is not installed — throws for the
+same reason: resolving somewhere else is worse than failing, because the Cell renders and the
+developer concludes the substitute ran.
+
+`vp dev` audits the same declaration at server start and **refuses to start** on an undeclared one.
+Both branches, the finding, and whether it blocks belong to the runtime package
+(`LOCAL_DEV_DIAGNOSTIC_RULES`); `dev-harness` reads `blocksLocalDevelopment` off that table rather
+than keeping a list of its own, so a rule the contract marks blocking cannot be downgraded here by
+omission. Matching is exact, not a prefix, so a subpath the extension does not provide is not
+answered locally — the same rule the compiler's extension table applies.
 
 Where the loop is *more* permissive than the page it is recorded rather than smoothed over:
 locally `react-dom/client` is the whole published module, while the page narrows it to the
