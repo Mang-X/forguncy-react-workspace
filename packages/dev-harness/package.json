@@ -1,0 +1,54 @@
+{
+  "name": "@forguncy-react-workspace/dev-harness",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "//exports": [
+    "`.` is the node half: the Vite plugin, the host-substitution plan, and provenance.",
+    "`./mount` is the browser half — the only module a page loads. The split is by *graph*, not",
+    "by tidiness: the generated entry imports `./mount` by package name, and routing that through",
+    "`.` would pull `node:module` into the page's graph. That is the same defect `core/browser`",
+    "exists to fix, and the harness must not reintroduce it one layer up."
+  ],
+  "//dependencies": [
+    "`react` / `react-dom` are the harness's *host substitutions*, not an implementation detail.",
+    "They are pinned to the versions #5 measured on Forguncy 12.0.100 (19.2.7) because the dev",
+    "loop renders Cell source against the React the page will provide — a different version would",
+    "make local feedback evidence about a different target. They are dependencies rather than",
+    "devDependencies for the same reason: `hostModuleAliases()` resolves them from this package",
+    "at dev-server configuration time, so they have to be installed wherever the plugin runs.",
+    "",
+    "Examples deliberately do *not* install them (`examples/host-antd/package.json` records why:",
+    "installing a `host`-decided package is a silent escape hatch for a broken interception), so",
+    "the harness supplying the substitution is what makes `vp dev` able to render a Cell at all.",
+    "`host-modules.ts` checks the installed version against #5's record and reports a mismatch",
+    "rather than trusting the pin.",
+    "",
+    "`vite` is a dependency because the plugin's own public types describe Vite hooks it composes",
+    "(`DevHarnessVitePlugin`), and because a harness that resolves `optimizeDeps`/`resolve` settings",
+    "for a Vite server has to be able to name that server's version. The plugin is still typed",
+    "structurally, like `vite-plugin-fgc`'s, so nothing here *imports* Vite at runtime.",
+    "`@vitejs/plugin-react-swc` is a *runtime* dependency, not a devDependency, because the",
+    "harness plugin includes it in the Vite config it returns: React Fast Refresh is what makes",
+    "an edit to a Cell's source keep the component's state, and without it `vp dev` degrades to",
+    "a full page reload. It is loaded from this package's own tree, so a project does not have",
+    "to install it to get the loop #23 defines."
+  ],
+  "dependencies": {
+    "@forguncy-react-workspace/core": "workspace:*",
+    "@forguncy-react-workspace/runtime": "workspace:*",
+    "@forguncy-react-workspace/vite-plugin-fgc": "workspace:*",
+    "@vitejs/plugin-react-swc": "4.3.3",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "vite": "8.3.0"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./mount": "./src/mount.ts"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.7",
+    "@types/react-dom": "19.2.7"
+  }
+}

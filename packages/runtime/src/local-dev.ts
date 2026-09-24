@@ -71,7 +71,7 @@ import {
   hostBridgeModuleIds,
   isApplicationOwned,
   RUNTIME_CONTRACT_TARGET,
-} from "@forguncy-react-workspace/core";
+} from "@forguncy-react-workspace/core/browser";
 import type {
   ArchitectureDecisionSource,
   DependencyCheckLevel,
@@ -80,7 +80,7 @@ import type {
   HostBridgeDeferredModule,
   HostBridgeMapping,
   OwnershipConcernId,
-} from "@forguncy-react-workspace/core";
+} from "@forguncy-react-workspace/core/browser";
 
 import { LOCAL_DEV_RUNTIME_DECISION, RUNTIME_FACADE_DECISION } from "./provenance";
 import type { RuntimeFacadeHostBindings, RuntimeFacadeProvider } from "./contract";

@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>dev harness — 销售订单</title>
+  </head>
+  <body>
+    <!--
+      The mount node and the entry script are injected by the harness plugin's
+      `transformIndexHtml`, not written here. That is deliberate: the element id lives in
+      `@forguncy-react-workspace/dev-harness` so a project-provided template cannot disagree
+      with the generated script about where the Cell renders, which is the one thing this
+      file would otherwise have to keep in sync by hand.
+    -->
+    <p>本地开发模式：以下内容由 dev harness 挂载，尚未经过真实活字格运行验证。</p>
+  </body>
+</html>

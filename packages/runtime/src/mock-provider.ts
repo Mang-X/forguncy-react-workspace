@@ -44,7 +44,7 @@
 import {
   CELL_FORGUNCY_PROP_KEYS,
   CELL_PROPS_BASE_KEYS,
-} from "@forguncy-react-workspace/core";
+} from "@forguncy-react-workspace/core/browser";
 
 import type { CellPropKey, ForguncyPropMember } from "./capabilities";
 import { RuntimeFacadeContractError } from "./capabilities";

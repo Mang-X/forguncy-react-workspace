@@ -34,8 +34,8 @@ import {
   decisionReference,
   formatGoverningSpecReferenceLine,
   GOVERNING_ARCHITECTURE_DECISIONS,
-} from "@forguncy-react-workspace/core";
-import type { ArchitectureDecisionSource } from "@forguncy-react-workspace/core";
+} from "@forguncy-react-workspace/core/browser";
+import type { ArchitectureDecisionSource } from "@forguncy-react-workspace/core/browser";
 
 /** The façade Spec this package is the executable projection of. */
 export const RUNTIME_FACADE_DECISION: ArchitectureDecisionSource = {

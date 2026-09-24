@@ -30,8 +30,8 @@
  * acceptance criterion is that the host contract, not convention, decides.
  */
 
-import { CELL_SERVER_COMMANDS_CONTRACT, concernsOwnedBy, isApplicationOwned } from "@forguncy-react-workspace/core";
-import type { OwnershipConcernId } from "@forguncy-react-workspace/core";
+import { CELL_SERVER_COMMANDS_CONTRACT, concernsOwnedBy, isApplicationOwned } from "@forguncy-react-workspace/core/browser";
+import type { OwnershipConcernId } from "@forguncy-react-workspace/core/browser";
 
 import {
   RUNTIME_FACADE_CAPABILITIES,

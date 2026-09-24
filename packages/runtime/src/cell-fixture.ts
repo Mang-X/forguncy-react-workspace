@@ -46,7 +46,7 @@
  * each cannot disagree about which failure class a problem is.
  */
 
-import { isConfigRecord } from "@forguncy-react-workspace/core";
+import { isConfigRecord } from "@forguncy-react-workspace/core/browser";
 
 import type { RuntimeFacadeProvider } from "./contract";
 import type { MockRuntimeFacadeOptions } from "./mock-provider";

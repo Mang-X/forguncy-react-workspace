@@ -47,8 +47,8 @@ import {
   CELL_USER_SCOPE_BINDINGS,
   cellUserScopeBinding,
   isApplicationOwned,
-} from "@forguncy-react-workspace/core";
-import type { OwnershipConcernId, RuntimeEvidenceChannel } from "@forguncy-react-workspace/core";
+} from "@forguncy-react-workspace/core/browser";
+import type { OwnershipConcernId, RuntimeEvidenceChannel } from "@forguncy-react-workspace/core/browser";
 
 // ---------------------------------------------------------------------------
 // Names derived from the verified contract

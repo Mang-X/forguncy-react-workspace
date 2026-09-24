@@ -70,7 +70,7 @@
  * not on the surface.
  */
 
-import { CELL_FORGUNCY_PROP_KEYS, CELL_PROPS_BASE_KEYS } from "@forguncy-react-workspace/core";
+import { CELL_FORGUNCY_PROP_KEYS, CELL_PROPS_BASE_KEYS } from "@forguncy-react-workspace/core/browser";
 
 import {
   findRuntimeFacadeCapability,
