@@ -985,3 +985,193 @@ describe("CLI contract: an option that needs a value fails closed", () => {
     });
   }, CASE_TIMEOUT_MS);
 });
+
+// ---------------------------------------------------------------------------
+// Review round 4 — evidence durability, and unknown options
+// ---------------------------------------------------------------------------
+
+/**
+ * A lock has to be checkable by someone who did not write it.
+ *
+ * The defect this covers is about *durability*, not about the write path: evidence was
+ * content-addressed and collision-free, but it lived under `.fgc/`, which the repository
+ * ignores wholesale. A committed lock therefore arrived on a fresh checkout with a
+ * citation that resolved to nothing — while every reader still reported `fresh`,
+ * `validated` and no blockers, because `assessLockDecision` recomputes freshness from
+ * versions and fingerprints and never asks whether the cited bytes exist. A
+ * `runtime-smoke` result cannot simply be re-derived on a reviewer's machine, which is
+ * the case the durable artifact is for.
+ */
+describe("CLI contract: cited evidence travels with the lock", () => {
+  const runtimeObserved = {
+    packageName: "es-toolkit",
+    role: "cell-local-ui",
+    strategy: "inline",
+    validatedAgainstRuntime: true,
+    evidence: [{ kind: "runtime-observation", reference: "https://example.invalid/report.md" }],
+  };
+
+  async function smokeHook(): Promise<{ path: string; cleanup: () => Promise<void> }> {
+    const directory = await mkdtemp(join(tmpdir(), "fgc-cli-hook-"));
+    const path = join(directory, "hook.mjs");
+    await writeFile(path, "export default () => ({ facts: [{ name: 'page.global', value: 'forguncy' }] });\n", "utf8");
+    return { path, cleanup: () => rm(directory, { recursive: true, force: true }) };
+  }
+
+  it("stores evidence outside .fgc/, so a commit can carry it", async () => {
+    // Asserted on the path's *first segment* rather than with `git check-ignore`, and the
+    // reason is worth recording: this suite's scratch root deliberately lives inside the
+    // example's `.fgc/`, so every path under it is ignored by inheritance whatever the CLI
+    // does. A `check-ignore` assertion here would fail for a harness reason and would keep
+    // failing no matter where the CLI put the file. The property that actually matters is
+    // that the citation is not under the repository-wide ignored directory, which
+    // `git check-ignore` confirms for the real project root in the run below.
+    await withScratch(PROVING_CASES, async root => {
+      const hook = await smokeHook();
+      const decision = await decisionFile(runtimeObserved);
+      try {
+        const recorded = await cli(["record", "--project", root, "--runtime-smoke", hook.path, "--decision", decision.path]);
+        expect(recorded.code, recorded.stderr).toBe(0);
+
+        const record = (await readLock(root)).decisions.find(entry => entry.packageName === "es-toolkit")!;
+        const reference = probeLink(record)!;
+
+        // `.fgc/` is the repository's ignored scratch tree; evidence must not be in it.
+        expect(reference.startsWith(".fgc/")).toBe(false);
+        expect(reference.startsWith("fgc-evidence/")).toBe(true);
+        expect(existsSync(join(root, ...reference.split("/")))).toBe(true);
+
+        // The real root, where a lock actually lives: an evidence file there is committable.
+        const committable = await run(
+          "git",
+          ["check-ignore", "-q", join(PROVING_CASES, ...reference.split("/"))],
+          { cwd: REPOSITORY_ROOT },
+        ).then(
+          () => false,
+          () => true,
+        );
+        expect(committable, `fgc-evidence must not be ignored under a real project root`).toBe(true);
+      } finally {
+        await hook.cleanup();
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("reports a citation that does not resolve as a blocker, not as a fresh record", async () => {
+    // The clean-checkout simulation: keep the lock, drop the evidence. Freshness is
+    // unaffected — versions and fingerprints still match — so this is precisely the gap
+    // where a lock could look verified while resting on bytes that never arrived.
+    await withScratch(PROVING_CASES, async root => {
+      const hook = await smokeHook();
+      const decision = await decisionFile(runtimeObserved);
+      try {
+        const recorded = await cli(["record", "--project", root, "--runtime-smoke", hook.path, "--decision", decision.path]);
+        expect(recorded.code, recorded.stderr).toBe(0);
+
+        const before = await cli(["status", "--project", root]);
+        const beforeRecord = json<{ decisions: readonly { blockers: readonly string[]; unresolvedEvidence: readonly string[] }[] }>(before).decisions[0]!;
+        expect(beforeRecord.unresolvedEvidence).toEqual([]);
+
+        // Simulate the fresh checkout: the evidence never made it into the commit.
+        const reference = probeLink((await readLock(root)).decisions.find(entry => entry.packageName === "es-toolkit")!)!;
+        await rm(join(root, ...reference.split("/")), { force: true });
+
+        const after = await cli(["status", "--project", root]);
+        expect(after.code, "a missing citation is actionable").not.toBe(0);
+        const afterRecord = json<{ decisions: readonly { freshness: string; blockers: readonly string[]; unresolvedEvidence: readonly string[] }[] }>(after).decisions[0]!;
+
+        expect(afterRecord.unresolvedEvidence).toEqual([reference]);
+        expect(afterRecord.blockers).toContain(`evidence-missing:${reference}`);
+        // The point of the finding: freshness alone would have said this record was fine.
+        expect(afterRecord.freshness).toBe("fresh");
+      } finally {
+        await hook.cleanup();
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("does not report a URL citation as missing, because it asserts somewhere unreachable", async () => {
+    // The repository's own committed lock fixture cites runtime observations by URL. A
+    // check that called those missing would be making a claim it cannot support.
+    await withScratch(PROVING_CASES, async root => {
+      const decision = await decisionFile({
+        packageName: "es-toolkit",
+        role: "cell-local-ui",
+        strategy: "inline",
+        evidence: [{ kind: "runtime-observation", reference: "https://github.com/example/report.md" }],
+      });
+      try {
+        const recorded = await cli(["record", "--project", root, "--decision", decision.path]);
+        expect(recorded.code, recorded.stderr).toBe(0);
+        const status = await cli(["status", "--project", root]);
+        const record = json<{ decisions: readonly { unresolvedEvidence: readonly string[] }[] }>(status).decisions[0]!;
+        expect(record.unresolvedEvidence).toEqual([]);
+      } finally {
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+});
+
+describe("CLI contract: an unrecognised option is refused", () => {
+  it("rejects a typo instead of silently falling back to a default", async () => {
+    // The defect: a misspelled flag was stored as a key nobody reads, so the real option
+    // stayed `undefined` and the command fell back to the shipped catalog. A decision that
+    // a supplied listing *refused* was recorded successfully — the caller believed a real
+    // listing had been consulted.
+    await withScratch(PROVING_CASES, async root => {
+      const decision = await decisionFile({ packageName: "es-toolkit", role: "cell-local-ui", strategy: "inline" });
+      try {
+        for (const args of [
+          ["probe", "--no-cach", "--project", root, "es-toolkit"],
+          ["status", "--porject", root],
+          ["record", "--project", root, "--decision", decision.path, "--extension-catlog=listing.json"],
+          ["policy", "--nope"],
+        ]) {
+          const refused = await cli(args);
+          expect(refused.code, `${args.join(" ")} must be refused`).not.toBe(0);
+          expect(refused.stderr).toContain("Unknown option");
+          expect(refused.stderr).not.toContain("at async");
+        }
+        expect(existsSync(join(root, "fgc.lock.json"))).toBe(false);
+      } finally {
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("names the known options and treats an empty value as missing", async () => {
+    await withScratch(PROVING_CASES, async () => {
+      const refused = await cli(["policy", "--telemetry"]);
+      expect(refused.code).not.toBe(0);
+      // "Known options" is the fix for the failure mode: the caller can compare what they
+      // typed against what exists, which a silent accept never let them do.
+      expect(refused.stderr).toContain("--extension-catalog");
+
+      // `--project=` resolves to the working directory, which is a default the caller did
+      // not ask for — the same class of silent fallback as an omitted value.
+      const empty = await cli(["status", "--project="]);
+      expect(empty.code).not.toBe(0);
+      expect(empty.stderr).toContain("needs a value");
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("still accepts every documented option", async () => {
+    // The guard must not reject the surface it exists to protect.
+    await withScratch(PROVING_CASES, async root => {
+      const decision = await decisionFile({ packageName: "es-toolkit", role: "cell-local-ui", strategy: "inline" });
+      try {
+        const recorded = await cli(["record", "--json", "--project", root, "--decision", decision.path]);
+        expect(recorded.code, recorded.stderr).toBe(0);
+        const status = await cli(["status", "--project", root]);
+        expect(status.code, status.stderr).toBe(0);
+        const policy = await cli(["policy"]);
+        expect(policy.code, policy.stderr).toBe(0);
+      } finally {
+        await decision.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+});

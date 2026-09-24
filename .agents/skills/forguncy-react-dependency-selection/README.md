@@ -63,6 +63,16 @@
 | `--runtime-smoke-export <name>` | 指定 hook 的导出名（默认 `default`） |
 | `--extension-catalog <file>` | 用真实清单/已验证目录校验 `extension` 的 `libraryId`（两种输入 shape 不同，见 `references/decision-recording.md`） |
 
+未知选项、以及需要值的选项缺值，都会直接 usage error——不会静默退回默认值。对验证型 CLI 这很关键：拼错 `--extension-catalog` 与漏写它落在同一个地方（使用默认目录），只报错才能让二者可分辨。
+
+## 证据要跟锁一起提交
+
+`record` 会把自己 cite 的 probe report 写到**锁旁边**的 `fgc-evidence/<content-hash>.json`。请把它与 `fgc.lock.json` 一起提交：
+
+- 位置与 `.fgc/`（被 git 忽略）无关。放在那里等于全新 checkout 后锁的引用指向空气，而锁仍显示 `validated`。
+- 按内容寻址，所以不同 report 不会互相覆盖，相同 report 复用同一路径。
+- `status` 会把无法解析的引用报成 `evidence-missing` 并列入 `blockers`、以非零码退出——它不会在证据缺失时继续说 fresh/validated。
+
 ## 用法示例
 
 ~~~text

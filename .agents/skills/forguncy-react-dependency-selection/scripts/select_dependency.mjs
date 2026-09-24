@@ -59,8 +59,9 @@
  *
  * ## Where evidence lives, and why it is not the engine's cache
  *
- * Every probed report is persisted to `.fgc/probe-evidence/<content-hash>.json`, and that
- * path — not the engine's `.fgc/probe-cache/<fingerprint>.json` — is what a lock cites.
+ * Every probed report is persisted to `fgc-evidence/<content-hash>.json` — beside the lock it
+ * belongs to, not under `.fgc/` — and that path, not the engine's
+ * `.fgc/probe-cache/<fingerprint>.json`, is what a lock cites.
  *
  * The two addresses answer different questions and must not be confused. The cache is
  * keyed by the probe's declared inputs, and smoke mode is deliberately not one of them, so
@@ -80,6 +81,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { register } from "node:module";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -99,6 +101,15 @@ const REPOSITORY_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 // ---------------------------------------------------------------------------
 
 /**
+ * The flags that take no value.
+ *
+ * `--json` is accepted on every command although only `policy` / `probe` / `status`
+ * default to it, because a caller piping another command's output has no way to know
+ * which commands already emit JSON.
+ */
+const BOOLEAN_OPTIONS = new Set(["json", "no-cache"]);
+
+/**
  * Options that are meaningless without a value.
  *
  * Listed rather than inferred, because getting one wrong is a fail-*open*: a flag that
@@ -109,6 +120,18 @@ const REPOSITORY_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
  */
 const VALUE_OPTIONS = new Set(["project", "decision", "runtime-smoke", "runtime-smoke-export", "extension-catalog"]);
 
+/**
+ * Parses `argv`, refusing anything it does not recognise.
+ *
+ * The recognised names are a whitelist rather than a fallback, because a typo in a
+ * *verification* flag is the same failure as an omitted one and reaches the same place: a
+ * misspelled `--extension-catalog` used to be stored as a key nobody reads, leaving the real
+ * option `undefined`, so the command fell back to the shipped catalog and could report
+ * success for a decision a real listing would have refused. Rejecting the whole invocation is
+ * the only answer that cannot be mistaken for a pass — a silently ignored flag turns "I
+ * verified against the project's listing" into "I verified against the default", with no
+ * observable difference in the output.
+ */
 function parseArguments(argv) {
   const [command, ...rest] = argv;
   const options = { json: command === "policy" || command === "probe" || command === "status", positionals: [] };
@@ -119,28 +142,34 @@ function parseArguments(argv) {
       continue;
     }
     const [name, inline] = token.slice(2).split("=", 2);
-    if (name === "json" || name === "no-cache") {
+
+    if (!BOOLEAN_OPTIONS.has(name) && !VALUE_OPTIONS.has(name)) {
+      const known = [...BOOLEAN_OPTIONS, ...VALUE_OPTIONS].sort().map(option => `--${option}`).join(", ");
+      fail(`Unknown option "--${name}". Known options: ${known}.`);
+    }
+
+    if (BOOLEAN_OPTIONS.has(name)) {
       options[name === "json" ? "json" : "noCache"] = inline === undefined ? true : inline !== "false";
       continue;
     }
 
-    if (VALUE_OPTIONS.has(name)) {
-      // A missing value is a usage error rather than an absent option. `--x --y` and a
-      // trailing `--x` both mean the caller forgot the argument; consuming the next flag as
-      // a value, or recording `undefined`, would turn either into a silent fallback.
-      const next = inline ?? rest[index + 1];
-      if (next === undefined || (inline === undefined && next.startsWith("--"))) {
-        fail(`--${name} needs a value (\`--${name} <value>\`); none was given.`);
-      }
-      if (inline !== undefined) {
-        options[name] = inline;
-      } else {
-        options[name] = rest[++index];
-      }
-      continue;
+    // A missing value is a usage error rather than an absent option. `--x --y` and a
+    // trailing `--x` both mean the caller forgot the argument; consuming the next flag as
+    // a value, or recording `undefined`, would turn either into a silent fallback. An empty
+    // value (`--project=`) counts as missing for the same reason: it resolves to the current
+    // directory, which is a default the caller did not ask for.
+    const next = inline ?? rest[index + 1];
+    if (inline === "") {
+      fail(`--${name} needs a value (\`--${name} <value>\`); an empty value was given.`);
     }
-
-    options[name] = inline ?? true;
+    if (next === undefined || (inline === undefined && next.startsWith("--"))) {
+      fail(`--${name} needs a value (\`--${name} <value>\`); none was given.`);
+    }
+    if (inline !== undefined) {
+      options[name] = inline;
+    } else {
+      options[name] = rest[++index];
+    }
   }
   return { command, options };
 }
@@ -360,37 +389,46 @@ async function loadRuntimeSmokeHook(options) {
 }
 
 /**
- * Where a probe report is stored as immutable evidence, relative to the project root.
+ * Where probe evidence lives, relative to the project root, and why it is not `.fgc/`.
  *
- * Keyed by the report's **content**, not by its fingerprint, and that distinction is the
- * whole point. The engine's cache is keyed by fingerprint — the probe's declared inputs —
- * and deliberately leaves smoke mode out of it, which is why the engine refuses to store a
- * hook-bearing report under that key at all (`probe-engine.ts`: "a later hookless run would
- * otherwise inherit runtime facts it never requested").
+ * Two independent requirements pick this location:
  *
- * Writing one there anyway looks safe because the *read* side refuses to serve it, but a
- * cache entry can also be **overwritten**: a later hookless run misses, re-probes, and
- * stores its own report under the same fingerprint — silently replacing the very evidence a
- * `validated` record cites, while the record keeps its non-null `target`. The lock would
- * then claim a runtime validation whose supporting `runtime-smoke: passed` no longer exists
- * anywhere. Read-side guards cannot fix a write-side collision, which is what the earlier
- * revision of this script missed.
+ * 1. **It must not be shared with the cache by address.** Keyed by the report's *content*,
+ *    not its fingerprint. The engine's cache is keyed by fingerprint — the probe's declared
+ *    inputs — and deliberately leaves smoke mode out of it, so a hook-bearing and a hookless
+ *    report for the same package share a cache key. Writing one there looks safe because the
+ *    read side refuses to serve it, but a cache entry can also be **overwritten**: a later
+ *    hookless run misses, re-probes, and stores its own report at the same path — silently
+ *    replacing the `runtime-smoke: passed` result a `validated` record cites, while the record
+ *    keeps its non-null `target`. Read-side guards cannot fix a write-side collision. A content
+ *    address has neither problem: identical bytes reuse one path, different bytes cannot collide.
  *
- * A content address has neither problem: different reports get different paths, so nothing
- * can overwrite anything, and the cited bytes are pinned to exactly what was measured.
+ * 2. **It must be committable, and `.fgc/` is not.** `fgc.lock.json` is meant to be reviewed
+ *    and committed, and the repository ignores `.fgc/` wholesale. Evidence stored there
+ *    therefore cannot survive a fresh checkout: the lock keeps `probe.status: passed` and a
+ *    non-null `target`, its citation resolves to nothing, and nothing in the reader notices —
+ *    `assessLockDecision` recomputes freshness from versions and fingerprints and never looks
+ *    at whether the cited bytes exist. That gap is worst for a runtime claim, because a static
+ *    probe can be re-measured anywhere while a `runtime-smoke` result may not be reproducible
+ *    on a reviewer's machine at all — which is exactly the case durable evidence is for.
+ *
+ * So evidence is a sibling of the lock it belongs to, and `status` treats a citation that does
+ * not resolve as a blocker rather than as a fresh record.
  */
+const EVIDENCE_DIRECTORY = "fgc-evidence";
+
 function evidenceRelativePath(report) {
   const digest = createHash("sha256").update(core.serializeProbeReport(report), "utf8").digest("hex");
-  return `.fgc/probe-evidence/${digest}.json`;
+  return `${EVIDENCE_DIRECTORY}/${digest}.json`;
 }
 
 /**
  * Writes a report as evidence and returns the portable path to cite.
  *
- * Best-effort in the same sense the engine's cache is: a failed write means a caller has no
- * evidence to cite, which the caller must notice rather than a write that pretends to have
- * happened. Unlike the cache, an existing file is left alone — the path is a function of the
- * bytes, so an existing file already holds exactly this content.
+ * A failed write is fatal rather than best-effort, unlike the engine's cache: the lock is
+ * about to cite this path, and a citation nothing can follow is the defect this exists to
+ * prevent. An existing file is left alone — the path is a function of the bytes, so an
+ * existing file already holds exactly this content.
  */
 async function persistEvidence(projectRoot, report) {
   const relative = evidenceRelativePath(report);
@@ -400,12 +438,27 @@ async function persistEvidence(projectRoot, report) {
     await writeFile(absolute, core.serializeProbeReport(report), { encoding: "utf8", flag: "wx" });
   } catch (error) {
     // `wx` makes a concurrent run's identical write a no-op rather than a clobber, which is
-    // the one error worth tolerating; anything else means the evidence is not on disk.
+    // the one error worth tolerating; anything else means the evidence is not on disk and the
+    // citation about to be written would be unresolvable.
     if (error?.code !== "EEXIST") {
       fail(`Cannot persist probe evidence at "${absolute}": ${error.message}`);
     }
   }
   return relative;
+}
+
+/**
+ * Whether a cited evidence reference resolves against the project root.
+ *
+ * Only repository-relative references are checked. A URL — the form the repository's own
+ * committed lock fixture uses for its runtime observations — is a claim about somewhere this
+ * command cannot reach, and reporting it as "missing" would be a claim of its own.
+ */
+function evidenceReferenceResolves(projectRoot, reference) {
+  if (!core.isRepositoryRelativeReference(reference)) {
+    return true;
+  }
+  return existsSync(join(projectRoot, ...reference.trim().split(/[\\/]/)));
 }
 
 async function runProbe(options, packageName) {
@@ -1122,6 +1175,17 @@ async function commandStatus(options) {
 
   const decisions = lock.decisions.map((record) => {
     const assessment = core.assessLockDecision(record, environment);
+
+    // A citation that does not resolve is a blocker, and it is reported *beside* the core
+    // assessment rather than through it: `assessLockDecision` answers "do the versions,
+    // fingerprints and runtime still match", which is a different question from "are the
+    // bytes the record rests on still here". Core cannot answer the second — it is handed a
+    // parsed document, not a working directory — and the gap is exactly how a fresh checkout
+    // could keep reporting `fresh`/`validated` for a record whose evidence never arrived.
+    const unresolvedEvidence = record.evidence
+      .filter(link => !evidenceReferenceResolves(projectRoot, link.reference))
+      .map(link => link.reference);
+
     return {
       packageName: record.packageName,
       strategy: record.strategy,
@@ -1134,7 +1198,11 @@ async function commandStatus(options) {
       // `lockDecisionBlockers` reads the assessment, not the record: it is the
       // assessment plus the runtime question, and re-deriving it from the record
       // here would be a second copy of a rule core already states.
-      blockers: core.lockDecisionBlockers(assessment),
+      blockers: [
+        ...core.lockDecisionBlockers(assessment),
+        ...unresolvedEvidence.map(reference => `evidence-missing:${reference}`),
+      ],
+      unresolvedEvidence,
     };
   });
 
@@ -1149,7 +1217,9 @@ async function commandStatus(options) {
     options,
   );
 
-  if (decisions.some((entry) => entry.freshness === "stale")) {
+  // Non-zero when anything a caller has to act on is wrong: a stale record or a citation
+  // nothing can follow. Both mean "do not treat this lock as verified as it stands".
+  if (decisions.some((entry) => entry.freshness === "stale" || entry.unresolvedEvidence.length > 0)) {
     process.exitCode = 1;
   }
 }
@@ -1173,7 +1243,7 @@ Options:
   --decision <file> The Agent-formed decision JSON. See this script's header for its shape.
   --no-cache        Force a fresh probe instead of reusing .fgc/probe-cache/. The
                     measurement is still persisted as evidence, so the lock's
-                    \`.fgc/probe-evidence/\` link resolves.
+                    \`fgc-evidence/\` link resolves.
   --runtime-smoke <module>
                     Load a local module and run its export as the probe's
                     runtime-smoke hook. Needed for a decision that claims
@@ -1192,7 +1262,12 @@ Options:
   --json            Machine-readable output (default for policy, probe and status).
 
 audit and record run the same checks, including conformance against the verified target;
-record refuses to write anything the checks reject.
+record refuses to write anything the checks reject. Unknown options are refused rather than
+ignored, and an option that needs a value must have one.
+
+Evidence: record writes the report it cites to \`fgc-evidence/<content-hash>.json\` beside
+fgc.lock.json, and status reports a citation that does not resolve as \`evidence-missing\`.
+Commit that directory with the lock — an ignored one would not survive a fresh checkout.
 
 The script measures, audits and persists. It never chooses a strategy, never picks a
 replacement package and never classifies ownership — #16 puts all three on the Agent.
