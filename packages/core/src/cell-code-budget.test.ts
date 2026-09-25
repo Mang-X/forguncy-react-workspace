@@ -108,7 +108,7 @@ describe("the measured bands", () => {
     let previousEntry = 0;
 
     for (const definition of CELL_CODE_BUDGET_BAND_DEFINITIONS) {
-      const { write, browserEntry } = definition.measuredAtCeiling;
+      const { write, browserEntry } = definition.representativeMeasurements;
 
       for (const point of [write, browserEntry]) {
         expect(point.artifact.length).toBeGreaterThan(20);
@@ -137,6 +137,31 @@ describe("the measured bands", () => {
     for (const definition of CELL_CODE_BUDGET_BAND_DEFINITIONS) {
       expect(definition.guidance.length).toBeGreaterThan(40);
     }
+  });
+
+  it("names the field for what it holds, because no measurement was taken at a ceiling", () => {
+    // The field this replaced was called `measuredAtCeiling` and documented as "the
+    // measured cost at this band's ceiling". After the correction that made every
+    // figure a traceable point from a published series, that name described a
+    // measurement that does not exist: the ceilings are round legibility numbers, so
+    // the entry points are 381,643 / 1,459,501 / 2,725,099 against ceilings of
+    // 524,288 / 2,097,152 / none. The top band has no ceiling at all, so a
+    // "measurement at the ceiling" is not merely absent there — it is unstatable.
+    for (const definition of CELL_CODE_BUDGET_BAND_DEFINITIONS) {
+      expect(Object.keys(definition)).toContain("representativeMeasurements");
+      expect(Object.keys(definition)).not.toContain("measuredAtCeiling");
+
+      // Where a ceiling exists, no quoted point may claim to be exactly it: that
+      // would be the fabricated measurement the rename exists to prevent.
+      if (definition.maxCharacters !== null) {
+        const { write, browserEntry } = definition.representativeMeasurements;
+        expect(write.characters).not.toBe(definition.maxCharacters);
+        expect(browserEntry.characters).not.toBe(definition.maxCharacters);
+      }
+    }
+
+    // The top band is open-ended, which is why a ceiling-shaped name cannot work.
+    expect(findCellCodeBudgetBand("extension-recommended").maxCharacters).toBeNull();
   });
 });
 
@@ -266,31 +291,51 @@ describe("what the measurement does and does not establish", () => {
     expect(high).toBeCloseTo(Math.max(...perKb), 1);
   });
 
-  it("states coverage per series, since the two series do not reach equally far", () => {
-    // The entry slope is computed over the real compiled artifacts, so its coverage
-    // is what that series reached. An earlier draft recorded a single
-    // `largestEntryObservedCharacters` holding a generated-toolkit point (4,193,986)
-    // beside a real-series slope, which read as if the slope had been measured that
-    // far — it had not.
+  it("separates how far each slope was measured from how large an artifact persisted", () => {
+    // Three different questions, and conflating any two of them misleads a machine
+    // reader about what the published slopes are based on:
+    //
+    //   1. how far the write slope reaches  -> largestTimedWriteCharacters
+    //   2. how large a write was seen to persist -> largestPersistedWriteCharacters
+    //   3. how far the entry slopes reach -> the two entry coverage fields
+    //
+    // The defect this asserts against: a single `largestWriteObservedCharacters:
+    // 8_388_166` beside `writeMsPerKilobyte: 5.02`, whose own doc says the slope
+    // covers 101,919..4,193,986. A reader extrapolating the slope to 8.4 MiB was
+    // extrapolating 2x past its basis, with nothing in the record saying so.
+    expect(CELL_CODE_BUDGET_MEASUREMENT.largestTimedWriteCharacters).toBe(4_193_986);
+    expect(CELL_CODE_BUDGET_MEASUREMENT.largestPersistedWriteCharacters).toBe(8_388_166);
+
+    // The write slope's basis is the timed figure, and it must be the smaller one:
+    // the 8.4 MiB write produced no duration usable in a slope.
+    expect(CELL_CODE_BUDGET_MEASUREMENT.largestTimedWriteCharacters).toBeLessThan(
+      CELL_CODE_BUDGET_MEASUREMENT.largestPersistedWriteCharacters,
+    );
+    // And it must equal the last point of the timed series the slope is computed
+    // over, so "basis" is not just a label.
+    expect(WRITE_SERIES[WRITE_SERIES.length - 1]?.characters).toBe(
+      CELL_CODE_BUDGET_MEASUREMENT.largestTimedWriteCharacters,
+    );
+
+    // Entry: the real compiled series is the shorter of the two, and that is the
+    // bound the published entry slope has.
     expect(CELL_CODE_BUDGET_MEASUREMENT.largestRealArtifactEntryCharacters).toBe(2_725_099);
     expect(CELL_CODE_BUDGET_MEASUREMENT.largestGeneratedToolkitEntryCharacters).toBe(4_193_986);
-    // The real series is the shorter of the two, and that is the bound the slope has.
     expect(CELL_CODE_BUDGET_MEASUREMENT.largestRealArtifactEntryCharacters).toBeLessThan(
       CELL_CODE_BUDGET_MEASUREMENT.largestGeneratedToolkitEntryCharacters,
     );
-    // The write path reaches furthest of all, and never completed inside the tool's
-    // own timeout at that size — so the write curve is bounded by the largest point
-    // it actually measured cleanly, not by this.
-    expect(CELL_CODE_BUDGET_MEASUREMENT.largestWriteObservedCharacters).toBe(8_388_166);
-    expect(CELL_CODE_BUDGET_MEASUREMENT.largestGeneratedToolkitEntryCharacters).toBeLessThan(
-      CELL_CODE_BUDGET_MEASUREMENT.largestWriteObservedCharacters,
-    );
+
+    // No field may answer question 1 with question 2's number under a name that
+    // could be read either way. The two write figures must be separately named.
+    expect(Object.keys(CELL_CODE_BUDGET_MEASUREMENT)).not.toContain("largestWriteObservedCharacters");
   });
 
   it("records that the curves are linear and no hard limit was found", () => {
     expect(CELL_CODE_BUDGET_MEASUREMENT.curveShape).toBe("linear");
     expect(CELL_CODE_BUDGET_MEASUREMENT.hardLimitFound).toBe(false);
-    expect(CELL_CODE_BUDGET_MEASUREMENT.largestWriteObservedCharacters).toBeGreaterThan(4 * 1024 * 1024);
+    // The persistence finding is what bounds "no hard limit": the largest write
+    // persisted even though it outran the tool's timeout.
+    expect(CELL_CODE_BUDGET_MEASUREMENT.largestPersistedWriteCharacters).toBeGreaterThan(4 * 1024 * 1024);
   });
 
   it("says the observed ceiling is the harness's, not the product's", () => {

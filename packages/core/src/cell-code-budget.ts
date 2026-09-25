@@ -112,13 +112,13 @@ export type CellCodeBudgetBand = (typeof CELL_CODE_BUDGET_BANDS)[number];
 export interface CellCodeMeasurementPoint {
   /** The measured cost, milliseconds. */
   readonly ms: number;
-  /** The artifact size both figures were observed at, characters. */
+  /** The size of *this figure's own* artifact, characters. */
   readonly characters: number;
   /** Which artifact, named so a reader can find its row on #21. */
   readonly artifact: string;
 }
 
-/** One band: the ceiling, the cost it implies, and what a consumer should do. */
+/** One band: the ceiling, the measured costs that represent it, and what to do. */
 export interface CellCodeBudgetBandDefinition {
   readonly band: CellCodeBudgetBand;
   /**
@@ -128,7 +128,16 @@ export interface CellCodeBudgetBandDefinition {
    */
   readonly maxCharacters: number | null;
   /**
-   * The measured cost at this band's ceiling, each half with its own provenance.
+   * The measured costs that represent this band, each with its own provenance.
+   *
+   * **These are real measured points inside the band, not costs measured *at* the
+   * ceiling.** The field is named for what it holds rather than for the ceiling
+   * because the two are deliberately different: the ceilings are round numbers
+   * chosen for legibility, and the top band has no ceiling at all
+   * (`maxCharacters: null`), so a name like `measuredAtCeiling` would describe a
+   * measurement that does not exist — the very defect this table was corrected for.
+   * Each point names the size it was actually taken at, so the gap between it and
+   * the ceiling is visible rather than implied away.
    *
    * Two separate fields rather than one `characters` + `artifact`, because the two
    * figures come from **different measured series** and presenting them as one pair
@@ -149,7 +158,7 @@ export interface CellCodeBudgetBandDefinition {
    * bundled code (about 3.8 ms/KB against 6.9 ms/KB), and real compiled code is what
    * a Cell actually is. Quoting the padded series' entry cost would overstate it.
    */
-  readonly measuredAtCeiling: {
+  readonly representativeMeasurements: {
     readonly write: CellCodeMeasurementPoint;
     readonly browserEntry: CellCodeMeasurementPoint;
   };
@@ -158,18 +167,18 @@ export interface CellCodeBudgetBandDefinition {
 }
 
 /**
- * The bands, and the measured cost at each ceiling.
+ * The bands, and the measured points that represent each one.
  *
- * The ceilings are round numbers chosen for legibility, so each measurement names
- * the published point it is quoted from rather than the ceiling itself — a ceiling
- * with no measurement behind it is the kind of invented number this module exists
- * to avoid.
+ * The ceilings are round numbers chosen for legibility, so every figure names the
+ * published point it is quoted from rather than the ceiling itself — a ceiling with
+ * no measurement behind it is the kind of invented number this module exists to
+ * avoid, and the top band has no ceiling to measure at.
  */
 export const CELL_CODE_BUDGET_BAND_DEFINITIONS: readonly CellCodeBudgetBandDefinition[] = [
   {
     band: "inline",
     maxCharacters: 512 * 1024,
-    measuredAtCeiling: {
+    representativeMeasurements: {
       write: {
         ms: 1691,
         characters: 511_567,
@@ -187,7 +196,7 @@ export const CELL_CODE_BUDGET_BAND_DEFINITIONS: readonly CellCodeBudgetBandDefin
   {
     band: "review",
     maxCharacters: 2 * 1024 * 1024,
-    measuredAtCeiling: {
+    representativeMeasurements: {
       write: {
         ms: 9440,
         characters: 2_096_763,
@@ -205,7 +214,7 @@ export const CELL_CODE_BUDGET_BAND_DEFINITIONS: readonly CellCodeBudgetBandDefin
   {
     band: "extension-recommended",
     maxCharacters: null,
-    measuredAtCeiling: {
+    representativeMeasurements: {
       write: {
         ms: 20339,
         characters: 4_193_986,
@@ -262,10 +271,11 @@ export const CELL_CODE_BUDGET_MEASUREMENT = {
   /** The unit the product reports and these bands are expressed in. */
   unit: "characters of generated artifact source",
   /**
-   * Least-squares slope of the designer write path, over the six points from
-   * 101,919 to 4,193,986 characters. Per-point values span 3.4–6.3 ms/KB, and
-   * repeating one 1 MiB write five times gave a 1.24x spread — so this is a
-   * planning figure with a wide band, not a constant.
+   * Least-squares slope of the designer write path, over the six **timed** points
+   * from 101,919 to 4,193,986 characters (see `largestTimedWriteCharacters` — the
+   * basis is the timed series, not the largest artifact that persisted). Per-point
+   * values span 3.4–6.3 ms/KB, and repeating one 1 MiB write five times gave a 1.24x
+   * spread — so this is a planning figure with a wide band, not a constant.
    */
   writeMsPerKilobyte: 5.02,
   /** The per-point range the slope above summarises. */
@@ -282,20 +292,30 @@ export const CELL_CODE_BUDGET_MEASUREMENT = {
   /** Both curves were linear over their measured ranges; no cliff was found. */
   curveShape: "linear",
   /**
-   * Coverage, per series, because the two series do not reach equally far and a
-   * single "largest observed" would silently answer for both.
+   * Coverage, per series and per question, because the two series do not reach
+   * equally far and "how far the slope was measured" is not the same question as
+   * "how large an artifact was observed to persist".
    *
-   * The **write** path was measured on the generated-toolkit series, which reaches
-   * the furthest: 8,388,166 characters is the largest artifact that persisted (its
-   * write exceeded the tool's 60 s cap but completed, and read back intact).
+   * **Write coverage is split for exactly that reason.** The 5.02 ms/KB slope is
+   * computed over six *timed* points reaching `largestTimedWriteCharacters`; the
+   * 8,388,166-character write exceeded the tool's 60 s timeout, so it produced no
+   * duration usable in a slope or a cost curve. Recording only the larger figure
+   * under a name like "largest observed write" would tell a machine reader the slope
+   * had been measured to 8.4 MiB. It had not, and the difference matters: a consumer
+   * extrapolating 5.02 ms/KB to that size is extrapolating 2x beyond its basis.
    *
-   * The **entry** path is quoted from the real compiled series elsewhere in this
-   * record, so its coverage is stated for that series *and* for the generated-toolkit
-   * one it does not use. Quoting only 4,193,986 — a generated-toolkit point, now
-   * published on #21 — next to a real-series slope invited the reading that the slope
-   * was measured that far; it was not.
+   * The persistence fact is still recorded — under a name that says persistence
+   * rather than measurement, so neither fact is lost and neither is mistaken for the
+   * other.
+   *
+   * **Entry coverage** is likewise stated for the series the slope actually uses
+   * (the real compiled artifacts) *and* for the generated-toolkit one it does not, so
+   * a reader cannot read 4,193,986 as the slope's reach.
    */
-  largestWriteObservedCharacters: 8_388_166,
+  /** Largest write with a usable duration — the write slope's basis. */
+  largestTimedWriteCharacters: 4_193_986,
+  /** Largest write known to persist intact, though its duration was not measured. */
+  largestPersistedWriteCharacters: 8_388_166,
   /** Largest entry measured on a real compiled artifact — the series the slope uses. */
   largestRealArtifactEntryCharacters: 2_725_099,
   /** Largest entry measured on the generated-toolkit series (published on #21). */
@@ -304,7 +324,7 @@ export const CELL_CODE_BUDGET_MEASUREMENT = {
   hardLimitFound: false,
   /** Why the observed ceiling is a harness limit rather than a product one. */
   ceilingExplanation:
-    "The largest write exceeded the designer MCP tool's own 60-second execute_code timeout, not a product limit: the content persisted and read back intact at 8,388,166 characters.",
+    "The largest write attempted exceeded the designer MCP tool's own 60-second execute_code timeout, not a product limit: at 8,388,166 characters the content still persisted and read back intact, but its duration was not measured, so it contributes no point to the write slope.",
   evidence: ["designer-api", "generated-runtime-browser"],
 } as const;
 

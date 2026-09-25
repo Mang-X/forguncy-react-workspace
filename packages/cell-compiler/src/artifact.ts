@@ -822,7 +822,7 @@ function auditCodeBudget(code: string, budget: number | undefined): readonly Cel
   if (code.length <= budget) return [];
 
   const verdict = classifyCellCodeSize(code.length);
-  const { write, browserEntry } = verdict.definition.measuredAtCeiling;
+  const { write, browserEntry } = verdict.definition.representativeMeasurements;
 
   // Two different situations produce this diagnostic and they need different
   // advice, which is why the guidance is chosen rather than copied from the band:
