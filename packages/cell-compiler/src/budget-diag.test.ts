@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import { compileCell } from "./artifact.ts";
-import type { CellBundlerPort } from "./artifact.ts";
+import type { BundledCellModule, CellBundlerPort } from "./artifact.ts";
+import { CELL_ENTRY_COMPONENT_BINDING } from "./entry.ts";
 
 /**
  * The compiler's budget diagnostic, after #21.
@@ -14,6 +15,15 @@ import type { CellBundlerPort } from "./artifact.ts";
 function bundlerEmitting(code: string): CellBundlerPort {
   return { bundle: async () => ({ code, sourceSpecifiers: [] }) } as unknown as CellBundlerPort;
 }
+
+/** A bundle that declares the entry binding, so the wrapper can be emitted. */
+const BUNDLE = [
+  `var ${CELL_ENTRY_COMPONENT_BINDING} = (function () {`,
+  '  return function App() { return React.createElement("div", null, "trivial"); };',
+  "})();",
+].join("\n");
+
+const bundlerOf = (module: BundledCellModule): CellBundlerPort => ({ bundle: async () => module });
 
 async function budgetDiagnostic(codeLength: number, budget: number) {
   const outcome = await compileCell(
@@ -86,8 +96,43 @@ describe("a rejection whose artifact is inside the measured ordinary range", () 
     expect(diagnostic.message).not.toMatch(/Raise the budget/);
     // What it says instead has to be true of the two concepts: the budget is the
     // caller's hard cap, and the band is advisory.
-    expect(diagnostic.message).toMatch(/Raising the budget accepts the artifact outright/);
-    expect(diagnostic.message).toMatch(/bands are an advisory classification/);
+    expect(diagnostic.message).toMatch(/Raising the budget removes this budget rejection/);
+    expect(diagnostic.message).toMatch(/Bands are an advisory classification/);
+
+    // And the claim is scoped to this check, not to the whole compile. This
+    // diagnostic is one of several `assembleCellArtifact` collects, so an artifact
+    // can carry it beside an unrelated one — where raising the budget removes the
+    // budget rejection and the compile is *still* rejected. The assertion that the
+    // old wording is gone is separate from the one below, which reproduces it.
+    expect(diagnostic.message).not.toMatch(/accepts the artifact outright/);
+    expect(diagnostic.message).toMatch(/any other artifact diagnostic still applies/);
+  });
+
+  it("does not promise a raised budget makes the whole compile succeed", async () => {
+    // Reproduced: an unflattened inline import plus a tight budget yields
+    // `[source-level-import-remains, cell-code-budget-exceeded]`, and raising the
+    // budget yields `[source-level-import-remains]` — still `rejected`. So the
+    // diagnostic's advice must not read as "the build will be clean".
+    const module = { code: BUNDLE, externalImports: ["es-toolkit"] };
+    const dependencies = [{ strategy: "inline", packageName: "es-toolkit" }] as const;
+
+    const tight = await compileCell(
+      { entry: "src/App.tsx", dependencies: [...dependencies] },
+      { bundler: bundlerOf(module), codeBudgetCharacters: 10 },
+    );
+    if (tight.status !== "rejected") throw new Error(`expected a rejection, got ${tight.status}`);
+    expect(tight.diagnostics.map(diagnostic => diagnostic.code)).toEqual([
+      "source-level-import-remains",
+      "cell-code-budget-exceeded",
+    ]);
+
+    const raised = await compileCell(
+      { entry: "src/App.tsx", dependencies: [...dependencies] },
+      { bundler: bundlerOf(module), codeBudgetCharacters: 10_000_000 },
+    );
+    // The claim under test: the budget code is gone, the compile is not accepted.
+    if (raised.status !== "rejected") throw new Error(`expected a rejection, got ${raised.status}`);
+    expect(raised.diagnostics.map(diagnostic => diagnostic.code)).toEqual(["source-level-import-remains"]);
   });
 
   it("still gives the band's own guidance when the artifact is genuinely large", async () => {

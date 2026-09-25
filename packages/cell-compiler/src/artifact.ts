@@ -837,11 +837,23 @@ function auditCodeBudget(code: string, budget: number | undefined): readonly Cel
   // The second case is the one where the two concepts must not be conflated, so it
   // says what is actually true of this rejection: the budget is a hard cap, and the
   // band is an advisory classification that a raised cap does not start reporting.
+  //
+  // The claim is scoped to *this* check, and that scoping is load-bearing. This
+  // function returns one diagnostic among several that `assembleCellArtifact`
+  // collects, so an artifact can carry a budget rejection beside an unrelated one —
+  // reproduced with an unflattened inline import: a tight budget yields
+  // `[source-level-import-remains, cell-code-budget-exceeded]`, and raising the
+  // budget yields `[source-level-import-remains]` and the compile is *still*
+  // rejected. Saying a raised budget "accepts the artifact outright" would be false
+  // in exactly that case, and would send the caller away believing the build is
+  // clean. Nothing here knows whether other diagnostics exist, so the honest form is
+  // conditional: this rejection goes, anything else stands.
   const guidance = verdict.withinInlineBand
     ? `The artifact is inside the measured ordinary range (${verdict.band}, ceiling ` +
       `${String(verdict.definition.maxCharacters)} characters), so this rejection is the configured budget's ` +
-      `rather than a cost the measurement found. Raising the budget accepts the artifact outright — bands are ` +
-      `an advisory classification, not a severity this diagnostic re-reports once a size is allowed.`
+      `rather than a cost the measurement found. Raising the budget removes this budget rejection; any other ` +
+      `artifact diagnostic still applies. Bands are an advisory classification, not a severity this diagnostic ` +
+      `re-reports once a size is allowed.`
     : verdict.definition.guidance;
 
   return [
