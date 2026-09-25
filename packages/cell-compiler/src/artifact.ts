@@ -138,9 +138,18 @@ export interface CompileCellResult {
  * `CellBundlingRequest.componentBinding` is for, and the two are the same value by
  * construction.
  */
-/** One flattened package's rendered share of the artifact's characters. */
+/**
+ * One flattened package's rendered share of the artifact's characters.
+ *
+ * `exactSpecifier` is set when the modules were reached under a subpath (`pkg/subpath`), null when
+ * they are the package root's own files. The split exists because the compiler preserves
+ * exact-subpath precedence: `findDependencyDecision` checks the exact specifier before the package
+ * root, so crediting a subpath's bytes to the root decision would attribute them to a decision that
+ * did not govern them. A consumer deciding which record owns a share must prefer the exact entry.
+ */
 export interface InlinedPackageSize {
   readonly packageName: string;
+  readonly exactSpecifier: string | null;
   readonly renderedCharacters: number;
 }
 

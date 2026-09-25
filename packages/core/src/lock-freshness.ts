@@ -98,17 +98,23 @@ export interface LockEnvironment {
    */
   readonly probeFingerprints: Readonly<Record<string, string>>;
   /**
-   * The compile identity of each Cell this environment can currently produce, by Cell target.
+   * The compile identity each compile-observed rejection should currently be measured against,
+   * keyed by the **record identity** `packageName\0cellTarget`.
    *
-   * Keyed by Cell target rather than by package, because a compile identity describes *one*
-   * composed Cell and every `cell-code-budget-exceeded` record for that Cell shares it — the
-   * `(package, cellTarget)` pair the lock is keyed by has only one of its two halves varying
-   * here. A Cell missing from the map is `artifact-compile-unknown` rather than a pass.
+   * Keyed by record rather than by Cell, and that is a correction (#77 round 7): a compile
+   * identity describes one composed Cell, but which Cell state a rejection was measured from is a
+   * property of the *record*. Two artifact rejections in one Cell may have been recorded from
+   * different states — package A from S0, then the source changed, then package B from S1 — and
+   * both records stay in the lock. One fingerprint per Cell cannot represent two replay identities,
+   * so one of the two answers was necessarily wrong.
+   *
+   * The key is the lock's own `(packageName, cellTarget)` identity, the same one its records are
+   * keyed by, so an environment cannot answer a question about a different record. A record missing
+   * from the map is `artifact-compile-unknown` rather than a pass.
    *
    * Optional, because a caller that compiles nothing — the probe's own environment, a fixture —
    * has no compile to describe, and a required field would make "I did not compile" and "the
-   * compile is unknown" the same edit. Absent means the same thing an absent entry does:
-   * `artifact-compile-unknown` for any record that needs an answer.
+   * compile is unknown" the same edit. Absent means the same thing an absent entry does.
    */
   readonly artifactFingerprints?: Readonly<Record<string, string>>;
   /** Installed extension versions by `libraryId`, when known. */
@@ -346,7 +352,7 @@ function assessArtifactEvidenceFreshness(
     return ["artifact-compile-unknown"];
   }
 
-  const current = environment.artifactFingerprints?.[record.cellTarget];
+  const current = environment.artifactFingerprints?.[lockRecordIdentity(record)];
   if (current === undefined) {
     return ["artifact-compile-unknown"];
   }
@@ -379,6 +385,21 @@ export interface LockDecisionQuery {
  * Finds the record for a package, preferring one declared for the given cell
  * target over the target-independent record for the same package.
  */
+/**
+ * The identity of one lock record: `(packageName, cellTarget)`.
+ *
+ * Exported because it is what both the lock's keying and `LockEnvironment.artifactFingerprints`
+ * key on, and two spellings of it — one in a caller, one here — would silently make every lookup
+ * miss. The separator is a NUL because neither half can contain one, so no pair of names can
+ * compose another pair's key.
+ */
+export function lockRecordIdentity(record: {
+  readonly packageName: string;
+  readonly cellTarget: string | null;
+}): string {
+  return `${record.packageName}\u0000${record.cellTarget ?? ""}`;
+}
+
 export function findLockDecision(
   lock: { readonly decisions: readonly LockedDependencyDecision[] },
   query: LockDecisionQuery,

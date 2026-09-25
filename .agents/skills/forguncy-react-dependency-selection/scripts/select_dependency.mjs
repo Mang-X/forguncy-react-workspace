@@ -122,6 +122,10 @@ register(new URL("./workspace-loader.mjs", import.meta.url).href);
 
 const core = await import("@forguncy-react-workspace/core");
 const resolver = await import("@forguncy-react-workspace/dependency-resolver");
+// Loaded at module scope so the compile-evidence path can ask which package a specifier belongs to
+// without a per-call dynamic import: the specifier/package split is what decides whether a
+// rejection's rendered share is provable at all.
+const { packageNameOfSpecifier } = await import("@forguncy-react-workspace/cell-compiler");
 
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 
@@ -672,7 +676,10 @@ async function resolveCellBudget(projectRoot, cellId) {
  * name cannot contain NUL, so no `(a, b)` pair can collide with `(a + separator, b)`.
  */
 function recordIdentity(record) {
-  return `${record.packageName}\u0000${record.cellTarget ?? ""}`;
+  // `core`'s definition rather than a second copy (#77 round 7): this key is what `status` hands
+  // the environment *and* what the freshness axis looks up, so two spellings of it would make every
+  // lookup miss and every record report `artifact-compile-unknown`.
+  return core.lockRecordIdentity(record);
 }
 
 /**
@@ -1319,14 +1326,42 @@ async function compileEvidenceFor(entry, options) {
   // `replace`, so this is the only place the decision the measurement saw can be captured — and
   // without it a later re-record would compile a Cell the package is not part of and renew the
   // rejection from that (#77 round 6).
+  //
+  // A record that already carries evidence has *already* been overwritten, so its current strategy
+  // is the `replace` this very rejection wrote. Reading it would persist `subjectDecision:
+  // { strategy: "replace" }` and destroy the field's whole purpose on the second write (#77 round
+  // 7). The saved decision is the authority; `status` replays it for the same reason.
+  const savedSubject = subjectRecord.artifactEvidence?.subjectDecision;
   const subjectDecision = core.dependencyDecisionOf(subjectRecord);
-  const subjectCompileDecision = {
+
+  // A `replace` is not a decision a package can have been *in* the measured Cell under: it is the
+  // rejection itself, which keeps the package out of the compiled graph (rule 4 of #8). So it can
+  // never be a valid subject state, and accepting one would produce a "contribution" measured from
+  // a Cell the package was absent from. Reachable only when a record predates the replay above.
+  if (savedSubject === undefined && subjectDecision.strategy === "replace") {
+    return {
+      evidence: undefined,
+      problems: [
+        `The decision for "${decision.packageName}" cites "${decision.rejection.code}" and its record is already a \`replace\` with no saved \`artifactEvidence.subjectDecision\`. A compile-observed rejection has to be measured from the strategy that actually put the package in the Cell — a \`replace\` keeps it out of the graph — so this record cannot be re-measured as it stands. Record the strategy the package resolves to, then record the rejection.`,
+      ],
+    };
+  }
+
+  const subjectCompileDecision = savedSubject ?? {
     strategy: subjectDecision.strategy,
     ...(subjectDecision.globalName === undefined ? {} : { globalName: subjectDecision.globalName }),
     ...(subjectDecision.libraryId === undefined ? {} : { libraryId: subjectDecision.libraryId }),
   };
 
-  const withSubject = await projectionsFor(effective, projectRoot);
+  // The compile set is the effective decisions with the subject's **saved** decision substituted
+  // back in, so the Cell measured is the one the rejection was originally about. Leaving the
+  // current `replace` in place would measure a Cell the package was not part of and then record
+  // that measurement as this package's evidence (#77 round 7).
+  const compileSet =
+    savedSubject === undefined
+      ? effective
+      : effective.map(record => (record.packageName === decision.packageName ? { ...record, ...savedSubject } : record));
+  const withSubject = await projectionsFor(compileSet, projectRoot);
   if (withSubject.problem !== undefined) {
     return { evidence: undefined, problems: [`The decision for "${decision.packageName}" needs Cell "${cellTarget}" compiled, but ${withSubject.problem}`] };
   }
@@ -1346,11 +1381,45 @@ async function compileEvidenceFor(entry, options) {
   // its code, because the bundler still resolves the bare import (measured on `es-toolkit` — 14,971
   // characters with the decision and 14,971 without). What a package contributes is a fact about
   // the module graph, so only the graph can answer it.
-  const subjectRenderedCharacters = (compiledWith.artifact?.inlinedPackageSizes ?? [])
-    .filter(entry => entry.packageName === decision.packageName)
+  //
+  // ## Why a shared package root refuses rather than guesses (#77 round 7)
+  //
+  // The rendered share is reported per package root, and two decisions can govern one root:
+  // `es-toolkit` and `es-toolkit/compat` are distinct records, and the compiler resolves the exact
+  // subpath before the root. The module graph cannot say which *specifier* reached a given file — it
+  // reports resolved ids, and a subpath can resolve to a file beside the root's own (measured:
+  // `es-toolkit/compat` resolves into `node_modules/es-toolkit/dist/…`, so the path does not name the
+  // specifier). Reporting the whole root's bytes to the root record would credit a decision that did
+  // not govern them, and reporting zero to the subpath record would make a legitimate rejection
+  // unattributable forever.
+  //
+  // So this refuses the measurement where ownership is unprovable, rather than picking the more
+  // plausible record. Guessing is the defect this evidence exists to remove.
+  const sizes = compiledWith.artifact?.inlinedPackageSizes ?? [];
+  // The package root the subject's specifier belongs to, so a `pkg/subpath` subject is measured
+  // against `pkg`'s rendered share rather than against its own (non-existent) entry.
+  const subjectRoot = packageNameOfSpecifier(decision.packageName);
+  const rootShare = sizes
+    .filter(entry => entry.packageName === subjectRoot)
     .reduce((total, entry) => total + entry.renderedCharacters, 0);
 
-  // The compiler files its diagnostic only when the artifact is genuinely over, so a fitting
+  const sharingDecisions = effective.filter(
+    record =>
+      record.packageName !== decision.packageName &&
+      packageNameOfSpecifier(record.packageName) === subjectRoot,
+  );
+  if (sharingDecisions.length > 0) {
+    return {
+      evidence: undefined,
+      problems: [
+        `The decision for "${decision.packageName}" rejects Cell "${cellTarget}" on its size, but ${sharingDecisions
+          .map(record => `"${record.packageName}"`)
+          .join(", ")} also applies to that Cell under the same package root. The compiler resolves an exact-subpath decision before the package root, and the module graph reports rendered bytes per package — not per specifier — so which record owns the ${String(rootShare)} rendered characters cannot be proved from this compile. Record the rejection against the decision that actually governs the code, splitting the decisions so one of them owns the root, or drop this one.`,
+      ],
+    };
+  }
+
+  const subjectRenderedCharacters = rootShare;  // The compiler files its diagnostic only when the artifact is genuinely over, so a fitting
   // measurement means the rejection has nothing behind it — reported rather than accepted, because
   // a `replace` binds to this finding.
   if (compiledWith.measurement.codeCharacters <= compiledWith.measurement.budgetCharacters) {
@@ -1837,6 +1906,14 @@ async function commandRecord(options) {
   const environment = await resolver.probeLockEnvironment(projectRoot, {
     lock: written,
     probeFingerprints: probeResult === null ? {} : { [entry.decision.packageName]: probeResult.fingerprint },
+    // The compile identity this command just produced, handed to the freshness check under the same
+    // record key the axis looks up (#77 round 7). Without it the command reports `recorded: true`
+    // beside `artifact-compile-unknown` for evidence it created moments earlier — a record that
+    // becomes fresh the instant anyone runs `status`. Measuring and then not believing the
+    // measurement is worse than not reporting a freshness verdict here at all.
+    ...(compiled?.evidence === undefined || record === null
+      ? {}
+      : { artifactFingerprints: { [core.lockRecordIdentity(record)]: compiled.evidence.compileFingerprint } }),
   });
 
   print(
@@ -1918,39 +1995,35 @@ async function commandStatus(options) {
   // rebuilt stays out of the map, so a record needing it reports `artifact-compile-unknown` rather
   // than passing.
   const rebuiltArtifacts = new Map();
-  const cellsNeedingIdentity = new Set(
-    lock.decisions
-      .filter(record => record.artifactEvidence !== undefined && record.cellTarget !== null)
-      .map(record => record.cellTarget),
+  const artifactRecords = lock.decisions.filter(
+    record => record.artifactEvidence !== undefined && record.cellTarget !== null,
   );
-  for (const cellTarget of cellsNeedingIdentity) {
-    // Recompiled, not recomposed from metadata (#77 round 6). The identity is a hash of the
-    // *composed artifact*, so the only way to recompute it faithfully is to compose the artifact
-    // again — reading the entry file was the defect: an edit to a transitively imported module, or
-    // an upgrade of an inline dependency, left the identity unchanged and the record reporting
-    // `fresh` for a Cell whose real compiled size had moved.
+  for (const record of artifactRecords) {
+    // Recompiled **per record**, not once per Cell (#77 round 7). A compile identity describes one
+    // composed Cell, but *which* Cell state a rejection was measured from is a property of the
+    // record: package A may be measured from state S0, the source then change, package B be
+    // measured from S1, and both records stay in the lock. One fingerprint per Cell cannot
+    // represent two replay identities, so at least one of the two assessments was necessarily
+    // wrong — the same class of bug the per-package probe fingerprint had.
     //
-    // Paid only for Cells that actually hold a compile-observed rejection, which is the trade the
-    // review endorsed: `status` already re-runs dependency probes, and an evidence class whose
-    // authority is explicitly the compiler must not stay fresh on a compiler-input change merely
-    // because the top-level entry did not move.
+    // Recompiled rather than recomposed from metadata (#77 round 6): the identity is a hash of the
+    // composed artifact, so the only faithful way to recompute it is to compose the artifact again.
+    //
+    // Paid only for records that actually hold compile evidence, which is the trade the review
+    // endorsed: `status` already re-runs dependency probes, and an evidence class whose authority
+    // is explicitly the compiler must not stay fresh on a compiler-input change merely because the
+    // top-level entry did not move.
     try {
+      const cellTarget = record.cellTarget;
       const effective = effectiveCellDecisions(lock, cellTarget);
-      // Replay the subject's *pre-rejection* decision from the evidence (#77 round 6). Recording the
-      // rejection overwrote the record with `replace`, so the lock no longer describes the Cell that
-      // was measured — compiling it as it stands would omit the subject and compose a different
-      // artifact, and the record would report `artifact-compile-changed` for its own write.
-      //
-      // A Cell may hold several compile-observed rejections, so each subject's recorded decision is
-      // restored in turn; they cannot overlap, since one package has one record per Cell.
-      const recordEvidence = lock.decisions.filter(
-        record => record.cellTarget === cellTarget && record.artifactEvidence !== undefined,
+      // Replay **this record's** saved pre-rejection decision, and only this one. Replaying every
+      // subject in the Cell would compose a third state that no record was ever measured from, and
+      // comparing it to each record's fingerprint would answer for a compile that never happened.
+      const replayable = effective.map(candidate =>
+        candidate.packageName === record.packageName && record.artifactEvidence.subjectDecision !== undefined
+          ? { ...candidate, ...record.artifactEvidence.subjectDecision }
+          : candidate,
       );
-      const replayable = [];
-      for (const record of effective) {
-        const evidence = recordEvidence.find(candidate => candidate.packageName === record.packageName)?.artifactEvidence;
-        replayable.push(evidence === undefined ? record : { ...record, ...evidence.subjectDecision });
-      }
 
       const projections = await projectionsFor(replayable, projectRoot);
       if (projections.problem !== undefined) {
@@ -1958,7 +2031,7 @@ async function commandStatus(options) {
       }
       const compiled = await compileDeclaredCell({ projectRoot, cellTarget, dependencies: projections.decisions });
       if (compiled.ok && compiled.compileFingerprint !== undefined) {
-        rebuiltArtifacts.set(cellTarget, compiled.compileFingerprint);
+        rebuiltArtifacts.set(core.lockRecordIdentity(record), compiled.compileFingerprint);
       }
     } catch {
       // An unresolvable Cell leaves the identity absent, which the freshness axis reports.
@@ -1976,12 +2049,13 @@ async function commandStatus(options) {
     // a single shared map can only be right when no two records share a package name. The
     // versions, target and toolchain are shared because none of them depends on the Cell.
     const own = rebuiltFingerprints.get(recordIdentity(record));
-    const artifactIdentity = record.cellTarget === null ? undefined : rebuiltArtifacts.get(record.cellTarget);
+    // Keyed by record identity, not by Cell (#77 round 7): two artifact rejections in one Cell may
+    // have been measured from different states, so the identity being compared against must vary on
+    // the same `(packageName, cellTarget)` key the record does.
+    const artifactIdentity = rebuiltArtifacts.get(recordIdentity(record));
     const recordEnvironment = {
       ...environment,
-      // The compile identity is keyed by Cell target, so it is shared by every record scoped to
-      // that Cell rather than varying per package — unlike the probe fingerprint beside it.
-      ...(artifactIdentity === undefined ? {} : { artifactFingerprints: { [record.cellTarget]: artifactIdentity } }),
+      ...(artifactIdentity === undefined ? {} : { artifactFingerprints: { [recordIdentity(record)]: artifactIdentity } }),
       ...(own === undefined ? {} : { probeFingerprints: { [record.packageName]: own } }),
     };
     const assessment = core.assessLockDecision(record, recordEnvironment);

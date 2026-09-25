@@ -420,6 +420,7 @@ export {
   LOCK_REAL_RUNTIME_VALIDATIONS,
   LOCK_STALENESS_REASONS,
   lockDecisionBlockers,
+  lockRecordIdentity,
   resolveLockDecision,
 } from "./lock-freshness.ts";
 export type {

@@ -607,6 +607,16 @@ export interface ProbeLockEnvironmentOptions {
    * #8's answer when the environment cannot say what the probe would produce now.
    */
   readonly probeFingerprints?: Readonly<Record<string, string>>;
+  /**
+   * Current compile identities by **record identity** (`packageName\u0000cellTarget`), for
+   * `artifact-rejection` records. Defaults to `{}` for the same fail-closed reason as
+   * `probeFingerprints`: a missing entry reports `artifact-compile-unknown` (stale) rather than
+   * passing.
+   *
+   * Keyed by record rather than by Cell, because which Cell state a rejection was measured from is
+   * a property of the record — two rejections in one Cell can come from different states.
+   */
+  readonly artifactFingerprints?: Readonly<Record<string, string>>;
   readonly extensionVersions?: Readonly<Record<string, string>>;
   readonly extensionIdentities?: Readonly<Record<string, string>>;
   readonly lock?: FgcLockDocument;
@@ -641,6 +651,10 @@ export async function probeLockEnvironment(
     target,
     toolchain,
     probeFingerprints,
+    // Carried through rather than defaulted away: an environment built here is how a caller hands
+    // the freshness axis the compile identity it just measured, so dropping it would make every
+    // `artifact-rejection` report `artifact-compile-unknown` no matter what the caller knew.
+    artifactFingerprints: options.artifactFingerprints ?? {},
     extensionVersions: options.extensionVersions ?? {},
     extensionIdentities: options.extensionIdentities ?? {},
   };

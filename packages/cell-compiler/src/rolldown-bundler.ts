@@ -486,15 +486,53 @@ function inlinedPackageNames(moduleIds: readonly string[]): string[] {
  * Sorted by name so the report is byte-stable, like the code and `inlinedPackages`.
  */
 function inlinedPackageSizesOf(modules: Record<string, { readonly renderedLength: number }>): readonly InlinedPackageSize[] {
-  const sizes = new Map<string, number>();
+  const sizes = new Map<string, { packageName: string; exactSpecifier: string | null; renderedCharacters: number }>();
   for (const [moduleId, module] of Object.entries(modules)) {
     const packageName = packageNameOfModuleId(moduleId);
     if (packageName === undefined) continue;
-    sizes.set(packageName, (sizes.get(packageName) ?? 0) + module.renderedLength);
+    // Attributed by the specifier that *resolved* to this module, not only by its package root.
+    // The compiler preserves exact-subpath precedence everywhere else — `findDependencyDecision`
+    // checks the exact specifier before the package root, and `inlinedSpecifiers` exists so
+    // `pkg/subpath` is not folded into `pkg` — so reporting a subpath's bytes under the root would
+    // credit a decision that did not govern them (#77 round 7).
+    const exactSpecifier = exactSubpathOf(moduleId, packageName);
+    const key = `${packageName}\u0000${exactSpecifier ?? ""}`;
+    const entry = sizes.get(key) ?? { packageName, exactSpecifier, renderedCharacters: 0 };
+    entry.renderedCharacters += module.renderedLength;
+    sizes.set(key, entry);
   }
-  return [...sizes.entries()]
-    .map(([packageName, renderedCharacters]) => ({ packageName, renderedCharacters }))
-    .sort((a, b) => (a.packageName < b.packageName ? -1 : a.packageName > b.packageName ? 1 : 0));
+  return [...sizes.values()].sort((a, b) =>
+    a.packageName !== b.packageName
+      ? (a.packageName < b.packageName ? -1 : 1)
+      : ((a.exactSpecifier ?? "") < (b.exactSpecifier ?? "") ? -1 : (a.exactSpecifier ?? "") > (b.exactSpecifier ?? "") ? 1 : 0),
+  );
+}
+
+/**
+ * The subpath a module under `node_modules/<packageName>` came from, or null for the package root.
+ *
+ * Derived from the module's own path rather than from the specifier that imported it, because the
+ * specifier is not available at this level: the module graph reports resolved ids, and two
+ * different specifiers can resolve into one package. So this answers "which subpath does this file
+ * belong to", which is enough for the *subpath* half of the split and deliberately not offered as
+ * a claim about which import reached it.
+ */
+function exactSubpathOf(moduleId: string, packageName: string): string | null {
+  const normalized = moduleId.replace(/\\/g, "/");
+  const marker = `${NODE_MODULES_MARKER}${packageName}/`;
+  const at = normalized.lastIndexOf(marker);
+  if (at < 0) return null;
+  const rest = normalized.slice(at + marker.length);
+  const segments = rest.split("/").filter(segment => segment.length > 0);
+  // A file directly inside the package directory is the package root; anything under a
+  // subdirectory is a subpath. `dist/index.js` is the root's build output, not an imported
+  // `dist` subpath, which is why the entry file's own directory is not treated as a subpath.
+  if (segments.length === 0) return null;
+  const [first] = segments;
+  if (first === "dist" || first === "lib" || first === "src" || first === "esm" || first === "cjs") {
+    return null;
+  }
+  return segments.length > 1 ? first! : null;
 }
 
 /**

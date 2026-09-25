@@ -261,6 +261,33 @@ async function withCappedCell<T>(cap: number | null, body: (root: string) => Pro
  * compile to reproduce is the one that *included* the package being rejected, and the round-5
  * attribution rule refuses a rejection for a package no Cell record places here.
  */
+/**
+ * Adds a second declared Cell with its own cap, over the same source as `bench`.
+ *
+ * Distinct caps are what make the two records' compile identities differ, which is the property the
+ * per-record keying exists for. A distinct Forguncy target, because one Cell owns one target.
+ */
+async function writeSecondCappedCell(root: string, cap: number): Promise<void> {
+  const config = await readFile(join(root, "forguncy.config.ts"), "utf8");
+  await writeFile(
+    join(root, "forguncy.config.ts"),
+    config.replace(
+      "    },\n  },\n});",
+      `    },\n    second: {\n      entry: "./cells/bench/src/App.tsx",\n      target: { pageName: "Second", cell: "B2" },\n      output: { codeBudgetCharacters: ${String(cap)}, justification: "cap-e2e fixture" },\n    },\n  },\n});`,
+    ),
+    "utf8",
+  );
+}
+
+/** Adds the `second` Cell's own record for the subject, so its compile can include it. */
+async function writeSecondCellRecord(root: string): Promise<void> {
+  const lock = JSON.parse(await readFile(join(root, "fgc.lock.json"), "utf8")) as {
+    decisions: Record<string, unknown>[];
+  };
+  lock.decisions.push({ ...lock.decisions[0], cellTarget: "second" });
+  await writeFile(join(root, "fgc.lock.json"), JSON.stringify(lock, null, 2), "utf8");
+}
+
 async function withRecordedCell(root: string): Promise<void> {
   await writeFile(
     join(root, "fgc.lock.json"),
@@ -465,6 +492,170 @@ describe("CLI contract: the declared cell code cap reaches probe, audit, record 
         const recorded = await cli(["record", "--project", root, "--decision", file.path]);
         expect(recorded.code).not.toBe(0);
         expect(json<{ problems: readonly string[] }>(recorded).problems.join("\n")).toMatch(/within the cap/);
+      } finally {
+        await file.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  // PR review of #77, P1 (round 7). The record has to describe the compile it was measured from,
+  // and re-recording is where that breaks: the first write turned the subject's decision into
+  // `replace`, so reading the lock again would persist `subjectDecision: { strategy: "replace" }`
+  // and destroy the field's whole purpose on the second write.
+  it("preserves the subject's pre-rejection decision across a re-record", async () => {
+    await withCappedCell(CAP_SUBJECT_DECIDES, async root => {
+      await withRecordedCell(root);
+      const file = await decisionFile({
+        packageName: "es-toolkit",
+        role: "cell-local-ui",
+        strategy: "replace",
+        cellTarget: "bench",
+        rationale: "The Cell is over its cap because of this package.",
+        alternatives: ["a lighter date utility"],
+        rejection: {
+          kind: "technical",
+          code: "cell-code-budget-exceeded",
+          summary: "The composed Cell is over this Cell's cap.",
+          evidence: [],
+          remediation: "Evaluate a lighter alternative.",
+        },
+      });
+      try {
+        const first = await cli(["record", "--project", root, "--decision", file.path]);
+        expect(first.code, first.stderr).toBe(0);
+        expect((await readLock(root)).decisions.find(entry => entry.packageName === "es-toolkit")?.artifactEvidence?.subjectDecision).toEqual({
+          strategy: "inline",
+        });
+
+        // The re-record. The lock now says `replace` for this package, so a naive read would save
+        // that as the subject's decision.
+        const second = await cli(["record", "--project", root, "--decision", file.path]);
+        expect(second.code, second.stderr).toBe(0);
+        const evidence = (await readLock(root)).decisions.find(entry => entry.packageName === "es-toolkit")?.artifactEvidence;
+        expect(evidence?.subjectDecision).toEqual({ strategy: "inline" });
+        // And the measurement is still real: the re-record recompiled with the replayed decision
+        // rather than the `replace` the lock now holds.
+        expect(evidence?.subjectRenderedCharacters).toBeGreaterThan(0);
+      } finally {
+        await file.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  // PR review of #77, P2 (round 7). `record` measured the compile a moment earlier, so reporting the
+  // record it just wrote as `artifact-compile-unknown` was a command contradicting its own work.
+  it("reports the record it just wrote as fresh, without waiting for `status`", async () => {
+    await withCappedCell(CAP_SUBJECT_DECIDES, async root => {
+      await withRecordedCell(root);
+      const file = await decisionFile({
+        packageName: "es-toolkit",
+        role: "cell-local-ui",
+        strategy: "replace",
+        cellTarget: "bench",
+        rationale: "The Cell is over its cap because of this package.",
+        alternatives: ["a lighter date utility"],
+        rejection: {
+          kind: "technical",
+          code: "cell-code-budget-exceeded",
+          summary: "The composed Cell is over this Cell's cap.",
+          evidence: [],
+          remediation: "Evaluate a lighter alternative.",
+        },
+      });
+      try {
+        const recorded = await cli(["record", "--project", root, "--decision", file.path]);
+        expect(recorded.code, recorded.stderr).toBe(0);
+        const payload = json<{ freshness: { freshness: string; stalenessReasons: readonly string[] } }>(recorded);
+        expect(payload.freshness.stalenessReasons).not.toContain("artifact-compile-unknown");
+        expect(payload.freshness.freshness).toBe("fresh");
+      } finally {
+        await file.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  // PR review of #77, P1 (round 7). One compile identity cannot describe two records measured from
+  // different states: `artifactFingerprints` is keyed by record identity, so each record is
+  // assessed against its own replay rather than one shared Cell fingerprint.
+  it("assesses two Cells' records against their own compile identities, not one shared Cell one", async () => {
+    // Two Cells over the *same* source but with different caps, so their records carry different
+    // identities. A Cell-keyed map could hold only one of them, and the other would be assessed
+    // against a compile that is not its own.
+    await withCappedCell(CAP_SUBJECT_DECIDES, async root => {
+      await withRecordedCell(root);
+      await writeSecondCappedCell(root, 12_000);
+      await writeSecondCellRecord(root);
+
+      const second = await decisionFile({
+        packageName: "es-toolkit",
+        role: "cell-local-ui",
+        strategy: "replace",
+        cellTarget: "second",
+        rationale: "This Cell is over its cap because of this package.",
+        alternatives: ["a lighter date utility"],
+        rejection: {
+          kind: "technical",
+          code: "cell-code-budget-exceeded",
+          summary: "The composed Cell is over this Cell's cap.",
+          evidence: [],
+          remediation: "Evaluate a lighter alternative.",
+        },
+      });
+      try {
+        const recorded = await cli(["record", "--project", root, "--decision", second.path]);
+        expect(recorded.code, recorded.stderr).toBe(0);
+
+        const status = await cli(["status", "--project", root]);
+        const decisions = json<{ decisions: readonly { cellTarget: string | null; stalenessReasons: readonly string[] }[] }>(status).decisions;
+        expect(decisions).toHaveLength(2);
+        // Each record answers for its own identity. Asserted on the artifact axes rather than on
+        // the whole reason list, because the fixture's probe fingerprint and recorded version are
+        // placeholders — unrelated to the compile identity under test.
+        for (const decision of decisions) {
+          const artifactReasons = decision.stalenessReasons.filter(reason => reason.startsWith("artifact-compile-"));
+          expect(artifactReasons, `cell ${String(decision.cellTarget)}`).toEqual([]);
+        }
+      } finally {
+        await second.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("refuses attribution when two decisions share one package root", async () => {
+    // PR review of #77, P1 (round 7). The module graph reports rendered bytes per package, not per
+    // specifier, and the compiler resolves an exact-subpath decision before the root — so which
+    // record owns a shared root's bytes cannot be proved from the compile. Refused rather than
+    // guessed: crediting the root with a subpath's code is the misattribution this evidence exists
+    // to prevent, and reporting zero to the subpath makes a real rejection unattributable forever.
+    await withCappedCell(CAP_SUBJECT_DECIDES, async root => {
+      await withRecordedCell(root);
+      const lock = JSON.parse(await readFile(join(root, "fgc.lock.json"), "utf8")) as {
+        decisions: Record<string, unknown>[];
+      };
+      lock.decisions.push({ ...lock.decisions[0], packageName: "es-toolkit/compat" });
+      await writeFile(join(root, "fgc.lock.json"), JSON.stringify(lock, null, 2), "utf8");
+
+      const file = await decisionFile({
+        packageName: "es-toolkit",
+        role: "cell-local-ui",
+        strategy: "replace",
+        cellTarget: "bench",
+        rationale: "Rejects the root while a subpath decision also applies.",
+        alternatives: ["a lighter date utility"],
+        rejection: {
+          kind: "technical",
+          code: "cell-code-budget-exceeded",
+          summary: "The composed Cell is over this Cell's cap.",
+          evidence: [],
+          remediation: "Evaluate a lighter alternative.",
+        },
+      });
+      try {
+        const recorded = await cli(["record", "--project", root, "--decision", file.path]);
+        expect(recorded.code).not.toBe(0);
+        expect(json<{ problems: readonly string[] }>(recorded).problems.join("\n")).toMatch(
+          /also applies to that Cell under the same package root/,
+        );
       } finally {
         await file.cleanup();
       }

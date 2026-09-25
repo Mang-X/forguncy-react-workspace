@@ -37,13 +37,19 @@ const ARTIFACT_FINGERPRINT = 'cell="abc";budget=100000';
  * pre-rejection decision, and the two compiles a size verdict has to justify. Defaults describe the
  * state a rejection is allowed to rest on — over cap with the subject, under it without.
  */
+/** The artifact-axis staleness reasons for a record: what this file's cases assert on. */
+function artifactReasons(record: LockedDependencyDecision, environment: LockEnvironment): readonly string[] {
+  return reasonsFor(record, environment).stalenessReasons.filter((reason: string) => reason.startsWith("artifact-compile-"));
+}
+
 function artifactEvidenceFixture(overrides: {
   readonly subjectRenderedCharacters?: number;
   readonly codeCharacters?: number;
   readonly budgetCharacters?: number;
+  readonly compileFingerprint?: string;
 } = {}): ArtifactBudgetEvidence {
   return {
-    compileFingerprint: ARTIFACT_FINGERPRINT,
+    compileFingerprint: overrides.compileFingerprint ?? ARTIFACT_FINGERPRINT,
     subjectDecision: { strategy: "inline" },
     // Over cap with the subject's contribution counted, under it without: the state a rejection is
     // allowed to rest on.
@@ -78,7 +84,9 @@ function lockEnvironment(overrides: Partial<LockEnvironment> = {}): LockEnvironm
     target: RUNTIME_CONTRACT_TARGET,
     toolchain: { vitePlus: "0.3.2" },
     probeFingerprints: { "@tanstack/react-query": CELL_FINGERPRINT, "date-fns": CELL_FINGERPRINT, "es-toolkit": CELL_FINGERPRINT, react: CELL_FINGERPRINT, "some-amd-package": BUNDLER_FINGERPRINT },
-    artifactFingerprints: { [BENCH_CELL]: ARTIFACT_FINGERPRINT },
+    // Keyed by *record* identity, not by Cell (#77 round 7): two artifact rejections in one
+    // Cell may come from different compile states, so the identity must vary on the same key.
+    artifactFingerprints: { ["date-fns\u0000" + BENCH_CELL]: ARTIFACT_FINGERPRINT },
     extensionVersions: { "tanstack-query": "5.90.2" },
     extensionIdentities: { "tanstack-query": EXTENSION_IDENTITY },
     ...overrides,
@@ -531,7 +539,7 @@ describe("replace decisions expire differently by rejection kind", () => {
   // dependency's decision could move, and the record kept reporting fresh. The identity in
   // `artifactEvidence.compileFingerprint` is what closes that.
   it("goes stale when the Cell's compile identity moves, so a size verdict cannot outlive its Cell", () => {
-    const moved = lockEnvironment({ artifactFingerprints: { [BENCH_CELL]: "artifact=\"moved\";deps=[];budget=100000" } });
+    const moved = lockEnvironment({ artifactFingerprints: { ["date-fns\u0000" + BENCH_CELL]: 'cell="moved";budget=100000' } });
 
     const assessment = reasonsFor(artifactRejection, moved);
 
@@ -545,6 +553,44 @@ describe("replace decisions expire differently by rejection kind", () => {
     const assessment = reasonsFor(artifactRejection, lockEnvironment({ artifactFingerprints: {} }));
 
     expect(assessment.stalenessReasons).toEqual(["artifact-compile-unknown"]);
+  });
+
+  // PR review of #77, P1 (round 7). A compile identity describes one composed Cell, but *which*
+  // Cell state a rejection was measured from is a property of the record: package A may be measured
+  // from one state, the source change, package B be measured from another, and both records stay in
+  // the lock. Keyed by Cell, one fingerprint had to answer for both — and could only be right for
+  // one of them.
+  it("assesses two records in one Cell against their own compile identities", () => {
+    const second: LockedDependencyDecision = {
+      ...artifactRejection,
+      packageName: "es-toolkit",
+      cellTarget: BENCH_CELL,
+      artifactEvidence: artifactEvidenceFixture({ compileFingerprint: 'cell="second";budget=100000' }),
+    };
+    // Both records are in one Cell; their identities differ. An environment answering for one
+    // fingerprint would leave the other reporting `artifact-compile-changed` for a compile that is
+    // in fact its own.
+    const environment = lockEnvironment({
+      artifactFingerprints: {
+        ["date-fns\u0000" + BENCH_CELL]: ARTIFACT_FINGERPRINT,
+        ["es-toolkit\u0000" + BENCH_CELL]: 'cell="second";budget=100000',
+      },
+    });
+
+    // Asserted on the artifact axis: the fixture's recorded candidate version does not match this
+    // environment, which is an unrelated staleness reason and not what this case is about.
+    expect(artifactReasons(artifactRejection, environment)).toEqual([]);
+    expect(artifactReasons(second, environment)).toEqual([]);
+    // And a moved identity still moves exactly one of them, so the keying is not answering "fresh"
+    // for everything.
+    const moved = lockEnvironment({
+      artifactFingerprints: {
+        ["date-fns\u0000" + BENCH_CELL]: ARTIFACT_FINGERPRINT,
+        ["es-toolkit\u0000" + BENCH_CELL]: 'cell="moved";budget=100000',
+      },
+    });
+    expect(artifactReasons(artifactRejection, moved)).toEqual([]);
+    expect(artifactReasons(second, moved)).toEqual(["artifact-compile-changed"]);
   });
 
   it("re-checks an unrejected candidate's own version, which an artifact rejection also records", () => {
