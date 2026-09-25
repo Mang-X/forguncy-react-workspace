@@ -1395,13 +1395,8 @@ async function compileEvidenceFor(entry, options) {
   //
   // So this refuses the measurement where ownership is unprovable, rather than picking the more
   // plausible record. Guessing is the defect this evidence exists to remove.
-  const sizes = compiledWith.artifact?.inlinedPackageSizes ?? [];
-  // The package root the subject's specifier belongs to, so a `pkg/subpath` subject is measured
-  // against `pkg`'s rendered share rather than against its own (non-existent) entry.
   const subjectRoot = packageNameOfSpecifier(decision.packageName);
-  const rootShare = sizes
-    .filter(entry => entry.packageName === subjectRoot)
-    .reduce((total, entry) => total + entry.renderedCharacters, 0);
+  const rootShare = subjectShareOf(compiledWith.artifact, decision.packageName);
 
   const sharingDecisions = effective.filter(
     record =>
@@ -1441,6 +1436,25 @@ async function compileEvidenceFor(entry, options) {
     },
     problems: [],
   };
+}
+
+/**
+ * The characters the subject's modules contributed to one compile, as the bundler accounted them.
+ *
+ * The **one** definition, called by the recorder and by `status`'s recomputation (#77 revision 17).
+ * Two copies would eventually disagree, and a disagreement here is the exact defect the
+ * recomputation exists to catch — `status` would report a mismatch against its own arithmetic rather
+ * than against a changed Cell.
+ *
+ * A `pkg/subpath` subject is measured against its package root's share, because `inlinedPackageSizes`
+ * is keyed by package and the subject's specifier is not recoverable from a module id. Where two
+ * decisions share one root the caller refuses rather than using this number; see `compileEvidenceFor`.
+ */
+function subjectShareOf(artifact, packageName) {
+  const root = packageNameOfSpecifier(packageName);
+  return (artifact?.inlinedPackageSizes ?? [])
+    .filter(entry => entry.packageName === root)
+    .reduce((total, entry) => total + entry.renderedCharacters, 0);
 }
 
 /**
@@ -1913,7 +1927,14 @@ async function commandRecord(options) {
     // measurement is worse than not reporting a freshness verdict here at all.
     ...(compiled?.evidence === undefined || record === null
       ? {}
-      : { artifactFingerprints: { [core.lockRecordIdentity(record)]: compiled.evidence.compileFingerprint } }),
+      : {
+          artifactFingerprints: {
+            [core.lockRecordIdentity(record)]: {
+              fingerprint: compiled.evidence.compileFingerprint,
+              subjectRenderedCharacters: compiled.evidence.subjectRenderedCharacters,
+            },
+          },
+        }),
   });
 
   print(
@@ -1988,12 +2009,17 @@ async function commandStatus(options) {
     }
   }
 
-  // The compile identity, rebuilt per Cell rather than per record (#77 round 5). It describes one
-  // composed Cell, so every `artifact-rejection` record scoped to that Cell shares it — and it is
-  // composed from the same three inputs the recorder used, read the same way: the entry's source,
-  // the Cell's decisions minus the subject, and the declared cap. A Cell whose identity cannot be
-  // rebuilt stays out of the map, so a record needing it reports `artifact-compile-unknown` rather
-  // than passing.
+  // What each compile-observed rejection's Cell compiles to **now**, rebuilt per record (#77
+  // round 7). A compile identity describes one composed Cell, but which Cell state a rejection was
+  // measured from is a property of the record: package A may be measured from one state, the source
+  // change, package B be measured from another, and both records stay in the lock — so one
+  // fingerprint per Cell could only answer for one of them.
+  //
+  // Each entry carries the artifact identity *and* the subject's current rendered share, because
+  // they describe one compile and are compared together (#77 round 8): separate maps could be
+  // updated independently, leaving a record whose identity is current but whose attribution is
+  // stale. A record whose Cell cannot be rebuilt stays out, so it reports `artifact-compile-unknown`
+  // rather than passing.
   const rebuiltArtifacts = new Map();
   const artifactRecords = lock.decisions.filter(
     record => record.artifactEvidence !== undefined && record.cellTarget !== null,
@@ -2031,7 +2057,14 @@ async function commandStatus(options) {
       }
       const compiled = await compileDeclaredCell({ projectRoot, cellTarget, dependencies: projections.decisions });
       if (compiled.ok && compiled.compileFingerprint !== undefined) {
-        rebuiltArtifacts.set(core.lockRecordIdentity(record), compiled.compileFingerprint);
+        // Both halves of one compile, stored together (#77 revision 17): the artifact identity and
+        // the subject's current rendered share. A separate map for the share could be updated
+        // independently and leave a record whose identity is current but whose attribution is stale,
+        // which is the state the reviewer found.
+        rebuiltArtifacts.set(core.lockRecordIdentity(record), {
+          fingerprint: compiled.compileFingerprint,
+          subjectRenderedCharacters: subjectShareOf(compiled.artifact, record.packageName),
+        });
       }
     } catch {
       // An unresolvable Cell leaves the identity absent, which the freshness axis reports.

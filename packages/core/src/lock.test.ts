@@ -178,10 +178,10 @@ function problemsFor(record: LockedDependencyDecision): string {
 /**
  * Compile evidence for a rejection that the compiler confirmed.
  *
- * The shape #77 revision 16 settled: an identity over the composed artifact, the subject's
- * pre-rejection decision, and the two compiles a size verdict has to justify — the Cell with the
- * subject, and the Cell without it. Defaults are a Cell that is over cap in both compiles unless a
- * case overrides them, so each test states only the property it is about.
+ * The shape #77 revision 17 settled: an identity over the composed artifact (the verdict, and the
+ * part that gets re-proven), the subject's pre-rejection decision (so the measured Cell can be
+ * replayed), and the subject's rendered share (advisory evidence a reviewer weighs — *not* a
+ * rejection rule; see the interface's header for the counterexample that retired that rule).
  */
 function artifactEvidenceFixture(overrides: {
   readonly subjectRenderedCharacters?: number;
@@ -672,35 +672,53 @@ describe("lock metadata validation", () => {
     expect(problemsFor(withinCap)).toMatch(/within the cap, so the evidence does not support/);
   });
 
-  // PR review of #77, P1 (round 6). Revision 15 checked only that the rejected package had a record
-  // in the Cell — attribution from mere presence, so tiny package B could be rejected on package A's
-  // excess. The fix is the subject's own share: removing its rendered characters has to bring the
-  // Cell under its cap.
-  it("refuses a size rejection the subject's own share does not account for", () => {
-    // The Cell is over cap, the subject is in it, and the numbers are internally consistent — but
-    // the Cell would still be over without this package's contribution, so the excess is not its.
-    const notTheCause: LockedDependencyDecision = {
+  // PR review of #77, P1 (round 8). Revision 16 turned the subject's rendered share into a rejection
+  // rule — `codeCharacters - subjectRenderedCharacters <= budgetCharacters` — reading the difference
+  // as "the Cell without this package". **It is not that**, and the counterexample compiles: with
+  // `App -> A` and `App -> B -> A`, marking A as `replace` produces a byte-identical artifact,
+  // because B keeps A reachable. The subtraction removes a number, not a dependency.
+  //
+  // So the share does not reject. What is still checked is the one thing true of a share by
+  // definition: it cannot exceed the artifact it is a share of.
+  it("does not refuse on the subject's share, which is advisory evidence rather than proof", () => {
+    const shareLooksSmall: LockedDependencyDecision = {
       ...technicalRejection,
+      cellTarget: "bench",
       rejection: {
         kind: "technical",
         code: "cell-code-budget-exceeded",
         summary: "The composed Cell is over the project's cap.",
         remediation: "Evaluate a lighter alternative.",
       },
-      artifactEvidence: artifactEvidenceFixture({ subjectRenderedCharacters: 1_000, codeCharacters: 200_000, budgetCharacters: 100_000 }),
+      // A sliver of the excess: a reviewer should weigh this as weak evidence, but the compiled
+      // verdict is what a `replace` rests on, so the record is accepted.
+      artifactEvidence: artifactEvidenceFixture({
+        subjectRenderedCharacters: 1_000,
+        codeCharacters: 200_000,
+        budgetCharacters: 100_000,
+      }),
     };
 
-    expect(problemsFor(notTheCause)).toMatch(/the excess is not this package's/);
-    // The same evidence with a share large enough to explain the excess is accepted, so the rule is
-    // about the attribution rather than about the shape.
-    const attributable: LockedDependencyDecision = {
-      ...notTheCause,
-      // A concrete Cell, which compile evidence requires (revision 15) — otherwise this case would
-      // pass for the wrong reason.
+    expect(problemsFor(shareLooksSmall)).toBe("");
+  });
+
+  it("refuses a share larger than the artifact it is a share of", () => {
+    // The bound that *is* structural: a larger number makes the residual negative and satisfies any
+    // comparison trivially, which revision 16 accepted — so the shape check would have let a record
+    // carry an impossible attribution.
+    const impossible: LockedDependencyDecision = {
+      ...technicalRejection,
       cellTarget: "bench",
-      artifactEvidence: artifactEvidenceFixture({ subjectRenderedCharacters: 150_000 }),
+      rejection: {
+        kind: "technical",
+        code: "cell-code-budget-exceeded",
+        summary: "The composed Cell is over the project's cap.",
+        remediation: "Evaluate a lighter alternative.",
+      },
+      artifactEvidence: artifactEvidenceFixture({ subjectRenderedCharacters: 999_999, codeCharacters: 200_000 }),
     };
-    expect(problemsFor(attributable)).toBe("");
+
+    expect(problemsFor(impossible)).toMatch(/cannot be larger than the artifact/);
   });
 
   // PR review of #77, P1 (round 5). A size verdict is about **one** composed Cell and that Cell's
@@ -772,6 +790,77 @@ describe("lock metadata validation", () => {
     };
 
     expect(problemsFor(legacy)).toBe("");
+  });
+
+  // PR review of #77, P1 (round 8). The *writer* refused `replace` as a subject decision, but the
+  // parser accepted any string for `strategy` — so a hand-edited lock could persist the one state
+  // the writer considers unreachable. It is not merely malformed: a `replace` subject replays to a
+  // Cell the package is not part of, and if the artifact bytes happen to match (the fall-through
+  // measured in round 6), freshness would keep that impossible state fresh.
+  it("refuses a persisted subject decision the subject cannot have been compiled under", () => {
+    // Asserted on the **structural** pass, which is where this rule is uniquely load-bearing: that
+    // pass is public API (`inspectFgcLockDocument`) and is what `lock-migration.ts` runs on a
+    // document from an older toolchain, so a hand-edited `replace` has to be caught there. The
+    // semantic pass refuses it too — see the sibling case — but a test that only went through
+    // `validateFgcLockDocument` would pass with this pass disabled, and would therefore not pin it.
+    const inspect = (subjectDecision: unknown): string =>
+      inspectFgcLockDocument({
+        schemaVersion: 1,
+        decisions: [
+          {
+            ...technicalRejection,
+            cellTarget: "bench",
+            rejection: {
+              kind: "technical",
+              code: "cell-code-budget-exceeded",
+              summary: "The composed Cell is over the project's cap.",
+              remediation: "Evaluate a lighter alternative.",
+            },
+            artifactEvidence: { ...artifactEvidenceFixture(), subjectDecision },
+          },
+        ],
+      }).join(" ");
+
+    // Each of these is a state the writer cannot produce, and each is refused.
+    expect(inspect({ strategy: "replace" })).toMatch(/subjectDecision/);
+    expect(inspect({ strategy: "host" })).toMatch(/subjectDecision/);
+    expect(inspect({ strategy: "extension", globalName: "X" })).toMatch(/subjectDecision/);
+    expect(inspect({ strategy: "nonsense" })).toMatch(/subjectDecision/);
+    expect(inspect("inline")).toMatch(/subjectDecision/);
+    // A field the strategy does not take is refused too, rather than ignored: a `host` subject
+    // carrying a `libraryId` is not a `host` decision.
+    expect(inspect({ strategy: "host", globalName: "R", libraryId: "x" })).toMatch(/subjectDecision/);
+    // The three legal shapes pass, so the union is not refusing everything.
+    expect(inspect({ strategy: "inline" })).toBe("");
+    expect(inspect({ strategy: "host", globalName: "R" })).toBe("");
+    expect(inspect({ strategy: "extension", globalName: "X", libraryId: "y" })).toBe("");
+  });
+
+  it("refuses the same state through the whole document path, so reading a lock cannot accept it", () => {
+    // The end-to-end half: a reader loads through `parseFgcLockDocument`, so the refusal has to
+    // hold there regardless of which pass catches it.
+    const text = JSON.stringify(
+      {
+        schemaVersion: 1,
+        decisions: [
+          {
+            ...technicalRejection,
+            cellTarget: "bench",
+            rejection: {
+              kind: "technical",
+              code: "cell-code-budget-exceeded",
+              summary: "The composed Cell is over the project's cap.",
+              remediation: "Evaluate a lighter alternative.",
+            },
+            artifactEvidence: { ...artifactEvidenceFixture(), subjectDecision: { strategy: "replace" } },
+          },
+        ],
+      },
+      null,
+      2,
+    );
+
+    expect(() => parseFgcLockDocument(text)).toThrow(/subjectDecision/);
   });
 
   it("ties a runtime-compatibility claim to a probe that actually passed", () => {

@@ -195,41 +195,47 @@ export interface ExtensionDependencyDecision {
 /**
  * The composed Cell's measured size, the cap it was compiled under, and the subject's share of it.
  *
- * The evidence for a `cell-code-budget-exceeded` rejection, and the **only** admissible one
- * (#77 revisions 14-16). Revision 13 established that no probe can file that rejection. The
- * authority is `compileCell`'s `auditCodeBudget` over the composed Cell, and this is what it
- * reported together with the attribution that makes the rejection about *this* package.
+ * The evidence for a `cell-code-budget-exceeded` rejection (#77 revisions 14-17). Revision 13
+ * established that no probe can file that rejection; the authority is `compileCell`'s
+ * `auditCodeBudget` over the composed Cell, and this is what that call reported.
  *
- * ## Why attribution is recorded, and how it is obtained
+ * ## What is *proven* here, and what is only reported
  *
- * A size verdict has to answer two questions, and "the Cell is over its cap" answers only the first:
+ * Two questions a size verdict raises, answered to different strengths — and conflating them is
+ * what revision 17 corrects:
  *
- * 1. **Is the Cell over its cap?** — `codeCharacters > budgetCharacters`.
+ * 1. **Is the Cell over its cap?** — `codeCharacters > budgetCharacters`. This is the verdict, and
+ *    `compileFingerprint` makes it reproducible: a reader recompiles and compares the artifact's
+ *    bytes, so an edited source or a moved decision cannot leave a stale record reporting `fresh`.
  * 2. **Is *this package* why?** — `subjectRenderedCharacters`, the characters the subject's own
- *    modules contributed to the artifact.
+ *    modules contributed. **Advisory evidence, never a proof.**
  *
- * Revision 15 checked only that the package had a record in the Cell, which certifies attribution
- * from mere presence: tiny package B could be rejected on package A's excess. The obvious repair —
- * recompile without the subject and subtract — **does not work**, and the measurement is worth
- * recording: dropping a decision does not remove the package's code, because the bundler still
- * resolves the bare import from `node_modules` (measured on `es-toolkit`: 14,971 characters with
- * the `inline` decision and 14,971 with it dropped, delta zero). What a package contributes is a
- * fact about the module graph, so it has to be read from the bundler's own per-module accounting —
- * `CompileCellResult.inlinedPackageSizes`.
+ * ## Why attribution is advisory rather than a rejection rule
  *
- * The attribution requirement is therefore: removing the subject's share would bring the Cell under
- * its cap (`codeCharacters - subjectRenderedCharacters <= budgetCharacters`). A subject that merely
- * happens to be present does not satisfy it.
+ * Revision 16 required `codeCharacters - subjectRenderedCharacters <= budgetCharacters`, reading
+ * the difference as "the Cell without this package". **It is not that**, and the counterexample
+ * compiles: with `App -> chain-a` and `App -> chain-b -> chain-a`, marking `chain-a` as `replace`
+ * produces a **byte-identical artifact** (measured: 4335 characters either way) because `chain-b`
+ * keeps it reachable. The subtraction removes a number, not a dependency.
+ *
+ * Nor can "the amount that disappears" be derived from the module graph as cheaply as the share:
+ * `renderedLength` answers *how much code belongs to this package*, while the removable amount is
+ * a question about exclusive reachability, which needs importer information and a second
+ * traversal — with its own edge cases (dynamic imports, cycles). Rather than dress a share up as a
+ * proof, this field says what it is.
+ *
+ * So a `replace` rests on the compiled verdict, and this number is what a reviewer weighs: a
+ * subject contributing most of the excess is a far better reason than one contributing a sliver. It
+ * is reported, reproducible, and explicitly not the thing that authorizes the rejection.
  */
 export interface ArtifactBudgetEvidence {
   /**
    * The identity of the compile these numbers came from — `composeCellCompileFingerprint` over the
    * composed artifact and the cap.
    *
-   * This is what makes the evidence **checkable** rather than self-attested, and it is what
-   * `status` invalidates on. It hashes the *artifact bytes*, so an edit to any module the entry
-   * reaches, a dependency's resolved version, or a decision moving between strategies all move it —
-   * the three stale paths revision 15's entry-source hash left open.
+   * This is what makes the verdict **checkable** rather than self-attested, and it is what `status`
+   * invalidates on. It hashes the *artifact bytes*, so an edit to any module the entry reaches, a
+   * dependency's resolved version, or a decision moving between strategies all move it.
    */
   readonly compileFingerprint: string;
   /**
@@ -248,8 +254,13 @@ export interface ArtifactBudgetEvidence {
    * Characters the subject's own modules contributed to the composed artifact, as the bundler
    * accounted them.
    *
-   * The attribution figure. Zero for a subject the bundler did not flatten into this Cell, which is
-   * the honest reading — a package whose code is not in the artifact did not make it too large.
+   * Advisory, and reproducible: `status` recomputes it from its own compile and reports
+   * `artifact-attribution-mismatch` if it has moved, so a hand-edited number cannot survive a
+   * freshness check the way revision 16 allowed. It is still not a proof of causation — see the
+   * interface's header — and nothing rejects on it.
+   *
+   * Zero for a subject the bundler did not flatten into this Cell, which is the honest reading: a
+   * package whose code is not in the artifact did not make it too large.
    */
   readonly subjectRenderedCharacters: number;
   /** Characters in the composed Cell, as `compileCell` measured it. */
@@ -265,12 +276,38 @@ export interface ArtifactBudgetEvidence {
  * rather than a lock record: this is an input to a recompile, and carrying lock metadata here
  * would make the evidence a second, divergent copy of the record it belongs to.
  */
-export interface SubjectCompileDecision {
-  readonly strategy: DependencyStrategy;
-  /** Set for `host` and `extension`, which resolve the package to a page global. */
-  readonly globalName?: string;
-  /** Set for `extension`. */
-  readonly libraryId?: string;
+export type SubjectCompileDecision =
+  | { readonly strategy: "inline" }
+  | { readonly strategy: "host"; readonly globalName: string }
+  | { readonly strategy: "extension"; readonly globalName: string; readonly libraryId: string };
+
+/** Whether a value is one of the strategies a subject can have been compiled under. */
+export function isSubjectCompileDecision(value: unknown): value is SubjectCompileDecision {
+  if (value === null || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  switch (candidate.strategy) {
+    case "inline":
+      return Object.keys(candidate).every(key => key === "strategy");
+    case "host":
+      return (
+        typeof candidate.globalName === "string" &&
+        candidate.globalName.trim().length > 0 &&
+        Object.keys(candidate).every(key => key === "strategy" || key === "globalName")
+      );
+    case "extension":
+      return (
+        typeof candidate.globalName === "string" &&
+        candidate.globalName.trim().length > 0 &&
+        typeof candidate.libraryId === "string" &&
+        candidate.libraryId.trim().length > 0 &&
+        Object.keys(candidate).every(key => key === "strategy" || key === "globalName" || key === "libraryId")
+      );
+    default:
+      // `replace` is deliberately absent, not an oversight: it keeps the package out of the compiled
+      // graph (rule 4 of #8), so a Cell can never have been measured with the subject in it under
+      // `replace`. The writer refuses to produce one; this refuses to accept one.
+      return false;
+  }
 }
 
 export interface ReplaceDependencyDecision {
@@ -363,9 +400,14 @@ export function validateDependencyDecisionShape(decision: DependencyDecision): r
             `Rejection of "${decision.packageName}" records \`artifactEvidence\` without a usable \`compileFingerprint\`. The identity of the compile is what ties these numbers to an artifact a reader can reproduce; record it from \`composeCellCompileFingerprint\`.`,
           );
         }
-        if (subjectDecision === undefined || subjectDecision.strategy === undefined) {
+        if (!isSubjectCompileDecision(subjectDecision)) {
+          // The union, not a `strategy` string (#77 revision 17). A persisted `replace` is the one
+          // state the writer refuses to produce because it cannot be replayed — the package is not
+          // in that Cell — and accepting it here would let a hand-edited lock renew a rejection from
+          // a compile that never contained the subject. `host`/`extension` missing their globals are
+          // refused for the same reason: replaying them would not reproduce the measured Cell.
           problems.push(
-            `Rejection of "${decision.packageName}" records \`artifactEvidence\` without the subject's pre-rejection \`subjectDecision\`. Recording the rejection overwrites that decision, so without it the measured Cell cannot be reproduced — and a later re-record would renew the rejection from a compile the package was not part of.`,
+            `Rejection of "${decision.packageName}" records \`artifactEvidence.subjectDecision\` as ${JSON.stringify(subjectDecision)}, which is not a decision the subject can have been compiled under. It must be \`{"strategy":"inline"}\`, or \`host\`/\`extension\` with the global (and library) those strategies resolve the package to — never \`replace\`, which keeps the package out of the compiled Cell and so cannot describe the Cell that was measured.`,
           );
         }
         for (const [name, value] of [
@@ -385,20 +427,17 @@ export function validateDependencyDecisionShape(decision: DependencyDecision): r
               `Rejection of "${decision.packageName}" cites "${rejection.code}" but its \`artifactEvidence\` measures ${String(codeCharacters)} characters against a cap of ${String(budgetCharacters)} — within the cap, so the evidence does not support the rejection.`,
             );
           }
-          // The attribution requirement: a rejection says this package is what puts the Cell over
-          // its cap, so the Cell without the subject's own contribution has to fit. Revision 15
-          // checked only that the package was *present*, which could not tell the package that
-          // caused the excess from one that merely happened to be alongside it.
+          // A local bound, and the only thing checked about the attribution (#77 revision 17).
+          // The share cannot exceed the artifact it is a share *of*: a larger number would make the
+          // residual negative and satisfy any comparison trivially, which revision 16 accepted.
           //
-          // The comparison is against the subject's rendered share rather than a second compile,
-          // because a second compile cannot isolate it: dropping a decision leaves the package's
-          // code in the artifact (see `ArtifactBudgetEvidence` for the measurement).
-          if (
-            Number.isFinite(subjectRenderedCharacters) &&
-            codeCharacters - subjectRenderedCharacters > budgetCharacters
-          ) {
+          // The share is deliberately **not** a rejection rule — `codeCharacters -
+          // subjectRenderedCharacters` is not "the Cell without this package" (see
+          // `ArtifactBudgetEvidence` for the counterexample that compiles) — so nothing here refuses
+          // on it. A reviewer weighs it; `status` recomputes it.
+          if (Number.isFinite(subjectRenderedCharacters) && subjectRenderedCharacters > codeCharacters) {
             problems.push(
-              `Rejection of "${decision.packageName}" cites "${rejection.code}", but the Cell would still measure ${String(codeCharacters - subjectRenderedCharacters)} characters against its cap of ${String(budgetCharacters)} without this package's ${String(subjectRenderedCharacters)} — so the excess is not this package's and the rejection cannot rest on the size it measured.`,
+              `Rejection of "${decision.packageName}" records \`artifactEvidence.subjectRenderedCharacters: ${String(subjectRenderedCharacters)}\`, which exceeds the whole artifact's ${String(codeCharacters)} characters. A share of the artifact cannot be larger than the artifact.`,
             );
           }
         }

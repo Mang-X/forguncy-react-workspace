@@ -94,6 +94,7 @@ export {
   DEPENDENCY_STRATEGIES,
   DEPENDENCY_STRATEGY_SEMANTICS,
   isDependencyStrategy,
+  isSubjectCompileDecision,
   requiresRealRuntimeValidation,
   strategySemantics,
   validateDependencyDecision,

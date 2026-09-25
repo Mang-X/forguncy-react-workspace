@@ -44,7 +44,12 @@ import {
 } from "./rejection.ts";
 import type { TechnicalRejectionCode } from "./rejection.ts";
 import type { DependencyDecision, DependencyStrategy } from "./strategy.ts";
-import { requiresRealRuntimeValidation, strategySemantics, validateDependencyDecisionShape } from "./strategy.ts";
+import {
+  isSubjectCompileDecision,
+  requiresRealRuntimeValidation,
+  strategySemantics,
+  validateDependencyDecisionShape,
+} from "./strategy.ts";
 
 // ---------------------------------------------------------------------------
 // Provenance
@@ -1045,12 +1050,15 @@ function inspectLockRecord(record: unknown, where: string): readonly string[] {
           problems.push(`${where} must declare \`artifactEvidence.${field}\` as a non-negative finite character count.`);
         }
       }
-      // The subject's own decision is read for its `strategy`, so it needs the same treatment.
-      const subject = evidence.subjectDecision;
-      if (!isPlainObject(subject)) {
-        problems.push(`${where} must declare \`artifactEvidence.subjectDecision\` as an object naming the strategy the subject compiled under.`);
-      } else if (typeof subject.strategy !== "string") {
-        problems.push(`${where} must declare \`artifactEvidence.subjectDecision.strategy\` as a string.`);
+      // The subject's own decision is validated as the discriminated union it is (#77 revision 17),
+      // not merely for the presence of a `strategy` string. This is the untrusted-JSON pass, so a
+      // hand-edited `replace` — the one state the writer refuses to produce because the package is
+      // not in that Cell — has to be refused here rather than reaching the semantic pass and
+      // replaying to an artifact that never contained the subject.
+      if (!isSubjectCompileDecision(evidence.subjectDecision)) {
+        problems.push(
+          `${where} must declare \`artifactEvidence.subjectDecision\` as \`{"strategy":"inline"}\` or a \`host\`/\`extension\` object with its \`globalName\` (and \`libraryId\`), or omit \`artifactEvidence\`.`,
+        );
       }
     }
   }

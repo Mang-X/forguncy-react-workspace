@@ -37,6 +37,17 @@ const ARTIFACT_FINGERPRINT = 'cell="abc";budget=100000';
  * pre-rejection decision, and the two compiles a size verdict has to justify. Defaults describe the
  * state a rejection is allowed to rest on — over cap with the subject, under it without.
  */
+/**
+ * What the environment knows about one record's compile: the artifact identity and the subject's
+ * rendered share. One value, because they describe one compile (#77 revision 17).
+ */
+function artifactCompile(fingerprint: string, subjectRenderedCharacters: number): {
+  readonly fingerprint: string;
+  readonly subjectRenderedCharacters: number;
+} {
+  return { fingerprint, subjectRenderedCharacters };
+}
+
 /** The artifact-axis staleness reasons for a record: what this file's cases assert on. */
 function artifactReasons(record: LockedDependencyDecision, environment: LockEnvironment): readonly string[] {
   return reasonsFor(record, environment).stalenessReasons.filter((reason: string) => reason.startsWith("artifact-compile-"));
@@ -86,7 +97,7 @@ function lockEnvironment(overrides: Partial<LockEnvironment> = {}): LockEnvironm
     probeFingerprints: { "@tanstack/react-query": CELL_FINGERPRINT, "date-fns": CELL_FINGERPRINT, "es-toolkit": CELL_FINGERPRINT, react: CELL_FINGERPRINT, "some-amd-package": BUNDLER_FINGERPRINT },
     // Keyed by *record* identity, not by Cell (#77 round 7): two artifact rejections in one
     // Cell may come from different compile states, so the identity must vary on the same key.
-    artifactFingerprints: { ["date-fns\u0000" + BENCH_CELL]: ARTIFACT_FINGERPRINT },
+    artifactFingerprints: { ["date-fns\u0000" + BENCH_CELL]: artifactCompile(ARTIFACT_FINGERPRINT, 190_000) },
     extensionVersions: { "tanstack-query": "5.90.2" },
     extensionIdentities: { "tanstack-query": EXTENSION_IDENTITY },
     ...overrides,
@@ -539,7 +550,9 @@ describe("replace decisions expire differently by rejection kind", () => {
   // dependency's decision could move, and the record kept reporting fresh. The identity in
   // `artifactEvidence.compileFingerprint` is what closes that.
   it("goes stale when the Cell's compile identity moves, so a size verdict cannot outlive its Cell", () => {
-    const moved = lockEnvironment({ artifactFingerprints: { ["date-fns\u0000" + BENCH_CELL]: 'cell="moved";budget=100000' } });
+    const moved = lockEnvironment({
+      artifactFingerprints: { ["date-fns\u0000" + BENCH_CELL]: artifactCompile('cell="moved";budget=100000', 190_000) },
+    });
 
     const assessment = reasonsFor(artifactRejection, moved);
 
@@ -560,6 +573,38 @@ describe("replace decisions expire differently by rejection kind", () => {
   // from one state, the source change, package B be measured from another, and both records stay in
   // the lock. Keyed by Cell, one fingerprint had to answer for both — and could only be right for
   // one of them.
+  // PR review of #77, P1 (round 8). Revision 16's `status` compared only the artifact fingerprint,
+  // so it discarded the freshly-produced attribution. A record could keep a real fingerprint beside
+  // an invented `subjectRenderedCharacters` — even one larger than the artifact — and stay fresh.
+  // Reproduced before this was fixed: inflating only that field left `status` reporting `fresh`.
+  it("goes stale when the recorded subject share no longer matches the recomputed one", () => {
+    // The identity is unchanged, so the artifact is the same compile; only the attribution moved.
+    const recomputed = lockEnvironment({
+      artifactFingerprints: {
+        ["date-fns\u0000" + BENCH_CELL]: artifactCompile(ARTIFACT_FINGERPRINT, 12_345),
+      },
+    });
+
+    const assessment = reasonsFor(artifactRejection, recomputed);
+
+    expect(assessment.stalenessReasons).toEqual(["artifact-attribution-changed"]);
+    expect(assessment.freshness).toBe("stale");
+  });
+
+  it("reports a moved identity and a moved share together, rather than one masking the other", () => {
+    // Both halves live in one environment entry, so a reader sees every reason the record moved.
+    const both = lockEnvironment({
+      artifactFingerprints: {
+        ["date-fns\u0000" + BENCH_CELL]: artifactCompile('cell="moved";budget=100000', 12_345),
+      },
+    });
+
+    const reasons = reasonsFor(artifactRejection, both).stalenessReasons;
+
+    expect(reasons).toContain("artifact-compile-changed");
+    expect(reasons).toContain("artifact-attribution-changed");
+  });
+
   it("assesses two records in one Cell against their own compile identities", () => {
     const second: LockedDependencyDecision = {
       ...artifactRejection,
@@ -572,8 +617,8 @@ describe("replace decisions expire differently by rejection kind", () => {
     // in fact its own.
     const environment = lockEnvironment({
       artifactFingerprints: {
-        ["date-fns\u0000" + BENCH_CELL]: ARTIFACT_FINGERPRINT,
-        ["es-toolkit\u0000" + BENCH_CELL]: 'cell="second";budget=100000',
+        ["date-fns\u0000" + BENCH_CELL]: artifactCompile(ARTIFACT_FINGERPRINT, 190_000),
+        ["es-toolkit\u0000" + BENCH_CELL]: artifactCompile('cell="second";budget=100000', 190_000),
       },
     });
 
@@ -585,8 +630,8 @@ describe("replace decisions expire differently by rejection kind", () => {
     // for everything.
     const moved = lockEnvironment({
       artifactFingerprints: {
-        ["date-fns\u0000" + BENCH_CELL]: ARTIFACT_FINGERPRINT,
-        ["es-toolkit\u0000" + BENCH_CELL]: 'cell="moved";budget=100000',
+        ["date-fns\u0000" + BENCH_CELL]: artifactCompile(ARTIFACT_FINGERPRINT, 190_000),
+        ["es-toolkit\u0000" + BENCH_CELL]: artifactCompile('cell="moved";budget=100000', 190_000),
       },
     });
     expect(artifactReasons(artifactRejection, moved)).toEqual([]);

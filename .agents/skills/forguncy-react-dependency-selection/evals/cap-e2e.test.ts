@@ -502,6 +502,52 @@ describe("CLI contract: the declared cell code cap reaches probe, audit, record 
   // and re-recording is where that breaks: the first write turned the subject's decision into
   // `replace`, so reading the lock again would persist `subjectDecision: { strategy: "replace" }`
   // and destroy the field's whole purpose on the second write.
+  // PR review of #77, P1 (round 8). `status` recompiled and compared the artifact fingerprint but
+  // discarded the freshly-produced attribution, so a record could keep a real fingerprint beside a
+  // doctored `subjectRenderedCharacters` and stay fresh. Reproduced before this was fixed.
+  it("goes stale when the recorded subject share is doctored and the artifact is unchanged", async () => {
+    await withCappedCell(CAP_SUBJECT_DECIDES, async root => {
+      await withRecordedCell(root);
+      const file = await decisionFile({
+        packageName: "es-toolkit",
+        role: "cell-local-ui",
+        strategy: "replace",
+        cellTarget: "bench",
+        rationale: "The Cell is over its cap because of this package.",
+        alternatives: ["a lighter date utility"],
+        rejection: {
+          kind: "technical",
+          code: "cell-code-budget-exceeded",
+          summary: "The composed Cell is over this Cell's cap.",
+          evidence: [],
+          remediation: "Evaluate a lighter alternative.",
+        },
+      });
+      try {
+        const recorded = await cli(["record", "--project", root, "--decision", file.path]);
+        expect(recorded.code, recorded.stderr).toBe(0);
+        const before = (await readLock(root)).decisions.find(entry => entry.packageName === "es-toolkit")!;
+        expect(before.artifactEvidence?.subjectRenderedCharacters).toBeGreaterThan(0);
+
+        // Doctor ONLY the attribution: the fingerprint, the character count and the cap stay real,
+        // so a fingerprint-only comparison cannot notice.
+        const lock = JSON.parse(await readFile(join(root, "fgc.lock.json"), "utf8")) as {
+          decisions: Record<string, { artifactEvidence?: Record<string, unknown> }>[];
+        };
+        const evidence = lock.decisions.find(entry => (entry as { packageName?: string }).packageName === "es-toolkit")!.artifactEvidence!;
+        evidence.subjectRenderedCharacters = 1;
+
+        await writeFile(join(root, "fgc.lock.json"), JSON.stringify(lock, null, 2), "utf8");
+        const status = await cli(["status", "--project", root]);
+
+        const decision = json<{ decisions: readonly { stalenessReasons: readonly string[] }[] }>(status).decisions[0];
+        expect(decision.stalenessReasons).toContain("artifact-attribution-changed");
+      } finally {
+        await file.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
   it("preserves the subject's pre-rejection decision across a re-record", async () => {
     await withCappedCell(CAP_SUBJECT_DECIDES, async root => {
       await withRecordedCell(root);

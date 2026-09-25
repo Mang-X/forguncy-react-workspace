@@ -64,6 +64,7 @@ export const LOCK_STALENESS_REASONS = [
   "artifact-evidence-missing",
   "artifact-compile-changed",
   "artifact-compile-unknown",
+  "artifact-attribution-changed",
 ] as const;
 export type LockStalenessReason = (typeof LOCK_STALENESS_REASONS)[number];
 
@@ -98,25 +99,26 @@ export interface LockEnvironment {
    */
   readonly probeFingerprints: Readonly<Record<string, string>>;
   /**
-   * The compile identity each compile-observed rejection should currently be measured against,
-   * keyed by the **record identity** `packageName\0cellTarget`.
+   * What each compile-observed rejection's Cell currently compiles to, keyed by the **record
+   * identity** `packageName\u0000cellTarget`.
    *
-   * Keyed by record rather than by Cell, and that is a correction (#77 round 7): a compile
-   * identity describes one composed Cell, but which Cell state a rejection was measured from is a
-   * property of the *record*. Two artifact rejections in one Cell may have been recorded from
-   * different states — package A from S0, then the source changed, then package B from S1 — and
-   * both records stay in the lock. One fingerprint per Cell cannot represent two replay identities,
-   * so one of the two answers was necessarily wrong.
+   * One value carrying both the artifact identity and the subject's rendered share, rather than two
+   * maps keyed the same way: the two describe one compile, and separate maps could be updated
+   * independently — leaving a record whose identity is current but whose attribution is stale. That
+   * is exactly the state revision 17 corrects.
    *
-   * The key is the lock's own `(packageName, cellTarget)` identity, the same one its records are
-   * keyed by, so an environment cannot answer a question about a different record. A record missing
-   * from the map is `artifact-compile-unknown` rather than a pass.
+   * Keyed by record rather than by Cell because *which* Cell state a rejection was measured from is
+   * a property of the record: two rejections in one Cell may have been recorded from different
+   * states, and one fingerprint per Cell could only answer for one of them.
    *
-   * Optional, because a caller that compiles nothing — the probe's own environment, a fixture —
-   * has no compile to describe, and a required field would make "I did not compile" and "the
-   * compile is unknown" the same edit. Absent means the same thing an absent entry does.
+   * A record missing from the map is `artifact-compile-unknown` rather than a pass.
+   *
+   * Optional, because a caller that compiles nothing — the probe's own environment, a fixture — has
+   * no compile to describe. Absent means the same thing an absent entry does.
    */
-  readonly artifactFingerprints?: Readonly<Record<string, string>>;
+  readonly artifactFingerprints?: Readonly<
+    Record<string, { readonly fingerprint: string; readonly subjectRenderedCharacters: number }>
+  >;
   /** Installed extension versions by `libraryId`, when known. */
   readonly extensionVersions: Readonly<Record<string, string>>;
   /** Installed extension content identities by `libraryId`, when known. */
@@ -356,7 +358,20 @@ function assessArtifactEvidenceFreshness(
   if (current === undefined) {
     return ["artifact-compile-unknown"];
   }
-  return current === evidence.compileFingerprint ? [] : ["artifact-compile-changed"];
+  const reasons: LockStalenessReason[] = [];
+  if (current.fingerprint !== evidence.compileFingerprint) {
+    reasons.push("artifact-compile-changed");
+  }
+  // The attribution is recomputed and compared, not trusted (#77 revision 17). Revision 16 compared
+  // only the artifact bytes, so a record could keep a real fingerprint beside an invented
+  // `subjectRenderedCharacters` and stay fresh — the one self-attested field left in an otherwise
+  // reproducible evidence shape. A moved share is reported rather than refused, because the share is
+  // advisory evidence: a reader weighs it, and a record whose share moved still says truthfully what
+  // was measured at the time.
+  if (current.subjectRenderedCharacters !== evidence.subjectRenderedCharacters) {
+    reasons.push("artifact-attribution-changed");
+  }
+  return reasons;
 }
 
 /**
