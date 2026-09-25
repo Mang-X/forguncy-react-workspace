@@ -64,7 +64,12 @@ node $S record --project <projectRoot> --decision decision.json
 # 注意：probe 只给出尺寸**估算**（band + 与 cap 的比较），任何情况下都不产生
 # cell-artifact-budget-exceeded。硬上限判定属于编译器对该 Cell 的 codeBudgetCharacters
 # 诊断——probe 的构建图与真实编译不同，合成候选可能比真实 Cell 更大。
-# 决策文件里的 imports 与 cellTarget 写法见 references/decision-recording.md。
+#
+# 但真实判定是可记录的：先真的编译该 Cell，从编译器自己的 cell-code-budget-exceeded
+# 诊断里逐字誊出两个数字，写进决策文件的 artifactEvidence，再 record：
+#   "artifactEvidence": { "codeCharacters": 200000, "budgetCharacters": 100000 }
+# budgetCharacters 必须等于该 Cell 声明的 output.codeBudgetCharacters，否则会被拒绝。
+# 决策文件里的 imports / cellTarget / artifactEvidence 写法见 references/decision-recording.md。
 
 # 5) 读回锁并报告每条记录是否仍然有效
 node $S status --project <projectRoot>

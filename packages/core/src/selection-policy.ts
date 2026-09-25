@@ -52,7 +52,7 @@ import type { PlatformConflictAssessment } from "./platform-conflicts.ts";
 import { isPlatformConflict } from "./platform-conflicts.ts";
 import type { ProbeAssessment, ProbeReport } from "./probe-protocol.ts";
 import { assessProbeReport, PROBE_DEPLOYMENT_REQUIRED_STEPS, validateProbeReport } from "./probe-protocol.ts";
-import { DEPENDENCY_REJECTION_RESPONSE } from "./rejection.ts";
+import { DEPENDENCY_REJECTION_RESPONSE, isArtifactObservedRejectionCode } from "./rejection.ts";
 import type { SelectionSignalId } from "./selection-signals.ts";
 import { findReplacementSignalRejection } from "./selection-signals.ts";
 import type { DependencyDecision, DependencyStrategy } from "./strategy.ts";
@@ -870,19 +870,34 @@ export function auditSelectionDecision(input: SelectionAuditInput): readonly str
       // and an unrelated build error must not be able to certify a size or asset
       // rejection. `REPLACEMENT_SIGNAL_REJECTIONS` already maps a finding to a code, so
       // the check is a comparison rather than a judgement.
+      //
+      // A compile-observed code is exempt from that comparison and gets a different one
+      // (#77 revision 14). It has no probe finding by construction, so the code cannot be
+      // observed here — what has to be observed is the evidence: the rejection must carry
+      // `artifactEvidence` whose own numbers state the over-cap claim. Without this branch the
+      // one rejection the compile can prove would be the one rejection an agent could not
+      // record, which is the dead end revision 13 created.
       if (decision.strategy === "replace" && decision.rejection.kind === "technical") {
-        const observedCodes = support.assessment.rejectionFindings
-          .map(finding => findReplacementSignalRejection(finding.signal)?.code)
-          .filter((code): code is NonNullable<typeof code> => code !== undefined);
+        if (isArtifactObservedRejectionCode(decision.rejection.code)) {
+          if (decision.artifactEvidence === undefined) {
+            problems.push(
+              `The recorded technical rejection is "${decision.rejection.code}", whose evidence is a composed Cell compile rather than a probe. Record \`artifactEvidence\` with the measured \`codeCharacters\` and the \`budgetCharacters\` that compile used: the probe builds a synthetic candidate whose resolution graph differs from the compiler's, so no probe finding can support this code.`,
+            );
+          }
+        } else {
+          const observedCodes = support.assessment.rejectionFindings
+            .map(finding => findReplacementSignalRejection(finding.signal)?.code)
+            .filter((code): code is NonNullable<typeof code> => code !== undefined);
 
-        if (!observedCodes.includes(decision.rejection.code)) {
-          const observed =
-            observedCodes.length > 0
-              ? observedCodes.join(", ")
-              : "none (the report contains no rejection finding)";
-          problems.push(
-            `The recorded technical rejection is "${decision.rejection.code}", but the machine-observed rejection codes are: ${observed}. A failed step shows the candidate cannot be accepted; it does not prove this reason. Record the code the finding maps to, or produce the finding that supports this one.`,
-          );
+          if (!observedCodes.includes(decision.rejection.code)) {
+            const observed =
+              observedCodes.length > 0
+                ? observedCodes.join(", ")
+                : "none (the report contains no rejection finding)";
+            problems.push(
+              `The recorded technical rejection is "${decision.rejection.code}", but the machine-observed rejection codes are: ${observed}. A failed step shows the candidate cannot be accepted; it does not prove this reason. Record the code the finding maps to, or produce the finding that supports this one.`,
+            );
+          }
         }
       }
     }

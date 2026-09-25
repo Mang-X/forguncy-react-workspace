@@ -43,13 +43,14 @@ function lockEnvironment(overrides: Partial<LockEnvironment> = {}): LockEnvironm
   return {
     resolvedVersions: {
       "@tanstack/react-query": "5.90.2",
+      "date-fns": "4.1.0",
       "es-toolkit": "1.39.8",
       react: "19.2.7",
       "some-amd-package": "2.4.0",
     },
     target: RUNTIME_CONTRACT_TARGET,
     toolchain: { vitePlus: "0.3.2" },
-    probeFingerprints: { "@tanstack/react-query": CELL_FINGERPRINT, "es-toolkit": CELL_FINGERPRINT, react: CELL_FINGERPRINT, "some-amd-package": BUNDLER_FINGERPRINT },
+    probeFingerprints: { "@tanstack/react-query": CELL_FINGERPRINT, "date-fns": CELL_FINGERPRINT, "es-toolkit": CELL_FINGERPRINT, react: CELL_FINGERPRINT, "some-amd-package": BUNDLER_FINGERPRINT },
     extensionVersions: { "tanstack-query": "5.90.2" },
     extensionIdentities: { "tanstack-query": EXTENSION_IDENTITY },
     ...overrides,
@@ -168,9 +169,48 @@ const technicalRejection: LockedDependencyDecision = {
   ],
 };
 
+/**
+ * A compile-observed rejection: the package's own probe **passed**, and what failed is the
+ * composed Cell (#77 revision 14). Its `artifactEvidence` is the measurement that makes the
+ * rejection checkable, and its profile is `artifact-rejection` — the one technical rejection whose
+ * evidence is a *passing* probe.
+ */
+const artifactRejection: LockedDependencyDecision = {
+  strategy: "replace",
+  packageName: "date-fns",
+  rejection: {
+    kind: "technical",
+    code: "cell-code-budget-exceeded",
+    summary: "The composed Cell is 200,000 characters against this Cell's cap of 100,000.",
+    remediation: "Evaluate a lighter alternative or raise the Cell's declared cap.",
+  },
+  artifactEvidence: { codeCharacters: 200_000, budgetCharacters: 100_000 },
+  alternatives: ["a lighter date utility"],
+  supersededBy: "host",
+  cellTarget: null,
+  resolvedVersion: null,
+  probe: { status: "passed", fingerprint: CELL_FINGERPRINT, versionIndependent: false },
+  target: RECORD_TARGET,
+  probedWith: { vitePlus: "0.3.2" },
+  extension: null,
+  rejectedCandidate: { version: "4.1.0" },
+  rationale: "The package builds cleanly; the composed Cell is what exceeds the Cell's declared cap.",
+  evidence: [
+    { kind: "probe", reference: "docs/probes/inline-es-toolkit.md" },
+    { kind: "spec-issue", reference: SPEC_8 },
+  ],
+};
+
 const lock = {
   schemaVersion: 1,
-  decisions: [extensionRecord, inlineRecord, hostRecord, architecturalRejection, technicalRejection],
+  decisions: [
+    extensionRecord,
+    inlineRecord,
+    hostRecord,
+    architecturalRejection,
+    technicalRejection,
+    artifactRejection,
+  ],
 };
 
 function reasonsFor(record: LockedDependencyDecision, environment: LockEnvironment) {
@@ -436,6 +476,33 @@ describe("replace decisions expire differently by rejection kind", () => {
       "forguncy-target-unknown",
       "toolchain-unknown",
     ]);
+  });
+
+  // PR review of #77, P1 (round 4). Round 3 refused a `cell-code-budget-exceeded` record outright
+  // in the *shape* validator, which runs on the parse path — so a schema-v1 lock holding one failed
+  // to parse and never reached freshness at all. The record now stays readable and goes **stale**
+  // here, which is what the migration contract in `lock-migration.ts` requires and what the
+  // revision bump exists to produce.
+  it("reports a pre-revision-14 budget rejection as missing its compile evidence, not as invalid", () => {
+    const legacy: LockedDependencyDecision = {
+      ...artifactRejection,
+      artifactEvidence: undefined,
+    };
+
+    const assessment = reasonsFor(legacy, lockEnvironment());
+
+    expect(assessment.stalenessReasons).toEqual(["artifact-evidence-missing"]);
+    expect(assessment.freshness).toBe("stale");
+  });
+
+  it("verifies a budget rejection once it carries the compile evidence", () => {
+    // The other half: with the evidence, the record is fresh, and its profile is the one whose
+    // probe requirement is *passed* — the package is fine, the composed Cell is not.
+    const resolution = resolveLockDecision(lock, { packageName: "date-fns" }, lockEnvironment());
+
+    expect(resolution.state).toBe("verified");
+    expect(resolution.assessment?.profile).toBe("artifact-rejection");
+    expect(resolution.assessment?.stalenessReasons).toEqual([]);
   });
 });
 

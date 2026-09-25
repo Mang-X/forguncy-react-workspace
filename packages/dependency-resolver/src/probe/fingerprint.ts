@@ -148,8 +148,14 @@ function stableScalar(value: string): string {
  *   `PROBE_STEPS_OBSERVING_SIGNAL` gives the signal no observing step so a report claiming it is
  *   *invalid*. A report cached at 12 can carry exactly that finding, so it must not answer a run
  *   at 13 — this is the invalidation #8 requires when a rejection's meaning changes.
+ * - `14` — the `size` step's `size.bound` fact is renamed `size.estimateBias`, and its values
+ *   `lower-bound`/`upper-bound` become `lower-leaning`/`upper-leaning`. The old spelling asserted
+ *   a relation between the probe's number and the Cell's that revision 13 **disproved for both
+ *   entry shapes**: a machine consumer reading `bound` would read a claim the structured fact no
+ *   longer supports, which is exactly the falsified claim in machine-readable form. A report
+ *   cached at 13 carries the old fact name and the old values, so it must not answer a run at 14.
  */
-export const PROBE_ANALYSIS_REVISION = 13;
+export const PROBE_ANALYSIS_REVISION = 14;
 
 export interface ComposeProbeFingerprintInput {
   /** Which probe ran, e.g. `inline-bundle`. */

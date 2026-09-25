@@ -37,7 +37,11 @@ import {
 } from "./governance.ts";
 import type { RuntimeContractTarget } from "./runtime-contract.ts";
 import { RUNTIME_CONTRACT_TARGET } from "./runtime-contract.ts";
-import { ARCHITECTURAL_REJECTION_CODES, TECHNICAL_REJECTION_CODES } from "./rejection.ts";
+import {
+  ARCHITECTURAL_REJECTION_CODES,
+  TECHNICAL_REJECTION_CODES,
+  isArtifactObservedRejectionCode,
+} from "./rejection.ts";
 import type { TechnicalRejectionCode } from "./rejection.ts";
 import type { DependencyDecision, DependencyStrategy } from "./strategy.ts";
 import { requiresRealRuntimeValidation, strategySemantics, validateDependencyDecisionShape } from "./strategy.ts";
@@ -347,14 +351,15 @@ export const LOCK_EVIDENCE_PROFILES = [
   "resolved-dependency",
   "architectural-rejection",
   "technical-rejection",
+  "artifact-rejection",
 ] as const;
 export type LockEvidenceProfile = (typeof LOCK_EVIDENCE_PROFILES)[number];
 
 /**
  * Which probe outcome a profile's evidence is.
  *
- * Named for the outcome rather than for "how much evidence", because the three
- * profiles want three different outcomes and the difference is semantic:
+ * Named for the outcome rather than for "how much evidence", because the profiles
+ * want different outcomes and the difference is semantic:
  *
  * - `none` — no probe belongs to this record at all.
  * - `passed` — the record is usable once a probe passes. A failed or missing
@@ -366,6 +371,12 @@ export type LockEvidenceProfile = (typeof LOCK_EVIDENCE_PROFILES)[number];
  *   package's requirements rather than from a bundle attempt, and freshness
  *   reports it as unverified. `passed` is refused: a record cannot both reject a
  *   candidate and hold a probe that accepted it.
+ *
+ * `passed` covers two profiles with opposite conclusions, and that is the point rather than a
+ * conflation: a `resolved-dependency` record *adopts* the package a passing probe describes,
+ * while an `artifact-rejection` record rejects a different document — the composed Cell — that
+ * the probe never builds. In both cases the package itself passed, so requiring anything else
+ * would make the expected state (a good package that produces a too-large Cell) unrecordable.
  */
 export const LOCK_PROBE_REQUIREMENTS = ["none", "passed", "not-passed"] as const;
 export type LockProbeRequirement = (typeof LOCK_PROBE_REQUIREMENTS)[number];
@@ -403,6 +414,21 @@ export const LOCK_EVIDENCE_POLICY: Readonly<Record<LockEvidenceProfile, LockEvid
     probeRequirement: "not-passed",
     participatesInCompilation: false,
   },
+  "artifact-rejection": {
+    profile: "artifact-rejection",
+    // The package's own probe **passed** — the rejection is about the composed Cell, which no
+    // probe builds (#77 revision 14). Its evidence is `artifactEvidence`: the measured
+    // `codeCharacters` against the cap the compile used.
+    //
+    // Tied to the target because the Cell is compiled for one: a different host React, or a
+    // different product build, composes a different artifact.
+    invalidatedByTargetChange: true,
+    probeRequirement: "passed",
+    // False for the same reason as the other rejections: a `replace` keeps no dependency for the
+    // compiled cell, so this package does not appear in its graph. What *is* compiled is the
+    // replacement, under its own record.
+    participatesInCompilation: false,
+  },
 };
 
 /**
@@ -424,30 +450,6 @@ export const RUNTIME_CONFIRMED_TECHNICAL_REJECTION_CODES: readonly TechnicalReje
   "host-module-identity-mismatch",
   "global-namespace-collision",
   "runtime-api-unavailable",
-];
-
-/**
- * Technical rejections no probe can observe, so a probe report cannot be their evidence.
- *
- * #77 revision 13 made the probe a pure measurement: it files no
- * `cell-artifact-budget-exceeded` finding under any input, because the synthetic candidate it
- * builds does not share a resolution graph with the compiled Cell and the declared import
- * surface is a caller's declaration. `PROBE_STEPS_OBSERVING_SIGNAL` records that as an **empty**
- * observer list, which makes a *report* claiming the finding invalid.
- *
- * This list is the other half of the same rule, for the document: a lock can be hand-written or
- * produced by an older revision, so without it a record could still state the one rejection the
- * current runtime path refuses to produce — and remain structurally valid. The invariant is
- * therefore inverted rather than dropped: since the finding is unprovable from a probe, a
- * `replace` resting on it is refused outright.
- *
- * Kept as a named list here rather than derived from `probe-protocol.ts` because `lock` may not
- * import it (that module already imports `lock`, so the edge would be a cycle). A test recomputes
- * this list from the protocol table instead, so the two cannot drift silently — the same shape as
- * {@link RUNTIME_CONFIRMED_TECHNICAL_REJECTION_CODES}, which is also a judgement recorded as data.
- */
-export const UNOBSERVABLE_TECHNICAL_REJECTION_CODES: readonly TechnicalRejectionCode[] = [
-  "cell-code-budget-exceeded",
 ];
 
 /**
@@ -504,7 +506,14 @@ export function lockEvidenceProfileForDecision(decision: DependencyDecision): Lo
   if (decision.strategy !== "replace") {
     return "resolved-dependency";
   }
-  return decision.rejection.kind === "architectural" ? "architectural-rejection" : "technical-rejection";
+  if (decision.rejection.kind === "architectural") {
+    return "architectural-rejection";
+  }
+  // A technical rejection splits by *what observed it*: a probe reports the package's own
+  // failure, while a compose reports the Cell's size. The two want different probe outcomes —
+  // `not-passed` and `passed` respectively — so the split has to happen here, where the code is
+  // known, rather than in a validator that would have to special-case the policy back.
+  return isArtifactObservedRejectionCode(decision.rejection.code) ? "artifact-rejection" : "technical-rejection";
 }
 
 export function lockEvidenceProfileOf(record: LockedDependencyDecision): LockEvidenceProfile {
@@ -1385,18 +1394,6 @@ function validateRejectedCandidate(where: string, record: LockedDependencyDecisi
       : [
           `${where} is an architectural rejection: the capability belongs to Forguncy whatever version the package is, so recording a rejected candidate version would tie an ownership conflict to a release.`,
         ];
-  }
-
-  // The evidence-shape invariant (#77 revision 13). A record citing a code no probe can observe
-  // cannot rest on a probe report, and a `replace` binds its whole justification to these
-  // findings — so the document would state a rejection the runtime path refuses to produce. It is
-  // refused here rather than left to the writer, because a lock can be hand-edited or written by
-  // an older revision, and a persisted contract weaker than the path that writes it is how the
-  // unsound rejection comes back.
-  if (UNOBSERVABLE_TECHNICAL_REJECTION_CODES.includes(record.rejection.code)) {
-    return [
-      `${where} is a technical rejection with code "${record.rejection.code}", which no probe step can observe: the probe measures a synthetic candidate whose build does not share the compiler's resolution graph, so its size can exceed the compiled Cell's. The authority for this verdict is the compiler's own diagnostic on the composed Cell. Record the strategy that actually resolved, or a rejection a probe finding supports.`,
-    ];
   }
 
   if (rejectedCandidate === null || rejectedCandidate.version.trim().length === 0) {

@@ -12,7 +12,7 @@
  */
 
 import type { DependencyRejection } from "./rejection.ts";
-import { DEPENDENCY_REJECTION_RESPONSE } from "./rejection.ts";
+import { DEPENDENCY_REJECTION_RESPONSE, isArtifactObservedRejectionCode } from "./rejection.ts";
 
 export const DEPENDENCY_STRATEGIES = ["host", "inline", "extension", "replace"] as const;
 export type DependencyStrategy = (typeof DEPENDENCY_STRATEGIES)[number];
@@ -192,6 +192,28 @@ export interface ExtensionDependencyDecision {
   readonly globalName: string;
 }
 
+/**
+ * The composed Cell's measured size against the cap it was compiled under.
+ *
+ * The evidence for a `cell-code-budget-exceeded` rejection, and the **only** admissible one
+ * (#77 revision 14). Revision 13 established that no probe can file that rejection: the probe
+ * measures a synthetic candidate whose build does not share the compiler's resolution graph, so
+ * its artifact can be larger or smaller than the Cell's. The authority is `compileCell`'s
+ * `auditCodeBudget`, which measures the composed Cell source — these two numbers are what that
+ * call reported.
+ *
+ * Both figures are recorded rather than only a verdict, so a reader can check the claim: the
+ * rejection is true exactly when `codeCharacters > budgetCharacters`, and recording the cap the
+ * compile actually used is what ties the evidence to the Cell's own declaration instead of to a
+ * number the writer chose.
+ */
+export interface ArtifactBudgetEvidence {
+  /** Characters in the composed Cell source, as `compileCell` measured it. */
+  readonly codeCharacters: number;
+  /** The `codeBudgetCharacters` that compile was given, from the Cell's own config. */
+  readonly budgetCharacters: number;
+}
+
 export interface ReplaceDependencyDecision {
   readonly strategy: "replace";
   readonly packageName: string;
@@ -200,6 +222,14 @@ export interface ReplaceDependencyDecision {
    * different answers. See `rejection.ts`.
    */
   readonly rejection: DependencyRejection;
+  /**
+   * Required exactly when the rejection code is `cell-code-budget-exceeded`, refused otherwise.
+   *
+   * The pairing is the point: that code's answer comes from a compile, so a record citing it
+   * without compile evidence would be claiming the one thing a probe cannot show. See
+   * {@link ArtifactBudgetEvidence}.
+   */
+  readonly artifactEvidence?: ArtifactBudgetEvidence;
   /** Alternatives that were evaluated, not merely proposed. */
   readonly alternatives?: readonly string[];
   /** The strategy that actually replaces it, when one exists. */
@@ -245,6 +275,41 @@ export function validateDependencyDecisionShape(decision: DependencyDecision): r
     }
     if (rejection.remediation.trim().length === 0) {
       problems.push(`Rejection of "${decision.packageName}" must state a remediation; a rejection is never a dead end.`);
+    }
+
+    // The compile-evidence pairing (#77 revision 14), stated as the two things a *shape* check can
+    // settle. The requirement that a compile-observed code **carry** the evidence is deliberately
+    // not here: this validator runs on the parse path too, and a lock written before revision 14
+    // holds such a rejection with no `artifactEvidence`. Refusing it here would make an existing
+    // lock unreadable instead of stale — the opposite of the migration contract in
+    // `lock-migration.ts`. So the requirement lives on the two paths that can act on it:
+    // `auditSelectionDecision` refuses to *record* such a rejection without evidence, and freshness
+    // reports an existing one as `artifact-evidence-missing`. Both directions below are safe here
+    // because they can only fire on a record that *has* the field.
+    const { artifactEvidence } = decision;
+    const observedByCompile = rejection.kind === "technical" && isArtifactObservedRejectionCode(rejection.code);
+    if (artifactEvidence !== undefined) {
+      if (!observedByCompile) {
+        problems.push(
+          `Rejection of "${decision.packageName}" records \`artifactEvidence\`, which is the evidence for a compile-observed code; "${rejection.kind === "technical" ? rejection.code : rejection.kind}" is not one. A probe observes that code, so compile numbers there would let a writer bypass the probe path.`,
+        );
+      } else {
+        // The numbers have to *say* the rejection: an over-cap claim with a measurement under the
+        // cap is a contradiction, and recording both makes it checkable rather than trusted.
+        const { codeCharacters, budgetCharacters } = artifactEvidence;
+        for (const [name, value] of [["codeCharacters", codeCharacters], ["budgetCharacters", budgetCharacters]] as const) {
+          if (!Number.isFinite(value) || value < 0) {
+            problems.push(
+              `Rejection of "${decision.packageName}" records \`artifactEvidence.${name}\` as ${String(value)}; it must be a non-negative finite character count.`,
+            );
+          }
+        }
+        if (Number.isFinite(codeCharacters) && Number.isFinite(budgetCharacters) && codeCharacters <= budgetCharacters) {
+          problems.push(
+            `Rejection of "${decision.packageName}" cites "${rejection.code}" but its \`artifactEvidence\` measures ${String(codeCharacters)} characters against a cap of ${String(budgetCharacters)} — within the cap, so the evidence does not support the rejection.`,
+          );
+        }
+      }
     }
   }
 

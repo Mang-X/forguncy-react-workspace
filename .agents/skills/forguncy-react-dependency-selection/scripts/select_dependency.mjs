@@ -900,8 +900,14 @@ function probePayload({ projectRoot, result, evidencePath }) {
  *     "extensionVersion": "…",       // extension
  *     "imports": ["debounce"],       // the named bindings the Cell will import;
  *                                    // omitted or null for the whole namespace
- *     "rejection": { … }             // replace; omitted for an architectural
+ *     "rejection": { … },            // replace; omitted for an architectural
  *                                    // rejection, which uses the assessment's own
+ *     "artifactEvidence": {         // required exactly when the rejection code is
+ *       "codeCharacters": 200000,   // `cell-code-budget-exceeded`: the composed Cell
+ *       "budgetCharacters": 100000  // exceeded its cap. Reproduced from the compile's
+ *     }                             // own `cell-code-budget-exceeded` diagnostic, and
+ *                                    // `budgetCharacters` must equal the Cell's declared
+ *                                    // `output.codeBudgetCharacters`.
  *   }
  */
 function decisionFromFile(document) {
@@ -947,12 +953,26 @@ function decisionFromFile(document) {
     );
   }
 
+  // Compile evidence travels with the decision it belongs to (#77 revision 14). It is *not*
+  // optional decoration: `cell-code-budget-exceeded` is observed by a compose, not by a probe, so
+  // these two numbers are the whole of that rejection's evidence. `core`'s shape validator refuses
+  // the pairing in either direction — this file cannot smuggle the numbers under a probe-observed
+  // code, and cannot state a compile-observed rejection without them.
+  const artifactEvidence = document.artifactEvidence;
+
   const decision = {
     packageName,
     strategy,
     ...(strategy === "host" ? { globalName: document.globalName } : {}),
     ...(strategy === "extension" ? { libraryId: document.libraryId, globalName: document.globalName } : {}),
-    ...(strategy === "replace" ? { rejection, ...(document.alternatives === undefined ? {} : { alternatives: document.alternatives }), ...(document.supersededBy === undefined ? {} : { supersededBy: document.supersededBy }) } : {}),
+    ...(strategy === "replace"
+      ? {
+          rejection,
+          ...(artifactEvidence === undefined ? {} : { artifactEvidence }),
+          ...(document.alternatives === undefined ? {} : { alternatives: document.alternatives }),
+          ...(document.supersededBy === undefined ? {} : { supersededBy: document.supersededBy }),
+        }
+      : {}),
   };
 
   return { decision, ownership, architectural, document };
@@ -1235,12 +1255,50 @@ async function candidateProblems(lock, options, report) {
 }
 
 /**
- * Why a decision recorded a runtime target or did not, in the words the report uses.
+ * Whether a decision's compile evidence names the cap the Cell actually declares.
  *
- * `runtimeTargetFor` decides it once, and this states that same decision for the
- * payload — a caller that re-derived the sentence from the record's fields would
- * eventually describe a different rule than the one enforced.
+ * `core`'s shape validator checks that the evidence *states* the rejection — the measurement over
+ * the cap — but it cannot know whether the cap is the Cell's. A writer could pass a
+ * `budgetCharacters` of its own choosing and produce a record whose numbers look conclusive while
+ * measuring against a ceiling the project never set, which is the drift #77 exists to remove at
+ * every other boundary. So this resolves the Cell's own `output.codeBudgetCharacters` and requires
+ * the evidence to agree, or requires the cap to be genuinely absent.
+ *
+ * Null when there is nothing to check, so a decision without compile evidence costs no config
+ * read: `core` already refuses that pairing, and re-reporting it here would be a second voice.
  */
+async function artifactEvidenceProblems(entry, options) {
+  const { decision } = entry;
+  if (decision.strategy !== "replace" || decision.artifactEvidence === undefined) {
+    return [];
+  }
+
+  const projectRoot = fromWorkingDirectory(options.project ?? ".");
+  const cellTarget = cellTargetFor(entry, options);
+  const resolved = cellTarget === null ? { ok: true, codeBudgetCharacters: null } : await resolveCellBudget(projectRoot, cellTarget);
+
+  if (!resolved.ok) {
+    return [
+      `The decision for "${decision.packageName}" carries compile evidence, so its cap has to be checked against the Cell that was compiled, but that Cell could not be resolved: ${resolved.problem}`,
+    ];
+  }
+
+  const declared = resolved.codeBudgetCharacters;
+  if (declared === null) {
+    return [
+      `The decision for "${decision.packageName}" records \`artifactEvidence.budgetCharacters: ${String(decision.artifactEvidence.budgetCharacters)}\`, but ${cellTarget === null ? "no cell target is named, so no Cell declares one" : `Cell "${cellTarget}" declares no \`output.codeBudgetCharacters\``}. A cap that appears in the evidence but exists nowhere in the project would let this record measure against a ceiling nobody set. Declare the cap on the Cell, or drop the compile evidence.`,
+    ];
+  }
+
+  if (declared !== decision.artifactEvidence.budgetCharacters) {
+    return [
+      `The decision for "${decision.packageName}" records \`artifactEvidence.budgetCharacters: ${String(decision.artifactEvidence.budgetCharacters)}\`, but Cell "${cellTarget}" declares \`output.codeBudgetCharacters: ${String(declared)}\`. The evidence has to measure against the cap the compile would actually apply, or the record states a rejection for a ceiling the project does not have.`,
+    ];
+  }
+
+  return [];
+}
+
 /**
  * Why a decision recorded a runtime target or did not, in the words the report uses.
  *
@@ -1400,7 +1458,11 @@ async function commandAudit(options) {
   }
   const entry = decisionFromFile(await readJson(path, "decision file"));
   const { probe, probeResult } = await probeForDecision(entry, options);
-  const problems = core.auditSelectionDecision({ decision: entry.decision, probe, ownership: entry.ownership });
+  const problems = [
+    ...core.auditSelectionDecision({ decision: entry.decision, probe, ownership: entry.ownership }),
+    // Checks the shape validator cannot make, because it does not read the project config.
+    ...(await artifactEvidenceProblems(entry, options)),
+  ];
 
   // The same acceptance checks `record` applies, over the lock this decision *would*
   // produce. `audit` is the read-only check, so the two have to reach the same verdict —
@@ -1444,7 +1506,10 @@ async function commandRecord(options) {
   }
   const entry = decisionFromFile(await readJson(path, "decision file"));
   const { probe, probeResult } = await probeForDecision(entry, options);
-  const problems = core.auditSelectionDecision({ decision: entry.decision, probe, ownership: entry.ownership });
+  const problems = [
+    ...core.auditSelectionDecision({ decision: entry.decision, probe, ownership: entry.ownership }),
+    ...(await artifactEvidenceProblems(entry, options)),
+  ];
 
   if (problems.length > 0) {
     print({ ...auditPayload(entry, probe, problems), command: "record", recorded: false }, { ...options, json: true });
@@ -1724,7 +1789,7 @@ Options:
                     \`exists\`/\`typeDefinitionAvailable\`). A listing is checked against
                     the declared rows via #12's metadata audit; its display \`name\` is
                     never read as an npm package.
-  --cell <id>       Scope the run to one declared Cell, and measure against the
+  --cell <id>       Scope the run to one declared Cell, and compare against the
                     \`codeBudgetCharacters\` that Cell's \`output\` declares. The cap is
                     read from forguncy.config rather than passed as a number, because
                     the compiler takes its cap from the same declaration — a flag
@@ -1733,18 +1798,21 @@ Options:
                     fingerprint's declared inputs, so a record measured with one
                     reports \`probe-fingerprint-changed\` if it later moves or is
                     removed. Without \`--cell\` no cap applies: the band is still
-                    recorded, and nothing rejects on it.
+                    recorded, and nothing is compared against one.
   --imports <a,b>   The named bindings the Cell will import, comma-separated. The probe
-                    bundles an entry that imports exactly these, which makes the
-                    measured size a **lower bound** on what the Cell carries — and a
-                    lower bound is the only measurement a cap rejection may rest on.
-                    Without it the probe keeps the whole namespace, which measures an
-                    **upper** bound: the size is still reported, but an over-cap
-                    namespace bundle files no rejection, because a Cell importing a
-                    subset can tree-shake below the cap. Measured on \`es-toolkit\`:
-                    the namespace bundles to 249,750 characters against 2,865 for
-                    \`debounce\` alone. The surface is one of the fingerprint's declared
-                    inputs and is recorded on the lock record.
+                    bundles an entry that imports exactly these, which biases the
+                    measured size **down** (\`size.estimateBias: "lower-leaning"\`).
+                    Without it the probe keeps the whole namespace, which biases the
+                    estimate **up**. Neither is a bound on the compiled Cell and
+                    neither files a rejection: the probe's build and the compiler's do
+                    not share a resolution graph, so the probe's artifact can be larger
+                    than the Cell (measured on \`es-toolkit\`, the namespace bundles to
+                    249,750 characters against 2,865 for \`debounce\` alone; and
+                    \`react-library\`'s \`DatePicker\` shows the reverse, inlining npm
+                    React that the real compile externalizes to the host). The surface
+                    is one of the fingerprint's declared inputs and is recorded on the
+                    lock record. The hard cap verdict is the compiler's — see
+                    \`artifactEvidence\` in the decision-file shape above.
   --json            Machine-readable output (default for policy, probe and status).
 
 audit and record run the same checks, covering everything record refuses for a reason it can

@@ -6,12 +6,12 @@
  * engine"
  * https://github.com/Mang-X/forguncy-react-workspace/issues/17
  *
- * Governing Specs: #16 (this step records "the generated artifact size, to be
- * compared against the measured cell code budget", and is the only step that may
- * observe `cell-artifact-budget-exceeded`), #21 (the measurement — this module
- * classifies against its bands and never restates them), #8 (the fingerprint the
- * budget participates in, so changing the unit or the comparison invalidates the
- * evidence the comparison produced), #77 (which settled the unit below).
+ * Governing Specs: #16 (this step records "the generated artifact size, to be compared against
+ * the measured cell code budget"), #21 (the measurement — this module classifies against its
+ * bands and never restates them), #8 (the fingerprint the budget participates in, so changing
+ * the unit or the comparison invalidates the evidence the comparison produced), #77 (which
+ * settled the unit below, and then revision 13, which removed this step's power to **file**
+ * `cell-artifact-budget-exceeded` at all — it is a measurement, not a verdict).
  *
  * ## The unit contract (#77)
  *
@@ -96,9 +96,11 @@
  * by giving `cell-artifact-budget-exceeded` **no** observing step, so a report that attributes the
  * finding to any probe step is refused by `validateProbeReport` rather than merely discouraged.
  *
- * `size.bound` still records which way this *estimate* leans (a namespace probe leans over, a
+ * `size.estimateBias` records which way this *estimate* leans (a namespace probe leans over, a
  * named one leans under), because that is what makes the number interpretable — but it selects
- * between two estimates, not between an estimate and a verdict.
+ * between two estimates, not between an estimate and a verdict. It is named for a bias and not a
+ * bound because revision 13 disproved the bound relation for **both** shapes: a named-surface
+ * probe is not a lower bound on the Cell either (the `react-library` counterexample above).
  *
  * ## Band versus cap
  *
@@ -193,14 +195,15 @@ export interface SizeObservation {
 /**
  * Which way this *estimate* leans, never which way a verdict runs.
  *
- * `upper-bound` — the build kept the whole namespace, so the Cell very likely carries less.
- * `lower-bound` — the build named bindings, so the Cell very likely carries at least these.
- * Neither is a bound on the compiled Cell: the probe's build and the compiler's do not share a
- * resolution graph (see the module header), so both are estimates and **neither may file a
- * rejection**. The value is recorded because it makes the number interpretable, not because it
- * authorizes anything.
+ * The values are named for a **bias in an estimate**, not for a mathematical bound, and that
+ * renaming is load-bearing: revision 13 disproved the claim that a named-surface probe is a lower
+ * bound on the compiled Cell (`react-library`'s `DatePicker` measures *larger* than the Cell,
+ * because the real compile externalizes `react` to the host). A fact reading
+ * `size.estimateBias = "lower-leaning"` says what is actually true — the number probably
+ * understates — where `size.bound = "lower-bound"` asserted the relation that was falsified. So
+ * neither value may file a rejection; the string itself is what a machine consumer reads.
  */
-export type SizeBound = "lower-bound" | "upper-bound";
+export type SizeEstimateBias = "upper-leaning" | "lower-leaning";
 
 /**
  * Observes size, classifies its band, and reports an optional cap comparison.
@@ -212,13 +215,13 @@ export type SizeBound = "lower-bound" | "upper-bound";
  * @param budgetCharacters - The project's cell code budget in **characters**, or
  *   `null` when none applies. Not bytes: see the module header. A non-null value is
  *   validated here, before it is compared or folded into a fingerprint.
- * @param bound - Which way this estimate leans, from the build's declared import surface.
- *   Reported as a fact; it does not authorize a rejection. See `SizeBound`.
+ * @param bias - Which way this estimate leans, from the build's declared import surface.
+ *   Reported as a fact; it does not authorize a rejection. See `SizeEstimateBias`.
  */
 export function observeSize(
   output: readonly (OutputChunk | OutputAsset)[] | undefined,
   budgetCharacters: number | null,
-  bound: SizeBound = "upper-bound",
+  bias: SizeEstimateBias = "upper-leaning",
 ): SizeObservation {
   // Validated at this boundary rather than by the caller, because both the comparison
   // below and the fingerprint the caller composed are derived from the same number: a
@@ -259,10 +262,11 @@ export function observeSize(
     // What the band was computed from, so the two facts cannot be read as describing
     // different artifacts.
     { step: "size", name: "size.band.basis", value: "characters of emitted code" },
-    // Which way this measurement bounds the Cell. Recorded on every run rather than only on a
-    // rejection, because it is what makes the other size facts interpretable: a reader that
-    // sees a number over a cap needs to know whether that is a verdict or an upper bound.
-    { step: "size", name: "size.bound", value: bound },
+    // Which way this *estimate* leans. Recorded on every run because it is what makes the other
+    // size facts interpretable: a reader that sees a number over a cap needs to know which way the
+    // number is probably wrong. Named for a bias rather than a bound — see `SizeEstimateBias` —
+    // because revision 13 disproved the bound relation for both entry shapes.
+    { step: "size", name: "size.estimateBias", value: bias },
   ];
   if (budgetCharacters !== null) {
     facts.push({ step: "size", name: "artifact.budgetCharacters", value: budgetCharacters });
@@ -293,7 +297,7 @@ export function observeSize(
     // so it is not acted on: the probe measures a candidate the compiler will not build, so only
     // the compile can exceed a cap.
     const leaning =
-      bound === "upper-bound"
+      bias === "upper-leaning"
         ? "the build kept the whole package namespace, so the Cell may carry less"
         : "the build declared named imports, so the Cell may still carry more once React, host and extension dependencies resolve differently";
     return `${against}. This is an estimate of a candidate, not a cap verdict: ${leaning}, and the compile resolves host/extension dependencies the probe build does not. The compiler's own \`cell-code-budget-exceeded\` diagnostic on the composed Cell is what decides it.`;

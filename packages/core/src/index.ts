@@ -52,6 +52,8 @@ export {
   isTechnicalRejection,
   isTechnicalRejectionCode,
   TECHNICAL_REJECTION_CODES,
+  ARTIFACT_OBSERVED_TECHNICAL_REJECTION_CODES,
+  isArtifactObservedRejectionCode,
 } from "./rejection.ts";
 export type {
   ArchitecturalDependencyRejection,
@@ -99,6 +101,7 @@ export {
   validateDependencyVerification,
 } from "./strategy.ts";
 export type {
+  ArtifactBudgetEvidence,
   DependencyCheck,
   DependencyCheckLevel,
   DependencyDecision,
@@ -376,7 +379,6 @@ export {
   requiresRuntimeValidation,
   requiresTargetIdentity,
   RUNTIME_CONFIRMED_TECHNICAL_REJECTION_CODES,
-  UNOBSERVABLE_TECHNICAL_REJECTION_CODES,
   serializeFgcLock,
   SUPPORTED_FGC_LOCK_SCHEMA_VERSIONS,
   validateFgcLockDocument,

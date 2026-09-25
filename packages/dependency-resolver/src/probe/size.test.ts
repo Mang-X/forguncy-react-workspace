@@ -155,7 +155,7 @@ describe("observeSize", () => {
     // probe's build and the compiler's do not share a resolution graph, so even a named-surface
     // measurement can exceed the Cell's. See the module header for the `react-library` fixture
     // that falsifies the lower-bound claim (a *named* probe of `DatePicker` inlines npm React).
-    for (const bound of ["lower-bound", "upper-bound"] as const) {
+    for (const bound of ["lower-leaning", "upper-leaning"] as const) {
       const observation = observeSize([chunk("var a = 12345;")], 4, bound);
 
       expect(observation.validation.outcome, bound).toBe("passed");
@@ -180,9 +180,9 @@ describe("observeSize", () => {
     // The fact that makes the number interpretable. It selects between two *estimates*, not
     // between an estimate and a verdict — see `SizeBound` — so its presence must not be read as
     // authorization.
-    expect(factValue(observeSize([chunk("var a = 1;")], null), "size.bound")).toBe("upper-bound");
-    expect(factValue(observeSize([chunk("var a = 1;")], null, "lower-bound"), "size.bound")).toBe("lower-bound");
-    expect(factValue(observeSize([chunk("var a = 1;")], 4), "size.bound")).toBe("upper-bound");
+    expect(factValue(observeSize([chunk("var a = 1;")], null), "size.estimateBias")).toBe("upper-leaning");
+    expect(factValue(observeSize([chunk("var a = 1;")], null, "lower-leaning"), "size.estimateBias")).toBe("lower-leaning");
+    expect(factValue(observeSize([chunk("var a = 1;")], 4), "size.estimateBias")).toBe("upper-leaning");
   });
 
   it("defaults to the upper bound, which is the direction that leans over", () => {
@@ -192,7 +192,7 @@ describe("observeSize", () => {
     // passed because the leaning is only stated where it is interpretable, i.e. against a cap.
     const observation = observeSize([chunk("x".repeat(10_000))], 4);
 
-    expect(factValue(observation, "size.bound")).toBe("upper-bound");
+    expect(factValue(observation, "size.estimateBias")).toBe("upper-leaning");
     expect(observation.validation.detail).toContain("kept the whole package namespace");
   });
 

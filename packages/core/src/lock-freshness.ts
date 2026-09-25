@@ -42,6 +42,7 @@ import {
   requiresRuntimeValidation,
 } from "./lock.ts";
 import type { ForguncyTargetIdentity, ToolchainIdentity } from "./lock.ts";
+import { isArtifactObservedRejectionCode } from "./rejection.ts";
 import type { RuntimeContractTarget } from "./runtime-contract.ts";
 
 export const LOCK_STALENESS_REASONS = [
@@ -60,6 +61,7 @@ export const LOCK_STALENESS_REASONS = [
   "extension-version-unknown",
   "extension-identity-changed",
   "extension-identity-unknown",
+  "artifact-evidence-missing",
 ] as const;
 export type LockStalenessReason = (typeof LOCK_STALENESS_REASONS)[number];
 
@@ -130,6 +132,7 @@ export function assessLockDecision(
   reasons.push(...assessTargetFreshness(record, environment, policy));
   reasons.push(...assessToolchainFreshness(record, environment));
   reasons.push(...assessExtensionFreshness(record, environment));
+  reasons.push(...assessArtifactEvidenceFreshness(record));
 
   return {
     profile,
@@ -277,6 +280,30 @@ function assessExtensionFreshness(
   }
 
   return reasons;
+}
+
+/**
+ * Whether a compile-observed rejection still carries the evidence that makes it checkable.
+ *
+ * #77 revision 14 gave `cell-code-budget-exceeded` a real evidence shape — the measured
+ * `codeCharacters` against the `budgetCharacters` the compile used — and this is the freshness
+ * axis for it. A record written before revision 14 cites that code with no such evidence, and
+ * reporting it here rather than refusing it at parse time is deliberate: an existing lock has to
+ * stay **readable and stale**, per `lock-migration.ts`, and a migration step must not silently
+ * delete or re-decide what it cannot interpret. Stale is exactly right — the record's evidence is
+ * not re-checkable, so it cannot be treated as verified until it is re-recorded from a compile.
+ *
+ * A record whose code is *not* compile-observed is untouched: the shape validator already refuses
+ * artifact evidence under any other code, so there is no second case to assess here.
+ */
+function assessArtifactEvidenceFreshness(record: LockedDependencyDecision): readonly LockStalenessReason[] {
+  if (record.strategy !== "replace" || record.rejection.kind !== "technical") {
+    return [];
+  }
+  if (!isArtifactObservedRejectionCode(record.rejection.code)) {
+    return [];
+  }
+  return record.artifactEvidence === undefined ? ["artifact-evidence-missing"] : [];
 }
 
 /**

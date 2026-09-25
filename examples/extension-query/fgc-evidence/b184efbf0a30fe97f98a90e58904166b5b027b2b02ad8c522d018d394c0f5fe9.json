@@ -1,0 +1,279 @@
+{
+  "schemaVersion": 1,
+  "environment": {
+    "packageName": "@tanstack/react-query",
+    "packageVersion": "5.102.8",
+    "license": "MIT",
+    "source": "https://github.com/TanStack/query",
+    "toolchain": {
+      "vitePlus": null
+    },
+    "target": {
+      "product": "Forguncy",
+      "productVersion": "12.0.100.0",
+      "productBuild": "12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623",
+      "hostReactVersion": "19.2.7"
+    }
+  },
+  "facts": [
+    {
+      "step": "export-metadata",
+      "name": "exports.browser-field-present",
+      "value": false
+    },
+    {
+      "step": "export-metadata",
+      "name": "exports.browser-resolvable",
+      "value": true
+    },
+    {
+      "step": "export-metadata",
+      "name": "exports.map.present",
+      "value": true
+    },
+    {
+      "step": "export-metadata",
+      "name": "exports.types-present",
+      "value": true
+    },
+    {
+      "step": "export-metadata",
+      "name": "peerDependencies.ranges",
+      "value": [
+        "react@^18 || ^19"
+      ]
+    },
+    {
+      "step": "node-builtin-scan",
+      "name": "graph.entry-resolutions",
+      "value": []
+    },
+    {
+      "step": "node-builtin-scan",
+      "name": "graph.files-shaken-out",
+      "value": 2
+    },
+    {
+      "step": "node-builtin-scan",
+      "name": "graph.native-indicators",
+      "value": []
+    },
+    {
+      "step": "node-builtin-scan",
+      "name": "graph.node-only-specifiers",
+      "value": []
+    },
+    {
+      "step": "node-builtin-scan",
+      "name": "graph.packages-scanned",
+      "value": [
+        "@tanstack/query-core@5.102.8",
+        "@tanstack/react-query@5.102.8",
+        "react@19.2.7"
+      ]
+    },
+    {
+      "step": "node-builtin-scan",
+      "name": "graph.reachable-file-count",
+      "value": 48
+    },
+    {
+      "step": "node-builtin-scan",
+      "name": "signal.no-node-builtins",
+      "value": true
+    },
+    {
+      "step": "build",
+      "name": "build.entry-specifier",
+      "value": "@tanstack/react-query"
+    },
+    {
+      "step": "build",
+      "name": "build.import-surface",
+      "value": []
+    },
+    {
+      "step": "build",
+      "name": "build.warning-codes",
+      "value": [
+        "MODULE_LEVEL_DIRECTIVE"
+      ]
+    },
+    {
+      "step": "artifact-scan",
+      "name": "artifact.assets",
+      "value": []
+    },
+    {
+      "step": "artifact-scan",
+      "name": "artifact.chunk-count",
+      "value": 1
+    },
+    {
+      "step": "artifact-scan",
+      "name": "artifact.chunks",
+      "value": [
+        "8e213ec8bec3b5dc.js"
+      ]
+    },
+    {
+      "step": "artifact-scan",
+      "name": "signal.self-contained-runtime-assets",
+      "value": false
+    },
+    {
+      "step": "asset-inventory",
+      "name": "assets.by-class",
+      "value": []
+    },
+    {
+      "step": "asset-inventory",
+      "name": "assets.emitted-count",
+      "value": 0
+    },
+    {
+      "step": "asset-inventory",
+      "name": "assets.inlinedDataUrlCount",
+      "value": 0
+    },
+    {
+      "step": "asset-inventory",
+      "name": "signal.self-contained-runtime-assets",
+      "value": true
+    },
+    {
+      "step": "runtime-pattern-scan",
+      "name": "runtime.entry-paths",
+      "value": [
+        "build/modern/index.js"
+      ]
+    },
+    {
+      "step": "runtime-pattern-scan",
+      "name": "runtime.files-shaken-out",
+      "value": 0
+    },
+    {
+      "step": "runtime-pattern-scan",
+      "name": "runtime.filesScanned",
+      "value": 22
+    },
+    {
+      "step": "runtime-pattern-scan",
+      "name": "runtime.patterns",
+      "value": []
+    },
+    {
+      "step": "runtime-pattern-scan",
+      "name": "runtime.wasm-source-markers",
+      "value": []
+    },
+    {
+      "step": "size",
+      "name": "size.assetBytes",
+      "value": 0
+    },
+    {
+      "step": "size",
+      "name": "size.band",
+      "value": "inline"
+    },
+    {
+      "step": "size",
+      "name": "size.band.basis",
+      "value": "characters of emitted code"
+    },
+    {
+      "step": "size",
+      "name": "size.band.decision",
+      "value": "https://github.com/Mang-X/forguncy-react-workspace/issues/21"
+    },
+    {
+      "step": "size",
+      "name": "size.codeBytes",
+      "value": 152120
+    },
+    {
+      "step": "size",
+      "name": "size.codeCharacters",
+      "value": 152120
+    },
+    {
+      "step": "size",
+      "name": "size.estimateBias",
+      "value": "upper-leaning"
+    },
+    {
+      "step": "size",
+      "name": "size.totalBytes",
+      "value": 152120
+    }
+  ],
+  "risks": [
+    {
+      "step": "artifact-scan",
+      "signal": "dynamic-import-or-code-splitting",
+      "summary": "The emitted code contains a dynamic import expression, which may cause a runtime module load.",
+      "evidence": [
+        "chunk:8e213ec8bec3b5dc.js"
+      ]
+    }
+  ],
+  "validation": [
+    {
+      "step": "package-identity",
+      "outcome": "passed",
+      "detail": "Resolved \"@tanstack/react-query@5.102.8\" from the install graph (license MIT).",
+      "diagnostics": []
+    },
+    {
+      "step": "export-metadata",
+      "outcome": "passed",
+      "detail": "Read the published entry fields; a browser build has an entry point to consume.",
+      "diagnostics": []
+    },
+    {
+      "step": "node-builtin-scan",
+      "outcome": "passed",
+      "detail": "Scanned 3 package(s) in the resolved graph; no Node-only builtin or native-addon indicator was found.",
+      "diagnostics": []
+    },
+    {
+      "step": "build",
+      "outcome": "passed",
+      "detail": "The candidate \"@tanstack/react-query\" built through the Vite+/Rolldown stack; 1 entry chunk(s) emitted.",
+      "diagnostics": []
+    },
+    {
+      "step": "artifact-scan",
+      "outcome": "passed",
+      "detail": "Scanned 1 chunk(s) and 0 asset(s); found 1 risk marker(s) and 0 disqualifying observation(s).",
+      "diagnostics": []
+    },
+    {
+      "step": "asset-inventory",
+      "outcome": "passed",
+      "detail": "Inventoried 0 emitted asset(s); 0 data URL(s) are already inlined in chunk code.",
+      "diagnostics": []
+    },
+    {
+      "step": "runtime-pattern-scan",
+      "outcome": "passed",
+      "detail": "Scanned 22 source file(s); found 0 runtime-requirement pattern(s).",
+      "diagnostics": []
+    },
+    {
+      "step": "size",
+      "outcome": "passed",
+      "detail": "Measured 152120 character(s) of emitted code (band inline, #21) from the synthetic candidate build, weighing 152120 byte(s) as served (code 152120, assets 0); no cell cap applies to this run.",
+      "diagnostics": []
+    },
+    {
+      "step": "runtime-smoke",
+      "outcome": "skipped",
+      "detail": "No runtime-smoke hook was supplied for this run; #16 asks for a runtime result where needed, and this toolchain ran the static steps only.",
+      "diagnostics": []
+    }
+  ],
+  "rejectionFindings": []
+}

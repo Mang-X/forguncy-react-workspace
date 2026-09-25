@@ -453,7 +453,7 @@ export async function runDependencyProbe(options: RunDependencyProbeOptions): Pr
   // A named import surface makes the measured artifact a lower bound on what the Cell
   // carries, which is the only shape a cap rejection is sound on; a namespace build measures
   // an upper bound. Derived from the surface the caller declared, never guessed here.
-  const size = observeSize(build.output, budgetCharacters, imports.length > 0 ? "lower-bound" : "upper-bound");
+  const size = observeSize(build.output, budgetCharacters, imports.length > 0 ? "lower-leaning" : "upper-leaning");
   steps.addFacts(size.facts);
   steps.addRisks(size.risks);
   steps.addRejections(size.rejectionFindings);

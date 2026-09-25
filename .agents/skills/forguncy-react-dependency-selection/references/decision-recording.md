@@ -33,6 +33,10 @@
   "cellTarget": null,                  // 默认 null，即适用于每个 target
   "imports": ["debounce"],             // 可选：Cell 会具名导入的绑定，用于让尺寸估算偏向"下"。
                                        // 省略或 null = 整个命名空间（估算偏向"上"）。详见下节。
+  "artifactEvidence": {                // rejection.code 为 cell-code-budget-exceeded 时**必填**：
+    "codeCharacters": 200000,          // 编译器对该 Cell 报出的实际测量值，逐字誊自它自己的
+    "budgetCharacters": 100000         // cell-code-budget-exceeded 诊断。详见下面「硬上限判定」。
+  },
   "validatedAgainstRuntime": false,    // 置 true 需 cite runtime-observation 且 smoke 步骤通过
   "evidence": [{ "kind": "spec-issue", "reference": "…" }]
 }
@@ -55,6 +59,14 @@
 2. `imports` 是**调用方的声明**，不是从 Cell 读出来的事实：Cell 可能导入了却因未使用被 tree-shake 掉，声明也可能与源码不符。
 
 因此 `cell-artifact-budget-exceeded` 的**唯一**权威是编译器：`auditCodeBudget` 对**合成后的 Cell 源码**应用 `codeBudgetCharacters`，那里入口是 Cell 自己的、解析图是真的。probe 报告里的尺寸数字是**估算**，供 Agent 参考；它不是拒绝依据。`PROBE_STEPS_OBSERVING_SIGNAL` 里这个信号没有任何观测步骤，所以一份把该 finding 归到任何 probe 步骤的报告会被 `validateProbeReport` 判为**无效**，而不只是"不推荐"。
+
+**但这个真实的编译器判定是可记录的**，走 `artifactEvidence`：决策文件写 `rejection.code = "cell-code-budget-exceeded"` 时**必须**带上它，两个数字逐字誊自编译器自己的诊断。
+
+- `codeCharacters` 是编译器对该 Cell 报出的实际测量值，`budgetCharacters` 是那次编译实际用的上限。两者都要记，是因为这样结论才**可核对**：只有 `codeCharacters > budgetCharacters` 才支持这条拒绝，校验会当场核对，对不上就拒绝记录。
+- `budgetCharacters` **必须等于**该 Cell 在 `forguncy.config` 里声明的 `output.codeBudgetCharacters`（`--cell` / 决策文件的 `cellTarget` 指向的那个）。写一个项目里根本不存在的上限会被拒绝——否则记录就会"针对一个没人设过的天花板"声称超限，这正是 #77 要在每个边界消除的漂移。
+- 反过来，`artifactEvidence` 挂在任何其它 code 上也会被拒：那些 code 是 probe 能观测的，带上编译数字等于绕过 probe 路径。
+- 这条记录的 evidence profile 是 `artifact-rejection`（**不是** `technical-rejection`）：它要求 probe **通过**——包本身没问题，超限的是合成出来的 Cell。这正是"好包 + 过大 Cell"这个预期状态之所以能落盘的原因。
+- revision 14 之前写的 `cell-code-budget-exceeded` 记录**仍然可读**，只是 stale（`artifact-evidence-missing`），需要从新的证据路径重新记录。不升 schema、不静默删除或改判——见 `lock-migration.ts` 的契约。
 
 ## 脚本对决策文件做的事
 

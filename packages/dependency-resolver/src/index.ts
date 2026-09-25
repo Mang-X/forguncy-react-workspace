@@ -239,7 +239,7 @@ export { observeRuntimePatterns } from "./probe/runtime-pattern-scan.ts";
 export type { RuntimePatternObservation } from "./probe/runtime-pattern-scan.ts";
 
 export { measureArtifactSize, observeSize } from "./probe/size.ts";
-export type { ArtifactSize, SizeBound, SizeObservation } from "./probe/size.ts";
+export type { ArtifactSize, SizeEstimateBias, SizeObservation } from "./probe/size.ts";
 
 export {
   buildProbeEnvironment,

@@ -195,7 +195,7 @@ describe("runDependencyProbe: react library", () => {
     // the way the compiler does.
     expect(emitted).toContain("function createElement");
     // Both surfaces lean the same way for this fixture, and neither may reject.
-    expect(named.report.facts.find(fact => fact.name === "size.bound")?.value).toBe("lower-bound");
+    expect(named.report.facts.find(fact => fact.name === "size.estimateBias")?.value).toBe("lower-leaning");
     expect(rejectionSignals(named.report)).not.toContain("cell-artifact-budget-exceeded");
     expect(rejectionSignals(namespace.report)).not.toContain("cell-artifact-budget-exceeded");
   });
@@ -736,8 +736,8 @@ describe("runDependencyProbe: budget", () => {
     const namespace = await probe("pure-esm-utility", "tiny-math", { cellArtifactBudgetCharacters: 4 });
     const named = await probe("pure-esm-utility", "tiny-math", { cellArtifactBudgetCharacters: 4, imports: ["add"] });
 
-    expect(namespace.report.facts.find(fact => fact.name === "size.bound")?.value).toBe("upper-bound");
-    expect(named.report.facts.find(fact => fact.name === "size.bound")?.value).toBe("lower-bound");
+    expect(namespace.report.facts.find(fact => fact.name === "size.estimateBias")?.value).toBe("upper-leaning");
+    expect(named.report.facts.find(fact => fact.name === "size.estimateBias")?.value).toBe("lower-leaning");
     // …and the lower-bound lean still files nothing.
     expect(rejectionSignals(named.report)).not.toContain("cell-artifact-budget-exceeded");
   });

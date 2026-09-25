@@ -218,12 +218,31 @@ describe("fgc.lock.json model", () => {
       "resolved-dependency",
       "architectural-rejection",
       "technical-rejection",
+      "artifact-rejection",
     ]);
     expect(lockEvidenceProfileOf(inlineRecord)).toBe("resolved-dependency");
     expect(lockEvidenceProfileOf(hostRecord)).toBe("resolved-dependency");
     expect(lockEvidenceProfileOf(extensionRecord)).toBe("resolved-dependency");
     expect(lockEvidenceProfileOf(architecturalRejection)).toBe("architectural-rejection");
     expect(lockEvidenceProfileOf(technicalRejection)).toBe("technical-rejection");
+
+    // The split that revision 14 added, and the reason it is a *profile* rather than a validator
+    // special-case: a compile-observed rejection wants a **passing** probe (the package is fine,
+    // the Cell is over cap), which is the opposite of what `technical-rejection` requires. Routing
+    // it through the probe profile would make the expected state unrecordable.
+    const artifactRejection: LockedDependencyDecision = {
+      ...technicalRejection,
+      rejection: {
+        kind: "technical",
+        code: "cell-code-budget-exceeded",
+        summary: "The composed Cell is over the project's cap.",
+        remediation: "Evaluate a lighter alternative.",
+      },
+      artifactEvidence: { codeCharacters: 200_000, budgetCharacters: 100_000 },
+    };
+    expect(lockEvidenceProfileOf(artifactRejection)).toBe("artifact-rejection");
+    expect(LOCK_EVIDENCE_POLICY["artifact-rejection"].probeRequirement).toBe("passed");
+    expect(LOCK_EVIDENCE_POLICY["artifact-rejection"].participatesInCompilation).toBe(false);
   });
 
   it("owes a runtime check to every profile that produces a dependency", () => {
@@ -590,17 +609,47 @@ describe("lock metadata validation", () => {
     );
   });
 
-  // PR review of #77, P1. The persisted contract has to be as strong as the path that writes it:
-  // revision 13 made the probe unable to file `cell-code-budget-exceeded` under ANY input, so a
-  // record citing it is stating a rejection no probe could have produced — and since a `replace`
-  // binds its whole justification to probe findings, that record is a refusal nothing supports.
-  // A hand-edited lock or one written by revision 12 would otherwise still validate.
-  it("refuses a technical rejection whose code no probe step can observe", () => {
-    // The rejection is stated in full rather than spread from the fixture: `technicalRejection`
-    // is typed as `LockedDependencyDecision`, so its `rejection` is the *union* and spreading it
-    // widens `kind` back to architectural-or-technical. Writing the shape out keeps the fixture
-    // honest and the type narrow.
-    const unobservable: LockedDependencyDecision = {
+  // PR review of #77, P1 (round 4). Round 3's version of this test asserted the code was refused
+  // outright; that made a schema-v1 lock holding it *unreadable* rather than stale, which is the
+  // opposite of the migration contract. Revision 14 gives the code a real evidence shape instead,
+  // and the rules are now: evidence required where it belongs, refused where it does not, and a
+  // record without it stays readable (freshness reports `artifact-evidence-missing`).
+  it("refuses compile evidence attached to a code a probe observes", () => {
+    const misplaced: LockedDependencyDecision = {
+      ...technicalRejection,
+      artifactEvidence: { codeCharacters: 200_000, budgetCharacters: 100_000 },
+    };
+
+    expect(problemsFor(misplaced)).toMatch(/which is the evidence for a compile-observed code/);
+    // The sibling code that a probe *can* observe is untouched when it carries no artifact
+    // evidence, so this is a rule about the pairing rather than about `replace`.
+    expect(problemsFor(technicalRejection)).toBe("");
+  });
+
+  it("refuses compile evidence whose own numbers do not state the rejection", () => {
+    // The point of recording both figures is that the claim becomes checkable: an over-cap
+    // rejection whose measurement is under the cap is a contradiction.
+    const withinCap: LockedDependencyDecision = {
+      ...technicalRejection,
+      rejection: {
+        kind: "technical",
+        code: "cell-code-budget-exceeded",
+        summary: "The composed Cell is over the project's cap.",
+        remediation: "Evaluate a lighter alternative.",
+      },
+      artifactEvidence: { codeCharacters: 100, budgetCharacters: 100_000 },
+    };
+
+    expect(problemsFor(withinCap)).toMatch(/within the cap, so the evidence does not support/);
+  });
+
+  it("keeps a pre-revision-14 budget rejection readable, so it can go stale instead of unreadable", () => {
+    // The migration contract in `lock-migration.ts`: a lock written by a previous toolchain must
+    // stay readable, and a migration must not silently delete or re-decide a record it cannot
+    // interpret. Round 3 refused this outright, which made such a lock fail to *parse* — the
+    // record never reached freshness, so the invalidation the revision bump exists to produce
+    // never ran. It is accepted here; `lock-freshness.test.ts` asserts it reports stale.
+    const legacy: LockedDependencyDecision = {
       ...technicalRejection,
       rejection: {
         kind: "technical",
@@ -610,12 +659,7 @@ describe("lock metadata validation", () => {
       },
     };
 
-    expect(problemsFor(unobservable)).toMatch(/no probe step can observe/);
-    // …and says where the verdict does come from, so the writer is not left guessing.
-    expect(problemsFor(unobservable)).toMatch(/compiler's own diagnostic/);
-    // The sibling code that a probe *can* observe is untouched, so this is a rule about
-    // observability rather than about `replace`.
-    expect(problemsFor(technicalRejection)).toBe("");
+    expect(problemsFor(legacy)).toBe("");
   });
 
   it("ties a runtime-compatibility claim to a probe that actually passed", () => {

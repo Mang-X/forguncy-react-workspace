@@ -36,7 +36,7 @@ import {
   validateProbeReport,
 } from "./probe-protocol.ts";
 import { REPLACEMENT_SIGNAL_REJECTIONS, SELECTION_SIGNALS } from "./selection-signals.ts";
-import { UNOBSERVABLE_TECHNICAL_REJECTION_CODES } from "./lock.ts";
+import { ARTIFACT_OBSERVED_TECHNICAL_REJECTION_CODES } from "./rejection.ts";
 import type {
   ProbeEnvironment,
   ProbeOutcome,
@@ -769,7 +769,7 @@ describe("the unobservable-rejection list cannot drift from the protocol table",
       .map(mapping => mapping.code)
       .sort();
 
-    expect([...UNOBSERVABLE_TECHNICAL_REJECTION_CODES].sort()).toEqual(derived);
+    expect([...ARTIFACT_OBSERVED_TECHNICAL_REJECTION_CODES].sort()).toEqual(derived);
     // And the list is not vacuous: an empty derivation would make the assertion above pass while
     // the lock's rule did nothing. `cell-code-budget-exceeded` is the code #77 revision 13 made
     // unprovable, so it is the one that has to be there.
