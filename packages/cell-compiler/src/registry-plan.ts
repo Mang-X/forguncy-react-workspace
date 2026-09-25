@@ -23,8 +23,10 @@
  *   answering. The mismatch is real and recorded rather than papered over:
  *   `codeBudgetBytes` is bytes, `compileCell`'s budget is characters, and
  *   `dependency-resolver`'s `size` probe compares bytes. Reconciling the config
- *   field and the probe with the settled character unit is follow-up work on #8/#17,
- *   not a conversion to be invented in this seam.
+ *   field and the probe with the settled character unit is follow-up work owned by
+ *   issue #77, not a conversion to be invented in this seam. (An earlier version of
+ *   this note named #8/#17 as the owner; both are closed and neither carries the
+ *   work, so #77 was created to own it.)
  * - **No second target spelling.** The `target` in the plan is the registry's
  *   normalized coordinates — the same two fields `mcp-sync` later writes with —
  *   so compile-time reporting and the eventual `setCells` call cannot disagree.

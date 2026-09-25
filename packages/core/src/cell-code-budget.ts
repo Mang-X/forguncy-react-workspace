@@ -5,8 +5,24 @@
  * Decision source: GitHub Issue #21 — "Research: measure ReactCellType
  * generated-code budget and performance envelope"
  * (https://github.com/Mang-X/forguncy-react-workspace/issues/21), downstream of
- * #3 (the v0.1 epic) and feeding #8's decision policy and #16's selection
- * procedure. The target itself is #5's verified contract.
+ * #3 (the v0.1 epic). The target itself is #5's verified contract.
+ *
+ * ## Which half of #21's acceptance this module actually delivers
+ *
+ * #21's result is required to "feed #8/#16 decision policy and compiler
+ * diagnostics". Only the **compiler** half is wired here: `cell-compiler`'s
+ * `auditCodeBudget` classifies a composed artifact through
+ * `classifyCellCodeSize` and reports the band. The **selection-policy** half is
+ * not: #16's `size` probe (`packages/dependency-resolver/src/probe/size.ts`)
+ * still compares UTF-8 **bytes** against a configured hard cap and files
+ * `cell-artifact-budget-exceeded`, and nothing in `probe-engine.ts`,
+ * `output.codeBudgetBytes` or `selection-signals.ts` reads these bands.
+ *
+ * So the two paths can disagree about one artifact — the compiler can call it
+ * `inline` while the probe rejects it as over budget. That is a real
+ * inconsistency, tracked as issue #77, and it is recorded here rather than
+ * implied away by this module's presence: being a *governing* decision for #8/#16
+ * (below) is not the same as being *consumed* by them.
  *
  * ## What was actually measured, and where
  *
@@ -81,9 +97,16 @@ export const CELL_CODE_BUDGET_DECISION: ArchitectureDecisionSource = {
  * shape `LOCK_GOVERNING_DECISIONS` and `HOST_BRIDGE_GOVERNING_DECISIONS` use, and
  * for the same reason: every number in this module is a claim about a specific
  * verified target (#5), and #21's own acceptance criterion is that its result
- * "feeds #8/#16 decision policy and compiler diagnostics", so a change here that a
- * lock or a selection procedure depends on has to cite them. Composed from the
+ * "feeds #8/#16 decision policy and compiler diagnostics". Composed from the
  * records `core` owns rather than restated, so the lists cannot drift.
+ *
+ * **Citing a Spec is not the same as being consumed by it.** #8 and #16 are listed
+ * because a change to these bands invalidates decisions they own — a lock
+ * fingerprint, a selection verdict — so the change has to answer to them. It does
+ * *not* mean #16's selection path reads these bands today; it does not, which is
+ * what issue #77 exists to fix. Reading this list as evidence that #21's
+ * "feeds #8/#16 decision policy" criterion is met would be the exact
+ * overclaim the header above warns against.
  */
 export const CELL_CODE_BUDGET_GOVERNING_DECISIONS: readonly ArchitectureDecisionSource[] = [
   ...GOVERNING_ARCHITECTURE_DECISIONS,

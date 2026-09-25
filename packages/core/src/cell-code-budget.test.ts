@@ -157,12 +157,24 @@ describe("the measured bands", () => {
       expect(Object.keys(definition)).toContain("representativeMeasurements");
       expect(Object.keys(definition)).not.toContain("measuredAtCeiling");
 
-      // Where a ceiling exists, no quoted point may claim to be exactly it: that
-      // would be the fabricated measurement the rename exists to prevent.
-      if (definition.maxCharacters !== null) {
-        const { write, browserEntry } = definition.representativeMeasurements;
-        expect(write.characters).not.toBe(definition.maxCharacters);
-        expect(browserEntry.characters).not.toBe(definition.maxCharacters);
+      // What the rename is actually for: each point describes *itself*, so a reader
+      // can locate it without the ceiling, and the two halves are independently
+      // specified rather than sharing one size. That is the property that makes a
+      // ceiling-shaped name unnecessary — and it is asserted structurally, on the
+      // points' own fields, rather than by comparing them to the ceiling.
+      //
+      // A previous draft of this test asserted `characters !== maxCharacters`, which
+      // was wrong in kind: it froze a coincidence of the *current* data as an API
+      // contract. A real measured point landing exactly on a ceiling (512 KiB, say)
+      // would be entirely legitimate — `representativeMeasurements` would still be
+      // the right name, and that assertion would have blocked recording real
+      // evidence. "Not measured at the ceiling" is a claim about provenance, and
+      // provenance is what the traceability test above checks: every point must be
+      // a published point of its series. Equality with a ceiling is not a defect.
+      const { write, browserEntry } = definition.representativeMeasurements;
+      for (const point of [write, browserEntry]) {
+        expect(point.characters).toBeGreaterThan(0);
+        expect(point.artifact.length).toBeGreaterThan(20);
       }
     }
 
@@ -395,6 +407,30 @@ describe("provenance", () => {
 
   it("keeps a stable band order for a report table", () => {
     expect(cellCodeBudgetBands()).toBe(CELL_CODE_BUDGET_BAND_DEFINITIONS);
+  });
+
+  it("records that the selection path does not consume these bands yet", () => {
+    // #21's acceptance asks the result to feed "#8/#16 decision policy and compiler
+    // diagnostics". Citing #8 and #16 in the governing decisions is provenance, not
+    // consumption: a change to these bands invalidates decisions those Specs own, so
+    // it has to answer to them. The compiler half is genuinely wired; the selection
+    // half is not, and the module must not read as though both were.
+    //
+    // Asserted by reading the source, because the claim is *documentary* — there is
+    // no runtime value that could distinguish "cites #16" from "is consumed by #16",
+    // which is exactly how the overclaim survived several review rounds. The check is
+    // that the module states the limit and names the follow-up.
+    const source = readFileSync(join(here, "cell-code-budget.ts"), "utf8");
+    expect(source).toMatch(/selection-policy\*\* half is\s+\* not/);
+    expect(source).toMatch(/Citing a Spec is not the same as being consumed/);
+    expect(source).toContain("#77");
+
+    // And the negative direction, so the note cannot be softened into vagueness: the
+    // module must not claim the selection path reads the bands. Both spellings of the
+    // verb, because the overclaim this replaced read "feeding #8's decision policy and
+    // #16's selection procedure" — and a `feeds`-only pattern misses `feeding`, which
+    // is how this assertion first passed against the very text it exists to reject.
+    expect(source).not.toMatch(/feed(s|ing)? #8's decision policy/);
   });
 
   it("refuses an unknown band id rather than returning undefined", () => {
