@@ -1002,7 +1002,10 @@ function inspectLockRecord(record: unknown, where: string): readonly string[] {
       // reader is told to serialize, instead of the document being quietly reordered under a
       // reviewer. `canonicalizeImports` is the one definition both this and the serializer use,
       // so the accepted spelling cannot drift from the produced one.
-      const canonical = canonicalizeImports(record.imports);
+      // `?? []` cannot fire here — the branch above already returned for an empty array — but the
+      // helper is total by design, so its `null` return has to be narrowed for the caller rather
+      // than asserted away.
+      const canonical = canonicalizeImports(record.imports) ?? [];
       if (canonical.join("\u0000") !== record.imports.join("\u0000")) {
         problems.push(
           `${where} records \`imports\` as [${record.imports.join(", ")}], which is not the canonical spelling [${canonical.join(", ")}]. The surface is a set: serialize through \`serializeFgcLock\` (or record through \`recordDependencyDecision\`) so two spellings of one surface cannot be two lock bytes.`,

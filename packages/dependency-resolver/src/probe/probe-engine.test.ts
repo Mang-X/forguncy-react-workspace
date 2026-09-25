@@ -185,7 +185,7 @@ describe("runDependencyProbe: react library", () => {
       entry: "@fixture/date-picker",
       imports: ["DatePicker"],
     });
-    const emitted = built.output
+    const emitted = (built.output ?? [])
       .filter(item => item.type === "chunk")
       .map(item => (item as { readonly code: string }).code)
       .join("");

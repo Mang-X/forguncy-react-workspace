@@ -596,9 +596,18 @@ describe("lock metadata validation", () => {
   // binds its whole justification to probe findings, that record is a refusal nothing supports.
   // A hand-edited lock or one written by revision 12 would otherwise still validate.
   it("refuses a technical rejection whose code no probe step can observe", () => {
-    const unobservable = {
+    // The rejection is stated in full rather than spread from the fixture: `technicalRejection`
+    // is typed as `LockedDependencyDecision`, so its `rejection` is the *union* and spreading it
+    // widens `kind` back to architectural-or-technical. Writing the shape out keeps the fixture
+    // honest and the type narrow.
+    const unobservable: LockedDependencyDecision = {
       ...technicalRejection,
-      rejection: { ...technicalRejection.rejection, code: "cell-code-budget-exceeded" as const },
+      rejection: {
+        kind: "technical",
+        code: "cell-code-budget-exceeded",
+        summary: "The candidate's artifact is over the cell code cap.",
+        remediation: "Evaluate a lighter alternative.",
+      },
     };
 
     expect(problemsFor(unobservable)).toMatch(/no probe step can observe/);
