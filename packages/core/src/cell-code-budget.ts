@@ -18,14 +18,22 @@
  *   (`packages/dependency-resolver/src/probe/size.ts`) classifies the artifact
  *   through `classifyCellCodeSize` too, records the band and its provenance as the
  *   probe facts `size.band`, `size.band.decision` and `size.band.basis`, and compares
- *   the project's own cap (`cellArtifactBudgetCharacters`) in **characters** — the same
- *   quantity the compiler caps. The config field is `codeBudgetCharacters`.
+ *   the project's own cap (`cellArtifactBudgetCharacters`) in **characters**. The
+ *   config field is `codeBudgetCharacters`.
  *
  * Issue #77 did that wiring. Before it the probe compared UTF-8 **bytes** against a
  * hard cap, so the two paths could disagree about one artifact — the compiler calling
  * it `inline` while the probe rejected it as over budget. The unit is the whole reason
  * it could not be a rename: 100,095 characters of CJK source is 300,095 bytes, so a
  * byte comparison misclassifies a Chinese-language Cell by roughly a band.
+ *
+ * The two paths now share the **unit**, not the document. The compiler caps the
+ * composed Cell source (banner + the Cell's bundled entry + entry wrapper); the probe
+ * measures the candidate package's own bundle. Those counts differ by construction —
+ * see `size.ts`'s "Whose characters these are" — so a probe pass is evidence about the
+ * package, not a prediction that the compile will fit. What the shared unit buys is
+ * that a CJK artifact is classified and compared the same way on both paths; what it
+ * does not buy is one number describing both artifacts.
  *
  * The bands are still **advisory** on both paths. What a rejection turns on is a
  * project's configured cap, never a band: #21 measured cost, it did not decide policy,
@@ -426,6 +434,41 @@ export function classifyCellCodeSize(characters: number): CellCodeBudgetVerdict 
     definition,
     withinInlineBand: definition.band === "inline",
   };
+}
+
+/**
+ * Refuses a cell code budget that is not a non-negative finite number of characters.
+ *
+ * The **one** guard for a programmatic cap, shared by the two callers that compare a
+ * number rather than parse a document: `cell-compiler`'s `auditCodeBudget` and the
+ * probe's `size` step. It is a function rather than a rule each caller restates
+ * because an unvalidated budget fails in the most confusing direction available:
+ * `code.length <= Number.NaN` is `false`, so a NaN budget rejects *every* artifact
+ * with "against a configured budget of NaN" — which reads like a size problem and is
+ * a caller's typo. The same guard `classifyCellCodeSize` applies to the size, applied
+ * to the ceiling it is compared against; the two are deliberately symmetric.
+ *
+ * ## Why this is not the config's rule
+ *
+ * `cell-registry.ts` validates the same quantity *stricter* — a positive **whole**
+ * number — because it is reading a committed document an author typed, where `0`,
+ * `1.5` and `NaN` are all mistakes worth naming. A programmatic cap is different:
+ * zero is legitimate (a caller may want every non-empty artifact reported), and the
+ * compiler's tests pin that. So the shared contract is the weaker one the two
+ * numeric callers agree on, and the config layers its own diagnostic on top. The
+ * two cannot disagree about what a cap *means*, only about which values a document
+ * may carry.
+ *
+ * Throws rather than returning a diagnostic: the compiler and the probe both treat a
+ * malformed cap as a caller error rather than a finding about the artifact, and a
+ * caller that could ignore a return value is a caller that will.
+ */
+export function assertCellCodeBudget(budget: number): void {
+  if (!Number.isFinite(budget) || budget < 0) {
+    throw new Error(
+      `A cell code budget must be a non-negative finite number of characters, received ${String(budget)}.`,
+    );
+  }
 }
 
 /** The band definitions in order, lowest first — the shape a report table wants. */

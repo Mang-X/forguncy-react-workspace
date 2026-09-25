@@ -616,6 +616,7 @@ export {
   CELL_CODE_INLINE_CEILING_CHARACTERS,
   CELL_CODE_PROJECT_VOLUME_OBSERVATION,
   CELL_CODE_REVIEW_CEILING_CHARACTERS,
+  assertCellCodeBudget,
   cellCodeBudgetBands,
   classifyCellCodeSize,
   findCellCodeBudgetBand,

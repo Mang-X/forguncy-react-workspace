@@ -67,6 +67,7 @@ import type {
 } from "@forguncy-react-workspace/core";
 import {
   assessProbeReport,
+  assertCellCodeBudget,
   assertProbeReport,
   canonicalizeProbeReport,
   lockProbeStatusForAssessment,
@@ -317,6 +318,14 @@ export async function runDependencyProbe(options: RunDependencyProbeOptions): Pr
   const probeId = options.probeId ?? "inline-bundle";
   const entry = options.entry ?? options.packageName;
   const budgetCharacters = options.cellArtifactBudgetCharacters ?? null;
+  // Validated before the fingerprint is composed, not only before the comparison. A
+  // non-finite cap would compose a `null` config segment, so `NaN`, `Infinity` and
+  // `-Infinity` would share one fingerprint while producing different rejections — and
+  // a cache keyed by that fingerprint would then answer a run it does not describe. The
+  // guard is `core`'s, the same one `observeSize` and the compiler apply.
+  if (budgetCharacters !== null) {
+    assertCellCodeBudget(budgetCharacters);
+  }
   const target = options.target === undefined ? defaultProbeTarget() : options.target;
   const toolchain = options.toolchain ?? (await readToolchainIdentity(options.projectRoot));
 

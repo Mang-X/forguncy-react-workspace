@@ -62,6 +62,7 @@
 | `--runtime-smoke <module>` | 执行该本地模块作为 `runtime-smoke` hook；`validatedAgainstRuntime` 需要它 |
 | `--runtime-smoke-export <name>` | 指定 hook 的导出名（默认 `default`） |
 | `--extension-catalog <file>` | 用真实清单/已验证目录校验 `extension` 的 `libraryId`（两种输入 shape 不同，见 `references/decision-recording.md`） |
+| `--cell <id>` | 把这次运行限定到配置里声明的某个 Cell，并按该 Cell `output` 里声明的 `codeBudgetCharacters` 测量 |
 
 未知选项、以及需要值的选项缺值，都会直接 usage error——不会静默退回默认值。对验证型 CLI 这很关键：拼错 `--extension-catalog` 与漏写它落在同一个地方（使用默认目录），只报错才能让二者可分辨。
 

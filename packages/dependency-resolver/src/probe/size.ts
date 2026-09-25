@@ -26,9 +26,8 @@
  *   compares them to a budget any more.
  * - **Characters** — `size.codeCharacters`. The character count of the emitted
  *   **code**, which is the quantity #21 measured, the quantity the product reports
- *   (`getCellCodeContext().length`), the quantity `cell-code-budget.ts`'s bands are
- *   expressed in, and the quantity `compileCell`'s `codeBudgetCharacters` caps. This
- *   is what the band classifies and what the cap is compared against.
+ *   (`getCellCodeContext().length`), and the quantity `cell-code-budget.ts`'s bands are
+ *   expressed in. This is what the band classifies and what the cap is compared against.
  *
  * The split is the whole point of #77 and not a cosmetic rename. Before it, this step
  * compared `size.totalBytes` against a byte budget while the compiler compared
@@ -39,6 +38,32 @@
  * reason the compiler's budget excludes them — a band is a statement about generated
  * *source*, and an asset is neither source nor text (a `Uint8Array` has no character
  * count). Their weight is not lost: it stays in the byte facts.
+ *
+ * ## Whose characters these are: the candidate, not the composed Cell
+ *
+ * This is the one place the probe and the compiler measure **different documents**, and
+ * saying so is load-bearing rather than pedantic:
+ *
+ * - **Here** — the character count of the *candidate artifact*: the probed package
+ *   bundled through the compiler's bundler configuration with the probe's synthetic
+ *   entry (`build.ts`). It contains the package and nothing else.
+ * - **The compiler's cap** — applied by `auditCodeBudget` to the *composed Cell source*:
+ *   `CELL_ARTIFACT_BANNER + "\n" + module.code + "\n" + entryWrapper + "\n"`, where
+ *   `module.code` is the **Cell's own** entry bundled, not the probe's synthetic one.
+ *
+ * So the two numbers are not equal, and neither bounds the other in general: the
+ * composed artifact adds a fixed banner, an entry wrapper and separators (measured at
+ * 219 characters for the default entry shape), while the bundles themselves differ
+ * because the entry differs. A candidate that fits a cap can still exceed it once
+ * composed, and the compiler's check — not this one — is what decides that.
+ *
+ * What this step therefore reports is evidence about the **package**: which #21 band its
+ * own bundled weight lands in, and whether that weight alone is already over the
+ * project's cap. A cap rejection here is sound (the package by itself is over, so the
+ * composed artifact certainly is), but a pass is **not** a prediction that the compile
+ * will fit. `budget-cross-path.test.ts` in `cell-compiler` asserts the composition
+ * overhead and the distinction, so this cannot silently collapse back into a claim that
+ * the two counts are one quantity.
  *
  * ## Band versus cap
  *
@@ -57,6 +82,16 @@
  *   rejection naming a threshold nobody set would be a claim about a rule that does
  *   not exist.
  *
+ * A cap that is not `null` is validated by `core`'s `assertCellCodeBudget` before
+ * anything compares or fingerprints it — the same guard the compiler applies to its
+ * own. An unvalidated one is worse here than in the compiler: `NaN` silently never
+ * rejects, `Infinity` never does either, and `JSON.stringify` canonicalizes every
+ * non-finite number to `null` in the fingerprint — so `NaN`, `Infinity` and
+ * `-Infinity` compose **one** fingerprint while `-Infinity` is the only one of the
+ * three that rejects. Two runs under one declared input would then disagree about the
+ * same artifact, which is the determinism #8 requires and the reason this is a throw
+ * rather than a finding about the artifact.
+ *
  * When a cap *is* given and the character count is over it, the step itself still
  * **passes**: it succeeded at measuring, and the rejection finding carries the
  * disqualification. This is the report's central separation — a failed step says "we
@@ -67,7 +102,7 @@
  */
 
 import type { ProbeFact, ProbeRejectionFinding, ProbeRisk, ProbeValidationEntry } from "@forguncy-react-workspace/core";
-import { CELL_CODE_BUDGET_DECISION, classifyCellCodeSize } from "@forguncy-react-workspace/core";
+import { CELL_CODE_BUDGET_DECISION, assertCellCodeBudget, classifyCellCodeSize } from "@forguncy-react-workspace/core";
 import type { OutputAsset, OutputChunk } from "rolldown";
 
 function byteSizeOf(value: string | Uint8Array): number {
@@ -126,12 +161,21 @@ export interface SizeObservation {
  * Observes size, classifies its band, and compares an optional cap.
  *
  * @param budgetCharacters - The project's cell code budget in **characters**, or
- *   `null` when none applies. Not bytes: see the module header.
+ *   `null` when none applies. Not bytes: see the module header. A non-null value is
+ *   validated here, before it is compared or folded into a fingerprint.
  */
 export function observeSize(
   output: readonly (OutputChunk | OutputAsset)[] | undefined,
   budgetCharacters: number | null,
 ): SizeObservation {
+  // Validated at this boundary rather than by the caller, because both the comparison
+  // below and the fingerprint the caller composed are derived from the same number: a
+  // cap that could reach one and not the other is the disagreement the guard exists to
+  // prevent. See the module header for the non-finite case that motivated it.
+  if (budgetCharacters !== null) {
+    assertCellCodeBudget(budgetCharacters);
+  }
+
   if (output === undefined) {
     return {
       facts: [],

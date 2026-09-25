@@ -33,6 +33,7 @@
 
 import {
   CELL_USER_SCOPE_BINDINGS,
+  assertCellCodeBudget,
   classifyCellCodeSize,
   validateDependencyDecisionShape,
 } from "@forguncy-react-workspace/core";
@@ -807,17 +808,12 @@ function artifactOriginOf(bundledCode: string): (index: number) => string {
 function auditCodeBudget(code: string, budget: number | undefined): readonly CellArtifactDiagnostic[] {
   if (budget === undefined) return [];
 
-  // The budget is validated, not trusted. An unvalidated one fails in the most
-  // confusing direction available: `code.length <= Number.NaN` is `false`, so a
-  // NaN budget rejects *every* artifact with "against a configured budget of NaN",
-  // which reads like a size problem and is a caller's typo. Refusing it here puts
-  // the report on the field that is actually wrong. `classifyCellCodeSize` guards
-  // the size for the same reason; the two guards are deliberately symmetric.
-  if (!Number.isFinite(budget) || budget < 0) {
-    throw new Error(
-      `A cell code budget must be a non-negative finite number of characters, received ${String(budget)}.`,
-    );
-  }
+  // The budget is validated, not trusted, and the guard is `core`'s rather than a
+  // second copy here: the probe's `size` step compares a cap too, so one contract
+  // for "what may a programmatic cap be" is what keeps the two from disagreeing
+  // about a value the caller supplied once. See `assertCellCodeBudget` for why an
+  // unvalidated one fails in the most confusing direction available.
+  assertCellCodeBudget(budget);
 
   if (code.length <= budget) return [];
 

@@ -30,12 +30,20 @@
       "rationale": "A bundled copy would give every Cell its own QueryClient and query cache, so the shared page global published by the verified tanstack-query extension is required for cross-Cell module identity.",
       "evidence": [
         {
+          "kind": "probe",
+          "reference": "fgc-evidence/47198a7a4ab60d414b96841669d943b6bbde10cd96ace3925c3bf5cb2679f22f.json"
+        },
+        {
           "kind": "runtime-observation",
           "reference": "https://github.com/MangMax/forguncy-react-library/blob/main/packages/tanstack-query/report.md"
         },
         {
           "kind": "spec-issue",
           "reference": "https://github.com/Mang-X/forguncy-react-workspace/issues/13"
+        },
+        {
+          "kind": "spec-issue",
+          "reference": "https://github.com/Mang-X/forguncy-react-workspace/issues/16"
         }
       ]
     }

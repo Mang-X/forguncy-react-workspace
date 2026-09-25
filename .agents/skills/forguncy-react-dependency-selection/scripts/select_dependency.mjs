@@ -90,6 +90,21 @@
  * change does not alter what a report means, so it must not alter its address; tampering still
  * shows because the content is parsed and re-serialized before comparison.
  *
+ * ## Where the cell code cap comes from, and why it is not a flag
+ *
+ * #77 wired the project's `codeBudgetCharacters` into the probe, but a cap the *caller*
+ * passes as a number is not the cap the compile will apply — the compiler reads it from
+ * `cells.<id>.output.codeBudgetCharacters` in the project config. So `--cell <id>` names a
+ * Cell and this script reads that Cell's declared cap out of its registry; it never accepts
+ * the number itself. Two consequences fall out of that and are deliberate:
+ *
+ * - A record scoped to a Cell carries that Cell's cap in its fingerprint, so moving or
+ *   removing the declaration reports `probe-fingerprint-changed` rather than leaving a
+ *   record that was measured against a ceiling nobody has any more.
+ * - A run with no `--cell` has no cap. That is not an omission: an un-scoped decision
+ *   applies to every Cell, and no single Cell's ceiling is the right one for it. The band
+ *   is still measured and recorded; nothing rejects on it.
+ *
  * `--json` on any command prints machine-readable output (the default for `policy`,
  * `probe` and `status`).
  */
@@ -132,7 +147,7 @@ const BOOLEAN_OPTIONS = new Set(["json", "no-cache"]);
  * is the one that bites — a caller who meant to verify against a real listing but dropped
  * the filename would get the shipped catalog instead and be told nothing.
  */
-const VALUE_OPTIONS = new Set(["project", "decision", "runtime-smoke", "runtime-smoke-export", "extension-catalog"]);
+const VALUE_OPTIONS = new Set(["project", "decision", "runtime-smoke", "runtime-smoke-export", "extension-catalog", "cell"]);
 
 /**
  * Parses `argv`, refusing anything it does not recognise.
@@ -612,9 +627,74 @@ function inspectEvidenceReference(projectRoot, reference) {
  * So this returns the report and the path it *would* be cited at, and
  * {@link commitEvidence} is called only once a decision has been accepted.
  */
+/**
+ * The cell code cap a named Cell declares, read from the project's own config.
+ *
+ * The cap is a property of the (project, Cell) pair —
+ * `cells.<id>.output.codeBudgetCharacters` — and not a number a caller types. That is
+ * deliberate, and it is the whole reason this reads a registry instead of taking a
+ * `--budget`: the compiler takes its cap from the *same* declaration, so a flag
+ * carrying a loose number would let the probe and the compile disagree about the
+ * ceiling, which is precisely the drift #77 exists to remove. `--cell` names the Cell;
+ * the number comes from the config, or the run has no cap.
+ *
+ * `requireEntryFiles: false` because probing a package does not compile the Cell. A
+ * project that has declared its Cell and its budget but has not written the entry yet
+ * is a real state — it is arguably the state a candidate is being chosen *for* — and
+ * refusing to probe there would withhold the cap exactly when it is being consulted.
+ * The registry still validates the declared cap with the config's own rule (a positive
+ * whole number), which is the contract an authored document is held to; this adds no
+ * second rule.
+ *
+ * Returns a problem instead of throwing so the two callers can treat an unresolvable
+ * Cell differently: `probe`/`audit`/`record` refuse the run, while `status` reports the
+ * record as stale rather than dying part-way through the lock.
+ */
+async function resolveCellBudget(projectRoot, cellId) {
+  try {
+    const registry = await core.loadForguncyConfig({ root: projectRoot, requireEntryFiles: false });
+    const cell = registry.require(cellId);
+    return { ok: true, codeBudgetCharacters: cell.output?.codeBudgetCharacters ?? null };
+  } catch (error) {
+    return { ok: false, problem: error.message };
+  }
+}
+
+/**
+ * The Cell identity a decision is scoped to, from `--cell` and the decision file.
+ *
+ * One identity, not two: the cap that was measured belongs to the Cell the record is
+ * scoped to, so a `--cell` and a `cellTarget` naming different Cells describe two
+ * different decisions and are refused rather than merged. A record measured against
+ * one Cell's cap while claiming to apply to every Cell would be the un-scoped claim
+ * this whole axis exists to prevent.
+ */
+function cellTargetFor(entry, options) {
+  const declared = entry.document.cellTarget ?? null;
+  const requested = options.cell ?? null;
+
+  if (declared !== null && requested !== null && declared !== requested) {
+    fail(
+      `The decision file for "${entry.decision.packageName}" is scoped to Cell "${declared}", but --cell names "${requested}". A record has one Cell identity, and the cap that was measured belongs to it.`,
+    );
+  }
+  return requested ?? declared;
+}
+
 async function runProbe(options, packageName) {
   const projectRoot = fromWorkingDirectory(options.project ?? ".");
   const runtimeSmoke = await loadRuntimeSmokeHook(options);
+
+  // The cap the project declared for the named Cell, or none. Resolved before the probe
+  // rather than passed through, because the value participates in both the comparison and
+  // the fingerprint — see `resolveCellBudget` for why it is read from the config.
+  const cellTarget = options.cell ?? null;
+  const resolved = cellTarget === null ? { ok: true, codeBudgetCharacters: null } : await resolveCellBudget(projectRoot, cellTarget);
+  if (!resolved.ok) {
+    fail(
+      `Cannot resolve Cell "${cellTarget}" in "${projectRoot}": ${resolved.problem} A --cell names a Cell the project's forguncy.config declares, because the cap is read from that declaration rather than from a number passed on the command line.`,
+    );
+  }
 
   let result;
   try {
@@ -623,6 +703,10 @@ async function runProbe(options, packageName) {
       packageName,
       // `false` means "do not consult a cached report", which is all `--no-cache` claims.
       cache: options.noCache === true ? false : undefined,
+      // Omitted rather than passed as null: the engine's option is optional, and a run with
+      // no declared cap must compose the same fingerprint it composed before #77 wired the
+      // cap in, or every existing no-cap record would report `probe-fingerprint-changed`.
+      ...(resolved.codeBudgetCharacters === null ? {} : { cellArtifactBudgetCharacters: resolved.codeBudgetCharacters }),
       // Passing the hook is what makes the `runtime-smoke` step run at all; without
       // it the step is `skipped` with a reason, which is the honest local-only record.
       ...(runtimeSmoke === undefined ? {} : { runtimeSmoke }),
@@ -1089,7 +1173,7 @@ function auditPayload(entry, probe, problems) {
  * claim its outcome — named rather than thrown so the caller reports it in its own
  * command's shape.
  */
-async function updateFor(entry, probe, probeResult) {
+async function updateFor(entry, probe, probeResult, cellTarget) {
   const lockEvidence = probeResult === null
     ? { status: core.ARCHITECTURAL_REJECTION_PROBE_STATUS, fingerprint: null, versionIndependent: false }
     : resolver.probeRunLockEvidence(probeResult);
@@ -1133,7 +1217,11 @@ async function updateFor(entry, probe, probeResult) {
   return {
     decision: entry.decision,
     probe: lockEvidence,
-    cellTarget: entry.document.cellTarget ?? null,
+    // The one Cell identity this record is scoped to, resolved by `cellTargetFor` from
+    // `--cell` and the decision file together — so the cap that was measured and the
+    // record's scope cannot name different Cells. Null means "applies to every Cell",
+    // which is also the only state in which no cap applies.
+    cellTarget,
     // Rule 4 of #8: a `replace` record keeps no dependency for the compiled cell, so
     // recording a resolved version there would imply the package is still installed for
     // it. The version that was rejected goes in `rejectedCandidate` instead — see below.
@@ -1162,7 +1250,8 @@ async function updateFor(entry, probe, probeResult) {
 
 /** The lock a decision file would produce, for a caller that wants to check it first. */
 async function candidateLockFor(entry, probe, probeResult, options) {
-  const update = await updateFor(entry, probe, probeResult);
+  const cellTarget = cellTargetFor(entry, options);
+  const update = await updateFor(entry, probe, probeResult, cellTarget);
   if (update === null) {
     return null;
   }
@@ -1170,7 +1259,7 @@ async function candidateLockFor(entry, probe, probeResult, options) {
   const lock = await resolver.readFgcLock(projectRoot);
   const existing = resolver.findExactLockDecision(lock, {
     packageName: entry.decision.packageName,
-    cellTarget: entry.document.cellTarget ?? null,
+    cellTarget,
   });
   return { projectRoot, lock, existing, update, candidate: resolver.upsertLockDecision(lock, resolver.mergeDependencyDecisionUpdate(existing, update)) };
 }
@@ -1310,9 +1399,13 @@ async function commandRecord(options) {
   // Read the written lock back rather than reporting the in-memory candidate, so what is
   // reported is what a later reader will load.
   const written = await resolver.readFgcLock(projectRoot);
+  // The same Cell identity `candidateLockFor` wrote with, not the document's raw field:
+  // `--cell` is a legitimate way to scope a record whose decision file omits `cellTarget`,
+  // and reading back with the raw field would look for the un-scoped record, find nothing,
+  // and report `null` for a record that was in fact written.
   const record = resolver.findExactLockDecision(written, {
     packageName: entry.decision.packageName,
-    cellTarget: entry.document.cellTarget ?? null,
+    cellTarget: cellTargetFor(entry, options),
   });
   const environment = await resolver.probeLockEnvironment(projectRoot, {
     lock: written,
@@ -1356,11 +1449,23 @@ async function commandStatus(options) {
     if (record.probe.status === "not-run" || record.probe.fingerprint === null) {
       continue;
     }
+    // Rebuilt with the cap the *record's own Cell* declares, because the cap is one of the
+    // fingerprint's declared inputs: rebuilding without it would compare a capped record
+    // against an uncapped fingerprint and report `probe-fingerprint-changed` for a record
+    // nobody touched. A Cell that no longer resolves, or one whose declared cap was
+    // removed, leaves the package out of the map — `probe-fingerprint-unknown` is the
+    // honest answer, and it is stale rather than silently fresh, which is the direction a
+    // wrong rebuild must never take.
+    const budget = record.cellTarget === null ? { ok: true, codeBudgetCharacters: null } : await resolveCellBudget(projectRoot, record.cellTarget);
+    if (!budget.ok) {
+      continue;
+    }
     try {
       const rebuilt = await resolver.runDependencyProbe({
         projectRoot,
         packageName: record.packageName,
         cache: undefined,
+        ...(budget.codeBudgetCharacters === null ? {} : { cellArtifactBudgetCharacters: budget.codeBudgetCharacters }),
       });
       fingerprints[record.packageName] = rebuilt.fingerprint;
     } catch {
@@ -1472,6 +1577,16 @@ Options:
                     \`exists\`/\`typeDefinitionAvailable\`). A listing is checked against
                     the declared rows via #12's metadata audit; its display \`name\` is
                     never read as an npm package.
+  --cell <id>       Scope the run to one declared Cell, and measure against the
+                    \`codeBudgetCharacters\` that Cell's \`output\` declares. The cap is
+                    read from forguncy.config rather than passed as a number, because
+                    the compiler takes its cap from the same declaration — a flag
+                    carrying a loose number could let the probe and the compile
+                    disagree about the ceiling (#77). The cap is one of the
+                    fingerprint's declared inputs, so a record measured with one
+                    reports \`probe-fingerprint-changed\` if it later moves or is
+                    removed. Without \`--cell\` no cap applies: the band is still
+                    recorded, and nothing rejects on it.
   --json            Machine-readable output (default for policy, probe and status).
 
 audit and record run the same checks, covering everything record refuses for a reason it can
