@@ -608,6 +608,26 @@ export type {
 } from "./forguncy-config.ts";
 
 export {
+  CELL_CODE_BUDGET_BAND_DEFINITIONS,
+  CELL_CODE_BUDGET_BANDS,
+  CELL_CODE_BUDGET_DECISION,
+  CELL_CODE_BUDGET_GOVERNING_DECISIONS,
+  CELL_CODE_BUDGET_MEASUREMENT,
+  CELL_CODE_INLINE_CEILING_CHARACTERS,
+  CELL_CODE_PROJECT_VOLUME_OBSERVATION,
+  CELL_CODE_REVIEW_CEILING_CHARACTERS,
+  cellCodeBudgetBands,
+  classifyCellCodeSize,
+  findCellCodeBudgetBand,
+} from "./cell-code-budget.ts";
+export type {
+  CellCodeBudgetBand,
+  CellCodeBudgetBandDefinition,
+  CellCodeBudgetVerdict,
+  CellCodeMeasurementPoint,
+} from "./cell-code-budget.ts";
+
+export {
   assertDistinctTargetClaims,
   assertUniqueTargets,
   CELL_ID_PATTERN,

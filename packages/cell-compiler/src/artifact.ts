@@ -31,7 +31,11 @@
  * `guarantees.ts` for which promises that leaves outstanding.
  */
 
-import { CELL_USER_SCOPE_BINDINGS, validateDependencyDecisionShape } from "@forguncy-react-workspace/core";
+import {
+  CELL_USER_SCOPE_BINDINGS,
+  classifyCellCodeSize,
+  validateDependencyDecisionShape,
+} from "@forguncy-react-workspace/core";
 import type {
   CellEntryKind,
   CellUserScopeBinding,
@@ -777,11 +781,90 @@ function artifactOriginOf(bundledCode: string): (index: number) => string {
   };
 }
 
+/**
+ * Checks a composed artifact against the caller's budget, saying *which measured
+ * band* the size falls in.
+ *
+ * Decision source: GitHub Issue #21 —
+ * "Research: measure ReactCellType generated-code budget and performance envelope"
+ * (https://github.com/Mang-X/forguncy-react-workspace/issues/21). Before #21 this
+ * function reported only "over budget", which is the one thing a caller can act on
+ * and the least useful thing it could say: a 600 KiB artifact and a 4 MiB one are
+ * both "over" a 512 KiB budget and are not remotely the same decision.
+ *
+ * The band comes from `core`'s measured record rather than from a second table
+ * here. `core` owns the measurement (#21) and `cell-compiler` takes it as
+ * configuration — the same division the package's other Specs use, and the reason
+ * the measurement is not restated: two copies would drift, and the drift would be
+ * invisible because both would look plausible.
+ *
+ * The code stays `cell-code-budget-exceeded`, because that is #6's public
+ * vocabulary and a downstream consumer branches on it. What changed is that the
+ * detail now names the band and the measured cost, so a caller that sees this
+ * diagnostic can tell "worth a look" from "get an extension" without re-deriving
+ * the thresholds.
+ */
 function auditCodeBudget(code: string, budget: number | undefined): readonly CellArtifactDiagnostic[] {
-  if (budget === undefined || code.length <= budget) return [];
+  if (budget === undefined) return [];
+
+  // The budget is validated, not trusted. An unvalidated one fails in the most
+  // confusing direction available: `code.length <= Number.NaN` is `false`, so a
+  // NaN budget rejects *every* artifact with "against a configured budget of NaN",
+  // which reads like a size problem and is a caller's typo. Refusing it here puts
+  // the report on the field that is actually wrong. `classifyCellCodeSize` guards
+  // the size for the same reason; the two guards are deliberately symmetric.
+  if (!Number.isFinite(budget) || budget < 0) {
+    throw new Error(
+      `A cell code budget must be a non-negative finite number of characters, received ${String(budget)}.`,
+    );
+  }
+
+  if (code.length <= budget) return [];
+
+  const verdict = classifyCellCodeSize(code.length);
+  const { write, browserEntry } = verdict.definition.representativeMeasurements;
+
+  // Two different situations produce this diagnostic and they need different
+  // advice, which is why the guidance is chosen rather than copied from the band:
+  //
+  // - The artifact is large by measurement (`review` or above). The band's own
+  //   guidance is the right advice.
+  // - The artifact is inside the measured ordinary range and the *budget* is what
+  //   is tight. Printing the inline band's "no review needed" next to a hard
+  //   rejection would have the diagnostic contradict itself, and would send the
+  //   caller looking for a problem in an artifact the measurement says is fine.
+  //
+  // The second case is the one where the two concepts must not be conflated, so it
+  // says what is actually true of this rejection: the budget is a hard cap, and the
+  // band is an advisory classification that a raised cap does not start reporting.
+  //
+  // The claim is scoped to *this* check, and that scoping is load-bearing. This
+  // function returns one diagnostic among several that `assembleCellArtifact`
+  // collects, so an artifact can carry a budget rejection beside an unrelated one —
+  // reproduced with an unflattened inline import: a tight budget yields
+  // `[source-level-import-remains, cell-code-budget-exceeded]`, and raising the
+  // budget yields `[source-level-import-remains]` and the compile is *still*
+  // rejected. Saying a raised budget "accepts the artifact outright" would be false
+  // in exactly that case, and would send the caller away believing the build is
+  // clean. Nothing here knows whether other diagnostics exist, so the honest form is
+  // conditional: this rejection goes, anything else stands.
+  const guidance = verdict.withinInlineBand
+    ? `The artifact is inside the measured ordinary range (${verdict.band}, ceiling ` +
+      `${String(verdict.definition.maxCharacters)} characters), so this rejection is the configured budget's ` +
+      `rather than a cost the measurement found. Raising the budget removes this budget rejection; any other ` +
+      `artifact diagnostic still applies. Bands are an advisory classification, not a severity this diagnostic ` +
+      `re-reports once a size is allowed.`
+    : verdict.definition.guidance;
+
   return [
     createCellArtifactDiagnostic("cell-code-budget-exceeded", "Cell artifact", {
-      detail: `The composed artifact is ${code.length} characters against a configured budget of ${budget}. The measurement is taken on the composed artifact because that is what is written into the cell.`,
+      detail:
+        `The composed artifact is ${code.length} characters against a configured budget of ${budget}. ` +
+        `The measurement is taken on the composed artifact because that is what is written into the cell. ` +
+        `Measured band: ${verdict.band} (#21). At this band's own measured points the designer write took ` +
+        `${String(write.ms)} ms at ${String(write.characters)} characters (${write.artifact}) and the ` +
+        `browser's first cell entry took ${String(browserEntry.ms)} ms at ` +
+        `${String(browserEntry.characters)} characters (${browserEntry.artifact}). ${guidance}`,
     }),
   ];
 }

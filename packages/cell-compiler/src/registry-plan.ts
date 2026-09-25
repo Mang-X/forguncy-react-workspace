@@ -14,10 +14,19 @@
  *
  * - **No compilation here.** The plan carries a `CompileCellInput`; calling
  *   `compileCell` is the caller's step, with its bundler and budget options.
- * - **No budget conversion.** `RegisteredCell.output.codeBudgetBytes` is copied
- *   through untouched. #21 owns the code budget and its units; converting bytes
- *   to the compiler's character budget here would be a second, unofficial answer
- *   to a question that Issue has not settled.
+ * - **Still no budget conversion, but the unit is no longer open.** #21 settled it:
+ *   the product prices **characters**, and `core`'s `cell-code-budget.ts` now carries
+ *   the measured bands in that unit. `RegisteredCell.output.codeBudgetBytes` is still
+ *   copied through untouched, because converting it here would mean this adapter
+ *   silently reinterpreting a field the config declares in bytes — a different
+ *   question from the one #21 answered, and one this module still has no business
+ *   answering. The mismatch is real and recorded rather than papered over:
+ *   `codeBudgetBytes` is bytes, `compileCell`'s budget is characters, and
+ *   `dependency-resolver`'s `size` probe compares bytes. Reconciling the config
+ *   field and the probe with the settled character unit is follow-up work owned by
+ *   issue #77, not a conversion to be invented in this seam. (An earlier version of
+ *   this note named #8/#17 as the owner; both are closed and neither carries the
+ *   work, so #77 was created to own it.)
  * - **No second target spelling.** The `target` in the plan is the registry's
  *   normalized coordinates — the same two fields `mcp-sync` later writes with —
  *   so compile-time reporting and the eventual `setCells` call cannot disagree.
