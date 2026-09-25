@@ -486,29 +486,66 @@ describe("registry validation", () => {
 
   it("requires evidence before granting a code-budget override", () => {
     const withoutJustification = captureConfigError(() =>
-      registryOf(oneCell({ output: { codeBudgetBytes: 600_000, justification: "   " } })),
+      registryOf(oneCell({ output: { codeBudgetCharacters: 600_000, justification: "   " } })),
     );
     expect(withoutJustification.codes).toEqual(["unjustified-output-override"]);
 
-    expect(codesOf(() => registryOf(oneCell({ output: { codeBudgetBytes: 0, justification: "measured" } })))).toEqual([
-      "invalid-output-override",
-    ]);
     expect(
-      codesOf(() => registryOf(oneCell({ output: { codeBudgetBytes: 1024.5, justification: "measured" } }))),
+      codesOf(() => registryOf(oneCell({ output: { codeBudgetCharacters: 0, justification: "measured" } }))),
+    ).toEqual(["invalid-output-override"]);
+    expect(
+      codesOf(() => registryOf(oneCell({ output: { codeBudgetCharacters: 1024.5, justification: "measured" } }))),
     ).toEqual(["invalid-output-override"]);
     expect(codesOf(() => registryOf(oneCell({ output: "600000" })))).toEqual(["invalid-output-override"]);
-    expect(codesOf(() => registryOf(oneCell({ output: { codeBudgetBytes: 1024, justification: "x", extra: 1 } })))).toEqual(
-      ["unknown-output-field"],
-    );
+    expect(
+      codesOf(() => registryOf(oneCell({ output: { codeBudgetCharacters: 1024, justification: "x", extra: 1 } }))),
+    ).toEqual(["unknown-output-field"]);
 
     const justified = registryOf(
-      oneCell({ output: { codeBudgetBytes: 600_000, justification: "Measured in #21: the canvas cell needs it." } }),
+      oneCell({ output: { codeBudgetCharacters: 600_000, justification: "Measured in #21: the canvas cell needs it." } }),
     ).require("orderList");
 
     expect(justified.output).toEqual({
-      codeBudgetBytes: 600_000,
+      codeBudgetCharacters: 600_000,
       justification: "Measured in #21: the canvas cell needs it.",
     });
+  });
+
+  it("refuses the pre-#77 byte field rather than repricing it as characters", () => {
+    // The rename is not convertible: a byte count read as a character count would
+    // silently admit an artifact roughly three times larger for CJK source. So the old
+    // name is refused with its own diagnostic, and the value is never carried forward.
+    const renamed = captureConfigError(() =>
+      registryOf(oneCell({ output: { codeBudgetBytes: 600_000, justification: "measured" } })),
+    );
+    expect(renamed.codes).toEqual(["renamed-output-field"]);
+    expect(renamed.diagnostics[0]?.path).toBe("cells.orderList.output.codeBudgetBytes");
+    expect(renamed.diagnostics[0]?.message).toContain("codeBudgetCharacters");
+    // One mistake, one diagnostic: the generic unknown-field check must not also fire.
+    expect(renamed.codes).not.toContain("unknown-output-field");
+    // Nor the "must be a positive whole number" complaint, which would send the reader
+    // hunting for a value problem when the field itself is the problem.
+    expect(renamed.codes).not.toContain("invalid-output-override");
+
+    // Declaring both is still refused, and that is deliberate rather than incidental:
+    // the retired field's presence means the config was not migrated, and accepting it
+    // because a correct sibling also exists would leave the stale byte number in the
+    // file for the next reader to trust. There is no partial credit — the field is
+    // removed or the config is rejected.
+    const both = captureConfigError(() =>
+      registryOf(
+        oneCell({
+          output: { codeBudgetBytes: 600_000, codeBudgetCharacters: 500_000, justification: "measured" },
+        }),
+      ),
+    );
+    expect(both.codes).toEqual(["renamed-output-field"]);
+    // The new field is genuinely read when it stands alone, which is what makes the
+    // rejection above a migration instruction rather than a dead end.
+    const migrated = registryOf(
+      oneCell({ output: { codeBudgetCharacters: 500_000, justification: "measured" } }),
+    ).require("orderList");
+    expect(migrated.output).toEqual({ codeBudgetCharacters: 500_000, justification: "measured" });
   });
 
   it("validates the runtime block it applies", () => {

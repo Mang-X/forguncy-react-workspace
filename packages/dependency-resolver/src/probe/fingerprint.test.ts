@@ -26,7 +26,7 @@ describe("composeProbeFingerprint", () => {
     });
 
     expect(composed.fingerprint).toBe(
-      'probe="inline-bundle";entry="es-toolkit";analysis=10;config={"format":"iife"};bundler={"format":"iife","platform":"browser"}',
+      'probe="inline-bundle";entry="es-toolkit";analysis=11;config={"format":"iife"};bundler={"format":"iife","platform":"browser"}',
     );
     expect(composed.probeConfig).toEqual({ format: "iife" });
     expect(composed.bundlerInput).toEqual({ format: "iife", platform: "browser" });
@@ -133,22 +133,22 @@ describe("composeProbeFingerprint", () => {
     expect(different.fingerprint).not.toContain(";config={};config=");
   });
 
-  it("folds a non-null budget into the probe configuration", () => {
+  it("folds a non-null cap into the probe configuration, under a unit-carrying key", () => {
     const withBudget = composeProbeFingerprint({
       probeId: "inline-bundle",
       entry: "es-toolkit",
       probeConfig: { format: "iife" },
-      budget: 4096,
+      budgetCharacters: 4096,
     });
     const withoutBudget = composeProbeFingerprint({
       probeId: "inline-bundle",
       entry: "es-toolkit",
       probeConfig: { format: "iife" },
-      budget: null,
+      budgetCharacters: null,
     });
 
-    expect(withBudget.probeConfig).toEqual({ format: "iife", budget: 4096 });
-    expect(withBudget.fingerprint).toContain('"budget":4096');
+    expect(withBudget.probeConfig).toEqual({ format: "iife", budgetCharacters: 4096 });
+    expect(withBudget.fingerprint).toContain('"budgetCharacters":4096');
     expect(withoutBudget.fingerprint).not.toContain("budget");
     expect(withoutBudget.fingerprint).toBe(
       composeProbeFingerprint({ probeId: "inline-bundle", entry: "es-toolkit", probeConfig: { format: "iife" } })
@@ -168,7 +168,7 @@ describe("composeProbeFingerprint", () => {
     const otherBudget = composeProbeFingerprint({
       probeId: "inline-bundle",
       entry: "es-toolkit",
-      budget: 1,
+      budgetCharacters: 1,
     });
 
     const fingerprints = [base, otherProbe, otherEntry, otherConfig, otherBudget].map(composed => composed.fingerprint);

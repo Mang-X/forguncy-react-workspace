@@ -155,8 +155,18 @@ export interface RunDependencyProbeOptions {
   readonly entry?: string;
   readonly probeConfig?: Readonly<Record<string, unknown>>;
   readonly bundlerInput?: Readonly<Record<string, string>>;
-  /** Cell code budget in bytes; null (default) means no budget applies to this run. Part of the fingerprint. */
-  readonly cellArtifactBudgetBytes?: number | null;
+  /**
+   * The project's cell code cap in **characters** of emitted code; `null` (default)
+   * means no cap applies to this run. Part of the fingerprint.
+   *
+   * Characters, not bytes (#77): the same quantity `compileCell`'s
+   * `codeBudgetCharacters` caps and the quantity #21's bands classify. This was
+   * `cellArtifactBudgetBytes` before #77 and the rename is deliberate — the unit
+   * decides which artifact the cap rejects, so a caller that kept the old name and
+   * passed a byte count would be refused at the type level rather than silently
+   * comparing two different quantities.
+   */
+  readonly cellArtifactBudgetCharacters?: number | null;
   /** Defaults to the verified runtime contract (#5). Null records a run with no target named. */
   readonly target?: ForguncyTargetIdentity | null;
   /** Defaults to reading `vite-plus` from the workspace manifest. */
@@ -306,7 +316,7 @@ function cacheHitAnswersThisRun(
 export async function runDependencyProbe(options: RunDependencyProbeOptions): Promise<DependencyProbeResult> {
   const probeId = options.probeId ?? "inline-bundle";
   const entry = options.entry ?? options.packageName;
-  const budget = options.cellArtifactBudgetBytes ?? null;
+  const budgetCharacters = options.cellArtifactBudgetCharacters ?? null;
   const target = options.target === undefined ? defaultProbeTarget() : options.target;
   const toolchain = options.toolchain ?? (await readToolchainIdentity(options.projectRoot));
 
@@ -319,7 +329,7 @@ export async function runDependencyProbe(options: RunDependencyProbeOptions): Pr
     entry,
     probeConfig: options.probeConfig,
     bundlerInput: options.bundlerInput,
-    budget,
+    budgetCharacters,
   });
   const fingerprint = composed.fingerprint;
   const cache = options.cache === false ? null : (options.cache ?? createFileProbeCache(options.projectRoot));
@@ -418,7 +428,7 @@ export async function runDependencyProbe(options: RunDependencyProbeOptions): Pr
   steps.addRejections(runtimePatterns.rejectionFindings);
   steps.record(runtimePatterns.validation);
 
-  const size = observeSize(build.output, budget);
+  const size = observeSize(build.output, budgetCharacters);
   steps.addFacts(size.facts);
   steps.addRisks(size.risks);
   steps.addRejections(size.rejectionFindings);

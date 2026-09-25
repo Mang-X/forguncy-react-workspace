@@ -637,6 +637,7 @@ export {
   isSecretLikeKey,
   machineSpecificPathProblem,
   OUTPUT_ALLOWED_FIELDS,
+  RETIRED_OUTPUT_BUDGET_FIELD,
   TARGET_ALLOWED_FIELDS,
 } from "./cell-registry.ts";
 export type {

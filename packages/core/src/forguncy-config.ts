@@ -115,10 +115,28 @@ export interface ForguncyTargetLocator {
  * The override is not free: Spec #26 allows output/code-budget overrides "only
  * when evidence justifies them", so the justification is part of the contract
  * rather than a comment. It is rejected when empty.
+ *
+ * ## The unit, and why this field is named for it
+ *
+ * `codeBudgetCharacters` counts **characters of generated cell source** — the
+ * same quantity `getCellCodeContext().length` reports and the same one #21's
+ * bands are expressed in. It is a hard cap: an artifact longer than it is
+ * refused by `compileCell`. The measured bands are *advisory* and are deliberately
+ * not reachable through this field (see `cell-code-budget.ts`).
+ *
+ * This field was `codeBudgetBytes` before #77. That name was not merely a
+ * misnomer — the number it held was compared against a byte count in the probe's
+ * `size` step while the compiler compared characters, so one artifact could be
+ * `inline` to the compiler and over budget to the probe. A byte value is not
+ * convertible here either: 100,095 characters of CJK source is 300,095 bytes, so
+ * reading the old number as characters would move a Chinese-language Cell by
+ * roughly a band. The old name is therefore **retired, not reinterpreted** — a
+ * config still declaring it is refused with `renamed-output-field` rather than
+ * silently repriced (see `cell-registry.ts`).
  */
 export interface CellCodeBudgetOverrides {
-  /** Ceiling this cell is allowed to reach instead of the project default. */
-  readonly codeBudgetBytes: number;
+  /** Ceiling, in characters of generated cell source, this cell may reach instead of the project default. */
+  readonly codeBudgetCharacters: number;
   /** Why the evidence supports the larger budget. */
   readonly justification: string;
 }

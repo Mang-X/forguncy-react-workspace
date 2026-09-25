@@ -664,7 +664,7 @@ describe("runDependencyProbe: broken build", () => {
 describe("runDependencyProbe: budget", () => {
   it("files cell-artifact-budget-exceeded while the size step still passes", async () => {
     const { report, assessment } = await probe("pure-esm-utility", "tiny-math", {
-      cellArtifactBudgetBytes: 4,
+      cellArtifactBudgetCharacters: 4,
     });
 
     const size = report.validation.find(entry => entry.step === "size")!;
@@ -675,12 +675,29 @@ describe("runDependencyProbe: budget", () => {
     expect(assessment.rejectionFindings.map(entry => entry.signal)).toContain("cell-artifact-budget-exceeded");
   });
 
-  it("keeps the budget out of a second run's fingerprint when it is not declared", async () => {
+  it("records the measured band end to end, so the selection path consumes #21's bands", async () => {
+    // #77's acceptance at the engine level: the band reaches the report an Agent reads,
+    // with provenance, on the ordinary no-cap run — not only when a cap is configured.
+    const { report } = await probe("pure-esm-utility", "tiny-math");
+
+    const band = report.facts.find(fact => fact.name === "size.band");
+    expect(band?.step).toBe("size");
+    expect(band?.value).toBe("inline");
+    expect(report.facts.find(fact => fact.name === "size.codeCharacters")?.value).toBeGreaterThan(0);
+    expect(report.facts.find(fact => fact.name === "size.band.decision")?.value).toContain("/issues/21");
+    // And with no cap configured, a band is evidence only.
+    expect(report.rejectionFindings).toEqual([]);
+  });
+
+  it("keeps the cap out of a second run's fingerprint when it is not declared", async () => {
     const withoutBudget = await probe("pure-esm-utility", "tiny-math");
-    const withBudget = await probe("pure-esm-utility", "tiny-math", { cellArtifactBudgetBytes: 1_000_000 });
+    const withBudget = await probe("pure-esm-utility", "tiny-math", { cellArtifactBudgetCharacters: 1_000_000 });
 
     expect(withoutBudget.fingerprint).not.toBe(withBudget.fingerprint);
-    expect(withBudget.fingerprint).toContain("budget");
+    // The unit is in the key, not only the value: the same integer meant bytes before
+    // #77, so a byte-era fingerprint must not collide with a character-era one.
+    expect(withBudget.fingerprint).toContain("budgetCharacters");
+    expect(withBudget.fingerprint).not.toContain('"budget":');
   });
 });
 

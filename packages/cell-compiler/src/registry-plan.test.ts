@@ -32,7 +32,7 @@ function projectConfig() {
       orderBoard: {
         entry: "./cells/order-board.ts",
         target: { pageName: "销售订单", cell: "A1" },
-        output: { codeBudgetBytes: 512, justification: "dashboard tile" },
+        output: { codeBudgetCharacters: 512, justification: "dashboard tile" },
       },
     },
   };
@@ -73,12 +73,12 @@ describe("planning one declared Cell for compilation", () => {
   });
 
   it("copies a declared output override through untouched, with no unit conversion", () => {
-    // #21 owns the budget and its units; converting bytes to characters here
-    // would be a second, unofficial answer to a question that Issue has not
-    // settled, so the declared value arrives exactly as written.
+    // #77 settled the unit as characters, so the declared value is already the
+    // quantity `compileCell`'s `codeBudgetCharacters` compares and needs no
+    // conversion here. This adapter's job stays "carry the override", not "reprice it".
     const plan = planCellCompile({ registry: registryOf(), cellId: "orderBoard", dependencies: DECISIONS });
 
-    expect(plan.output).toEqual({ codeBudgetBytes: 512, justification: "dashboard tile" });
+    expect(plan.output).toEqual({ codeBudgetCharacters: 512, justification: "dashboard tile" });
   });
 
   it("omits the output override when the config declares none", () => {
@@ -116,7 +116,7 @@ describe("planning every declared Cell", () => {
     expect(list?.target.locatorKey).toBe("销售订单#D4");
     expect(board?.target.locatorKey).toBe("销售订单#A1");
     expect(list?.output).toBeUndefined();
-    expect(board?.output).toEqual({ codeBudgetBytes: 512, justification: "dashboard tile" });
+    expect(board?.output).toEqual({ codeBudgetCharacters: 512, justification: "dashboard tile" });
   });
 
   it("shares the dependency list across plans rather than copying it per Cell", () => {

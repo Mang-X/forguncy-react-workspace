@@ -14,19 +14,18 @@
  *
  * - **No compilation here.** The plan carries a `CompileCellInput`; calling
  *   `compileCell` is the caller's step, with its bundler and budget options.
- * - **Still no budget conversion, but the unit is no longer open.** #21 settled it:
- *   the product prices **characters**, and `core`'s `cell-code-budget.ts` now carries
- *   the measured bands in that unit. `RegisteredCell.output.codeBudgetBytes` is still
- *   copied through untouched, because converting it here would mean this adapter
- *   silently reinterpreting a field the config declares in bytes — a different
- *   question from the one #21 answered, and one this module still has no business
- *   answering. The mismatch is real and recorded rather than papered over:
- *   `codeBudgetBytes` is bytes, `compileCell`'s budget is characters, and
- *   `dependency-resolver`'s `size` probe compares bytes. Reconciling the config
- *   field and the probe with the settled character unit is follow-up work owned by
- *   issue #77, not a conversion to be invented in this seam. (An earlier version of
- *   this note named #8/#17 as the owner; both are closed and neither carries the
- *   work, so #77 was created to own it.)
+ * - **Still no budget conversion, but the unit is no longer open.** #21 settled it and
+ *   #77 wired it through: the product prices **characters**, `core`'s
+ *   `cell-code-budget.ts` carries the measured bands in that unit, and the config field
+ *   is `codeBudgetCharacters` — the same unit `compileCell`'s `codeBudgetCharacters`
+ *   takes and the same one `dependency-resolver`'s `size` probe now measures. So the
+ *   value copied through here needs no conversion and gets none: it is already the
+ *   quantity the compiler compares, and this adapter's job stays "carry the declared
+ *   override to the compile", not "reprice it".
+ *
+ *   The seam still deliberately does not *default* the budget or derive one from the
+ *   measured bands. A band is advisory evidence (#21 measured cost, it did not decide
+ *   policy), so inventing a cap here would turn a recommendation into a refusal.
  * - **No second target spelling.** The `target` in the plan is the registry's
  *   normalized coordinates — the same two fields `mcp-sync` later writes with —
  *   so compile-time reporting and the eventual `setCells` call cannot disagree.
@@ -63,7 +62,7 @@ export interface CellCompilePlan {
    * The declared output overrides, verbatim.
    *
    * Absent when the config declares none, and never defaulted or unit-converted
-   * here: #21 owns the budget semantics.
+   * here: the value is already in the unit the compile consumes (#21/#77).
    */
   readonly output?: RegisteredCell["output"];
 }

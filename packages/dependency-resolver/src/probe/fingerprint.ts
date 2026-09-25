@@ -20,7 +20,7 @@
  * permits would still move a fingerprint containing the version, so the record
  * would go stale anyway. What remains is exactly what the lock's comment lists as
  * this fingerprint's job — the probe id, the entry, the probe configuration (with
- * the budget folded in as a declared input, since a budget change alters what the
+ * the cap folded in as a declared input, since a cap change alters what the
  * `size` step concludes), the bundler input no other field captures, and
  * {@link PROBE_ANALYSIS_REVISION}, which the three excluded dimensions do not cover
  * and which a change to the scanners makes load-bearing.
@@ -126,20 +126,34 @@ function stableScalar(value: string): string {
  * - `10` — a native indicator accumulates **every** contributor identity rather than the last one
  *   written, so two versions of a name that produce the same indicator are both named. Changes
  *   findings for that shape only; measured, the earlier map kept a single version.
+ * - `11` — the `size` step measures **characters of emitted code** and classifies #21's band,
+ *   and its cap input is characters (`cellArtifactBudgetCharacters`) rather than bytes. Changes
+ *   what the step reports for every artifact: the `size.band*` facts are new, `size.codeCharacters`
+ *   is new, and a cap that was previously compared against `totalBytes` is now compared against
+ *   the code's character count. It also changes what a cap *means* — a report cached under the
+ *   byte rule recorded a rejection the character rule may not make, or missed one it does — so a
+ *   cached report from revision 10 must not answer a probe run at 11.
  */
-export const PROBE_ANALYSIS_REVISION = 10;
+export const PROBE_ANALYSIS_REVISION = 11;
 
 export interface ComposeProbeFingerprintInput {
   /** Which probe ran, e.g. `inline-bundle`. */
   readonly probeId: string;
   /** The entry the synthetic build imports. */
   readonly entry: string;
-  /** Probe configuration; the cell budget is folded in as `budget` when present. */
+  /** Probe configuration; the cell cap is folded in as `budgetCharacters` when present. */
   readonly probeConfig?: Readonly<Record<string, unknown>>;
   /** Bundler input; defaults to the build module's declared configuration. */
   readonly bundlerInput?: Readonly<Record<string, string>>;
-  /** Cell artifact budget in bytes, when one applies to this run. */
-  readonly budget?: number | null;
+  /**
+   * Cell artifact cap in **characters**, when one applies to this run.
+   *
+   * The key it composes into is `budgetCharacters`, not `budget`, because the unit is
+   * now load-bearing for the fingerprint: the same number meant bytes before #77 and
+   * characters after it, so reusing the key would let a byte-era fingerprint collide
+   * with a character-era one holding the same integer.
+   */
+  readonly budgetCharacters?: number | null;
 }
 
 export interface ComposedProbeFingerprint {
@@ -158,8 +172,8 @@ export interface ComposedProbeFingerprint {
  */
 export function composeProbeFingerprint(input: ComposeProbeFingerprintInput): ComposedProbeFingerprint {
   const probeConfig: Record<string, unknown> = { ...input.probeConfig };
-  if (input.budget !== undefined && input.budget !== null) {
-    probeConfig["budget"] = input.budget;
+  if (input.budgetCharacters !== undefined && input.budgetCharacters !== null) {
+    probeConfig["budgetCharacters"] = input.budgetCharacters;
   }
   const bundlerInput = { ...(input.bundlerInput ?? BUILD_CONFIGURATION_FINGERPRINT) };
 

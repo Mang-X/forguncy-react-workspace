@@ -107,7 +107,12 @@ export const PROBE_STEPS: readonly ProbeStep[] = [
   {
     id: "size",
     label: "Measure output size",
-    records: "The generated artifact size, to be compared against the measured cell code budget.",
+    // Two quantities, and the split is #77's point: bytes are what the artifact weighs
+    // as served (code **and** assets), characters of emitted code are what the product
+    // prices and what #21's bands classify. The band is measured evidence; a rejection
+    // needs a cap the project configured, never a band.
+    records:
+      "The generated artifact's size as served (bytes) and as generated source (characters), the measured cell-code band that size falls in, and whether it exceeds the project's configured cap.",
   },
   {
     id: "runtime-smoke",

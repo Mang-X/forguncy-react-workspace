@@ -7,22 +7,31 @@
  * (https://github.com/Mang-X/forguncy-react-workspace/issues/21), downstream of
  * #3 (the v0.1 epic). The target itself is #5's verified contract.
  *
- * ## Which half of #21's acceptance this module actually delivers
+ * ## Both halves of #21's acceptance are wired
  *
  * #21's result is required to "feed #8/#16 decision policy and compiler
- * diagnostics". Only the **compiler** half is wired here: `cell-compiler`'s
- * `auditCodeBudget` classifies a composed artifact through
- * `classifyCellCodeSize` and reports the band. The **selection-policy** half is
- * not: #16's `size` probe (`packages/dependency-resolver/src/probe/size.ts`)
- * still compares UTF-8 **bytes** against a configured hard cap and files
- * `cell-artifact-budget-exceeded`, and nothing in `probe-engine.ts`,
- * `output.codeBudgetBytes` or `selection-signals.ts` reads these bands.
+ * diagnostics", and both consumers now read these bands in this unit:
  *
- * So the two paths can disagree about one artifact — the compiler can call it
- * `inline` while the probe rejects it as over budget. That is a real
- * inconsistency, tracked as issue #77, and it is recorded here rather than
- * implied away by this module's presence: being a *governing* decision for #8/#16
- * (below) is not the same as being *consumed* by them.
+ * - **Compiler** — `cell-compiler`'s `auditCodeBudget` classifies a composed
+ *   artifact through `classifyCellCodeSize` and reports the band.
+ * - **Selection policy** — #16's `size` probe
+ *   (`packages/dependency-resolver/src/probe/size.ts`) classifies the artifact
+ *   through `classifyCellCodeSize` too, records the band and its provenance as the
+ *   probe facts `size.band`, `size.band.decision` and `size.band.basis`, and compares
+ *   the project's own cap (`cellArtifactBudgetCharacters`) in **characters** — the same
+ *   quantity the compiler caps. The config field is `codeBudgetCharacters`.
+ *
+ * Issue #77 did that wiring. Before it the probe compared UTF-8 **bytes** against a
+ * hard cap, so the two paths could disagree about one artifact — the compiler calling
+ * it `inline` while the probe rejected it as over budget. The unit is the whole reason
+ * it could not be a rename: 100,095 characters of CJK source is 300,095 bytes, so a
+ * byte comparison misclassifies a Chinese-language Cell by roughly a band.
+ *
+ * The bands are still **advisory** on both paths. What a rejection turns on is a
+ * project's configured cap, never a band: #21 measured cost, it did not decide policy,
+ * and the two concepts are kept separate here (`CELL_CODE_INLINE_CEILING_CHARACTERS`
+ * and `CELL_CODE_REVIEW_CEILING_CHARACTERS` are not recommended caps) and in the probe
+ * (`observeSize`'s cap is the only rejection input).
  *
  * ## What was actually measured, and where
  *
@@ -100,13 +109,14 @@ export const CELL_CODE_BUDGET_DECISION: ArchitectureDecisionSource = {
  * "feeds #8/#16 decision policy and compiler diagnostics". Composed from the
  * records `core` owns rather than restated, so the lists cannot drift.
  *
- * **Citing a Spec is not the same as being consumed by it.** #8 and #16 are listed
- * because a change to these bands invalidates decisions they own — a lock
- * fingerprint, a selection verdict — so the change has to answer to them. It does
- * *not* mean #16's selection path reads these bands today; it does not, which is
- * what issue #77 exists to fix. Reading this list as evidence that #21's
- * "feeds #8/#16 decision policy" criterion is met would be the exact
- * overclaim the header above warns against.
+ * **Citing a Spec is not the same as being consumed by it**, and the list is not
+ * offered as evidence that either is. #8 and #16 appear because a change to these
+ * bands invalidates decisions they own — a lock fingerprint, a selection verdict —
+ * so the change has to answer to them. Whether a given consumer actually reads the
+ * bands is a separate question, answered by that consumer's own tests: #77's wiring
+ * is asserted in `dependency-resolver`'s `size` step, and the compiler's in
+ * `cell-compiler`'s budget diagnostic. A reader who wants to know whether the bands
+ * are consumed should read those, not this array.
  */
 export const CELL_CODE_BUDGET_GOVERNING_DECISIONS: readonly ArchitectureDecisionSource[] = [
   ...GOVERNING_ARCHITECTURE_DECISIONS,

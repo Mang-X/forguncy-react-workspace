@@ -409,28 +409,44 @@ describe("provenance", () => {
     expect(cellCodeBudgetBands()).toBe(CELL_CODE_BUDGET_BAND_DEFINITIONS);
   });
 
-  it("records that the selection path does not consume these bands yet", () => {
+  it("separates citing a Spec from being consumed by it, without claiming either", () => {
     // #21's acceptance asks the result to feed "#8/#16 decision policy and compiler
     // diagnostics". Citing #8 and #16 in the governing decisions is provenance, not
     // consumption: a change to these bands invalidates decisions those Specs own, so
-    // it has to answer to them. The compiler half is genuinely wired; the selection
-    // half is not, and the module must not read as though both were.
+    // it has to answer to them. #77 wired both consumers; the *documentary* claim this
+    // asserts is that this array is not offered as evidence of that, and points a
+    // reader at where the consumption is actually asserted.
     //
-    // Asserted by reading the source, because the claim is *documentary* — there is
-    // no runtime value that could distinguish "cites #16" from "is consumed by #16",
-    // which is exactly how the overclaim survived several review rounds. The check is
-    // that the module states the limit and names the follow-up.
+    // Asserted by reading the source, because the claim is documentary — there is no
+    // runtime value that could distinguish "cites #16" from "is consumed by #16", which
+    // is exactly how the original overclaim survived several review rounds.
     const source = readFileSync(join(here, "cell-code-budget.ts"), "utf8");
-    expect(source).toMatch(/selection-policy\*\* half is\s+\* not/);
     expect(source).toMatch(/Citing a Spec is not the same as being consumed/);
-    expect(source).toContain("#77");
+    expect(source).toMatch(/answered by that consumer's own tests/);
 
-    // And the negative direction, so the note cannot be softened into vagueness: the
-    // module must not claim the selection path reads the bands. Both spellings of the
-    // verb, because the overclaim this replaced read "feeding #8's decision policy and
-    // #16's selection procedure" — and a `feeds`-only pattern misses `feeding`, which
-    // is how this assertion first passed against the very text it exists to reject.
+    // And the negative direction, so the array cannot be softened into a claim it does
+    // not support. Both spellings of the verb, because the overclaim this replaced read
+    // "feeding #8's decision policy and #16's selection procedure" — and a `feeds`-only
+    // pattern misses `feeding`, which is how this assertion first passed against the
+    // very text it exists to reject.
     expect(source).not.toMatch(/feed(s|ing)? #8's decision policy/);
+  });
+
+  it("says both halves of #21's acceptance are wired, and where each is asserted", () => {
+    // #77's own change, pinned the same documentary way as the assertion above. The
+    // module header used to record that the selection half was *not* wired; that
+    // statement is now false, and leaving it would be the mirror of the overclaim the
+    // previous test guards. The header must name both consumers and the probe fact
+    // that carries the band, so a reader can follow each claim to its assertion.
+    const source = readFileSync(join(here, "cell-code-budget.ts"), "utf8");
+    expect(source).toMatch(/Both halves of #21's acceptance are wired/);
+    expect(source).toContain("cellArtifactBudgetCharacters");
+    expect(source).toContain("codeBudgetCharacters");
+    expect(source).toContain("size.band");
+    // The stale claim this replaced, in the exact shape it took — and the same
+    // both-spellings discipline, so a softened rewording of it cannot slip through.
+    expect(source).not.toMatch(/selection-policy\*\* half is\s+\* not/);
+    expect(source).not.toMatch(/still compares UTF-8 \*\*bytes\*\*/);
   });
 
   it("refuses an unknown band id rather than returning undefined", () => {
