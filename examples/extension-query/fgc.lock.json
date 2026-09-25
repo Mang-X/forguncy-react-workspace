@@ -10,7 +10,7 @@
       "libraryId": "tanstack-query",
       "probe": {
         "status": "passed",
-        "fingerprint": "probe=\"inline-bundle\";entry=\"@tanstack/react-query\";analysis=11;config={};bundler={\"attachDebugInfo\":\"none\",\"codeSplitting\":\"false\",\"format\":\"iife\",\"jsx\":\"react-jsx\",\"platform\":\"browser\"}",
+        "fingerprint": "probe=\"inline-bundle\";entry=\"@tanstack/react-query\";analysis=12;config={};bundler={\"attachDebugInfo\":\"none\",\"codeSplitting\":\"false\",\"format\":\"iife\",\"jsx\":\"react-jsx\",\"platform\":\"browser\"}",
         "versionIndependent": false
       },
       "target": {
@@ -20,7 +20,7 @@
         "hostReactVersion": "19.2.7"
       },
       "probedWith": {
-        "vitePlus": "0.3.2"
+        "vitePlus": null
       },
       "extension": {
         "version": "5.102.8",
@@ -34,6 +34,10 @@
           "reference": "fgc-evidence/47198a7a4ab60d414b96841669d943b6bbde10cd96ace3925c3bf5cb2679f22f.json"
         },
         {
+          "kind": "probe",
+          "reference": "fgc-evidence/f1de4e0da600eb6efc29c51bfca32c2b53a6b5ac2e4a2312deb87b21ab66637d.json"
+        },
+        {
           "kind": "runtime-observation",
           "reference": "https://github.com/MangMax/forguncy-react-library/blob/main/packages/tanstack-query/report.md"
         },
@@ -45,7 +49,8 @@
           "kind": "spec-issue",
           "reference": "https://github.com/Mang-X/forguncy-react-workspace/issues/16"
         }
-      ]
+      ],
+      "imports": null
     }
   ]
 }

@@ -240,6 +240,29 @@ export interface LockRecordMetadata {
    */
   readonly cellTarget: string | null;
   /**
+   * The named bindings the probe's synthetic entry imported, sorted; null when it kept the
+   * whole namespace.
+   *
+   * Recorded because the surface is one of the fingerprint's declared inputs *and* because it
+   * is the fact a reader needs to interpret the record's own size evidence: a namespace probe
+   * measures an **upper** bound on what a Cell would carry, a named-binding probe a **lower**
+   * one, and only the latter may support a cap rejection. Without this field a lock citing a
+   * `cell-code-budget-exceeded` rejection could not show which of the two it rested on, and
+   * `status` could not rebuild the fingerprint the record was measured under.
+   *
+   * Optional, not required, and the read path is why: `inspectLockRecord` accepts an **absent**
+   * key as the namespace surface, and `parseFgcLockDocument` casts the parsed JSON without
+   * normalizing it. A required field would therefore be a type claiming a key that a lock
+   * written before #77 does not have — the annotation would assert more than the read path
+   * guarantees, and every consumer would be reading `undefined` where the type promised
+   * `string[] | null`. Stating it as optional keeps the two in agreement, and the three spellings
+   * of "the whole namespace" (absent, `undefined`, `null`) all mean one thing.
+   *
+   * The fingerprint composition omits the key entirely for that state, so such a record still
+   * recomposes to the bytes it was written with.
+   */
+  readonly imports?: readonly string[] | null;
+  /**
    * Exact resolved version of the package in this workspace.
    *
    * Null for every `replace` record, which by rule 4 of #8 keeps no dependency:
@@ -898,6 +921,23 @@ function inspectLockRecord(record: unknown, where: string): readonly string[] {
   inspectNullableString(problems, record, "cellTarget", where);
   if (typeof record.cellTarget === "string" && record.cellTarget.trim().length === 0) {
     problems.push(`${where} must either name a cell target or record null for "applies to every target".`);
+  }
+
+  // `imports` is inspected on its own rather than through `inspectStringArrayOrAbsent`, because
+  // null is a *meaning* here — the namespace surface — and that helper rejects it. The two
+  // spellings of "no named surface" are an absent key (a lock written before #77) and an explicit
+  // null (what the merge writes); both are valid, and the only rejected forms are an empty array,
+  // which would compose a fingerprint carrying a surface no build ever used, and a blank name.
+  if (record.imports !== undefined && record.imports !== null) {
+    if (!Array.isArray(record.imports) || record.imports.some(item => typeof item !== "string")) {
+      problems.push(`${where} must declare \`imports\` as an array of strings, or null for the whole namespace.`);
+    } else if (record.imports.length === 0) {
+      problems.push(
+        `${where} records an empty \`imports\` array. An empty surface is the namespace probe, which this field spells as null — an empty array would compose a fingerprint carrying a surface no build ever used.`,
+      );
+    } else if (record.imports.some(name => name.trim().length === 0)) {
+      problems.push(`${where} records a blank binding name in \`imports\`; every entry must name an imported binding.`);
+    }
   }
 
   inspectNullableString(problems, record, "resolvedVersion", where);

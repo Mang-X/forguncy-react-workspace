@@ -663,16 +663,64 @@ describe("runDependencyProbe: broken build", () => {
 
 describe("runDependencyProbe: budget", () => {
   it("files cell-artifact-budget-exceeded while the size step still passes", async () => {
+    // `imports` is what makes this rejection sound rather than a guess: with a declared named
+    // surface the measured artifact is a lower bound on what the Cell carries. See the `size`
+    // step's header — a namespace run over the same cap files nothing.
     const { report, assessment } = await probe("pure-esm-utility", "tiny-math", {
       cellArtifactBudgetCharacters: 4,
+      imports: ["add"],
     });
 
     const size = report.validation.find(entry => entry.step === "size")!;
     expect(size.outcome).toBe("passed");
     const finding = report.rejectionFindings.find(entry => entry.signal === "cell-artifact-budget-exceeded");
     expect(finding?.step).toBe("size");
+    expect(finding?.evidence).toContain("bound:lower-bound");
     expect(assessment.status).toBe("supports-rejection-only");
     expect(assessment.rejectionFindings.map(entry => entry.signal)).toContain("cell-artifact-budget-exceeded");
+  });
+
+  it("measures an over-cap namespace bundle without rejecting it, because it is an upper bound", async () => {
+    // The P1-c distinction at the engine level. `import * as candidate` keeps every export
+    // reachable, so the number is an upper bound on what a Cell would carry: a Cell importing
+    // one binding tree-shakes the rest. Filing `replace` evidence on it would hand the Agent a
+    // rejection the artifact does not support, and `replace` decisions bind to these findings.
+    const { report, assessment } = await probe("pure-esm-utility", "tiny-math", {
+      cellArtifactBudgetCharacters: 4,
+    });
+
+    const size = report.validation.find(entry => entry.step === "size")!;
+    expect(size.outcome).toBe("passed");
+    expect(report.facts.find(fact => fact.name === "size.bound")?.value).toBe("upper-bound");
+    // The comparison is still reported — the fact and the detail both carry it.
+    expect(report.facts.find(fact => fact.name === "artifact.budgetCharacters")?.value).toBe(4);
+    expect(size.detail).toContain("upper bound");
+    expect(rejectionSignals(report)).not.toContain("cell-artifact-budget-exceeded");
+    expect(assessment.rejectionFindings).toEqual([]);
+  });
+
+  it("folds the declared import surface into the fingerprint, and only when there is one", async () => {
+    // The surface is a declared input of the measurement, so two runs that measured different
+    // entries must not compose one fingerprint. And a namespace run must compose the bytes it
+    // always did, or every record written before #77's surface landed would read as stale.
+    const namespace = await probe("pure-esm-utility", "tiny-math");
+    const named = await probe("pure-esm-utility", "tiny-math", { imports: ["add"] });
+    const namedAgain = await probe("pure-esm-utility", "tiny-math", { imports: ["add"] });
+
+    expect(namespace.fingerprint).not.toBe(named.fingerprint);
+    expect(named.fingerprint).toBe(namedAgain.fingerprint);
+    expect(named.fingerprint).toContain("imports");
+    expect(namespace.fingerprint).not.toContain("imports");
+  });
+
+  it("composes one fingerprint for one surface however the caller ordered it", async () => {
+    // The declaration order is the caller's spelling, not part of the measurement. Without the
+    // sort, `["a","b"]` and `["b","a"]` would write two entries and two fingerprints for one
+    // surface, and each would read as the other's staleness.
+    const forwards = await probe("pure-esm-utility", "tiny-math", { imports: ["add", "clamp"] });
+    const backwards = await probe("pure-esm-utility", "tiny-math", { imports: ["clamp", "add"] });
+
+    expect(forwards.fingerprint).toBe(backwards.fingerprint);
   });
 
   it("records the measured band end to end, so the selection path consumes #21's bands", async () => {
@@ -698,6 +746,52 @@ describe("runDependencyProbe: budget", () => {
     // #77, so a byte-era fingerprint must not collide with a character-era one.
     expect(withBudget.fingerprint).toContain("budgetCharacters");
     expect(withBudget.fingerprint).not.toContain('"budget":');
+  });
+
+  // PR review of #77, P2. The refusal is a *throw*, not a rejection finding: a cap that is not
+  // a usable number is a caller error, not a fact about the artifact, and `NaN`/`Infinity`
+  // would otherwise compose `config={}` — `JSON.stringify` writes `null` for every non-finite
+  // number — so three different inputs would share one fingerprint while `-Infinity` is the
+  // only one of them that rejects. Two runs under one declared input would then disagree, and
+  // a cache keyed by that fingerprint would answer a run it does not describe.
+  //
+  // This asserts the end-to-end refusal. Both the engine boundary and `observeSize` apply the
+  // same `core` guard, so removing either one alone still throws — which is the point of
+  // sharing the contract, and why the *position* has its own test below.
+  it("refuses a non-finite or negative cap rather than measuring with it", async () => {
+    // `0` is deliberately absent: `assertCellCodeBudget` is the weaker contract the compiler
+    // and the probe share, and zero is legitimate there — a caller may want every non-empty
+    // artifact reported. The config's stricter "positive whole number" rule is a diagnostic on
+    // a committed document, not this boundary's.
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -1]) {
+      await expect(
+        probe("pure-esm-utility", "tiny-math", { cellArtifactBudgetCharacters: bad }),
+        `cap ${String(bad)} must be refused`,
+      ).rejects.toThrow();
+    }
+  });
+
+  // Why the guard sits at the engine boundary and not only inside `observeSize`: here it runs
+  // **before package identity is resolved**, so a bad cap is reported as a bad cap. Drop it and
+  // the same call proceeds to resolve a package that is not installed, and the caller is told
+  // "nothing in the install graph resolves to that name" — a diagnostic about the dependency,
+  // for a typo in the cap. Verified by removing the guard: the message flips to the identity
+  // failure. The unresolvable name is the instrument, not the subject.
+  it("reports a bad cap as a bad cap, before it can be reported as a missing package", async () => {
+    await expect(
+      probe("pure-esm-utility", "no-such-package-xyz", { cellArtifactBudgetCharacters: Number.NaN }),
+    ).rejects.toThrow(/cell code budget/);
+  });
+
+  // The other half of the same boundary: a valid cap must still reach the report and the
+  // fingerprint, so the guard is a filter on the input rather than a refusal of the feature.
+  it("accepts a positive whole cap and folds it into the fingerprint", async () => {
+    const { report, fingerprint } = await probe("pure-esm-utility", "tiny-math", {
+      cellArtifactBudgetCharacters: 4_096,
+    });
+
+    expect(report.facts.find(fact => fact.name === "artifact.budgetCharacters")?.value).toBe(4_096);
+    expect(fingerprint).toContain('"budgetCharacters":4096');
   });
 });
 

@@ -918,9 +918,20 @@ describe("CLI contract: cited evidence survives later runs", () => {
         // self-consistent rather than pointing at the other record's evidence.
         expect(await citedSmokeOutcome(root, smokeReference)).toBe("passed");
         const record = (await readLock(root)).decisions.find(entry => entry.packageName === "es-toolkit")!;
-        const current = probeLink(record)!;
-        expect(current).not.toBe(smokeReference);
-        expect(await citedSmokeOutcome(root, current)).toBe("skipped");
+
+        // Over *every* probe link the record cites, not `probeLink(record)`'s first one.
+        // `mergeEvidenceLinks` unions evidence by design — "a re-probe adds to the review
+        // trail" — so this record cites both the smoke report and the hookless one, and which
+        // one `.find` returned was decided by sha256 sort order rather than by the property
+        // under test. The property is: the smoke report is still intact, and the hookless
+        // measurement the re-record made is cited beside it.
+        const citedProbeReports = record.evidence.filter(link => link.kind === "probe").map(link => link.reference);
+        expect(citedProbeReports).toContain(smokeReference);
+        const hookless = citedProbeReports.filter(reference => reference !== smokeReference);
+        expect(hookless).not.toHaveLength(0);
+        for (const reference of hookless) {
+          expect(await citedSmokeOutcome(root, reference)).toBe("skipped");
+        }
         // A record with no runtime observation must not claim a runtime target.
         expect(record.target).toBeNull();
       } finally {

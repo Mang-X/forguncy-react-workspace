@@ -56,14 +56,37 @@
  * 219 characters for the default entry shape), while the bundles themselves differ
  * because the entry differs. A candidate that fits a cap can still exceed it once
  * composed, and the compiler's check — not this one — is what decides that.
+ * `budget-cross-path.test.ts` in `cell-compiler` asserts the composition overhead and
+ * the distinction, so this cannot silently collapse back into a claim that the two
+ * counts are one quantity.
  *
- * What this step therefore reports is evidence about the **package**: which #21 band its
- * own bundled weight lands in, and whether that weight alone is already over the
- * project's cap. A cap rejection here is sound (the package by itself is over, so the
- * composed artifact certainly is), but a pass is **not** a prediction that the compile
- * will fit. `budget-cross-path.test.ts` in `cell-compiler` asserts the composition
- * overhead and the distinction, so this cannot silently collapse back into a claim that
- * the two counts are one quantity.
+ * ## Why the cap verdict needs a declared import surface (#77 review, P1-c)
+ *
+ * Which *direction* the difference runs in depends on the probe's entry shape, and that is
+ * what makes a cap verdict provable or not:
+ *
+ * - **A namespace probe** (`import * as candidate from "<pkg>"`, the default) keeps every
+ *   export reachable. That makes its size an **upper** bound on what a Cell carries: a Cell
+ *   that imports one small binding lets the bundler drop the rest, so the Cell can be far
+ *   under a cap the namespace bundle exceeds. Measured on `es-toolkit`: the namespace bundles
+ *   to **249,750** characters while the single named binding `debounce` bundles to **2,865** —
+ *   an 87x gap. Rejecting on that measurement would be a false technical rejection, and it
+ *   would hand the Agent a `replace` basis the artifact does not support. An earlier revision
+ *   of this module claimed the opposite ("a cap rejection here is sound, the package by itself
+ *   is over, so the composed artifact certainly is"); that claim was **false**, and this is the
+ *   measurement that falsifies it.
+ * - **A named-import probe** (`imports: ["debounce"]`) measures only what those bindings pull
+ *   in, so its size is a **lower** bound: a Cell importing them carries at least that much. A
+ *   cap rejection on a lower bound *is* sound, because the composed Cell cannot be smaller than
+ *   the code it certainly includes.
+ *
+ * So the cap is compared on every run and reported as a fact on every run, but the
+ * **rejection** is filed only when the measurement bounds the Cell from below — i.e. when the
+ * build declared a non-empty import surface. Without one the run still records
+ * `size.codeCharacters`, `size.band` and `artifact.budgetCharacters`, and states in its detail
+ * that the comparison is an upper bound rather than a verdict; the band remains advisory either
+ * way. `size.bound` is the fact that says which of the two a report is, so a consumer never has
+ * to infer it from the entry shape.
  *
  * ## Band versus cap
  *
@@ -158,15 +181,28 @@ export interface SizeObservation {
 }
 
 /**
+ * Which way the measurement bounds the Cell.
+ *
+ * `lower-bound` — the build declared a named import surface, so the Cell certainly carries at
+ * least this much and a cap rejection is sound. `upper-bound` — the build kept the whole
+ * namespace, so the Cell may carry less and a cap rejection would be a claim the artifact does
+ * not support. See the module header.
+ */
+export type SizeBound = "lower-bound" | "upper-bound";
+
+/**
  * Observes size, classifies its band, and compares an optional cap.
  *
  * @param budgetCharacters - The project's cell code budget in **characters**, or
  *   `null` when none applies. Not bytes: see the module header. A non-null value is
  *   validated here, before it is compared or folded into a fingerprint.
+ * @param bound - Which way the measurement bounds the Cell, from the build's declared import
+ *   surface. Only `lower-bound` may file a rejection: see the module header.
  */
 export function observeSize(
   output: readonly (OutputChunk | OutputAsset)[] | undefined,
   budgetCharacters: number | null,
+  bound: SizeBound = "upper-bound",
 ): SizeObservation {
   // Validated at this boundary rather than by the caller, because both the comparison
   // below and the fingerprint the caller composed are derived from the same number: a
@@ -207,13 +243,23 @@ export function observeSize(
     // What the band was computed from, so the two facts cannot be read as describing
     // different artifacts.
     { step: "size", name: "size.band.basis", value: "characters of emitted code" },
+    // Which way this measurement bounds the Cell. Recorded on every run rather than only on a
+    // rejection, because it is what makes the other size facts interpretable: a reader that
+    // sees a number over a cap needs to know whether that is a verdict or an upper bound.
+    { step: "size", name: "size.bound", value: bound },
   ];
   if (budgetCharacters !== null) {
     facts.push({ step: "size", name: "artifact.budgetCharacters", value: budgetCharacters });
   }
 
+  const overCap = budgetCharacters !== null && size.codeCharacters > budgetCharacters;
+  // Only a lower bound may reject. An upper bound over the cap is reported (the facts above
+  // carry it, and the detail says so) but files nothing: the Cell may import a fraction of
+  // what the namespace bundle contains, so a rejection would be a technical refusal the
+  // artifact does not support — and `replace` decisions bind to these findings. See the
+  // module header for the measurement that settled this.
   const rejectionFindings: ProbeRejectionFinding[] = [];
-  if (budgetCharacters !== null && size.codeCharacters > budgetCharacters) {
+  if (overCap && bound === "lower-bound") {
     // Two situations produce this and they need different wording, exactly as the
     // compiler's own diagnostic splits them. When the artifact is *large by
     // measurement*, the band is the story. When it is inside the measured ordinary
@@ -232,10 +278,30 @@ export function observeSize(
         `characters:${String(size.codeCharacters)}`,
         `band:${verdict.band}`,
         `budgetCharacters:${String(budgetCharacters)}`,
+        `bound:${bound}`,
         `decision:${CELL_CODE_BUDGET_DECISION.url}`,
       ],
     });
   }
+
+  // The three cases read differently on purpose. "No cap" is not "fits the cap", and an
+  // upper bound over the cap is not a verdict — collapsing any of them into a bare
+  // measurement would leave a reader to infer which one they are looking at from the
+  // absence of a finding, which is exactly the inference the missing rejection used to be.
+  const detail = (() => {
+    const measured = `Measured ${String(size.codeCharacters)} character(s) of emitted code (band ${verdict.band}, #21)`;
+    if (budgetCharacters === null) {
+      return `${measured}, weighing ${String(size.totalBytes)} byte(s) as served (code ${String(size.codeBytes)}, assets ${String(size.assetBytes)}); no cell cap applies to this run.`;
+    }
+    const against = `${measured} against a configured cap of ${String(budgetCharacters)} character(s)`;
+    if (!overCap) {
+      return `${against}; the artifact is within it.`;
+    }
+    if (bound === "lower-bound") {
+      return `${against}, which it exceeds. The build declared a named import surface, so the Cell certainly carries at least this much and the rejection is filed.`;
+    }
+    return `${against}, which it exceeds — but the build kept the whole package namespace, so this is an upper bound on what a Cell would carry rather than a verdict. No rejection is filed: a Cell importing a subset can tree-shake below the cap. Re-probe with a declared import surface to obtain a verdict.`;
+  })();
 
   return {
     facts,
@@ -244,10 +310,7 @@ export function observeSize(
     validation: {
       step: "size",
       outcome: "passed",
-      detail:
-        budgetCharacters === null
-          ? `Measured ${String(size.codeCharacters)} character(s) of emitted code (band ${verdict.band}, #21), weighing ${String(size.totalBytes)} byte(s) as served (code ${String(size.codeBytes)}, assets ${String(size.assetBytes)}); no cell cap applies to this run.`
-          : `Measured ${String(size.codeCharacters)} character(s) of emitted code (band ${verdict.band}, #21) against a configured cap of ${String(budgetCharacters)} character(s).`,
+      detail,
       diagnostics: [],
     },
   };

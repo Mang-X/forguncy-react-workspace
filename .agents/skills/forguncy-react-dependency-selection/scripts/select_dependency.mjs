@@ -147,7 +147,7 @@ const BOOLEAN_OPTIONS = new Set(["json", "no-cache"]);
  * is the one that bites — a caller who meant to verify against a real listing but dropped
  * the filename would get the shipped catalog instead and be told nothing.
  */
-const VALUE_OPTIONS = new Set(["project", "decision", "runtime-smoke", "runtime-smoke-export", "extension-catalog", "cell"]);
+const VALUE_OPTIONS = new Set(["project", "decision", "runtime-smoke", "runtime-smoke-export", "extension-catalog", "cell", "imports"]);
 
 /**
  * Parses `argv`, refusing anything it does not recognise.
@@ -661,6 +661,21 @@ async function resolveCellBudget(projectRoot, cellId) {
 }
 
 /**
+ * A record's identity in the lock's own key: `(packageName, cellTarget)`.
+ *
+ * The lock is keyed by the pair — the same package may legitimately carry one decision per
+ * Cell, and the cap makes their fingerprints differ — so anything that maps a *current*
+ * fingerprint back onto a record has to be keyed by the pair too. Keying by package name is
+ * what let `status` assess two Cell-scoped records against one Cell's fingerprint.
+ *
+ * NUL-joined rather than a formatted string, because both halves are free-form: a package
+ * name cannot contain NUL, so no `(a, b)` pair can collide with `(a + separator, b)`.
+ */
+function recordIdentity(record) {
+  return `${record.packageName}\u0000${record.cellTarget ?? ""}`;
+}
+
+/**
  * The Cell identity a decision is scoped to, from `--cell` and the decision file.
  *
  * One identity, not two: the cap that was measured belongs to the Cell the record is
@@ -681,14 +696,103 @@ function cellTargetFor(entry, options) {
   return requested ?? declared;
 }
 
-async function runProbe(options, packageName) {
+/**
+ * Parses a `--imports` value into a sorted, deduplicated binding list.
+ *
+ * Comma-separated because the value is a set of identifiers and a set is what the shell cannot
+ * repeat: `--imports debounce --imports throttle` would have to be folded by every reader, and
+ * an option that takes a list is more honestly spelled as one value.
+ *
+ * The names are *not* validated against the package here. Whether `debounce` is an export of the
+ * package being probed is a question the bundler answers by failing the `build` step, and a
+ * second, weaker answer computed from a manifest would disagree with it — a package can export a
+ * binding its `exports` map does not enumerate. What is checked is the shape, because a blank
+ * name composes a different fingerprint than the caller meant while looking identical.
+ */
+function parseImportsOption(value, where) {
+  if (value === undefined) {
+    return null;
+  }
+  const names = String(value)
+    .split(",")
+    .map(name => name.trim())
+    .filter(name => name.length > 0);
+  if (names.length === 0) {
+    fail(`${where} names no imported binding. A named import surface is a non-empty list, e.g. \`--imports debounce\`; to probe the whole namespace, omit it.`);
+  }
+  return [...new Set(names)].sort();
+}
+
+/**
+ * The import surface a decision is measured under, from `--imports` and the decision file.
+ *
+ * Mirrors `cellTargetFor`'s rule for the same reason: two spellings of one declared input must
+ * not silently disagree. `--imports` and the file's `imports` both describe the entry the probe
+ * bundles, so a run where they name different surfaces is refused rather than resolved in favour
+ * of one — whichever won, the other spelling would be a claim the caller made and the record
+ * would not carry.
+ *
+ * An empty result is `null`, the whole-namespace probe, because that is the one state the lock
+ * spells as absent and the one state under which no cap rejection is sound. See `size.ts`.
+ */
+function importsFor(entry, options) {
+  const requested = parseImportsOption(options.imports, "--imports");
+  const declared = entry?.document.imports === undefined ? null : validateDeclaredImports(entry.document.imports, entry.decision.packageName);
+
+  if (requested !== null && declared !== null && requested.join(",") !== declared.join(",")) {
+    fail(
+      `--imports names [${requested.join(", ")}] but the decision file for "${entry.decision.packageName}" declares [${declared.join(", ")}]. The import surface is one declared input, and the fingerprint the record carries has to be the one that was measured.`,
+    );
+  }
+  const surface = requested ?? declared;
+  return surface === null || surface.length === 0 ? null : surface;
+}
+
+/**
+ * Validates a decision file's `imports` field.
+ *
+ * Refused rather than normalized when it is an empty array, which is the one form the lock's own
+ * validator rejects: an empty array would compose a fingerprint carrying a surface no build ever
+ * used. `null` is the namespace probe and is the spelling a file should use to say so.
+ */
+function validateDeclaredImports(value, packageName) {
+  if (value === null) {
+    return null;
+  }
+  if (!Array.isArray(value) || value.some(name => typeof name !== "string")) {
+    fail(`The decision file for "${packageName}" declares "imports" as something other than an array of strings or null. A named import surface is e.g. ["debounce"]; use null (or omit it) for the whole namespace.`);
+  }
+  if (value.length === 0) {
+    fail(`The decision file for "${packageName}" declares an empty "imports" array. An empty surface is the whole-namespace probe, which this field spells as null; an empty array would compose a fingerprint no build used.`);
+  }
+  if (value.some(name => name.trim().length === 0)) {
+    fail(`The decision file for "${packageName}" declares a blank name in "imports"; every entry must name an imported binding.`);
+  }
+  return [...new Set(value.map(name => name.trim()))].sort();
+}
+
+/**
+ * Runs the probe for one package, scoped to a Cell identity the caller resolved.
+ *
+ * `cellTarget` is a **parameter** rather than something read out of `options` here, and that
+ * is the whole of the P1-a fix. `cellTargetFor` exists because a decision file's `cellTarget`
+ * and `--cell` are two spellings of one identity; reading only `options.cell` inside the probe
+ * meant the file's spelling never reached the cap, so `audit`/`record` on a file scoped to
+ * `"bench"` probed **uncapped**, wrote an uncapped fingerprint, and then `candidateLockFor`
+ * scoped the record to `bench` — leaving a record that `status` immediately reported as
+ * `probe-fingerprint-changed` and a cap rejection that was never visible during the audit.
+ * The resolution therefore happens once, before the probe, and this function consumes it.
+ *
+ * The bare `probe` command has no decision file, so its caller passes `options.cell ?? null`
+ * and resolves its own surface from `--imports` alone.
+ */
+async function runProbe(options, packageName, cellTarget, imports) {
   const projectRoot = fromWorkingDirectory(options.project ?? ".");
   const runtimeSmoke = await loadRuntimeSmokeHook(options);
 
   // The cap the project declared for the named Cell, or none. Resolved before the probe
   // rather than passed through, because the value participates in both the comparison and
   // the fingerprint — see `resolveCellBudget` for why it is read from the config.
-  const cellTarget = options.cell ?? null;
   const resolved = cellTarget === null ? { ok: true, codeBudgetCharacters: null } : await resolveCellBudget(projectRoot, cellTarget);
   if (!resolved.ok) {
     fail(
@@ -707,6 +811,11 @@ async function runProbe(options, packageName) {
       // no declared cap must compose the same fingerprint it composed before #77 wired the
       // cap in, or every existing no-cap record would report `probe-fingerprint-changed`.
       ...(resolved.codeBudgetCharacters === null ? {} : { cellArtifactBudgetCharacters: resolved.codeBudgetCharacters }),
+      // The declared import surface, or omitted for the whole namespace. Omitted rather than
+      // passed as `null` for the same reason the cap is: a namespace run must compose exactly
+      // the fingerprint it composed before #77's surface landed, or every record written
+      // earlier would read as `probe-fingerprint-changed`.
+      ...(imports === null || imports === undefined ? {} : { imports }),
       // Passing the hook is what makes the `runtime-smoke` step run at all; without
       // it the step is `skipped` with a reason, which is the honest local-only record.
       ...(runtimeSmoke === undefined ? {} : { runtimeSmoke }),
@@ -789,6 +898,8 @@ function probePayload({ projectRoot, result, evidencePath }) {
  *     "globalName": "React",         // host
  *     "libraryId": "…",              // extension
  *     "extensionVersion": "…",       // extension
+ *     "imports": ["debounce"],       // the named bindings the Cell will import;
+ *                                    // omitted or null for the whole namespace
  *     "rejection": { … }             // replace; omitted for an architectural
  *                                    // rejection, which uses the assessment's own
  *   }
@@ -860,8 +971,17 @@ async function probeForDecision(entry, options) {
   if (entry.architectural) {
     return { probe: null, probeResult: null };
   }
-  const { projectRoot, result, evidencePath } = await runProbe(options, entry.decision.packageName);
-  return { probe: result.report, probeResult: { ...result, projectRoot, evidencePath } };
+  // The Cell identity is resolved **here**, before the probe, from `--cell` and the decision
+  // file together. Resolving it after the measurement — which is what reading `options.cell`
+  // inside `runProbe` amounted to — measured the candidate against no cap at all whenever the
+  // file supplied the identity, and then scoped the record to that Cell anyway. See `runProbe`.
+  const cellTarget = cellTargetFor(entry, options);
+  // The surface is resolved here for the same reason the Cell identity is: it is a declared
+  // input of the measurement, so it has to reach the probe rather than be discovered afterwards
+  // from the record it produced.
+  const imports = importsFor(entry, options);
+  const { projectRoot, result, evidencePath } = await runProbe(options, entry.decision.packageName, cellTarget, imports);
+  return { probe: result.report, probeResult: { ...result, projectRoot, evidencePath }, imports };
 }
 
 /**
@@ -1173,7 +1293,7 @@ function auditPayload(entry, probe, problems) {
  * claim its outcome — named rather than thrown so the caller reports it in its own
  * command's shape.
  */
-async function updateFor(entry, probe, probeResult, cellTarget) {
+async function updateFor(entry, probe, probeResult, cellTarget, imports) {
   const lockEvidence = probeResult === null
     ? { status: core.ARCHITECTURAL_REJECTION_PROBE_STATUS, fingerprint: null, versionIndependent: false }
     : resolver.probeRunLockEvidence(probeResult);
@@ -1222,6 +1342,11 @@ async function updateFor(entry, probe, probeResult, cellTarget) {
     // record's scope cannot name different Cells. Null means "applies to every Cell",
     // which is also the only state in which no cap applies.
     cellTarget,
+    // The declared import surface the measurement was taken under, or null for the whole
+    // namespace. Recorded because it is one of the fingerprint's declared inputs *and* because
+    // it is what a reader needs to interpret the record's own size evidence: only a named
+    // surface makes a `cell-code-budget-exceeded` rejection sound. See `size.ts`.
+    imports,
     // Rule 4 of #8: a `replace` record keeps no dependency for the compiled cell, so
     // recording a resolved version there would imply the package is still installed for
     // it. The version that was rejected goes in `rejectedCandidate` instead — see below.
@@ -1251,7 +1376,11 @@ async function updateFor(entry, probe, probeResult, cellTarget) {
 /** The lock a decision file would produce, for a caller that wants to check it first. */
 async function candidateLockFor(entry, probe, probeResult, options) {
   const cellTarget = cellTargetFor(entry, options);
-  const update = await updateFor(entry, probe, probeResult, cellTarget);
+  // Resolved here from the same two spellings the probe used, so the surface the record states
+  // is the one the measurement was taken under rather than a second reading of the file that
+  // could have drifted from it.
+  const imports = importsFor(entry, options);
+  const update = await updateFor(entry, probe, probeResult, cellTarget, imports);
   if (update === null) {
     return null;
   }
@@ -1444,18 +1573,22 @@ async function commandStatus(options) {
     return;
   }
 
-  const fingerprints = {};
+  // Rebuilt per *record*, not per package. The lock is keyed by `(packageName, cellTarget)`
+  // and the cap is one of the fingerprint's declared inputs, so two records for one package
+  // scoped to two Cells have two different fingerprints — and a map keyed by package alone
+  // let the second iteration overwrite the first, assessing *both* records against whichever
+  // Cell happened to be processed last. Reversing the lock's order reversed which of the two
+  // was wrongly reported stale.
+  //
+  // A record whose rebuild cannot happen (its Cell no longer resolves, its package can no
+  // longer be probed) is left out, and the per-record environment below then answers
+  // `probe-fingerprint-unknown` — stale rather than silently fresh, which is the direction a
+  // wrong rebuild must never take.
+  const rebuiltFingerprints = new Map();
   for (const record of lock.decisions) {
     if (record.probe.status === "not-run" || record.probe.fingerprint === null) {
       continue;
     }
-    // Rebuilt with the cap the *record's own Cell* declares, because the cap is one of the
-    // fingerprint's declared inputs: rebuilding without it would compare a capped record
-    // against an uncapped fingerprint and report `probe-fingerprint-changed` for a record
-    // nobody touched. A Cell that no longer resolves, or one whose declared cap was
-    // removed, leaves the package out of the map — `probe-fingerprint-unknown` is the
-    // honest answer, and it is stale rather than silently fresh, which is the direction a
-    // wrong rebuild must never take.
     const budget = record.cellTarget === null ? { ok: true, codeBudgetCharacters: null } : await resolveCellBudget(projectRoot, record.cellTarget);
     if (!budget.ok) {
       continue;
@@ -1466,22 +1599,36 @@ async function commandStatus(options) {
         packageName: record.packageName,
         cache: undefined,
         ...(budget.codeBudgetCharacters === null ? {} : { cellArtifactBudgetCharacters: budget.codeBudgetCharacters }),
+        // The surface the record was measured under, read back out of the record. Without it a
+        // record scoped to a named surface would be rebuilt as a namespace run, compose a
+        // different fingerprint, and report `probe-fingerprint-changed` for a measurement that
+        // had not moved — the same class of false staleness the per-record keying above exists
+        // to prevent. Omitted when null, because that is the namespace run.
+        ...(record.imports == null ? {} : { imports: record.imports }),
       });
-      fingerprints[record.packageName] = rebuilt.fingerprint;
+      rebuiltFingerprints.set(recordIdentity(record), rebuilt.fingerprint);
     } catch {
-      // A package that can no longer be probed stays out of the environment map, so
-      // the record reports `probe-fingerprint-unknown` — stale rather than silently
-      // fresh. Rebuilding the fingerprint from a phantom would be worse.
+      // A package that can no longer be probed stays out of the map, so the record reports
+      // `probe-fingerprint-unknown`. Rebuilding the fingerprint from a phantom would be worse.
     }
   }
 
   const environment = await resolver.probeLockEnvironment(projectRoot, {
     lock,
-    probeFingerprints: fingerprints,
+    probeFingerprints: {},
   });
 
   const decisions = lock.decisions.map((record) => {
-    const assessment = core.assessLockDecision(record, environment);
+    // One environment per record. `LockEnvironment` describes **one compilation for one Cell
+    // target**, and `assessProbeFreshness` reads exactly `probeFingerprints[packageName]` — so
+    // a single shared map can only be right when no two records share a package name. The
+    // versions, target and toolchain are shared because none of them depends on the Cell.
+    const own = rebuiltFingerprints.get(recordIdentity(record));
+    const recordEnvironment =
+      own === undefined
+        ? environment
+        : { ...environment, probeFingerprints: { [record.packageName]: own } };
+    const assessment = core.assessLockDecision(record, recordEnvironment);
 
     // A citation problem is a blocker, and it is reported *beside* the core assessment
     // rather than through it: `assessLockDecision` answers "do the versions, fingerprints and
@@ -1587,6 +1734,17 @@ Options:
                     reports \`probe-fingerprint-changed\` if it later moves or is
                     removed. Without \`--cell\` no cap applies: the band is still
                     recorded, and nothing rejects on it.
+  --imports <a,b>   The named bindings the Cell will import, comma-separated. The probe
+                    bundles an entry that imports exactly these, which makes the
+                    measured size a **lower bound** on what the Cell carries — and a
+                    lower bound is the only measurement a cap rejection may rest on.
+                    Without it the probe keeps the whole namespace, which measures an
+                    **upper** bound: the size is still reported, but an over-cap
+                    namespace bundle files no rejection, because a Cell importing a
+                    subset can tree-shake below the cap. Measured on \`es-toolkit\`:
+                    the namespace bundles to 249,750 characters against 2,865 for
+                    \`debounce\` alone. The surface is one of the fingerprint's declared
+                    inputs and is recorded on the lock record.
   --json            Machine-readable output (default for policy, probe and status).
 
 audit and record run the same checks, covering everything record refuses for a reason it can
@@ -1616,7 +1774,10 @@ switch (command) {
     if (packageName === undefined) {
       fail("probe needs a package name: `probe --project <dir> <packageName>`.");
     }
-    print(probePayload(await runProbe(options, packageName)), options);
+    print(
+      probePayload(await runProbe(options, packageName, options.cell ?? null, parseImportsOption(options.imports, "--imports"))),
+      options,
+    );
     break;
   }
   case "audit":

@@ -26,10 +26,32 @@ describe("composeProbeFingerprint", () => {
     });
 
     expect(composed.fingerprint).toBe(
-      'probe="inline-bundle";entry="es-toolkit";analysis=11;config={"format":"iife"};bundler={"format":"iife","platform":"browser"}',
+      `probe="inline-bundle";entry="es-toolkit";analysis=${String(PROBE_ANALYSIS_REVISION)};config={"format":"iife"};bundler={"format":"iife","platform":"browser"}`,
     );
     expect(composed.probeConfig).toEqual({ format: "iife" });
     expect(composed.bundlerInput).toEqual({ format: "iife", platform: "browser" });
+  });
+
+  // The declared import surface (#77 review, P1-c) is an input of the measurement, so it belongs
+  // in the fingerprint: two runs that bundled different entries measured different artifacts, and
+  // one fingerprint for both would let a record claim evidence it was not measured under.
+  it("folds a declared import surface into the config, and omits the key when there is none", () => {
+    const namespace = composeProbeFingerprint({ probeId: "inline-bundle", entry: "es-toolkit" });
+    const named = composeProbeFingerprint({ probeId: "inline-bundle", entry: "es-toolkit", imports: ["debounce"] });
+
+    expect(named.fingerprint).not.toBe(namespace.fingerprint);
+    expect(named.fingerprint).toContain('"imports":["debounce"]');
+    // Omitted, not `[]`: a namespace run must compose exactly the bytes it composed before the
+    // surface landed, or every record written earlier would read as stale.
+    expect(namespace.fingerprint).not.toContain("imports");
+    expect(namespace.probeConfig).not.toHaveProperty("imports");
+  });
+
+  it("sorts the declared surface, so a caller's spelling cannot compose a second fingerprint", () => {
+    const forwards = composeProbeFingerprint({ probeId: "inline-bundle", entry: "es-toolkit", imports: ["add", "clamp"] });
+    const backwards = composeProbeFingerprint({ probeId: "inline-bundle", entry: "es-toolkit", imports: ["clamp", "add"] });
+
+    expect(forwards.fingerprint).toBe(backwards.fingerprint);
   });
 
   // The analysis revision is a declared input because nothing else on a lock record

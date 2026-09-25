@@ -42,7 +42,7 @@ import { dirname, join } from "node:path";
 import type { ProbeFact, ProbeValidationEntry } from "@forguncy-react-workspace/core";
 import { rolldown, type OutputAsset, type OutputChunk } from "rolldown";
 
-import { describeBuildFailureLines, portableText, safePathSegment } from "./scan-utils.ts";
+import { compareStrings, describeBuildFailureLines, portableText, safePathSegment } from "./scan-utils.ts";
 
 /**
  * The declared inputs of the build half of a probe — what `LockProbeEvidence.fingerprint`
@@ -66,6 +66,26 @@ export interface CandidateBuildOptions {
   readonly packageName: string;
   /** Specifier the synthetic entry imports; defaults to the package name. */
   readonly entry?: string;
+  /**
+   * Named bindings the synthetic entry imports, which is what makes the measured
+   * artifact a **lower bound** rather than an upper one.
+   *
+   * Empty (the default) means `import * as candidate from "<entry>"`, which keeps the
+   * whole module namespace observable. That is an **upper** bound on the code the Cell
+   * will carry: a Cell importing one small binding can tree-shake the rest away, so a
+   * namespace bundle over a cap does *not* show the Cell is over it. Measured on
+   * `es-toolkit`: the namespace bundles to 249,750 characters while the single named
+   * binding `debounce` bundles to 2,865 — an 87x gap, and the reason the cap verdict is
+   * gated on this list being non-empty (see `size.ts`).
+   *
+   * Non-empty means `import { a, b } from "<entry>"`, which measures only what those
+   * bindings pull in. A Cell that imports them carries at least that much, so the
+   * measurement bounds the Cell from below and a cap rejection on it is sound.
+   *
+   * Sorted before use, so a caller's declaration order cannot compose a different
+   * fingerprint or a different entry file for the same surface.
+   */
+  readonly imports?: readonly string[];
 }
 
 export interface CandidateBuildResult {
@@ -82,16 +102,33 @@ interface CapturedLog {
   readonly message: string;
 }
 
-function entrySource(specifier: string): string {
+/**
+ * The synthetic entry's source for one import surface.
+ *
+ * The two shapes are not interchangeable and the difference is the whole of the
+ * lower/upper bound distinction: a namespace import keeps every export reachable, while
+ * named imports let the bundler drop what the Cell will never call. See
+ * {@link CandidateBuildOptions.imports}.
+ */
+export function entrySource(specifier: string, imports: readonly string[] = []): string {
+  if (imports.length === 0) {
+    return [`import * as candidate from ${JSON.stringify(specifier)};`, `export default candidate;`, ``].join("\n");
+  }
+  const bindings = [...imports].sort(compareStrings);
   return [
-    `import * as candidate from ${JSON.stringify(specifier)};`,
-    `export default candidate;`,
+    `import { ${bindings.join(", ")} } from ${JSON.stringify(specifier)};`,
+    `export default { ${bindings.join(", ")} };`,
     ``,
   ].join("\n");
 }
 
+/** The surface as one stable string: the specifier, then the sorted bindings. */
+function surfaceKey(specifier: string, imports: readonly string[]): string {
+  return [specifier, ...[...imports].sort(compareStrings)].join("\u0000");
+}
+
 /**
- * The synthetic entry's path, unique to (package, specifier).
+ * The synthetic entry's path, unique to (package, specifier, import surface).
  *
  * `entry` is an independent fingerprint input while the path used to be keyed
  * only by package name: two concurrent probes of one package with different
@@ -99,16 +136,31 @@ function entrySource(specifier: string): string {
  * write could replace the file before the other Rolldown read — building the
  * wrong candidate under the wrong fingerprint. Hashing the specifier isolates
  * concurrent builds without giving up the human-readable package directory.
+ *
+ * The import surface is hashed too, and for the same reason one level down: a
+ * namespace probe and a named-binding probe of one package are two different
+ * measurements under two different fingerprints, so sharing one entry file would let
+ * either overwrite the other's source and build the wrong candidate.
  */
-export function probeEntryPath(projectRoot: string, packageName: string, specifier: string): string {
-  const entryHash = createHash("sha256").update(specifier, "utf8").digest("hex").slice(0, 16);
+export function probeEntryPath(
+  projectRoot: string,
+  packageName: string,
+  specifier: string,
+  imports: readonly string[] = [],
+): string {
+  const entryHash = createHash("sha256").update(surfaceKey(specifier, imports), "utf8").digest("hex").slice(0, 16);
   return join(projectRoot, ".fgc", "probe", safePathSegment(packageName), `${entryHash}.js`);
 }
 
-async function writeEntry(projectRoot: string, packageName: string, specifier: string): Promise<string> {
-  const entryPath = probeEntryPath(projectRoot, packageName, specifier);
+async function writeEntry(
+  projectRoot: string,
+  packageName: string,
+  specifier: string,
+  imports: readonly string[],
+): Promise<string> {
+  const entryPath = probeEntryPath(projectRoot, packageName, specifier, imports);
   await mkdir(dirname(entryPath), { recursive: true });
-  await writeFile(entryPath, entrySource(specifier), "utf8");
+  await writeFile(entryPath, entrySource(specifier, imports), "utf8");
   return entryPath;
 }
 
@@ -121,7 +173,8 @@ async function writeEntry(projectRoot: string, packageName: string, specifier: s
  */
 export async function runCandidateBuild(options: CandidateBuildOptions): Promise<CandidateBuildResult> {
   const specifier = options.entry ?? options.packageName;
-  const entryPath = await writeEntry(options.projectRoot, options.packageName, specifier);
+  const imports = options.imports ?? [];
+  const entryPath = await writeEntry(options.projectRoot, options.packageName, specifier, imports);
   const logs: CapturedLog[] = [];
 
   let build: Awaited<ReturnType<typeof rolldown>> | undefined;
@@ -204,6 +257,16 @@ export async function runCandidateBuild(options: CandidateBuildOptions): Promise
       step: "build",
       name: "build.entry-specifier",
       value: specifier,
+    },
+    // The import surface the artifact was built from, so a reader can tell which bound the
+    // measurement is: an empty list means the whole namespace was kept and the size is an
+    // upper bound, a non-empty one means only those bindings were reachable and the size
+    // bounds the Cell from below. `size.ts` reads this fact's meaning when it decides
+    // whether a cap verdict is provable, so it is recorded rather than implied by the entry.
+    {
+      step: "build",
+      name: "build.import-surface",
+      value: [...imports].sort(compareStrings),
     },
     {
       step: "build",

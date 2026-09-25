@@ -154,6 +154,16 @@ export interface RunDependencyProbeOptions {
   readonly probeId?: string;
   /** Entry specifier the synthetic build imports; defaults to the package name. Part of the fingerprint. */
   readonly entry?: string;
+  /**
+   * Named bindings the synthetic build imports; empty (the default) keeps the whole namespace.
+   * Part of the fingerprint.
+   *
+   * This is what makes a size cap verdict *provable*, and it is the caller's declaration
+   * rather than something the engine infers: only the Agent knows which bindings the Cell
+   * will import, and the engine may not guess a Cell's import surface (that would be choosing
+   * what the Cell does, which is not the probe's decision). See `build.ts` and `size.ts`.
+   */
+  readonly imports?: readonly string[];
   readonly probeConfig?: Readonly<Record<string, unknown>>;
   readonly bundlerInput?: Readonly<Record<string, string>>;
   /**
@@ -333,9 +343,11 @@ export async function runDependencyProbe(options: RunDependencyProbeOptions): Pr
   const identity = await resolvePackageIdentity(options.projectRoot, options.packageName);
   const environment: ProbeEnvironment = buildProbeEnvironment(identity, toolchain, target);
 
+  const imports = options.imports ?? [];
   const composed = composeProbeFingerprint({
     probeId,
     entry,
+    imports,
     probeConfig: options.probeConfig,
     bundlerInput: options.bundlerInput,
     budgetCharacters,
@@ -393,6 +405,7 @@ export async function runDependencyProbe(options: RunDependencyProbeOptions): Pr
     projectRoot: options.projectRoot,
     packageName: identity.packageName,
     entry,
+    imports,
   });
 
   const buildFailed = build.outcome === "failed";
@@ -437,7 +450,10 @@ export async function runDependencyProbe(options: RunDependencyProbeOptions): Pr
   steps.addRejections(runtimePatterns.rejectionFindings);
   steps.record(runtimePatterns.validation);
 
-  const size = observeSize(build.output, budgetCharacters);
+  // A named import surface makes the measured artifact a lower bound on what the Cell
+  // carries, which is the only shape a cap rejection is sound on; a namespace build measures
+  // an upper bound. Derived from the surface the caller declared, never guessed here.
+  const size = observeSize(build.output, budgetCharacters, imports.length > 0 ? "lower-bound" : "upper-bound");
   steps.addFacts(size.facts);
   steps.addRisks(size.risks);
   steps.addRejections(size.rejectionFindings);

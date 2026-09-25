@@ -133,14 +133,32 @@ function stableScalar(value: string): string {
  *   the code's character count. It also changes what a cap *means* — a report cached under the
  *   byte rule recorded a rejection the character rule may not make, or missed one it does — so a
  *   cached report from revision 10 must not answer a probe run at 11.
+ * - `12` — the synthetic entry can declare a **named import surface** (`imports`), and the
+ *   `build` step records it as `build.import-surface`. The surface decides whether the
+ *   measured artifact bounds the Cell from below or above, which is what the `size` step's
+ *   cap verdict now turns on: a namespace bundle over a cap proves nothing about a Cell that
+ *   imports one binding (measured on `es-toolkit`: 249,750 characters for the namespace
+ *   against 2,865 for `debounce` alone). Changes what the step reports for every artifact —
+ *   `build.import-surface` is a new fact — and changes what a cap rejection *means*, so a
+ *   report cached at 11 must not answer a run at 12.
  */
-export const PROBE_ANALYSIS_REVISION = 11;
+export const PROBE_ANALYSIS_REVISION = 12;
 
 export interface ComposeProbeFingerprintInput {
   /** Which probe ran, e.g. `inline-bundle`. */
   readonly probeId: string;
   /** The entry the synthetic build imports. */
   readonly entry: string;
+  /**
+   * Named bindings the synthetic build imports, sorted; empty means the whole namespace.
+   *
+   * A declared input rather than a detail of the build, because it decides *which document*
+   * the size step measured — the namespace bundle or a tree-shaken named-binding bundle —
+   * and therefore whether a cap verdict is provable at all (see `size.ts` and
+   * `build.ts`). Two runs of one package with different surfaces measure different
+   * artifacts, so they must not share a fingerprint.
+   */
+  readonly imports?: readonly string[];
   /** Probe configuration; the cell cap is folded in as `budgetCharacters` when present. */
   readonly probeConfig?: Readonly<Record<string, unknown>>;
   /** Bundler input; defaults to the build module's declared configuration. */
@@ -176,6 +194,15 @@ export function composeProbeFingerprint(input: ComposeProbeFingerprintInput): Co
     probeConfig["budgetCharacters"] = input.budgetCharacters;
   }
   const bundlerInput = { ...(input.bundlerInput ?? BUILD_CONFIGURATION_FINGERPRINT) };
+  // Folded into `probeConfig` rather than given its own segment: the format is quoted in lock
+  // diffs and in `probe-fingerprint-changed` diagnostics, and a new segment would have to be
+  // read by every consumer of that format. `imports` is omitted entirely when the surface is
+  // the whole namespace, so a pre-surface record composes the same bytes it always did under a
+  // surface that has not changed — the same reason `budgetCharacters` is omitted when null.
+  const imports = [...(input.imports ?? [])].sort();
+  if (imports.length > 0) {
+    probeConfig["imports"] = imports;
+  }
 
   const fingerprint = [
     `probe=${stableScalar(input.probeId)}`,

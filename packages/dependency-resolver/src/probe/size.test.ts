@@ -10,7 +10,11 @@
  * *passes* when the measurement is over the cap (the rejection carries the
  * disqualification). #21 — the bands the step classifies against, and the unit
  * (characters) it now compares. #77 — which separated the advisory band from the
- * project's cap and settled that only the cap may reject.
+ * project's cap and settled that only the cap may reject; and then, on review,
+ * settled that only a **lower** bound may: a namespace probe measures an upper
+ * bound on what a Cell carries, so an over-cap namespace bundle is a measurement
+ * rather than a verdict. The `bound` argument carries that distinction, and its
+ * default is the non-rejecting direction.
  */
 
 import { describe, expect, it } from "vitest";
@@ -146,8 +150,11 @@ describe("observeSize", () => {
 
   // The report's central separation: measuring succeeded; the rejection finding
   // carries "it does not qualify".
-  it("passes the step while filing cell-artifact-budget-exceeded when over the cap", () => {
-    const observation = observeSize([chunk("var a = 12345;")], 4);
+  it("passes the step while filing cell-artifact-budget-exceeded when a lower bound is over the cap", () => {
+    // `"lower-bound"` is not decoration: it is the argument that makes this rejection sound.
+    // The build declared a named import surface, so the Cell certainly carries at least these
+    // characters and the composed artifact cannot come in under the cap. See the module header.
+    const observation = observeSize([chunk("var a = 12345;")], 4, "lower-bound");
 
     expect(observation.validation.outcome).toBe("passed");
     expect(factValue(observation, "artifact.budgetCharacters")).toBe(4);
@@ -157,6 +164,7 @@ describe("observeSize", () => {
     expect(finding?.evidence).toContain(`characters:${String("var a = 12345;".length)}`);
     expect(finding?.evidence).toContain("band:inline");
     expect(finding?.evidence).toContain("budgetCharacters:4");
+    expect(finding?.evidence).toContain("bound:lower-bound");
   });
 
   it("blames the cap, not the measurement, when a tight cap rejects an ordinary artifact", () => {
@@ -165,13 +173,48 @@ describe("observeSize", () => {
     // measurement says this artifact is fine, and a summary that read "over budget"
     // without saying so would send the reader looking for a cost problem #21 says is
     // not there. This is the same split `cell-compiler`'s diagnostic makes.
-    const observation = observeSize([chunk("var a = 1;")], 4);
+    const observation = observeSize([chunk("var a = 1;")], 4, "lower-bound");
 
     expect(factValue(observation, "size.band")).toBe("inline");
     const finding = observation.rejectionFindings[0];
     expect(finding?.signal).toBe("cell-artifact-budget-exceeded");
     expect(finding?.summary).toContain("configured cap");
     expect(finding?.summary).toMatch(/rejection is the cap's rather than a cost the measurement found/);
+  });
+
+  it("records which way the measurement bounds the Cell, on every run", () => {
+    // The fact that makes the other size facts interpretable: a reader seeing a number over a
+    // cap needs to know whether that is a verdict or an upper bound, and it must not have to
+    // infer it from the entry shape or from the absence of a finding.
+    expect(factValue(observeSize([chunk("var a = 1;")], null), "size.bound")).toBe("upper-bound");
+    expect(factValue(observeSize([chunk("var a = 1;")], null, "lower-bound"), "size.bound")).toBe("lower-bound");
+    expect(factValue(observeSize([chunk("var a = 1;")], 4), "size.bound")).toBe("upper-bound");
+  });
+
+  it("defaults to the upper bound, so a caller that declared no surface cannot reject by omission", () => {
+    // The direction that matters for safety. A namespace probe is the default entry shape, so a
+    // caller who passes no `bound` has declared no import surface — and the default must be the
+    // one that files nothing, not the one that files a rejection on evidence the run lacks.
+    // Falsified against the old behaviour: before #77's review the default was the rejection.
+    const observation = observeSize([chunk("x".repeat(10_000))], 4);
+
+    expect(observation.rejectionFindings).toEqual([]);
+    expect(observation.validation.outcome).toBe("passed");
+  });
+
+  it("reports an over-cap upper bound as a measurement and names the way to get a verdict", () => {
+    // The P1-c case in one assertion. A namespace bundle over the cap is NOT a rejection: the
+    // Cell may import a fraction of it. Measured on `es-toolkit`, the namespace bundles to
+    // 249,750 characters against 2,865 for the single named binding `debounce` — an 87x gap,
+    // which is exactly the false rejection this branch exists to refuse.
+    const observation = observeSize([chunk("x".repeat(10_000))], 4);
+
+    expect(factValue(observation, "artifact.budgetCharacters")).toBe(4);
+    expect(factValue(observation, "size.bound")).toBe("upper-bound");
+    expect(observation.rejectionFindings).toEqual([]);
+    expect(observation.validation.outcome).toBe("passed");
+    expect(observation.validation.detail).toContain("upper bound");
+    expect(observation.validation.detail).toContain("Re-probe with a declared import surface");
   });
 
   it("files no rejection when the artifact fits the cap", () => {

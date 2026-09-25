@@ -79,6 +79,16 @@ export interface DependencyDecisionUpdate {
   readonly decision: DependencyDecision;
   /** The cell target the decision applies to; defaults to null, i.e. every target. */
   readonly cellTarget?: string | null;
+  /**
+   * The named bindings the probe's synthetic entry imported, sorted; omit or null for the
+   * whole-namespace probe.
+   *
+   * Stated rather than derived from the fingerprint: the fingerprint is one opaque string and
+   * a reader asking "does this record's cap rejection rest on a lower bound" must not have to
+   * parse it. It also has to survive into the record for `status` to recompose the same
+   * fingerprint at all.
+   */
+  readonly imports?: readonly string[] | null;
   /** The measurement being recorded. */
   readonly probe: LockProbeEvidence;
   readonly resolvedVersion?: string | null;
@@ -130,6 +140,10 @@ export function mergeDependencyDecisionUpdate(
     // #4's fields, including `packageName` and every strategy-specific one.
     ...update.decision,
     cellTarget: update.cellTarget ?? existing?.cellTarget ?? null,
+    // An empty array is normalized to null — the two spell one state, and the lock's own
+    // validator refuses the array form, so normalizing here keeps a caller that passed `[]`
+    // from producing a document nothing can read.
+    imports: update.imports === undefined ? (existing?.imports ?? null) : (update.imports?.length ? [...update.imports] : null),
     resolvedVersion: update.resolvedVersion ?? null,
     probe: update.probe,
     target: update.target ?? null,
