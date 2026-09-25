@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { LockEnvironment, LockedDependencyDecision } from "./index.ts";
+import type { ArtifactBudgetEvidence, LockEnvironment, LockedDependencyDecision } from "./index.ts";
 import {
   assessLockDecision,
   findLockDecision,
@@ -28,7 +28,30 @@ const EXTENSION_IDENTITY = "sha256:9f1c2b7d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091";
 
 /** The Cell a compile-observed rejection is about, and its compile identity. */
 const BENCH_CELL = "bench";
-const ARTIFACT_FINGERPRINT = 'artifact="abc";deps=[{"packageName":"react","strategy":"host"}];budget=100000';
+const ARTIFACT_FINGERPRINT = 'cell="abc";budget=100000';
+
+/**
+ * Compile evidence for a rejection the compiler confirmed.
+ *
+ * The shape #77 revision 16 settled: an identity over the composed artifact, the subject's
+ * pre-rejection decision, and the two compiles a size verdict has to justify. Defaults describe the
+ * state a rejection is allowed to rest on — over cap with the subject, under it without.
+ */
+function artifactEvidenceFixture(overrides: {
+  readonly subjectRenderedCharacters?: number;
+  readonly codeCharacters?: number;
+  readonly budgetCharacters?: number;
+} = {}): ArtifactBudgetEvidence {
+  return {
+    compileFingerprint: ARTIFACT_FINGERPRINT,
+    subjectDecision: { strategy: "inline" },
+    // Over cap with the subject's contribution counted, under it without: the state a rejection is
+    // allowed to rest on.
+    subjectRenderedCharacters: overrides.subjectRenderedCharacters ?? 190_000,
+    codeCharacters: overrides.codeCharacters ?? 200_000,
+    budgetCharacters: overrides.budgetCharacters ?? 100_000,
+  };
+}
 
 /** What a record stores: the identity derived from the verified contract. */
 const RECORD_TARGET = forguncyTargetIdentity();
@@ -189,7 +212,7 @@ const artifactRejection: LockedDependencyDecision = {
     summary: "The composed Cell is 200,000 characters against this Cell's cap of 100,000.",
     remediation: "Evaluate a lighter alternative or raise the Cell's declared cap.",
   },
-  artifactEvidence: { compileFingerprint: ARTIFACT_FINGERPRINT, codeCharacters: 200_000, budgetCharacters: 100_000 },
+  artifactEvidence: artifactEvidenceFixture(),
   alternatives: ["a lighter date utility"],
   supersededBy: "host",
   // A concrete Cell: a size verdict belongs to one composed Cell and one Cell's cap, which is why

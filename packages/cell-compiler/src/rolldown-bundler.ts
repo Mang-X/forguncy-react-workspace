@@ -63,7 +63,13 @@ import { rolldown, type OutputAsset, type OutputChunk } from "rolldown";
 // {@link resolveEntrySpecifiersWithRolldown}.
 import { scan } from "rolldown/experimental";
 
-import type { BundledCellModule, CellBundlerPort, CellBundlingRequest, CellResolveRequest } from "./artifact.ts";
+import type {
+  BundledCellModule,
+  CellBundlerPort,
+  CellBundlingRequest,
+  CellResolveRequest,
+  InlinedPackageSize,
+} from "./artifact.ts";
 import { findDependencyDecision, packageNameOfSpecifier } from "./specifier.ts";
 import type { CellArtifactDiagnostic } from "./diagnostics.ts";
 import { createCellArtifactDiagnostic, dedupeCellArtifactDiagnostics } from "./diagnostics.ts";
@@ -467,6 +473,31 @@ function inlinedPackageNames(moduleIds: readonly string[]): string[] {
 }
 
 /**
+ * Rendered characters contributed by each installed package that landed in this chunk.
+ *
+ * The bundler already accounts per module (`renderedLength`), so this is a grouping of what it
+ * reported rather than a second measurement — and it is the only sound basis for attribution. #77
+ * round 6 initially tried to obtain it by recompiling the Cell *without* the subject's decision and
+ * subtracting, which is **degenerate**: dropping a decision does not remove the package's code,
+ * because the bundler still resolves the bare import from `node_modules` (measured: 14971
+ * characters either way). Measuring what a package actually contributes requires asking the module
+ * graph, which is exactly this.
+ *
+ * Sorted by name so the report is byte-stable, like the code and `inlinedPackages`.
+ */
+function inlinedPackageSizesOf(modules: Record<string, { readonly renderedLength: number }>): readonly InlinedPackageSize[] {
+  const sizes = new Map<string, number>();
+  for (const [moduleId, module] of Object.entries(modules)) {
+    const packageName = packageNameOfModuleId(moduleId);
+    if (packageName === undefined) continue;
+    sizes.set(packageName, (sizes.get(packageName) ?? 0) + module.renderedLength);
+  }
+  return [...sizes.entries()]
+    .map(([packageName, renderedCharacters]) => ({ packageName, renderedCharacters }))
+    .sort((a, b) => (a.packageName < b.packageName ? -1 : a.packageName > b.packageName ? 1 : 0));
+}
+
+/**
  * Whether a module id resolves, after following symlinks, to a real path under
  * `node_modules`.
  *
@@ -735,6 +766,7 @@ async function bundleWithRolldown(dir: string, request: CellBundlingRequest): Pr
   const externalImports = [...entryChunk.imports].sort();
   const moduleIds = Object.keys(entryChunk.modules);
   const inlinedPackages = inlinedPackageNames(moduleIds);
+  const inlinedPackageSizes = inlinedPackageSizesOf(entryChunk.modules);
   // Bare specifiers whose resolved module actually landed in the entry chunk
   // and whose id sits under `node_modules` after symlink resolution. Sorted for
   // byte-stable reports; the decision loop and `auditInlinedPackages` both read
@@ -781,6 +813,7 @@ async function bundleWithRolldown(dir: string, request: CellBundlingRequest): Pr
     code: entryChunk.code,
     externalImports,
     inlinedPackages,
+    inlinedPackageSizes,
     inlinedSpecifiers,
     emittedAssets,
     // Sorted for a byte-stable report, like every other list here: #7's determinism

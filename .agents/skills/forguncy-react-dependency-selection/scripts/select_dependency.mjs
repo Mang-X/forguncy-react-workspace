@@ -1289,93 +1289,127 @@ async function compileEvidenceFor(entry, options) {
     return {
       evidence: undefined,
       problems: [
-        `The decision for "${decision.packageName}" rejects a Cell on a size the compiler measures, but names no Cell. A composed Cell and its cap belong to one Cell target — a null target is the record that applies to every Cell — so this would turn one Cell's size verdict into a rejection of the package everywhere. Name the Cell (\`--cell\` or the decision file's \`cellTarget\`).`,
+        `The decision for "${decision.packageName}" rejects a Cell on a size the compiler measures, but names no Cell. A composed Cell and its cap belong to one Cell target — a null target is the record that applies to every Cell — so this would turn one Cell's size verdict into a rejection of the package everywhere. Name the Cell (--cell or the decision file's cellTarget).`,
       ],
     };
   }
 
   const lock = await resolver.readFgcLock(projectRoot);
-  const cellDecisions = lock.decisions.filter(record => record.cellTarget === cellTarget);
-  if (!cellDecisions.some(record => record.packageName === decision.packageName)) {
+
+  // The effective decision set, resolved the way the *compiler's own projection* resolves it
+  // (#77 round 6). Filtering records by exact target was wrong: a `cellTarget: null` record means
+  // "applies to every Cell", so a Cell whose React decision is target-independent would have had
+  // that decision dropped here — and the evidence compile would then bundle npm React where the
+  // production compile applies the host bridge. `findLockDecision` is the lock's own read
+  // semantics (exact target, then the null fallback), applied per package.
+  const effective = effectiveCellDecisions(lock, cellTarget);
+
+  // The subject has to be part of the Cell's graph, or no compile of it measured this package.
+  const subjectRecord = effective.find(record => record.packageName === decision.packageName);
+  if (subjectRecord === undefined) {
     return {
       evidence: undefined,
       problems: [
-        `The decision for "${decision.packageName}" rejects Cell "${cellTarget}" on a size the compiler measures, but the lock places no decision for "${decision.packageName}" in that Cell — so no compile of it can have included this package. Record the strategy it resolves to first (the compile that measured the size ran under it).`,
+        `The decision for "${decision.packageName}" rejects Cell "${cellTarget}" on a size the compiler measures, but no decision for "${decision.packageName}" applies to that Cell — so no compile of it can have included this package. Record the strategy it resolves to first (the compile that measured the size ran under it).`,
       ],
     };
   }
 
-  const projections = [];
-  for (const record of cellDecisions) {
-    projections.push(await projectionFor(record, projectRoot));
+  // The subject's *pre-rejection* decision. Recording this rejection overwrites the record with
+  // `replace`, so this is the only place the decision the measurement saw can be captured — and
+  // without it a later re-record would compile a Cell the package is not part of and renew the
+  // rejection from that (#77 round 6).
+  const subjectDecision = core.dependencyDecisionOf(subjectRecord);
+  const subjectCompileDecision = {
+    strategy: subjectDecision.strategy,
+    ...(subjectDecision.globalName === undefined ? {} : { globalName: subjectDecision.globalName }),
+    ...(subjectDecision.libraryId === undefined ? {} : { libraryId: subjectDecision.libraryId }),
+  };
+
+  const withSubject = await projectionsFor(effective, projectRoot);
+  if (withSubject.problem !== undefined) {
+    return { evidence: undefined, problems: [`The decision for "${decision.packageName}" needs Cell "${cellTarget}" compiled, but ${withSubject.problem}`] };
   }
-  const failed = projections.filter(projection => projection.problem !== undefined);
-  if (failed.length > 0) {
+
+  const compiledWith = await compileDeclaredCell({ projectRoot, cellTarget, dependencies: withSubject.decisions });
+  if (!compiledWith.ok) {
     return {
       evidence: undefined,
       problems: [
-        `The decision for "${decision.packageName}" needs Cell "${cellTarget}" compiled, but some of its records could not be projected for compilation: ${failed.map(projection => projection.problem).join(" ")}`,
+        `The decision for "${decision.packageName}" rejects the Cell on a size the compiler measures, but that compile could not be produced: ${compiledWith.problem}`,
       ],
     };
   }
 
-  const compiled = await compileDeclaredCell({
-    projectRoot,
-    cellTarget,
-    dependencies: projections.map(projection => projection.decision),
-    // The identity is composed over the same records `status` will rebuild it from: the Cell's
-    // decisions minus every record that already carries compile evidence. `identityExcludes` is
-    // that rule, stated once so the two sites cannot disagree — a disagreement here would make
-    // every `artifact-rejection` report `artifact-compile-changed` for ever.
-    identityDependencies: projections
-      .filter((_, index) => !identityExcludes(cellDecisions[index], decision.packageName))
-      .map(projection => projection.decision),
-  });
-  if (!compiled.ok) {
+  // Attribution is read from the bundler's own per-module accounting, not from a second compile.
+  // The differential this replaced was degenerate: dropping the subject's decision does not remove
+  // its code, because the bundler still resolves the bare import (measured on `es-toolkit` — 14,971
+  // characters with the decision and 14,971 without). What a package contributes is a fact about
+  // the module graph, so only the graph can answer it.
+  const subjectRenderedCharacters = (compiledWith.artifact?.inlinedPackageSizes ?? [])
+    .filter(entry => entry.packageName === decision.packageName)
+    .reduce((total, entry) => total + entry.renderedCharacters, 0);
+
+  // The compiler files its diagnostic only when the artifact is genuinely over, so a fitting
+  // measurement means the rejection has nothing behind it — reported rather than accepted, because
+  // a `replace` binds to this finding.
+  if (compiledWith.measurement.codeCharacters <= compiledWith.measurement.budgetCharacters) {
     return {
       evidence: undefined,
       problems: [
-        `The decision for "${decision.packageName}" rejects the Cell on a size the compiler measures, but that compile could not be produced: ${compiled.problem}`,
+        `Cell "${cellTarget}" composes to ${String(compiledWith.measurement.codeCharacters)} characters against its declared cap of ${String(compiledWith.measurement.budgetCharacters)} — within the cap, so the compiler files no cell-code-budget-exceeded diagnostic and this rejection has nothing behind it.`,
       ],
     };
   }
 
-  // The compiler only files the diagnostic when the artifact is genuinely over, so reaching here
-  // with a fitting measurement means the rejection has nothing behind it — reported as such rather
-  // than accepted, because a `replace` binds to this finding.
-  if (compiled.evidence.codeCharacters <= compiled.evidence.budgetCharacters) {
-    return {
-      evidence: undefined,
-      problems: [
-        `Cell "${cellTarget}" composes to ${String(compiled.evidence.codeCharacters)} characters against its declared cap of ${String(compiled.evidence.budgetCharacters)} — within the cap, so the compiler files no \`cell-code-budget-exceeded\` diagnostic and this rejection has nothing behind it.`,
-      ],
-    };
-  }
-
-  return { evidence: compiled.evidence, problems: [] };
+  return {
+    evidence: {
+      compileFingerprint: compiledWith.compileFingerprint,
+      subjectDecision: subjectCompileDecision,
+      subjectRenderedCharacters,
+      codeCharacters: compiledWith.measurement.codeCharacters,
+      budgetCharacters: compiledWith.measurement.budgetCharacters,
+    },
+    problems: [],
+  };
 }
 
 /**
- * Whether a lock record is excluded from a Cell's compile identity.
+ * The decisions that actually apply to one Cell, resolved per package.
  *
- * The recorder and `status` must agree on this exactly, or the identity `status` rebuilds would
- * differ from the one `record` wrote and every `artifact-rejection` would report
- * `artifact-compile-changed` for ever. Stated once, as a predicate, so the two call sites cannot
- * drift into disagreeing about which records the identity covers.
+ * The lock's read semantics, and the reason this is not `filter(record => record.cellTarget ===
+ * cellTarget)`: a record with `cellTarget: null` **applies to every Cell**, and the resolver
+ * prefers an exact-target record and falls back to the null one. Dropping the fallback silently
+ * discarded every target-independent decision — including the host-React mapping the Cell cannot
+ * compile correctly without (#77 round 6).
  *
- * Two ways a record is excluded, and they coincide after a write:
- *
- * - **It is the subject** (`subjectPackageName`) — the record this rejection is about. Recording it
- *   turns its decision into `replace`, so its projection differs from the one the measuring compile
- *   saw; including it would make the identity change at the moment of writing.
- * - **It already carries compile evidence** — i.e. it is *a* recorded `artifact-rejection`. This is
- *   the same rule seen from `status`, which assesses records one at a time and knows no "subject":
- *   every artifact-rejection it assesses is the subject of its own identity, so the subject is
- *   always in this set. That is what makes `identityExcludes(record, null)` at assessment time
- *   compute the same set `identityExcludes(record, packageName)` computed at write time.
+ * Mirrors `compilationDependencies` in the resolver, which is the same rule stated for the
+ * compiler's own projection. It is restated here rather than imported because this needs the
+ * *records* (for the subject's pre-rejection decision) where that returns projected decisions.
  */
-function identityExcludes(record, subjectPackageName) {
-  return record.packageName === subjectPackageName || record.artifactEvidence !== undefined;
+function effectiveCellDecisions(lock, cellTarget) {
+  const packageNames = [...new Set(lock.decisions.map(record => record.packageName))].sort();
+  const resolved = [];
+  for (const packageName of packageNames) {
+    const record = core.findLockDecision(lock, { packageName, cellTarget });
+    if (record !== null) {
+      resolved.push(record);
+    }
+  }
+  return resolved;
+}
+
+/** Projects records for a compile, or a problem naming the first that could not be. */
+async function projectionsFor(records, projectRoot) {
+  const decisions = [];
+  for (const record of records) {
+    const projection = await projectionFor(record, projectRoot);
+    if (projection.problem !== undefined) {
+      return { problem: projection.problem };
+    }
+    decisions.push(projection.decision);
+  }
+  return { decisions };
 }
 
 /**
@@ -1397,16 +1431,21 @@ async function projectionFor(record, projectRoot) {
 }
 
 /**
- * Compiles one declared Cell and returns the budget evidence the compiler produced.
+ * Compiles one declared Cell and returns its measurement and compile identity.
  *
  * The plan comes from the registry (so the entry, the Cell's decisions and the declared cap are the
  * project's rather than the caller's), and the bundler is the same Rolldown port the compiler ships
  * — the point is to run the *real* compile, not an approximation of it.
  *
+ * The identity hashes the **composed artifact**, not the entry file: everything that changed the
+ * bytes is already in them, which is what makes an edit to a transitively imported module, or an
+ * upgrade of an `inline` dependency, move the identity. Composing it any other way was the round-6
+ * defect — `status` reported `fresh` for a Cell whose real compiled size had changed.
+ *
  * Returns a problem rather than throwing, because the callers report rather than die: `audit` on a
  * project whose Cell does not build yet is a normal state, and the answer is a finding.
  */
-async function compileDeclaredCell({ projectRoot, cellTarget, dependencies, identityDependencies }) {
+async function compileDeclaredCell({ projectRoot, cellTarget, dependencies }) {
   try {
     const compiler = await import("@forguncy-react-workspace/cell-compiler");
     const registry = await core.loadForguncyConfig({ root: projectRoot, requireEntryFiles: true });
@@ -1418,44 +1457,74 @@ async function compileDeclaredCell({ projectRoot, cellTarget, dependencies, iden
     if (codeBudgetCharacters === undefined) {
       return {
         ok: false,
-        problem: `Cell "${cellTarget}" declares no \`output.codeBudgetCharacters\`, so its compile applies no cap and cannot exceed one.`,
+        problem: `Cell "${cellTarget}" declares no output.codeBudgetCharacters, so its compile applies no cap and cannot exceed one.`,
       };
     }
-
-    // The identity's entry half is read from the file the plan resolved. Both halves of the
-    // fingerprint exist only here, and a later reader re-reading this file composes the same digest.
-    const entrySource = await readFile(plan.input.entry, "utf8");
-    const identify = measurements =>
-      core.composeCellCompileFingerprint({
-        entrySource,
-        dependencies: identityDependencies,
-        codeBudgetCharacters: measurements.budgetCharacters,
-      });
 
     const outcome = await compiler.compileCell(plan.input, {
       bundler: compiler.createRolldownCellBundler({ dir: projectRoot }),
       codeBudgetCharacters,
     });
 
+    // The composed source, whichever way the compile went. A rejected compile still built the
+    // artifact — the diagnostic is *about* it — so both outcomes measure the same document, and the
+    // identity is composed from it rather than from anything the caller supplied.
+    const artifactSource = outcome.status === "rejected" ? composedSourceOf(outcome) : outcome.artifact.code;
+    const artifactCharacters = artifactSource === undefined ? undefined : artifactSource.length;
+    const compileFingerprint =
+      artifactSource === undefined
+        ? undefined
+        : core.composeCellCompileFingerprint({ artifactSource, codeBudgetCharacters });
+
     if (outcome.status !== "rejected") {
       // Compiled cleanly: no budget diagnostic exists, so nothing measured a size. Reported as a
       // fitting measurement so the caller's one "over cap?" test decides, rather than duplicating it.
-      const measurements = { budgetCharacters: codeBudgetCharacters, codeCharacters: outcome.artifact.code.length };
-      return { ok: true, evidence: { ...measurements, compileFingerprint: identify(measurements) } };
+      return {
+        ok: true,
+        measurement: { budgetCharacters: codeBudgetCharacters, codeCharacters: artifactCharacters },
+        compileFingerprint,
+        artifact: outcome.artifact,
+      };
     }
 
     const measured = outcome.diagnostics.find(diagnostic => diagnostic.budgetEvidence !== undefined);
     if (measured?.budgetEvidence === undefined) {
       // Rejected for something else (a source construct, a remaining import): the size verdict is
-      // not what failed, so there is no budget evidence to cite.
+      // not what failed, so there is no budget measurement to compare.
       const codes = outcome.diagnostics.map(diagnostic => diagnostic.code).join(", ");
       return { ok: false, problem: `compiling Cell "${cellTarget}" was rejected by ${codes || "no named diagnostic"}, none of which measures a size.` };
     }
 
-    return { ok: true, evidence: { ...measured.budgetEvidence, compileFingerprint: identify(measured.budgetEvidence) } };
+    // The diagnostic's figures are the compiler's own; asserted against the artifact we just hashed
+    // so the two cannot describe different documents.
+    if (artifactCharacters !== measured.budgetEvidence.codeCharacters) {
+      return {
+        ok: false,
+        problem: `the compiler reported ${String(measured.budgetEvidence.codeCharacters)} characters for Cell "${cellTarget}" but the artifact it produced is ${String(artifactCharacters)}, so its measurement and its output disagree.`,
+      };
+    }
+
+    return {
+      ok: true,
+      measurement: measured.budgetEvidence,
+      compileFingerprint,
+      artifact: outcome.artifact,
+    };
   } catch (error) {
     return { ok: false, problem: error.message };
   }
+}
+
+/**
+ * The composed source behind a rejected compile, when the compiler can hand it back.
+ *
+ * A rejection means "this artifact does not qualify", so the artifact exists — but a rejection can
+ * also come from a path that never composed one (a workspace cycle found before bundling). `undefined`
+ * says so, and the caller then has no identity to record, which is the honest answer: there was no
+ * composed Cell to measure.
+ */
+function composedSourceOf(outcome) {
+  return outcome.artifact?.code;
 }
 
 /**
@@ -1855,30 +1924,44 @@ async function commandStatus(options) {
       .map(record => record.cellTarget),
   );
   for (const cellTarget of cellsNeedingIdentity) {
+    // Recompiled, not recomposed from metadata (#77 round 6). The identity is a hash of the
+    // *composed artifact*, so the only way to recompute it faithfully is to compose the artifact
+    // again — reading the entry file was the defect: an edit to a transitively imported module, or
+    // an upgrade of an inline dependency, left the identity unchanged and the record reporting
+    // `fresh` for a Cell whose real compiled size had moved.
+    //
+    // Paid only for Cells that actually hold a compile-observed rejection, which is the trade the
+    // review endorsed: `status` already re-runs dependency probes, and an evidence class whose
+    // authority is explicitly the compiler must not stay fresh on a compiler-input change merely
+    // because the top-level entry did not move.
     try {
-      const budget = await resolveCellBudget(projectRoot, cellTarget);
-      if (!budget.ok || budget.codeBudgetCharacters === null) {
+      const effective = effectiveCellDecisions(lock, cellTarget);
+      // Replay the subject's *pre-rejection* decision from the evidence (#77 round 6). Recording the
+      // rejection overwrote the record with `replace`, so the lock no longer describes the Cell that
+      // was measured — compiling it as it stands would omit the subject and compose a different
+      // artifact, and the record would report `artifact-compile-changed` for its own write.
+      //
+      // A Cell may hold several compile-observed rejections, so each subject's recorded decision is
+      // restored in turn; they cannot overlap, since one package has one record per Cell.
+      const recordEvidence = lock.decisions.filter(
+        record => record.cellTarget === cellTarget && record.artifactEvidence !== undefined,
+      );
+      const replayable = [];
+      for (const record of effective) {
+        const evidence = recordEvidence.find(candidate => candidate.packageName === record.packageName)?.artifactEvidence;
+        replayable.push(evidence === undefined ? record : { ...record, ...evidence.subjectDecision });
+      }
+
+      const projections = await projectionsFor(replayable, projectRoot);
+      if (projections.problem !== undefined) {
         continue;
       }
-      const registry = await core.loadForguncyConfig({ root: projectRoot, requireEntryFiles: true });
-      const entrySource = await readFile(registry.require(cellTarget).entryPath, "utf8");
-      const identityDependencies = [];
-      for (const record of lock.decisions) {
-        if (record.cellTarget !== cellTarget || identityExcludes(record, null)) {
-          continue;
-        }
-        identityDependencies.push(core.dependencyDecisionOf(record));
+      const compiled = await compileDeclaredCell({ projectRoot, cellTarget, dependencies: projections.decisions });
+      if (compiled.ok && compiled.compileFingerprint !== undefined) {
+        rebuiltArtifacts.set(cellTarget, compiled.compileFingerprint);
       }
-      rebuiltArtifacts.set(
-        cellTarget,
-        core.composeCellCompileFingerprint({
-          entrySource,
-          dependencies: identityDependencies,
-          codeBudgetCharacters: budget.codeBudgetCharacters,
-        }),
-      );
     } catch {
-      // An unresolvable Cell or entry leaves the identity absent, which the freshness axis reports.
+      // An unresolvable Cell leaves the identity absent, which the freshness axis reports.
     }
   }
 

@@ -1033,16 +1033,24 @@ function inspectLockRecord(record: unknown, where: string): readonly string[] {
     const evidence: unknown = record.artifactEvidence;
     if (!isPlainObject(evidence)) {
       problems.push(
-        `${where} must declare \`artifactEvidence\` as an object with \`codeCharacters\` and \`budgetCharacters\`, or omit it.`,
+        `${where} must declare \`artifactEvidence\` as an object describing the compiles it rests on, or omit it.`,
       );
     } else {
-      for (const field of ["codeCharacters", "budgetCharacters"]) {
+      if (typeof evidence.compileFingerprint !== "string") {
+        problems.push(`${where} must declare \`artifactEvidence.compileFingerprint\` as a string, or omit \`artifactEvidence\`.`);
+      }
+      for (const field of ["subjectRenderedCharacters", "codeCharacters", "budgetCharacters"]) {
         const value = evidence[field];
         if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
-          problems.push(
-            `${where} must declare \`artifactEvidence.${field}\` as a non-negative finite character count, or omit \`artifactEvidence\`.`,
-          );
+          problems.push(`${where} must declare \`artifactEvidence.${field}\` as a non-negative finite character count.`);
         }
+      }
+      // The subject's own decision is read for its `strategy`, so it needs the same treatment.
+      const subject = evidence.subjectDecision;
+      if (!isPlainObject(subject)) {
+        problems.push(`${where} must declare \`artifactEvidence.subjectDecision\` as an object naming the strategy the subject compiled under.`);
+      } else if (typeof subject.strategy !== "string") {
+        problems.push(`${where} must declare \`artifactEvidence.subjectDecision.strategy\` as a string.`);
       }
     }
   }

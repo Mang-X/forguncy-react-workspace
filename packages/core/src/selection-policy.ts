@@ -880,8 +880,12 @@ export function auditSelectionDecision(input: SelectionAuditInput): readonly str
       if (decision.strategy === "replace" && decision.rejection.kind === "technical") {
         if (isArtifactObservedRejectionCode(decision.rejection.code)) {
           if (decision.artifactEvidence === undefined) {
+            // State the invariant rather than instruct the writer: the evidence is not the
+            // decision-file author's to supply (#77 round 5), so a caller missing it has either
+            // bypassed the CLI's compile step or written a record by hand. Telling them to "record
+            // the measurement" would point at the field that is now refused.
             problems.push(
-              `The recorded technical rejection is "${decision.rejection.code}", whose evidence is a composed Cell compile rather than a probe. Record \`artifactEvidence\` with the measured \`codeCharacters\` and the \`budgetCharacters\` that compile used: the probe builds a synthetic candidate whose resolution graph differs from the compiler's, so no probe finding can support this code.`,
+              `The recorded technical rejection is "${decision.rejection.code}", whose evidence is a composed Cell compile rather than a probe — and this decision carries none. That code's evidence is produced by compiling the Cell (\`record\`/\`audit\` do it, and the decision file may not supply the numbers), so a record holding it without evidence reached this audit without that step.`,
             );
           }
         } else {

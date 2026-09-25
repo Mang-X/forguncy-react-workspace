@@ -4,7 +4,12 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import type { FgcLockDocument, ForguncyTargetIdentity, LockedDependencyDecision } from "./index.ts";
+import type {
+  ArtifactBudgetEvidence,
+  FgcLockDocument,
+  ForguncyTargetIdentity,
+  LockedDependencyDecision,
+} from "./index.ts";
 import {
   assertFgcLockDocument,
   canonicalizeFgcLock,
@@ -170,6 +175,30 @@ function problemsFor(record: LockedDependencyDecision): string {
   return validateFgcLockDocument(withRecord(record)).join("\n");
 }
 
+/**
+ * Compile evidence for a rejection that the compiler confirmed.
+ *
+ * The shape #77 revision 16 settled: an identity over the composed artifact, the subject's
+ * pre-rejection decision, and the two compiles a size verdict has to justify — the Cell with the
+ * subject, and the Cell without it. Defaults are a Cell that is over cap in both compiles unless a
+ * case overrides them, so each test states only the property it is about.
+ */
+function artifactEvidenceFixture(overrides: {
+  readonly subjectRenderedCharacters?: number;
+  readonly codeCharacters?: number;
+  readonly budgetCharacters?: number;
+} = {}): ArtifactBudgetEvidence {
+  return {
+    compileFingerprint: 'cell="x";budget=100000',
+    subjectDecision: { strategy: "inline" },
+    // Over cap with the subject's contribution counted, under it without: the state a rejection is
+    // allowed to rest on.
+    subjectRenderedCharacters: overrides.subjectRenderedCharacters ?? 190_000,
+    codeCharacters: overrides.codeCharacters ?? 200_000,
+    budgetCharacters: overrides.budgetCharacters ?? 100_000,
+  };
+}
+
 describe("lock provenance", () => {
   it("is governed by #4, #5 and #8, in that order", () => {
     expect(LOCK_GOVERNING_DECISIONS.map(source => source.issue)).toEqual([4, 5, 8]);
@@ -238,7 +267,7 @@ describe("fgc.lock.json model", () => {
         summary: "The composed Cell is over the project's cap.",
         remediation: "Evaluate a lighter alternative.",
       },
-      artifactEvidence: { compileFingerprint: "artifact=\"x\";deps=[];budget=100000", codeCharacters: 200_000, budgetCharacters: 100_000 },
+      artifactEvidence: artifactEvidenceFixture(),
     };
     expect(lockEvidenceProfileOf(artifactRejection)).toBe("artifact-rejection");
     expect(LOCK_EVIDENCE_POLICY["artifact-rejection"].probeRequirement).toBe("passed");
@@ -617,7 +646,7 @@ describe("lock metadata validation", () => {
   it("refuses compile evidence attached to a code a probe observes", () => {
     const misplaced: LockedDependencyDecision = {
       ...technicalRejection,
-      artifactEvidence: { compileFingerprint: "artifact=\"x\";deps=[];budget=100000", codeCharacters: 200_000, budgetCharacters: 100_000 },
+      artifactEvidence: artifactEvidenceFixture(),
     };
 
     expect(problemsFor(misplaced)).toMatch(/which is the evidence for a compile-observed code/);
@@ -637,10 +666,41 @@ describe("lock metadata validation", () => {
         summary: "The composed Cell is over the project's cap.",
         remediation: "Evaluate a lighter alternative.",
       },
-      artifactEvidence: { compileFingerprint: "artifact=\"x\";deps=[];budget=100000", codeCharacters: 100, budgetCharacters: 100_000 },
+      artifactEvidence: artifactEvidenceFixture({ codeCharacters: 100 }),
     };
 
     expect(problemsFor(withinCap)).toMatch(/within the cap, so the evidence does not support/);
+  });
+
+  // PR review of #77, P1 (round 6). Revision 15 checked only that the rejected package had a record
+  // in the Cell — attribution from mere presence, so tiny package B could be rejected on package A's
+  // excess. The fix is the subject's own share: removing its rendered characters has to bring the
+  // Cell under its cap.
+  it("refuses a size rejection the subject's own share does not account for", () => {
+    // The Cell is over cap, the subject is in it, and the numbers are internally consistent — but
+    // the Cell would still be over without this package's contribution, so the excess is not its.
+    const notTheCause: LockedDependencyDecision = {
+      ...technicalRejection,
+      rejection: {
+        kind: "technical",
+        code: "cell-code-budget-exceeded",
+        summary: "The composed Cell is over the project's cap.",
+        remediation: "Evaluate a lighter alternative.",
+      },
+      artifactEvidence: artifactEvidenceFixture({ subjectRenderedCharacters: 1_000, codeCharacters: 200_000, budgetCharacters: 100_000 }),
+    };
+
+    expect(problemsFor(notTheCause)).toMatch(/the excess is not this package's/);
+    // The same evidence with a share large enough to explain the excess is accepted, so the rule is
+    // about the attribution rather than about the shape.
+    const attributable: LockedDependencyDecision = {
+      ...notTheCause,
+      // A concrete Cell, which compile evidence requires (revision 15) — otherwise this case would
+      // pass for the wrong reason.
+      cellTarget: "bench",
+      artifactEvidence: artifactEvidenceFixture({ subjectRenderedCharacters: 150_000 }),
+    };
+    expect(problemsFor(attributable)).toBe("");
   });
 
   // PR review of #77, P1 (round 5). A size verdict is about **one** composed Cell and that Cell's
@@ -655,7 +715,7 @@ describe("lock metadata validation", () => {
         summary: "The composed Cell is over the project's cap.",
         remediation: "Evaluate a lighter alternative.",
       },
-      artifactEvidence: { compileFingerprint: "artifact=\"x\";deps=[];budget=100000", codeCharacters: 200_000, budgetCharacters: 100_000 },
+      artifactEvidence: artifactEvidenceFixture(),
       cellTarget: null,
     };
 
