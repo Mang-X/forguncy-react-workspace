@@ -108,6 +108,16 @@ export const CELL_CODE_BUDGET_BANDS = ["inline", "review", "extension-recommende
 
 export type CellCodeBudgetBand = (typeof CELL_CODE_BUDGET_BANDS)[number];
 
+/** One measured figure, with the artifact it came from so it can be located on #21. */
+export interface CellCodeMeasurementPoint {
+  /** The measured cost, milliseconds. */
+  readonly ms: number;
+  /** The artifact size both figures were observed at, characters. */
+  readonly characters: number;
+  /** Which artifact, named so a reader can find its row on #21. */
+  readonly artifact: string;
+}
+
 /** One band: the ceiling, the cost it implies, and what a consumer should do. */
 export interface CellCodeBudgetBandDefinition {
   readonly band: CellCodeBudgetBand;
@@ -118,28 +128,30 @@ export interface CellCodeBudgetBandDefinition {
    */
   readonly maxCharacters: number | null;
   /**
-   * The measured cost at this band's ceiling.
+   * The measured cost at this band's ceiling, each half with its own provenance.
    *
-   * Both figures come from the **same** artifact, because reporting a write time
-   * from one size and an entry time from another inside one object invites a
-   * comparison that is not valid. The artifact each band names is identified so a
-   * reader can find its row on #21 rather than trust the rounding.
+   * Two separate fields rather than one `characters` + `artifact`, because the two
+   * figures come from **different measured series** and presenting them as one pair
+   * implied a single artifact that does not exist. The write path was measured on
+   * generated-toolkit artifacts; the browser entry path on real compiled ones. Both
+   * series are on #21; neither covers every band at the same size.
    *
-   * The write figure is `setCells` wall time; the entry figure is the platform's
-   * first `App` invocation. They come from two different runs — the write path was
-   * measured on hand-generated artifacts, the entry path on real compiled ones —
-   * so `artifact` names which measurement the *pair* is quoted from, and the two
-   * numbers are never subtracted from each other.
+   * Every figure here is required to be traceable: it must be a point #21 publishes.
+   * Two earlier drafts of this table broke that rule — one quoted entry times from a
+   * hand-generated entry series that had not been published at the time, and the
+   * table presented each band's two figures as one artifact when they came from two
+   * different series. Both are fixed here, and the series that was missing was
+   * published to #21 rather than dropped, so the figures stay honest either way.
+   *
+   * The entry half is deliberately drawn from the **real compiled** series rather
+   * than the generated-toolkit one, even though the write half comes from the latter.
+   * Same character count is much less code for the browser to walk when it is real
+   * bundled code (about 3.8 ms/KB against 6.9 ms/KB), and real compiled code is what
+   * a Cell actually is. Quoting the padded series' entry cost would overstate it.
    */
   readonly measuredAtCeiling: {
-    /** Designer `setCells` wall time, milliseconds. */
-    readonly writeMs: number;
-    /** Time from page load to the platform's first `App` invocation, milliseconds. */
-    readonly browserEntryMs: number;
-    /** The artifact size both figures above were observed at, characters. */
-    readonly characters: number;
-    /** What that artifact was, so the pair can be located on #21. */
-    readonly artifact: string;
+    readonly write: CellCodeMeasurementPoint;
+    readonly browserEntry: CellCodeMeasurementPoint;
   };
   /** What a consumer is expected to do in this band. */
   readonly guidance: string;
@@ -148,51 +160,62 @@ export interface CellCodeBudgetBandDefinition {
 /**
  * The bands, and the measured cost at each ceiling.
  *
- * Every band quotes **one** artifact for both figures — the hand-generated series,
- * which is the only one where `setCells` and the platform's entry were both measured
- * at each size. A pair drawn from two different artifacts would invite subtracting
- * one from the other, which is not valid across series (see
- * {@link CELL_CODE_BUDGET_MEASUREMENT}: the real compiled artifacts measured the
- * entry path at little more than half the per-character cost of the padded series).
- *
- * The ceilings are round numbers chosen for legibility, so each `artifact` names the
- * measured point the pair is quoted from rather than the ceiling itself — a ceiling
- * with no measurement behind it is the kind of invented number this module exists to
- * avoid.
+ * The ceilings are round numbers chosen for legibility, so each measurement names
+ * the published point it is quoted from rather than the ceiling itself — a ceiling
+ * with no measurement behind it is the kind of invented number this module exists
+ * to avoid.
  */
 export const CELL_CODE_BUDGET_BAND_DEFINITIONS: readonly CellCodeBudgetBandDefinition[] = [
   {
     band: "inline",
     maxCharacters: 512 * 1024,
     measuredAtCeiling: {
-      writeMs: 1691,
-      browserEntryMs: 2894,
-      characters: 511_567,
-      artifact: "the 500 KiB generated-toolkit artifact",
+      write: {
+        ms: 1691,
+        characters: 511_567,
+        artifact: "the 500 KiB generated-toolkit artifact",
+      },
+      browserEntry: {
+        ms: 1504,
+        characters: 381_643,
+        artifact: "the real `three` core build — the largest real compiled artifact inside this band",
+      },
     },
     guidance:
-      "At this size the designer write is under two seconds and the cell's first paint under three. No review beyond the ordinary one; this is the range `inline` is expected to serve.",
+      "The designer write is under two seconds and the cell's first paint under two. No review beyond the ordinary one; this is the range `inline` is expected to serve.",
   },
   {
     band: "review",
     maxCharacters: 2 * 1024 * 1024,
     measuredAtCeiling: {
-      writeMs: 9440,
-      browserEntryMs: 14787,
-      characters: 2_096_763,
-      artifact: "the 2 MiB generated-toolkit artifact",
+      write: {
+        ms: 9440,
+        characters: 2_096_763,
+        artifact: "the 2 MiB generated-toolkit artifact",
+      },
+      browserEntry: {
+        ms: 3986,
+        characters: 1_459_501,
+        artifact: "the real `three` addons+postprocessing build",
+      },
     },
     guidance:
-      "The write blocks the designer for most of ten seconds and the cell's first paint is a visible pause. Not refused, but the size should be justified — check whether the dependency is really needed by this cell, whether a verified extension already provides it, and whether the artifact carries code the cell never calls. The real `three` addons+postprocessing build lands here too: 1,459,501 characters, 4.0 s to reach its entry.",
+      "The write blocks the designer for most of ten seconds, and the cell's first paint is a visible pause: the real `three` addons+postprocessing build took 4.0 s to reach its entry. Not refused, but the size should be justified — check whether the dependency is really needed by this cell, whether a verified extension already provides it, and whether the artifact carries code the cell never calls.",
   },
   {
     band: "extension-recommended",
     maxCharacters: null,
     measuredAtCeiling: {
-      writeMs: 20339,
-      browserEntryMs: 28110,
-      characters: 4_193_986,
-      artifact: "the 4 MiB generated-toolkit artifact",
+      write: {
+        ms: 20339,
+        characters: 4_193_986,
+        artifact: "the 4 MiB generated-toolkit artifact",
+      },
+      browserEntry: {
+        ms: 10588,
+        characters: 2_725_099,
+        artifact: "the real `echarts` + `zrender` build",
+      },
     },
     guidance:
       "Both costs are now tens of seconds and the browser's own Babel pass dominates. Prefer a verified `extension`, or split the cell. This is a recommendation, not a refusal: no platform limit was reached, a 4 MiB artifact still wrote and rendered correctly, and an 8.4 MiB one persisted intact.",
@@ -203,24 +226,32 @@ export const CELL_CODE_BUDGET_BAND_DEFINITIONS: readonly CellCodeBudgetBandDefin
  * The artifact size, in characters, above which a Cell is no longer in the
  * ordinary `inline` band.
  *
- * Exported as a named constant because it is the one figure a compiler needs: the
- * point at which refusing to stay silent is correct. Taking this value as
- * `codeBudgetCharacters` does **not** make every artifact above it a failure — see
- * {@link classifyCellCodeSize}; the ceiling of the middle band is what a budget
- * should default to when a project has not measured its own.
+ * An **advisory** boundary, and the name says band rather than budget for that
+ * reason. It is not a hard cap and must not be passed to `codeBudgetCharacters`
+ * expecting the review and top bands to still compile: `codeBudgetCharacters` is a
+ * hard rejection cap, so using this ceiling as one refuses every artifact above it.
+ * The two concepts are deliberately separate — see
+ * {@link CELL_CODE_REVIEW_CEILING_CHARACTERS} for the same distinction stated
+ * against the compiler's budget.
  */
 export const CELL_CODE_INLINE_CEILING_CHARACTERS = CELL_CODE_BUDGET_BAND_DEFINITIONS[0].maxCharacters!;
 
 /**
- * The figure a project's code budget should start from: the top of the `review`
- * band, in characters.
+ * The top of the `review` band, in characters: the last size at which the measured
+ * cost is "seconds, and worth justifying".
  *
- * This is the number the compiler's diagnostic treats as the default once a caller
- * asks for a default. It is deliberately the *top of review* and not the top of
- * `inline`: a compiler that refused the review band on its own authority would be
- * making the policy decision that band exists to hand back to a human. Passing this
- * as a budget still permits the top band, which is why the compiler's diagnostic
- * reports a band rather than a boolean.
+ * Also **advisory**, and this is the constant most likely to be misused, so the
+ * distinction is spelled out. This is *not* a recommended default for
+ * `codeBudgetCharacters`. The compiler's `codeBudgetCharacters` is a hard cap: an
+ * artifact longer than it is rejected, whatever band it falls in. Passing this value
+ * there therefore refuses every artifact in the top band — the opposite of what the
+ * open-ended band's own guidance says, which is that the top band is a
+ * recommendation and not a refusal.
+ *
+ * There is deliberately no constant here that is a recommended hard cap. Choosing
+ * one is a project's decision about how much it will refuse, and #21 measured cost
+ * rather than deciding a policy limit; a number invented here would look measured
+ * and would not be.
  */
 export const CELL_CODE_REVIEW_CEILING_CHARACTERS = CELL_CODE_BUDGET_BAND_DEFINITIONS[1].maxCharacters!;
 
@@ -241,22 +272,34 @@ export const CELL_CODE_BUDGET_MEASUREMENT = {
   writeMsPerKilobyteRange: [3.38, 6.28] as const,
   /**
    * Least-squares slope of the browser entry path, over the four real compiled
-   * artifacts from 119,422 to 2,725,099 characters. The hand-generated series
-   * measured the same path at a steeper 6.9 ms/KB, so the two series disagree and
-   * the real-artifact one is quoted: same characters, much less code for the
-   * browser to walk, which is the shape a real Cell has.
+   * artifacts from 119,422 to 2,725,099 characters — the series #21 publishes.
    */
   browserEntryMsPerKilobyte: 3.83,
-  /** The other series' slope, recorded so the disagreement is not hidden. */
-  browserEntryMsPerKilobyteHandGenerated: 6.93,
+  /** The per-point range the slope above summarises: 2.80 ms/KB to 4.78 ms/KB. */
+  browserEntryMsPerKilobyteRange: [2.8, 4.78] as const,
   /** Repeated-write spread on one 1 MiB artifact, as a ratio. */
   writeRepeatabilitySpread: 1.24,
   /** Both curves were linear over their measured ranges; no cliff was found. */
   curveShape: "linear",
-  /** The largest artifact that completed a write, characters (exceeded the tool's 60 s cap). */
+  /**
+   * Coverage, per series, because the two series do not reach equally far and a
+   * single "largest observed" would silently answer for both.
+   *
+   * The **write** path was measured on the generated-toolkit series, which reaches
+   * the furthest: 8,388,166 characters is the largest artifact that persisted (its
+   * write exceeded the tool's 60 s cap but completed, and read back intact).
+   *
+   * The **entry** path is quoted from the real compiled series elsewhere in this
+   * record, so its coverage is stated for that series *and* for the generated-toolkit
+   * one it does not use. Quoting only 4,193,986 — a generated-toolkit point, now
+   * published on #21 — next to a real-series slope invited the reading that the slope
+   * was measured that far; it was not.
+   */
   largestWriteObservedCharacters: 8_388_166,
-  /** The largest artifact whose browser entry was measured, characters. */
-  largestEntryObservedCharacters: 4_193_986,
+  /** Largest entry measured on a real compiled artifact — the series the slope uses. */
+  largestRealArtifactEntryCharacters: 2_725_099,
+  /** Largest entry measured on the generated-toolkit series (published on #21). */
+  largestGeneratedToolkitEntryCharacters: 4_193_986,
   /** Whether any hard product limit was encountered. */
   hardLimitFound: false,
   /** Why the observed ceiling is a harness limit rather than a product one. */

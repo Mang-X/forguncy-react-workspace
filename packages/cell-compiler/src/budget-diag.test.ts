@@ -35,10 +35,12 @@ describe("the cell code budget diagnostic names the measured band", () => {
     expect(diagnostic.message).toContain("Measured band: review");
     // The cost that band implies, from #21, so a caller is not sent to the Issue to
     // find out whether it matters.
-    expect(diagnostic.message).toMatch(/took \d+ ms to write/);
-    expect(diagnostic.message).toMatch(/\d+ ms to reach the platform's first cell entry/);
-    // The artifact the pair is quoted from, so the figures can be located on #21.
-    expect(diagnostic.message).toMatch(/the 2 MiB generated-toolkit artifact at \d+ characters/);
+    expect(diagnostic.message).toMatch(/designer write took \d+ ms at \d+ characters/);
+    expect(diagnostic.message).toMatch(/first cell entry took \d+ ms at \d+ characters/);
+    // Each figure names the artifact it came from, so it can be located on #21 — and
+    // they are two *different* artifacts, which is the point of splitting them.
+    expect(diagnostic.message).toMatch(/the 2 MiB generated-toolkit artifact\)/);
+    expect(diagnostic.message).toMatch(/the real `three` addons\+postprocessing build\)/);
   });
 
   it("reports the extension-recommended band for a multi-megabyte artifact", async () => {
@@ -68,10 +70,24 @@ describe("a rejection whose artifact is inside the measured ordinary range", () 
     const diagnostic = await budgetDiagnostic(200_000, 100_000);
     expect(diagnostic.message).toMatch(/Measured band: inline/);
     expect(diagnostic.message).toMatch(/this rejection is the configured budget's/);
-    // The budget guidance has to point at a number, so the caller can act on it.
-    expect(diagnostic.message).toMatch(/Raise the budget to the measured review ceiling \(\d+ characters\)/);
     // And it must not carry the inline band's "no review" advice next to a rejection.
     expect(diagnostic.message).not.toMatch(/No review beyond the ordinary one/);
+  });
+
+  it("does not tell the caller a raised budget will report the band instead of refusing", async () => {
+    // The false claim this replaced: the old text said to raise the budget to the
+    // measured review ceiling "to let the compiler report the band's own cost instead
+    // of refusing". Raising it above the artifact makes the compile succeed outright,
+    // so no band is ever reported — the advice described behaviour that cannot happen.
+    // Reproduced: a 200,219-character artifact with `codeBudgetCharacters` at the
+    // review ceiling compiles, and produces no diagnostic at all.
+    const diagnostic = await budgetDiagnostic(200_000, 100_000);
+    expect(diagnostic.message).not.toMatch(/to let the compiler report the band's own/);
+    expect(diagnostic.message).not.toMatch(/Raise the budget/);
+    // What it says instead has to be true of the two concepts: the budget is the
+    // caller's hard cap, and the band is advisory.
+    expect(diagnostic.message).toMatch(/Raising the budget accepts the artifact outright/);
+    expect(diagnostic.message).toMatch(/bands are an advisory classification/);
   });
 
   it("still gives the band's own guidance when the artifact is genuinely large", async () => {

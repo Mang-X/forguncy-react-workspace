@@ -32,7 +32,6 @@
  */
 
 import {
-  CELL_CODE_REVIEW_CEILING_CHARACTERS,
   CELL_USER_SCOPE_BINDINGS,
   classifyCellCodeSize,
   validateDependencyDecisionShape,
@@ -823,7 +822,7 @@ function auditCodeBudget(code: string, budget: number | undefined): readonly Cel
   if (code.length <= budget) return [];
 
   const verdict = classifyCellCodeSize(code.length);
-  const { measuredAtCeiling } = verdict.definition;
+  const { write, browserEntry } = verdict.definition.measuredAtCeiling;
 
   // Two different situations produce this diagnostic and they need different
   // advice, which is why the guidance is chosen rather than copied from the band:
@@ -834,12 +833,15 @@ function auditCodeBudget(code: string, budget: number | undefined): readonly Cel
   //   is tight. Printing the inline band's "no review needed" next to a hard
   //   rejection would have the diagnostic contradict itself, and would send the
   //   caller looking for a problem in an artifact the measurement says is fine.
+  //
+  // The second case is the one where the two concepts must not be conflated, so it
+  // says what is actually true of this rejection: the budget is a hard cap, and the
+  // band is an advisory classification that a raised cap does not start reporting.
   const guidance = verdict.withinInlineBand
-    ? `The artifact is inside the measured ordinary range (${verdict.definition.band}, ceiling ` +
+    ? `The artifact is inside the measured ordinary range (${verdict.band}, ceiling ` +
       `${String(verdict.definition.maxCharacters)} characters), so this rejection is the configured budget's ` +
-      `rather than a cost the measurement found. Raise the budget to the measured review ceiling ` +
-      `(${String(CELL_CODE_REVIEW_CEILING_CHARACTERS)} characters) to let the compiler report the band's own ` +
-      `cost instead of refusing.`
+      `rather than a cost the measurement found. Raising the budget accepts the artifact outright — bands are ` +
+      `an advisory classification, not a severity this diagnostic re-reports once a size is allowed.`
     : verdict.definition.guidance;
 
   return [
@@ -847,9 +849,10 @@ function auditCodeBudget(code: string, budget: number | undefined): readonly Cel
       detail:
         `The composed artifact is ${code.length} characters against a configured budget of ${budget}. ` +
         `The measurement is taken on the composed artifact because that is what is written into the cell. ` +
-        `Measured band: ${verdict.band} — ${measuredAtCeiling.artifact} at ` +
-        `${measuredAtCeiling.characters} characters took ${measuredAtCeiling.writeMs} ms to write and ` +
-        `${measuredAtCeiling.browserEntryMs} ms to reach the platform's first cell entry (#21). ${guidance}`,
+        `Measured band: ${verdict.band} (#21). At this band's own measured points the designer write took ` +
+        `${String(write.ms)} ms at ${String(write.characters)} characters (${write.artifact}) and the ` +
+        `browser's first cell entry took ${String(browserEntry.ms)} ms at ` +
+        `${String(browserEntry.characters)} characters (${browserEntry.artifact}). ${guidance}`,
     }),
   ];
 }

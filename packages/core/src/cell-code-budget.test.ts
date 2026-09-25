@@ -35,14 +35,12 @@ import { RUNTIME_CONTRACT_DECISION } from "./governance.ts";
  */
 
 /**
- * The measured points from #21, as (characters, writeMs, entryMs).
+ * The two series #21 publishes, which is also the set the module is allowed to quote.
  *
- * Two series, and the disagreement between them is real rather than noise: the
- * write column is the hand-generated series (six points, 101,919 to 4,193,986
- * characters), the entry column mixes that series with the four real compiled
- * artifacts, which measure the same path noticeably cheaper per character. The
- * module records both slopes for that reason, and the test below asserts the
- * recorded slopes match these points rather than merely being positive.
+ * They cover different things and must not be mixed: the write path was measured on
+ * six generated-toolkit artifacts, the browser entry path on four real compiled
+ * ones. A figure in the module that is not in one of these lists is, by definition,
+ * not traceable to #21 — which is what the table checks below enforce.
  */
 const WRITE_SERIES = [
   { characters: 101_919, ms: 625 },
@@ -93,34 +91,45 @@ describe("the measured bands", () => {
     expect(closed).toEqual(ascending);
   });
 
-  it("quotes each band's cost pair from one named artifact, and states which", () => {
-    // Two properties, and both are things a later edit can quietly break:
+  it("quotes each band's cost from a traceable #21 point, with the artifact named", () => {
+    // Every figure in the table has to be findable on #21, and the checks below are
+    // what makes that enforceable rather than a claim in a comment:
     //
-    // 1. Every band names the artifact its pair came from. Without it the figures
-    //    are unfalsifiable — a reader cannot tell a measurement from a guess.
-    // 2. The pair is monotone across the bands. Write and entry cost both have to
-    //    rise as the band rises; a band whose entry figure is *below* a smaller
-    //    band's would mean one of the two was quoted from the wrong series.
+    // 1. Each measured point names the artifact it came from. An unnamed figure is
+    //    indistinguishable from an invented one.
+    // 2. The write half is drawn from the published write series, and the entry half
+    //    from the published real-artifact entry series. Mixing the two is the defect
+    //    the review caught: this table once quoted entry times from the
+    //    generated-toolkit series, which is roughly twice as expensive per character
+    //    as real compiled code and was also missing from #21 at the time.
+    // 3. Both figures rise across the bands, so no band quotes a cheaper cost than
+    //    the band below it.
     let previousWrite = 0;
     let previousEntry = 0;
+
     for (const definition of CELL_CODE_BUDGET_BAND_DEFINITIONS) {
-      const { writeMs, browserEntryMs, characters, artifact } = definition.measuredAtCeiling;
+      const { write, browserEntry } = definition.measuredAtCeiling;
 
-      expect(artifact.length).toBeGreaterThan(20);
-      expect(characters).toBeGreaterThan(0);
-      // Each pair is quoted at a real measured size, so the implied per-character
-      // cost has to be in the range #21 recorded rather than wildly off it.
-      const writePerKb = writeMs / (characters / 1024);
-      const entryPerKb = browserEntryMs / (characters / 1024);
-      expect(writePerKb).toBeGreaterThan(1);
-      expect(writePerKb).toBeLessThan(30);
-      expect(entryPerKb).toBeGreaterThan(1);
-      expect(entryPerKb).toBeLessThan(20);
+      for (const point of [write, browserEntry]) {
+        expect(point.artifact.length).toBeGreaterThan(20);
+        expect(point.characters).toBeGreaterThan(0);
+        expect(point.ms).toBeGreaterThan(0);
+      }
 
-      expect(writeMs).toBeGreaterThanOrEqual(previousWrite);
-      previousWrite = writeMs;
-      expect(browserEntryMs).toBeGreaterThanOrEqual(previousEntry);
-      previousEntry = browserEntryMs;
+      // Each half is a real measured point, not a rounded ceiling: the size it is
+      // quoted at has to be one of the published ones, and the implied per-character
+      // cost has to be in that series' recorded range.
+      expect(WRITE_SERIES.map(point => point.characters)).toContain(write.characters);
+      expect(REAL_ENTRY_SERIES.map(point => point.characters)).toContain(browserEntry.characters);
+      expect(WRITE_SERIES.find(point => point.characters === write.characters)?.ms).toBe(write.ms);
+      expect(REAL_ENTRY_SERIES.find(point => point.characters === browserEntry.characters)?.ms).toBe(
+        browserEntry.ms,
+      );
+
+      expect(write.ms).toBeGreaterThanOrEqual(previousWrite);
+      previousWrite = write.ms;
+      expect(browserEntry.ms).toBeGreaterThanOrEqual(previousEntry);
+      previousEntry = browserEntry.ms;
     }
   });
 
@@ -233,25 +242,49 @@ describe("what the measurement does and does not establish", () => {
     expect(CELL_CODE_BUDGET_MEASUREMENT.writeMsPerKilobyte).toBeLessThanOrEqual(high);
   });
 
-  it("keeps both entry-path slopes, because the two series disagree and hiding it would mislead", () => {
-    // The hand-generated series measured the entry path much steeper per character
-    // than the real compiled artifacts did. Quoting only the flattering one would
-    // understate the cost for padding-heavy artifacts, so the module records both.
-    const handGenerated = CELL_CODE_BUDGET_MEASUREMENT.browserEntryMsPerKilobyteHandGenerated;
-    expect(handGenerated).toBeGreaterThan(CELL_CODE_BUDGET_MEASUREMENT.browserEntryMsPerKilobyte);
-    expect(handGenerated).toBeCloseTo(6.93, 1);
+  it("publishes only the entry slope #21 can support, from the published series", () => {
+    // The published entry series is the real compiled artifacts, whose slope is
+    // 3.83 ms/KB. An earlier draft also carried a
+    // `browserEntryMsPerKilobyteHandGenerated: 6.93` from the generated-toolkit
+    // series — a real measurement, but not the one a Cell's entry cost should be
+    // planned from, since real bundled code is about half as expensive per
+    // character. Two slopes in one record invite using the wrong one; the honest
+    // fix is to publish both series (done, on #21) and quote only the one that
+    // describes real artifacts.
+    expect(Object.keys(CELL_CODE_BUDGET_MEASUREMENT)).not.toContain(
+      "browserEntryMsPerKilobyteHandGenerated",
+    );
+    // And the one that remains is recomputed from the published points rather than
+    // asserted against a literal the test also wrote.
+    expect(CELL_CODE_BUDGET_MEASUREMENT.browserEntryMsPerKilobyte).toBeCloseTo(
+      slopeMsPerKilobyte(REAL_ENTRY_SERIES),
+      1,
+    );
+    const [low, high] = CELL_CODE_BUDGET_MEASUREMENT.browserEntryMsPerKilobyteRange;
+    const perKb = REAL_ENTRY_SERIES.map(point => point.ms / (point.characters / 1024));
+    expect(low).toBeCloseTo(Math.min(...perKb), 1);
+    expect(high).toBeCloseTo(Math.max(...perKb), 1);
   });
 
-  it("bounds each curve by the range it was actually measured over", () => {
-    // The entry curve reaches the 4 MiB band (the hand-generated series measured it
-    // there) but not the 8.4 MiB write, which never completed within the tool's own
-    // timeout. Claiming the entry curve out to 8.4 MiB would be an extrapolation
-    // presented as a measurement.
-    expect(CELL_CODE_BUDGET_MEASUREMENT.largestEntryObservedCharacters).toBe(4_193_986);
-    expect(CELL_CODE_BUDGET_MEASUREMENT.largestEntryObservedCharacters).toBeLessThan(
+  it("states coverage per series, since the two series do not reach equally far", () => {
+    // The entry slope is computed over the real compiled artifacts, so its coverage
+    // is what that series reached. An earlier draft recorded a single
+    // `largestEntryObservedCharacters` holding a generated-toolkit point (4,193,986)
+    // beside a real-series slope, which read as if the slope had been measured that
+    // far — it had not.
+    expect(CELL_CODE_BUDGET_MEASUREMENT.largestRealArtifactEntryCharacters).toBe(2_725_099);
+    expect(CELL_CODE_BUDGET_MEASUREMENT.largestGeneratedToolkitEntryCharacters).toBe(4_193_986);
+    // The real series is the shorter of the two, and that is the bound the slope has.
+    expect(CELL_CODE_BUDGET_MEASUREMENT.largestRealArtifactEntryCharacters).toBeLessThan(
+      CELL_CODE_BUDGET_MEASUREMENT.largestGeneratedToolkitEntryCharacters,
+    );
+    // The write path reaches furthest of all, and never completed inside the tool's
+    // own timeout at that size — so the write curve is bounded by the largest point
+    // it actually measured cleanly, not by this.
+    expect(CELL_CODE_BUDGET_MEASUREMENT.largestWriteObservedCharacters).toBe(8_388_166);
+    expect(CELL_CODE_BUDGET_MEASUREMENT.largestGeneratedToolkitEntryCharacters).toBeLessThan(
       CELL_CODE_BUDGET_MEASUREMENT.largestWriteObservedCharacters,
     );
-    expect(CELL_CODE_BUDGET_MEASUREMENT.writeRepeatabilitySpread).toBeGreaterThan(1);
   });
 
   it("records that the curves are linear and no hard limit was found", () => {
