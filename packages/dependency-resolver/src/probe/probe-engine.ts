@@ -50,6 +50,7 @@
 import { normalize } from "node:path";
 
 import type {
+  ArtifactCompileSnapshot,
   FgcLockDocument,
   ForguncyTargetIdentity,
   LockEnvironment,
@@ -616,9 +617,7 @@ export interface ProbeLockEnvironmentOptions {
    * Keyed by record rather than by Cell, because which Cell state a rejection was measured from is
    * a property of the record — two rejections in one Cell can come from different states.
    */
-  readonly artifactFingerprints?: Readonly<
-    Record<string, { readonly fingerprint: string; readonly subjectRenderedCharacters: number }>
-  >;
+  readonly artifactFingerprints?: Readonly<Record<string, ArtifactCompileSnapshot>>;
   readonly extensionVersions?: Readonly<Record<string, string>>;
   readonly extensionIdentities?: Readonly<Record<string, string>>;
   readonly lock?: FgcLockDocument;

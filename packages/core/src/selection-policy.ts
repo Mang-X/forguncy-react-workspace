@@ -56,7 +56,11 @@ import { DEPENDENCY_REJECTION_RESPONSE, isArtifactObservedRejectionCode } from "
 import type { SelectionSignalId } from "./selection-signals.ts";
 import { findReplacementSignalRejection } from "./selection-signals.ts";
 import type { DependencyDecision, DependencyStrategy } from "./strategy.ts";
-import { strategySemantics, validateDependencyDecisionShape } from "./strategy.ts";
+import {
+  isSubjectCompileDecision,
+  strategySemantics,
+  validateDependencyDecisionShape,
+} from "./strategy.ts";
 
 // ---------------------------------------------------------------------------
 // Provenance
@@ -886,6 +890,16 @@ export function auditSelectionDecision(input: SelectionAuditInput): readonly str
             // the measurement" would point at the field that is now refused.
             problems.push(
               `The recorded technical rejection is "${decision.rejection.code}", whose evidence is a composed Cell compile rather than a probe — and this decision carries none. That code's evidence is produced by compiling the Cell (\`record\`/\`audit\` do it, and the decision file may not supply the numbers), so a record holding it without evidence reached this audit without that step.`,
+            );
+          } else if (!isSubjectCompileDecision(decision.artifactEvidence.subjectDecision)) {
+            // The **write gate**, and the reason this rule is not in the lock's semantic validator:
+            // that validator runs on the read path too, and a `replace` subject is a shape revision
+            // 16's own writer could persist — so it has to stay loadable (#77 revision 18). What it
+            // must not be is *writable*: it keeps the package out of the compiled Cell (rule 4 of
+            // #8), so it cannot describe the Cell the evidence was measured from, and a re-record
+            // would replay it to an artifact that never contained the subject.
+            problems.push(
+              `The rejection for "${decision.packageName}" records \`artifactEvidence.subjectDecision\` as ${JSON.stringify(decision.artifactEvidence.subjectDecision)}, which cannot describe the Cell the evidence was measured from: a \`replace\` keeps the package out of the compiled graph, and \`host\`/\`extension\` have to name the global they resolve to. Record the decision the package actually resolved to, or leave the field out and let \`record\` supply it from the compile.`,
             );
           }
         } else {

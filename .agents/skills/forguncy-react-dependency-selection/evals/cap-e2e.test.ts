@@ -505,6 +505,50 @@ describe("CLI contract: the declared cell code cap reaches probe, audit, record 
   // PR review of #77, P1 (round 8). `status` recompiled and compared the artifact fingerprint but
   // discarded the freshly-produced attribution, so a record could keep a real fingerprint beside a
   // doctored `subjectRenderedCharacters` and stay fresh. Reproduced before this was fixed.
+  // PR review of #77, P1 (round 9). Round 8 stopped at the attribution; the two numbers that state
+  // the hard rejection were still trusted, so a forged `codeCharacters` could make the lock report a
+  // verified rejection the current compiler does not emit.
+  it("goes stale when the recorded verdict numbers are doctored and the artifact is unchanged", async () => {
+    await withCappedCell(CAP_SUBJECT_DECIDES, async root => {
+      await withRecordedCell(root);
+      const file = await decisionFile({
+        packageName: "es-toolkit",
+        role: "cell-local-ui",
+        strategy: "replace",
+        cellTarget: "bench",
+        rationale: "The Cell is over its cap because of this package.",
+        alternatives: ["a lighter date utility"],
+        rejection: {
+          kind: "technical",
+          code: "cell-code-budget-exceeded",
+          summary: "The composed Cell is over this Cell's cap.",
+          evidence: [],
+          remediation: "Evaluate a lighter alternative.",
+        },
+      });
+      try {
+        const recorded = await cli(["record", "--project", root, "--decision", file.path]);
+        expect(recorded.code, recorded.stderr).toBe(0);
+
+        // Doctor ONLY the verdict pair: the fingerprint is real (the artifact genuinely is the one
+        // it names) and the share is real, so nothing but a verdict comparison can notice.
+        const lock = JSON.parse(await readFile(join(root, "fgc.lock.json"), "utf8")) as {
+          decisions: Record<string, { artifactEvidence?: Record<string, unknown> }>[];
+        };
+        const evidence = lock.decisions.find(entry => (entry as { packageName?: string }).packageName === "es-toolkit")!.artifactEvidence!;
+        evidence.codeCharacters = 9_000_000;
+
+        await writeFile(join(root, "fgc.lock.json"), JSON.stringify(lock, null, 2), "utf8");
+        const status = await cli(["status", "--project", root]);
+
+        const decision = json<{ decisions: readonly { stalenessReasons: readonly string[] }[] }>(status).decisions[0];
+        expect(decision.stalenessReasons).toContain("artifact-verdict-changed");
+      } finally {
+        await file.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
   it("goes stale when the recorded subject share is doctored and the artifact is unchanged", async () => {
     await withCappedCell(CAP_SUBJECT_DECIDES, async root => {
       await withRecordedCell(root);

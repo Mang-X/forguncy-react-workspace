@@ -95,6 +95,7 @@ export {
   DEPENDENCY_STRATEGY_SEMANTICS,
   isDependencyStrategy,
   isSubjectCompileDecision,
+  isReadableSubjectCompileDecision,
   requiresRealRuntimeValidation,
   strategySemantics,
   validateDependencyDecision,
@@ -425,6 +426,7 @@ export {
   resolveLockDecision,
 } from "./lock-freshness.ts";
 export type {
+  ArtifactCompileSnapshot,
   LockDecisionAssessment,
   LockDecisionQuery,
   LockDecisionResolution,

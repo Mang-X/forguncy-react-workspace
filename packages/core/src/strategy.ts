@@ -255,7 +255,7 @@ export interface ArtifactBudgetEvidence {
    * accounted them.
    *
    * Advisory, and reproducible: `status` recomputes it from its own compile and reports
-   * `artifact-attribution-mismatch` if it has moved, so a hand-edited number cannot survive a
+   * `artifact-attribution-changed` if it has moved, so a hand-edited number cannot survive a
    * freshness check the way revision 16 allowed. It is still not a proof of causation — see the
    * interface's header — and nothing rejects on it.
    *
@@ -281,7 +281,21 @@ export type SubjectCompileDecision =
   | { readonly strategy: "host"; readonly globalName: string }
   | { readonly strategy: "extension"; readonly globalName: string; readonly libraryId: string };
 
-/** Whether a value is one of the strategies a subject can have been compiled under. */
+/**
+ * Whether a value is one of the strategies a subject can have been compiled under.
+ *
+ * This is the **write-side** rule: `replace` is refused because it keeps the package out of the
+ * compiled Cell (rule 4 of #8), so a Cell can never have been measured with the subject in it under
+ * `replace`, and replaying one would not reproduce the measured artifact.
+ *
+ * It is deliberately *not* the read-side rule, and the distinction matters (#77 revision 18).
+ * Revision 16's own `record` produced exactly this shape through its normal writer — a second
+ * `record` of the same rejection read the `replace` the first write had persisted and saved it as
+ * the subject's decision. That is a reproducible output of the immediately preceding toolchain under
+ * the same schema version, so a schema-v1 lock carrying it has to stay **readable** and go stale
+ * rather than fail to parse. `isReadableSubjectCompileDecision` is that weaker read-side test; see
+ * `assessArtifactEvidenceFreshness` for the staleness reason it produces.
+ */
 export function isSubjectCompileDecision(value: unknown): value is SubjectCompileDecision {
   if (value === null || typeof value !== "object") return false;
   const candidate = value as Record<string, unknown>;
@@ -308,6 +322,29 @@ export function isSubjectCompileDecision(value: unknown): value is SubjectCompil
       // `replace`. The writer refuses to produce one; this refuses to accept one.
       return false;
   }
+}
+
+/**
+ * Whether a persisted subject decision is *readable*, which is weaker than whether it is legal.
+ *
+ * The difference is one value, and it exists because a schema-v1 lock can carry it legitimately:
+ * revision 16's `record` persisted `{"strategy":"replace"}` through its normal writer, so a lock
+ * written by that toolchain must still load. Such a record cannot be replayed — the package is not
+ * in the Cell it names — so freshness reports it stale rather than pretending otherwise; what it
+ * must not do is make the whole document unreadable, which is the migration contract in
+ * `lock-migration.ts`.
+ *
+ * Every *other* illegal shape is still refused at the read boundary: `replace` is the one value the
+ * previous toolchain could actually emit, so it is the only one a reader has to tolerate.
+ */
+export function isReadableSubjectCompileDecision(value: unknown): boolean {
+  if (isSubjectCompileDecision(value)) return true;
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    (value as Record<string, unknown>).strategy === "replace" &&
+    Object.keys(value as Record<string, unknown>).length === 1
+  );
 }
 
 export interface ReplaceDependencyDecision {
@@ -400,14 +437,16 @@ export function validateDependencyDecisionShape(decision: DependencyDecision): r
             `Rejection of "${decision.packageName}" records \`artifactEvidence\` without a usable \`compileFingerprint\`. The identity of the compile is what ties these numbers to an artifact a reader can reproduce; record it from \`composeCellCompileFingerprint\`.`,
           );
         }
-        if (!isSubjectCompileDecision(subjectDecision)) {
-          // The union, not a `strategy` string (#77 revision 17). A persisted `replace` is the one
-          // state the writer refuses to produce because it cannot be replayed — the package is not
-          // in that Cell — and accepting it here would let a hand-edited lock renew a rejection from
-          // a compile that never contained the subject. `host`/`extension` missing their globals are
-          // refused for the same reason: replaying them would not reproduce the measured Cell.
+        // The **readable** shape, not the legal one (#77 revision 18). This validator runs on both
+        // the read path and the write gate, and revision 16's own `record` persisted
+        // `{"strategy":"replace"}` through its normal writer — so refusing it here would make a
+        // schema-v1 lock written by the previous toolchain fail to parse. `replace` is accepted as
+        // *readable*; `auditSelectionDecision` refuses it as *writable*, and freshness reports the
+        // record `artifact-subject-decision-unreplayable`. Every other illegal shape is still
+        // refused here, because `replace` is the only one the previous toolchain could emit.
+        if (!isReadableSubjectCompileDecision(subjectDecision)) {
           problems.push(
-            `Rejection of "${decision.packageName}" records \`artifactEvidence.subjectDecision\` as ${JSON.stringify(subjectDecision)}, which is not a decision the subject can have been compiled under. It must be \`{"strategy":"inline"}\`, or \`host\`/\`extension\` with the global (and library) those strategies resolve the package to — never \`replace\`, which keeps the package out of the compiled Cell and so cannot describe the Cell that was measured.`,
+            `Rejection of "${decision.packageName}" records \`artifactEvidence.subjectDecision\` as ${JSON.stringify(subjectDecision)}, which is not a decision the subject can have been compiled under. It must be \`{"strategy":"inline"}\`, or \`host\`/\`extension\` with the global (and library) those strategies resolve the package to.`,
           );
         }
         for (const [name, value] of [

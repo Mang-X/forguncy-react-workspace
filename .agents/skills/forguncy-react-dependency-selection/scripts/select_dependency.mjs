@@ -1931,6 +1931,8 @@ async function commandRecord(options) {
           artifactFingerprints: {
             [core.lockRecordIdentity(record)]: {
               fingerprint: compiled.evidence.compileFingerprint,
+              codeCharacters: compiled.evidence.codeCharacters,
+              budgetCharacters: compiled.evidence.budgetCharacters,
               subjectRenderedCharacters: compiled.evidence.subjectRenderedCharacters,
             },
           },
@@ -2063,6 +2065,11 @@ async function commandStatus(options) {
         // which is the state the reviewer found.
         rebuiltArtifacts.set(core.lockRecordIdentity(record), {
           fingerprint: compiled.compileFingerprint,
+          // The verdict's own numbers, from this compile (#77 revision 18). `status` compares every
+          // field the record states, so leaving these out would leave exactly the two numbers that
+          // say "the Cell is over its cap" as trusted input.
+          codeCharacters: compiled.measurement.codeCharacters,
+          budgetCharacters: compiled.measurement.budgetCharacters,
           subjectRenderedCharacters: subjectShareOf(compiled.artifact, record.packageName),
         });
       }

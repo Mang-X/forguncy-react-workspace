@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import type { ArtifactBudgetEvidence, LockEnvironment, LockedDependencyDecision } from "./index.ts";
+import { parseFgcLockDocument } from "./index.ts";
+import type {
+  ArtifactBudgetEvidence,
+  ArtifactCompileSnapshot,
+  LockEnvironment,
+  LockedDependencyDecision,
+} from "./index.ts";
 import {
   assessLockDecision,
   findLockDecision,
@@ -41,16 +47,24 @@ const ARTIFACT_FINGERPRINT = 'cell="abc";budget=100000';
  * What the environment knows about one record's compile: the artifact identity and the subject's
  * rendered share. One value, because they describe one compile (#77 revision 17).
  */
-function artifactCompile(fingerprint: string, subjectRenderedCharacters: number): {
-  readonly fingerprint: string;
-  readonly subjectRenderedCharacters: number;
-} {
-  return { fingerprint, subjectRenderedCharacters };
+function artifactCompile(
+  fingerprint: string,
+  subjectRenderedCharacters: number,
+  overrides: { readonly codeCharacters?: number; readonly budgetCharacters?: number } = {},
+): ArtifactCompileSnapshot {
+  return {
+    fingerprint,
+    // The fixture's evidence defaults, so a case that only cares about the identity or the share
+    // does not have to restate the verdict numbers.
+    codeCharacters: overrides.codeCharacters ?? 200_000,
+    budgetCharacters: overrides.budgetCharacters ?? 100_000,
+    subjectRenderedCharacters,
+  };
 }
 
 /** The artifact-axis staleness reasons for a record: what this file's cases assert on. */
 function artifactReasons(record: LockedDependencyDecision, environment: LockEnvironment): readonly string[] {
-  return reasonsFor(record, environment).stalenessReasons.filter((reason: string) => reason.startsWith("artifact-compile-"));
+  return reasonsFor(record, environment).stalenessReasons.filter((reason: string) => reason.startsWith("artifact-"));
 }
 
 function artifactEvidenceFixture(overrides: {
@@ -577,6 +591,61 @@ describe("replace decisions expire differently by rejection kind", () => {
   // so it discarded the freshly-produced attribution. A record could keep a real fingerprint beside
   // an invented `subjectRenderedCharacters` — even one larger than the artifact — and stay fresh.
   // Reproduced before this was fixed: inflating only that field left `status` reporting `fresh`.
+  // PR review of #77, P1 (round 9). The two fields that state the *hard rejection* were still
+  // trusted: revision 17 compared the fingerprint and the attribution but not `codeCharacters` or
+  // `budgetCharacters`. Reproduced before this was fixed — a record could keep the real fingerprint
+  // (the artifact genuinely is the one it names) beside a forged pair saying "over cap" and stay
+  // fresh, reporting a rejection the current compiler does not emit. `codeCharacters` is not inside
+  // the fingerprint (a fingerprint is a hash, not a size), so nothing else caught it.
+  it("goes stale when the recorded verdict numbers no longer match the current compile", () => {
+    const recomputed = lockEnvironment({
+      artifactFingerprints: {
+        ["date-fns\u0000" + BENCH_CELL]: artifactCompile(ARTIFACT_FINGERPRINT, 190_000, {
+          // The Cell fits: the current compiler files no budget diagnostic.
+          codeCharacters: 5_000,
+          budgetCharacters: 100_000,
+        }),
+      },
+    });
+
+    const assessment = reasonsFor(artifactRejection, recomputed);
+
+    expect(assessment.stalenessReasons).toContain("artifact-verdict-changed");
+    expect(assessment.freshness).toBe("stale");
+  });
+
+  // PR review of #77, P1 (round 9). Revision 16's own `record` persisted
+  // `subjectDecision: { strategy: "replace" }` through its normal writer (a second `record` read the
+  // `replace` the first write had stored). Refusing it at the read boundary made a schema-v1 lock the
+  // previous toolchain could write fail to *parse*, so the record never reached freshness — the
+  // migration failure `lock-migration.ts` exists to prevent. It is readable now, and reports why it
+  // cannot be replayed rather than pretending otherwise.
+  it("reports a legacy subject decision as unreplayable rather than refusing to read the lock", () => {
+    // Built through the parser rather than as a typed object, and that is more than convenience:
+    // the type forbids this shape (correctly — no *new* record may carry it), so a legacy record can
+    // only arrive as parsed JSON, which is exactly how a real reader meets it.
+    const [legacy] = parseFgcLockDocument(
+      JSON.stringify(
+        {
+          schemaVersion: 1,
+          decisions: [
+            {
+              ...artifactRejection,
+              artifactEvidence: { ...artifactEvidenceFixture(), subjectDecision: { strategy: "replace" } },
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+    ).decisions;
+
+    const assessment = reasonsFor(legacy!, lockEnvironment());
+
+    expect(assessment.stalenessReasons).toEqual(["artifact-subject-decision-unreplayable"]);
+    expect(assessment.freshness).toBe("stale");
+  });
+
   it("goes stale when the recorded subject share no longer matches the recomputed one", () => {
     // The identity is unchanged, so the artifact is the same compile; only the attribution moved.
     const recomputed = lockEnvironment({

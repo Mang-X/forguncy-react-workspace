@@ -797,12 +797,9 @@ describe("lock metadata validation", () => {
   // the writer considers unreachable. It is not merely malformed: a `replace` subject replays to a
   // Cell the package is not part of, and if the artifact bytes happen to match (the fall-through
   // measured in round 6), freshness would keep that impossible state fresh.
-  it("refuses a persisted subject decision the subject cannot have been compiled under", () => {
-    // Asserted on the **structural** pass, which is where this rule is uniquely load-bearing: that
-    // pass is public API (`inspectFgcLockDocument`) and is what `lock-migration.ts` runs on a
-    // document from an older toolchain, so a hand-edited `replace` has to be caught there. The
-    // semantic pass refuses it too — see the sibling case — but a test that only went through
-    // `validateFgcLockDocument` would pass with this pass disabled, and would therefore not pin it.
+  it("refuses an illegal subject decision at the read boundary, except the one a prior toolchain wrote", () => {
+    // Asserted on the **structural** pass, which is public API (`inspectFgcLockDocument`) and what
+    // `lock-migration.ts` runs on a document from an older toolchain.
     const inspect = (subjectDecision: unknown): string =>
       inspectFgcLockDocument({
         schemaVersion: 1,
@@ -821,8 +818,7 @@ describe("lock metadata validation", () => {
         ],
       }).join(" ");
 
-    // Each of these is a state the writer cannot produce, and each is refused.
-    expect(inspect({ strategy: "replace" })).toMatch(/subjectDecision/);
+    // Each of these is a state no writer could produce, and each is refused.
     expect(inspect({ strategy: "host" })).toMatch(/subjectDecision/);
     expect(inspect({ strategy: "extension", globalName: "X" })).toMatch(/subjectDecision/);
     expect(inspect({ strategy: "nonsense" })).toMatch(/subjectDecision/);
@@ -834,11 +830,19 @@ describe("lock metadata validation", () => {
     expect(inspect({ strategy: "inline" })).toBe("");
     expect(inspect({ strategy: "host", globalName: "R" })).toBe("");
     expect(inspect({ strategy: "extension", globalName: "X", libraryId: "y" })).toBe("");
+
+    // `replace` is the exception, and the reason is a migration one (#77 revision 18): revision
+    // 16's own `record` persisted it through its normal writer — a second `record` read the
+    // `replace` the first write had stored and saved it as the subject's decision — so a schema-v1
+    // lock carrying it must stay loadable. Freshness reports it unreplayable
+    // (`lock-freshness.test.ts`), and `auditSelectionDecision` refuses to *write* it.
+    expect(inspect({ strategy: "replace" })).toBe("");
   });
 
-  it("refuses the same state through the whole document path, so reading a lock cannot accept it", () => {
-    // The end-to-end half: a reader loads through `parseFgcLockDocument`, so the refusal has to
-    // hold there regardless of which pass catches it.
+  it("keeps a lock written by the previous toolchain readable through the whole document path", () => {
+    // The end-to-end half: a reader loads through `parseFgcLockDocument`, so the legacy shape has
+    // to survive both passes. Failing here would mean the record never reaches freshness — the
+    // migration failure `lock-migration.ts` exists to prevent.
     const text = JSON.stringify(
       {
         schemaVersion: 1,
@@ -860,7 +864,7 @@ describe("lock metadata validation", () => {
       2,
     );
 
-    expect(() => parseFgcLockDocument(text)).toThrow(/subjectDecision/);
+    expect(() => parseFgcLockDocument(text)).not.toThrow();
   });
 
   it("ties a runtime-compatibility claim to a probe that actually passed", () => {
