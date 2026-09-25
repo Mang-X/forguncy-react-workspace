@@ -238,7 +238,7 @@ describe("fgc.lock.json model", () => {
         summary: "The composed Cell is over the project's cap.",
         remediation: "Evaluate a lighter alternative.",
       },
-      artifactEvidence: { codeCharacters: 200_000, budgetCharacters: 100_000 },
+      artifactEvidence: { compileFingerprint: "artifact=\"x\";deps=[];budget=100000", codeCharacters: 200_000, budgetCharacters: 100_000 },
     };
     expect(lockEvidenceProfileOf(artifactRejection)).toBe("artifact-rejection");
     expect(LOCK_EVIDENCE_POLICY["artifact-rejection"].probeRequirement).toBe("passed");
@@ -617,7 +617,7 @@ describe("lock metadata validation", () => {
   it("refuses compile evidence attached to a code a probe observes", () => {
     const misplaced: LockedDependencyDecision = {
       ...technicalRejection,
-      artifactEvidence: { codeCharacters: 200_000, budgetCharacters: 100_000 },
+      artifactEvidence: { compileFingerprint: "artifact=\"x\";deps=[];budget=100000", codeCharacters: 200_000, budgetCharacters: 100_000 },
     };
 
     expect(problemsFor(misplaced)).toMatch(/which is the evidence for a compile-observed code/);
@@ -637,10 +637,62 @@ describe("lock metadata validation", () => {
         summary: "The composed Cell is over the project's cap.",
         remediation: "Evaluate a lighter alternative.",
       },
-      artifactEvidence: { codeCharacters: 100, budgetCharacters: 100_000 },
+      artifactEvidence: { compileFingerprint: "artifact=\"x\";deps=[];budget=100000", codeCharacters: 100, budgetCharacters: 100_000 },
     };
 
     expect(problemsFor(withinCap)).toMatch(/within the cap, so the evidence does not support/);
+  });
+
+  // PR review of #77, P1 (round 5). A size verdict is about **one** composed Cell and that Cell's
+  // cap, but `cellTarget: null` is the lock's fallback record for *every* Cell — so accepting it
+  // here would turn one Cell's measurement into "replace this package everywhere".
+  it("refuses compile evidence that names no Cell", () => {
+    const everywhere: LockedDependencyDecision = {
+      ...technicalRejection,
+      rejection: {
+        kind: "technical",
+        code: "cell-code-budget-exceeded",
+        summary: "The composed Cell is over the project's cap.",
+        remediation: "Evaluate a lighter alternative.",
+      },
+      artifactEvidence: { compileFingerprint: "artifact=\"x\";deps=[];budget=100000", codeCharacters: 200_000, budgetCharacters: 100_000 },
+      cellTarget: null,
+    };
+
+    expect(problemsFor(everywhere)).toMatch(/without naming the Cell it measured/);
+    // A record with no compile evidence is untouched, so a pre-revision-15 lock stays readable.
+    expect(problemsFor(technicalRejection)).toBe("");
+  });
+
+  // PR review of #77, P2 (round 5). `inspectLockRecord` runs over untrusted JSON, so a malformed
+  // value has to become a validation finding rather than a native throw.
+  it("reports a malformed compile-evidence value instead of throwing on it", () => {
+    // Reproduced through the *parser*, not the typed validator: the defect was that an explicit
+    // `null` passed the structural phase and then blew up when the semantic pass destructured it.
+    const text = JSON.stringify(
+      {
+        schemaVersion: 1,
+        decisions: [
+          {
+            ...technicalRejection,
+            rejection: {
+              kind: "technical",
+              code: "cell-code-budget-exceeded",
+              summary: "The composed Cell is over the project's cap.",
+              remediation: "Evaluate a lighter alternative.",
+            },
+            cellTarget: "bench",
+            artifactEvidence: null,
+          },
+        ],
+      },
+      null,
+      2,
+    );
+
+    expect(() => parseFgcLockDocument(text)).toThrow(FgcLockValidationError);
+    // …and the message says what was wrong rather than surfacing a `TypeError`.
+    expect(() => parseFgcLockDocument(text)).toThrow(/artifactEvidence/);
   });
 
   it("keeps a pre-revision-14 budget rejection readable, so it can go stale instead of unreadable", () => {

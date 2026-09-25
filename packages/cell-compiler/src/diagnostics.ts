@@ -238,6 +238,35 @@ export interface CellArtifactDiagnostic {
    * from `subject` so a report can print one without the other.
    */
   readonly location?: string;
+  /**
+   * The measurement behind a `cell-code-budget-exceeded` diagnostic, when one was taken.
+   *
+   * Present so the numbers a dependency decision records are the compiler's rather than a
+   * caller's (#77 round 5). A record's `artifactEvidence` has to be the measurement the cap check
+   * actually made, and the only place that measurement exists is here — a caller that could type
+   * the numbers could certify its own rejection, which is the defect this replaces. Absent on
+   * every other code, because no other check measures a size.
+   *
+   * The two figures only: the compile's *identity* is composed by the caller, which holds the
+   * entry's source and the decision set the compiler was given. See
+   * `ComposeCellCompileFingerprintInput`.
+   */
+  readonly budgetEvidence?: ArtifactMeasurements;
+}
+
+/**
+ * What the cap check measured, without an identity.
+ *
+ * Split from `ArtifactBudgetEvidence` because the two have different producers: the compiler
+ * measures the composed artifact and knows nothing about the entry's source as a separate input,
+ * while only the caller can name the Cell and read its entry. Keeping them apart means the compiler
+ * cannot invent an identity it is not in a position to compute.
+ */
+export interface ArtifactMeasurements {
+  /** Characters in the composed Cell source, as `compileCell` measured it. */
+  readonly codeCharacters: number;
+  /** The `codeBudgetCharacters` that compile was given, from the Cell's own config. */
+  readonly budgetCharacters: number;
 }
 
 /**
@@ -250,7 +279,11 @@ export interface CellArtifactDiagnostic {
 export function createCellArtifactDiagnostic(
   code: CellArtifactDiagnosticCode,
   subject: string,
-  options: { readonly detail?: string; readonly location?: string } = {},
+  options: {
+    readonly detail?: string;
+    readonly location?: string;
+    readonly budgetEvidence?: ArtifactMeasurements;
+  } = {},
 ): CellArtifactDiagnostic {
   const rule = cellArtifactDiagnosticRule(code);
   const message = options.detail === undefined ? rule.states : `${rule.states} ${options.detail}`;
@@ -262,6 +295,7 @@ export function createCellArtifactDiagnostic(
     fixOwner: rule.fixOwner,
     breaksGuarantees: rule.breaksGuarantees,
     ...(options.location === undefined ? {} : { location: options.location }),
+    ...(options.budgetEvidence === undefined ? {} : { budgetEvidence: options.budgetEvidence }),
   };
 }
 

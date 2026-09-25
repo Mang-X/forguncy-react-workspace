@@ -666,3 +666,6 @@ export type {
   ForguncyConfigModuleLoader,
   LoadForguncyConfigOptions,
 } from "./config-loader.ts";
+
+export { composeCellCompileFingerprint } from "./cell-compile-fingerprint.ts";
+export type { ComposeCellCompileFingerprintInput } from "./cell-compile-fingerprint.ts";

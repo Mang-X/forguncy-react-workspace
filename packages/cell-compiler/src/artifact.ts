@@ -861,6 +861,18 @@ function auditCodeBudget(code: string, budget: number | undefined): readonly Cel
         `${String(write.ms)} ms at ${String(write.characters)} characters (${write.artifact}) and the ` +
         `browser's first cell entry took ${String(browserEntry.ms)} ms at ` +
         `${String(browserEntry.characters)} characters (${browserEntry.artifact}). ${guidance}`,
+      // The measurement travels with the diagnostic so it has exactly one producer (#77 round 5).
+      // A caller that wants to record this rejection has to take these numbers — it cannot type its
+      // own, which is what makes the recorded evidence compiler-origin rather than attested.
+      //
+      // Deliberately just the two figures: the *identity* of the compile is composed one level up,
+      // where the entry's source and the decision set are in hand (see
+      // `composeCellCompileFingerprint`). Composing it here would mean deriving the entry source
+      // from the composed artifact, which no longer exists as a separate input.
+      budgetEvidence: {
+        budgetCharacters: budget,
+        codeCharacters: code.length,
+      },
     }),
   ];
 }

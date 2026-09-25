@@ -26,6 +26,10 @@ const CELL_FINGERPRINT = "probe=inline-bundle;entry=src/cells/orders-table/App.t
 const BUNDLER_FINGERPRINT = "probe=amd-detect;entry=src/cells/orders-table/App.tsx";
 const EXTENSION_IDENTITY = "sha256:9f1c2b7d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091";
 
+/** The Cell a compile-observed rejection is about, and its compile identity. */
+const BENCH_CELL = "bench";
+const ARTIFACT_FINGERPRINT = 'artifact="abc";deps=[{"packageName":"react","strategy":"host"}];budget=100000';
+
 /** What a record stores: the identity derived from the verified contract. */
 const RECORD_TARGET = forguncyTargetIdentity();
 
@@ -51,6 +55,7 @@ function lockEnvironment(overrides: Partial<LockEnvironment> = {}): LockEnvironm
     target: RUNTIME_CONTRACT_TARGET,
     toolchain: { vitePlus: "0.3.2" },
     probeFingerprints: { "@tanstack/react-query": CELL_FINGERPRINT, "date-fns": CELL_FINGERPRINT, "es-toolkit": CELL_FINGERPRINT, react: CELL_FINGERPRINT, "some-amd-package": BUNDLER_FINGERPRINT },
+    artifactFingerprints: { [BENCH_CELL]: ARTIFACT_FINGERPRINT },
     extensionVersions: { "tanstack-query": "5.90.2" },
     extensionIdentities: { "tanstack-query": EXTENSION_IDENTITY },
     ...overrides,
@@ -184,10 +189,12 @@ const artifactRejection: LockedDependencyDecision = {
     summary: "The composed Cell is 200,000 characters against this Cell's cap of 100,000.",
     remediation: "Evaluate a lighter alternative or raise the Cell's declared cap.",
   },
-  artifactEvidence: { codeCharacters: 200_000, budgetCharacters: 100_000 },
+  artifactEvidence: { compileFingerprint: ARTIFACT_FINGERPRINT, codeCharacters: 200_000, budgetCharacters: 100_000 },
   alternatives: ["a lighter date utility"],
   supersededBy: "host",
-  cellTarget: null,
+  // A concrete Cell: a size verdict belongs to one composed Cell and one Cell's cap, which is why
+  // revision 15 requires the target for any record carrying compile evidence.
+  cellTarget: BENCH_CELL,
   resolvedVersion: null,
   probe: { status: "passed", fingerprint: CELL_FINGERPRINT, versionIndependent: false },
   target: RECORD_TARGET,
@@ -484,10 +491,11 @@ describe("replace decisions expire differently by rejection kind", () => {
   // here, which is what the migration contract in `lock-migration.ts` requires and what the
   // revision bump exists to produce.
   it("reports a pre-revision-14 budget rejection as missing its compile evidence, not as invalid", () => {
-    const legacy: LockedDependencyDecision = {
-      ...artifactRejection,
-      artifactEvidence: undefined,
-    };
+    // Built by removing the field rather than setting it to `undefined`: an explicit `undefined`
+    // would still be *present* to the type checker's spread, and the point of the case is a record
+    // that predates the field entirely.
+    const { artifactEvidence: _dropped, ...rest } = artifactRejection;
+    const legacy: LockedDependencyDecision = rest;
 
     const assessment = reasonsFor(legacy, lockEnvironment());
 
@@ -495,10 +503,42 @@ describe("replace decisions expire differently by rejection kind", () => {
     expect(assessment.freshness).toBe("stale");
   });
 
+  // PR review of #77, P1 (round 5). Round 4's evidence was two self-attested numbers, so nothing
+  // tied the rejection to the compile it described: the Cell source could change, or another
+  // dependency's decision could move, and the record kept reporting fresh. The identity in
+  // `artifactEvidence.compileFingerprint` is what closes that.
+  it("goes stale when the Cell's compile identity moves, so a size verdict cannot outlive its Cell", () => {
+    const moved = lockEnvironment({ artifactFingerprints: { [BENCH_CELL]: "artifact=\"moved\";deps=[];budget=100000" } });
+
+    const assessment = reasonsFor(artifactRejection, moved);
+
+    expect(assessment.stalenessReasons).toEqual(["artifact-compile-changed"]);
+    expect(assessment.freshness).toBe("stale");
+  });
+
+  it("cannot verify a budget rejection against an environment that compiled nothing", () => {
+    // Fail-closed, like an unknown probe fingerprint: an absent compile is not agreement, and a
+    // record whose Cell nobody recompiled has not been shown to still hold.
+    const assessment = reasonsFor(artifactRejection, lockEnvironment({ artifactFingerprints: {} }));
+
+    expect(assessment.stalenessReasons).toEqual(["artifact-compile-unknown"]);
+  });
+
+  it("re-checks an unrejected candidate's own version, which an artifact rejection also records", () => {
+    // The round-5 hole: `assessPackageVersionFreshness` gated on the `technical-rejection` profile,
+    // so an `artifact-rejection` skipped it even though it records `rejectedCandidate.version` —
+    // and a candidate upgrade is exactly what can make the Cell small enough to fit.
+    const upgraded = lockEnvironment({ resolvedVersions: { "date-fns": "5.0.0", "es-toolkit": "1.39.8", "some-amd-package": "2.4.0", react: "19.2.7" } });
+
+    const assessment = reasonsFor(artifactRejection, upgraded);
+
+    expect(assessment.stalenessReasons).toContain("rejected-candidate-version-changed");
+  });
+
   it("verifies a budget rejection once it carries the compile evidence", () => {
     // The other half: with the evidence, the record is fresh, and its profile is the one whose
     // probe requirement is *passed* — the package is fine, the composed Cell is not.
-    const resolution = resolveLockDecision(lock, { packageName: "date-fns" }, lockEnvironment());
+    const resolution = resolveLockDecision(lock, { packageName: "date-fns", cellTarget: BENCH_CELL }, lockEnvironment());
 
     expect(resolution.state).toBe("verified");
     expect(resolution.assessment?.profile).toBe("artifact-rejection");

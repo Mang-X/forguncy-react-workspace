@@ -62,6 +62,8 @@ export const LOCK_STALENESS_REASONS = [
   "extension-identity-changed",
   "extension-identity-unknown",
   "artifact-evidence-missing",
+  "artifact-compile-changed",
+  "artifact-compile-unknown",
 ] as const;
 export type LockStalenessReason = (typeof LOCK_STALENESS_REASONS)[number];
 
@@ -95,6 +97,20 @@ export interface LockEnvironment {
    * the map is a stale answer rather than a pass.
    */
   readonly probeFingerprints: Readonly<Record<string, string>>;
+  /**
+   * The compile identity of each Cell this environment can currently produce, by Cell target.
+   *
+   * Keyed by Cell target rather than by package, because a compile identity describes *one*
+   * composed Cell and every `cell-code-budget-exceeded` record for that Cell shares it — the
+   * `(package, cellTarget)` pair the lock is keyed by has only one of its two halves varying
+   * here. A Cell missing from the map is `artifact-compile-unknown` rather than a pass.
+   *
+   * Optional, because a caller that compiles nothing — the probe's own environment, a fixture —
+   * has no compile to describe, and a required field would make "I did not compile" and "the
+   * compile is unknown" the same edit. Absent means the same thing an absent entry does:
+   * `artifact-compile-unknown` for any record that needs an answer.
+   */
+  readonly artifactFingerprints?: Readonly<Record<string, string>>;
   /** Installed extension versions by `libraryId`, when known. */
   readonly extensionVersions: Readonly<Record<string, string>>;
   /** Installed extension content identities by `libraryId`, when known. */
@@ -132,7 +148,7 @@ export function assessLockDecision(
   reasons.push(...assessTargetFreshness(record, environment, policy));
   reasons.push(...assessToolchainFreshness(record, environment));
   reasons.push(...assessExtensionFreshness(record, environment));
-  reasons.push(...assessArtifactEvidenceFreshness(record));
+  reasons.push(...assessArtifactEvidenceFreshness(record, environment));
 
   return {
     profile,
@@ -188,10 +204,14 @@ function assessPackageVersionFreshness(
   }
 
   if (record.strategy === "replace") {
-    // A technical rejection is about the exact candidate that failed, so the
-    // version that matters is the rejected one — and its movement is what
-    // re-opens the decision instead of letting it stand forever.
-    if (policy.profile !== "technical-rejection" || record.rejectedCandidate === null) {
+    // A rejection is about the exact candidate that failed, so the version that matters is the
+    // rejected one — and its movement is what re-opens the decision instead of letting it stand
+    // forever. Every rejection that *records* a rejected candidate is assessed, not just the
+    // probe-observed profile (#77 round 5, P1): an `artifact-rejection` records one too, so gating
+    // on the profile let a genuinely smaller candidate keep an old size rejection reporting
+    // `fresh`. `rejectedCandidate === null` is the architectural case, which has no version to
+    // compare and no bundle to re-measure.
+    if (record.rejectedCandidate === null) {
       return [];
     }
     const installed = environment.resolvedVersions[record.packageName];
@@ -283,27 +303,54 @@ function assessExtensionFreshness(
 }
 
 /**
- * Whether a compile-observed rejection still carries the evidence that makes it checkable.
+ * Whether a compile-observed rejection still carries evidence that describes the *current* Cell.
  *
- * #77 revision 14 gave `cell-code-budget-exceeded` a real evidence shape — the measured
- * `codeCharacters` against the `budgetCharacters` the compile used — and this is the freshness
- * axis for it. A record written before revision 14 cites that code with no such evidence, and
- * reporting it here rather than refusing it at parse time is deliberate: an existing lock has to
- * stay **readable and stale**, per `lock-migration.ts`, and a migration step must not silently
- * delete or re-decide what it cannot interpret. Stale is exactly right — the record's evidence is
- * not re-checkable, so it cannot be treated as verified until it is re-recorded from a compile.
+ * #77 revision 14 gave `cell-code-budget-exceeded` a real evidence shape and revision 15 bound it
+ * to the compile that produced it, so this axis answers two questions in order:
  *
- * A record whose code is *not* compile-observed is untouched: the shape validator already refuses
- * artifact evidence under any other code, so there is no second case to assess here.
+ * 1. **Is there evidence at all?** A record written before revision 14 cites the code with none.
+ *    Reporting that here rather than refusing it at parse time is deliberate: an existing lock has
+ *    to stay **readable and stale** (`lock-migration.ts`), and a migration must not silently
+ *    delete or re-decide what it cannot interpret.
+ * 2. **Is it still the same compile?** The recorded `compileFingerprint` covers the composed
+ *    artifact's bytes, the dependency decision set and the cap. If the entry (or anything it
+ *    imports) changed, or a dependency decision moved, this workspace would now compose a
+ *    different artifact — and a size verdict about the old one must not report `fresh`. This is the
+ *    question the round-5 review asked for, and the reason the fingerprint exists.
+ *
+ * A Cell the environment cannot compile is `artifact-compile-unknown` rather than a pass, for the
+ * same reason a missing probe fingerprint is: an absent answer is not agreement. A record whose
+ * code is *not* compile-observed is untouched — the shape validator already refuses artifact
+ * evidence under any other code, so there is no second case to assess here.
  */
-function assessArtifactEvidenceFreshness(record: LockedDependencyDecision): readonly LockStalenessReason[] {
+function assessArtifactEvidenceFreshness(
+  record: LockedDependencyDecision,
+  environment: LockEnvironment,
+): readonly LockStalenessReason[] {
   if (record.strategy !== "replace" || record.rejection.kind !== "technical") {
     return [];
   }
   if (!isArtifactObservedRejectionCode(record.rejection.code)) {
     return [];
   }
-  return record.artifactEvidence === undefined ? ["artifact-evidence-missing"] : [];
+
+  const evidence = record.artifactEvidence;
+  if (evidence === undefined) {
+    return ["artifact-evidence-missing"];
+  }
+
+  // A record with no Cell target cannot be compared against a compile at all. Revision 15 requires
+  // a concrete target for *new* compile-observed rejections, so this is the pre-revision-15 shape —
+  // reportable as stale rather than invalid, so the lock stays readable.
+  if (record.cellTarget === null) {
+    return ["artifact-compile-unknown"];
+  }
+
+  const current = environment.artifactFingerprints?.[record.cellTarget];
+  if (current === undefined) {
+    return ["artifact-compile-unknown"];
+  }
+  return current === evidence.compileFingerprint ? [] : ["artifact-compile-changed"];
 }
 
 /**

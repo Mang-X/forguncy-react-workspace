@@ -121,7 +121,11 @@ interface LockRecord {
   readonly packageName: string;
   readonly cellTarget: string | null;
   readonly imports?: readonly string[] | null;
-  readonly artifactEvidence?: { readonly codeCharacters: number; readonly budgetCharacters: number };
+  readonly artifactEvidence?: {
+    readonly compileFingerprint: string;
+    readonly codeCharacters: number;
+    readonly budgetCharacters: number;
+  };
   readonly probe: { readonly status: string; readonly fingerprint: string | null };
 }
 
@@ -192,6 +196,19 @@ async function withCappedCell<T>(cap: number | null, body: (root: string) => Pro
   const root = await scratchRoot(PROVING_CASES);
   try {
     await mkdir(join(root, "cells", "bench", "src"), { recursive: true });
+    // A real entry: the compile-evidence path *builds* this Cell, so the fixture has to have
+    // something to build. Small enough to compile in a test, large enough to exceed a tight cap.
+    await writeFile(
+      join(root, "cells", "bench", "src", "App.tsx"),
+      [
+        "export default function App() {",
+        "  const rows = Array.from({ length: 200 }, (_, index) => index);",
+        "  return <ul>{rows.map(row => <li key={row}>{row}</li>)}</ul>;",
+        "}",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
     await writeFile(
       join(root, "package.json"),
       JSON.stringify({ name: "capped-cell", version: "0.0.0", private: true, type: "module" }, null, 2),
@@ -223,6 +240,53 @@ async function withCappedCell<T>(cap: number | null, body: (root: string) => Pro
   } finally {
     await removeScratch(root);
   }
+}
+
+/**
+ * Writes a lock placing `es-toolkit` in the fixture's Cell.
+ *
+ * Called by the compile-evidence cases and not by the fixture, because those cases need it and the
+ * refusal cases assert that no lock is left behind — an unconditional write made the fixture itself
+ * look like a recorded decision. The compile-evidence path needs the record for a real reason: the
+ * compile to reproduce is the one that *included* the package being rejected, and the round-5
+ * attribution rule refuses a rejection for a package no Cell record places here.
+ */
+async function withRecordedCell(root: string): Promise<void> {
+  await writeFile(
+    join(root, "fgc.lock.json"),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        decisions: [
+          {
+            packageName: "es-toolkit",
+            cellTarget: "bench",
+            imports: null,
+            strategy: "inline",
+            resolvedVersion: "1.39.8",
+            globalName: null,
+            libraryId: null,
+            probe: { status: "passed", fingerprint: "probe=\"inline-bundle\";entry=\"es-toolkit\";analysis=14", versionIndependent: false },
+            target: null,
+            probedWith: { vitePlus: null },
+            extension: null,
+            rejectedCandidate: null,
+            rationale: null,
+            evidence: [{ kind: "probe", reference: "fgc-evidence/fixture.json" }],
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+}
+
+interface ProbePayload {
+  readonly fingerprint: string;
+  readonly facts: readonly { readonly name: string; readonly value: unknown }[];
+  readonly rejectionFindings: readonly { readonly signal: string }[];
 }
 
 interface ProbePayload {
@@ -276,13 +340,15 @@ describe("CLI contract: the declared cell code cap reaches probe, audit, record 
     });
   }, CASE_TIMEOUT_MS);
 
-  // PR review of #77, P1 (round 4). Revision 13 removed the only path that could *record* a size
-  // rejection, because the probe was the only thing that could file one and the probe cannot prove
-  // it. These four cases cover the replacement path end to end: the compile's own numbers are what
-  // a `cell-code-budget-exceeded` record rests on, and the CLI checks them against the Cell's
-  // declared cap so a writer cannot measure against a ceiling the project never set.
-  it("records a compile-observed size rejection, and `status` verifies it", async () => {
+  // PR review of #77, P1 (rounds 4-5). Revision 13 removed the only path that could *record* a size
+  // rejection — the probe cannot prove one. Revision 14 gave the rejection a route through the
+  // compiler's own diagnostic; revision 15 made the CLI run that compiler rather than accept the
+  // numbers from the deciding file. These cases cover the resulting path end to end.
+  it("records a compile-observed size rejection the CLI produced, and `status` verifies it", async () => {
     await withCappedCell(CAP_EXCEEDED, async root => {
+      await withRecordedCell(root);
+      // The decision file states *which* rejection it is and carries no measurement: a rejection
+      // certified by numbers the deciding file chose is the evidence revision 13 removed.
       const file = await decisionFile({
         packageName: "es-toolkit",
         role: "cell-local-ui",
@@ -297,109 +363,82 @@ describe("CLI contract: the declared cell code cap reaches probe, audit, record 
           evidence: [],
           remediation: "Evaluate a lighter alternative.",
         },
-        artifactEvidence: { codeCharacters: CAP_EXCEEDED + 1, budgetCharacters: CAP_EXCEEDED },
       });
       try {
         const recorded = await cli(["record", "--project", root, "--decision", file.path]);
         expect(recorded.code, recorded.stderr).toBe(0);
 
         const record = (await readLock(root)).decisions.find(entry => entry.packageName === "es-toolkit")!;
-        expect(record.artifactEvidence).toEqual({
-          codeCharacters: CAP_EXCEEDED + 1,
-          budgetCharacters: CAP_EXCEEDED,
-        });
+        // The evidence is the compiler's: real character counts for the Cell this fixture declares,
+        // and an identity composed from the entry, the Cell's decisions and the cap.
+        expect(record.artifactEvidence?.budgetCharacters).toBe(CAP_EXCEEDED);
+        expect(record.artifactEvidence?.codeCharacters).toBeGreaterThan(CAP_EXCEEDED);
+        expect(record.artifactEvidence?.compileFingerprint).toMatch(/^cell="[0-9a-f]{64}";deps=\[/);
 
-        // `status` reports it verified — the profile is `artifact-rejection`, whose probe
-        // requirement is *passed*, because the package's own probe is fine and the Cell is not.
+        // `status` recompiles the Cell's identity and finds it unchanged, so the record verifies —
+        // the profile whose probe requirement is *passed*, because the package builds cleanly and
+        // the composed Cell is what exceeds the cap.
         const status = await cli(["status", "--project", root]);
         const decision = json<{ decisions: readonly { freshness: string; stalenessReasons: readonly string[]; profile: string }[] }>(status).decisions[0];
         expect(decision.profile).toBe("artifact-rejection");
-        expect(decision.stalenessReasons).not.toContain("artifact-evidence-missing");
+        expect(decision.stalenessReasons).toEqual([]);
       } finally {
         await file.cleanup();
       }
     });
   }, CASE_TIMEOUT_MS);
 
-  it("refuses a compile-observed rejection that states no evidence", async () => {
+  it("refuses a decision file that supplies its own compile measurement", async () => {
+    // The round-5 requirement in one assertion: the deciding file cannot manufacture the evidence.
     await withCappedCell(CAP_EXCEEDED, async root => {
+      await withRecordedCell(root);
       const file = await decisionFile({
         packageName: "es-toolkit",
         role: "cell-local-ui",
         strategy: "replace",
         cellTarget: "bench",
-        rationale: "The composed Cell exceeds the cap this Cell declares.",
+        rationale: "Claimed a size with numbers of its own choosing.",
         alternatives: ["a lighter date utility"],
         rejection: {
           kind: "technical",
           code: "cell-code-budget-exceeded",
-          summary: "Claimed a size problem with nothing behind it.",
+          summary: "Claimed.",
           evidence: [],
           remediation: "Evaluate a lighter alternative.",
         },
+        artifactEvidence: { compileFingerprint: "typed", codeCharacters: 5_000, budgetCharacters: 4_000 },
       });
       try {
         const recorded = await cli(["record", "--project", root, "--decision", file.path]);
+        // A malformed *file* is a usage error, so it is refused before any payload is printed —
+        // asserted on stderr, which is where `fail()` writes, not on a JSON document.
         expect(recorded.code).not.toBe(0);
-        // The problem is in the JSON payload; stderr carries only the one-line summary.
-        expect(json<{ problems: readonly string[] }>(recorded).problems.join("\n")).toContain("artifactEvidence");
+        expect(recorded.stderr).toMatch(/not the caller's to state/);
       } finally {
         await file.cleanup();
       }
     });
   }, CASE_TIMEOUT_MS);
 
-  it("refuses compile evidence measured against a cap the Cell does not declare", async () => {
-    // The drift this closes: the numbers are structurally fine and state an over-cap claim, but
-    // the ceiling they measure against exists nowhere in the project. `core` cannot see the config,
-    // so this is the CLI's check — and without it a record could assert a rejection for a cap
-    // nobody set.
-    await withCappedCell(CAP_EXCEEDED, async root => {
+  it("refuses a size rejection whose Cell does not actually exceed its cap", async () => {
+    // The CLI compiles the Cell, so a rejection the compile does not support is refused on the
+    // compiler's own answer rather than on a number the file supplied.
+    await withCappedCell(CAP_MET, async root => {
+      await withRecordedCell(root);
       const file = await decisionFile({
         packageName: "es-toolkit",
         role: "cell-local-ui",
         strategy: "replace",
         cellTarget: "bench",
-        rationale: "The composed Cell exceeds the cap this Cell declares.",
+        rationale: "Claims a size the Cell does not have.",
         alternatives: ["a lighter date utility"],
         rejection: {
           kind: "technical",
           code: "cell-code-budget-exceeded",
-          summary: "Measured against an invented cap.",
+          summary: "Claimed, but the Cell fits.",
           evidence: [],
           remediation: "Evaluate a lighter alternative.",
         },
-        artifactEvidence: { codeCharacters: 5_000, budgetCharacters: 4_000 },
-      });
-      try {
-        const recorded = await cli(["record", "--project", root, "--decision", file.path]);
-        expect(recorded.code).not.toBe(0);
-        expect(json<{ problems: readonly string[] }>(recorded).problems.join("\n")).toMatch(/declares/);
-      } finally {
-        await file.cleanup();
-      }
-    });
-  }, CASE_TIMEOUT_MS);
-
-  it("refuses compile evidence whose numbers do not state the rejection", async () => {
-    // Structurally valid, cap matches the Cell, and the measurement is *under* the cap — so the
-    // numbers disprove the claim they are attached to.
-    await withCappedCell(CAP_EXCEEDED, async root => {
-      const file = await decisionFile({
-        packageName: "es-toolkit",
-        role: "cell-local-ui",
-        strategy: "replace",
-        cellTarget: "bench",
-        rationale: "The composed Cell exceeds the cap this Cell declares.",
-        alternatives: ["a lighter date utility"],
-        rejection: {
-          kind: "technical",
-          code: "cell-code-budget-exceeded",
-          summary: "Under the cap, so the evidence contradicts the claim.",
-          evidence: [],
-          remediation: "Evaluate a lighter alternative.",
-        },
-        artifactEvidence: { codeCharacters: CAP_EXCEEDED - 1, budgetCharacters: CAP_EXCEEDED },
       });
       try {
         const recorded = await cli(["record", "--project", root, "--decision", file.path]);
@@ -410,6 +449,40 @@ describe("CLI contract: the declared cell code cap reaches probe, audit, record 
       }
     });
   }, CASE_TIMEOUT_MS);
+
+  it("refuses a size rejection for a Cell the lock does not place the package in", async () => {
+    // A package the lock does not put in this Cell is not in its graph, so no compile of that Cell
+    // measured this package — the attribution the round-5 review asked to keep explicit.
+    await withCappedCell(CAP_EXCEEDED, async root => {
+      // The lock records `es-toolkit`; the decision rejects `@embedpdf/pdfium`, which the fixture
+      // declares but the Cell's record does not include. Both are installed, so the probe passes
+      // and the refusal under test is the attribution rule rather than "not installed".
+      await withRecordedCell(root);
+      const file = await decisionFile({
+        packageName: "@embedpdf/pdfium",
+        role: "cell-local-ui",
+        strategy: "replace",
+        cellTarget: "bench",
+        rationale: "Rejects a package the Cell never used.",
+        alternatives: ["a lighter date utility"],
+        rejection: {
+          kind: "technical",
+          code: "cell-code-budget-exceeded",
+          summary: "Attributed to the wrong package.",
+          evidence: [],
+          remediation: "Evaluate a lighter alternative.",
+        },
+      });
+      try {
+        const recorded = await cli(["record", "--project", root, "--decision", file.path]);
+        expect(recorded.code).not.toBe(0);
+        expect(json<{ problems: readonly string[] }>(recorded).problems.join("\n")).toMatch(/places no decision/);
+      } finally {
+        await file.cleanup();
+      }
+    });
+  }, CASE_TIMEOUT_MS);
+
 
   it("carries the declared surface into the record, and `status` rebuilds it from there", async () => {
     // The whole P1-c plumbing in one case, because each half is useless without the other: the

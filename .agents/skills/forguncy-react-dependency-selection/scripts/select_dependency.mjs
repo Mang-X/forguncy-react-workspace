@@ -953,12 +953,20 @@ function decisionFromFile(document) {
     );
   }
 
-  // Compile evidence travels with the decision it belongs to (#77 revision 14). It is *not*
-  // optional decoration: `cell-code-budget-exceeded` is observed by a compose, not by a probe, so
-  // these two numbers are the whole of that rejection's evidence. `core`'s shape validator refuses
-  // the pairing in either direction — this file cannot smuggle the numbers under a probe-observed
-  // code, and cannot state a compile-observed rejection without them.
-  const artifactEvidence = document.artifactEvidence;
+  // A compile-observed rejection's evidence is **not** read from the file (#77 round 5). Revision
+  // 14 accepted it here, which meant a caller could certify its own rejection by choosing any
+  // `codeCharacters > budgetCharacters` — two self-attested numbers are no stronger than the
+  // synthetic probe finding revision 13 removed. The file states *which* rejection; the compiler
+  // supplies *how big* the Cell is, and `audit`/`record` produce it by compiling (`artifactEvidence`
+  // is filled in after this function, in `compileEvidenceFor`).
+  //
+  // Refused rather than ignored, because silently dropping a field the file bothered to include
+  // would leave the caller believing their numbers were used.
+  if (document.artifactEvidence !== undefined) {
+    fail(
+      `The decision file for "${packageName}" supplies \`artifactEvidence\`, but a compile measurement is not the caller's to state: a rejection certified by numbers the deciding file chose is exactly the evidence #77 removed. Drop the field — \`audit\`/\`record\` compile the Cell and take the measurement from the compiler.`,
+    );
+  }
 
   const decision = {
     packageName,
@@ -968,7 +976,6 @@ function decisionFromFile(document) {
     ...(strategy === "replace"
       ? {
           rejection,
-          ...(artifactEvidence === undefined ? {} : { artifactEvidence }),
           ...(document.alternatives === undefined ? {} : { alternatives: document.alternatives }),
           ...(document.supersededBy === undefined ? {} : { supersededBy: document.supersededBy }),
         }
@@ -1255,48 +1262,200 @@ async function candidateProblems(lock, options, report) {
 }
 
 /**
- * Whether a decision's compile evidence names the cap the Cell actually declares.
+ * The compiler's measurement for a decision that rejects a Cell on its size, or a problem.
  *
- * `core`'s shape validator checks that the evidence *states* the rejection — the measurement over
- * the cap — but it cannot know whether the cap is the Cell's. A writer could pass a
- * `budgetCharacters` of its own choosing and produce a record whose numbers look conclusive while
- * measuring against a ceiling the project never set, which is the drift #77 exists to remove at
- * every other boundary. So this resolves the Cell's own `output.codeBudgetCharacters` and requires
- * the evidence to agree, or requires the cap to be genuinely absent.
+ * #77 round 5: the evidence for `cell-code-budget-exceeded` has to come from the compile, so this
+ * is where it is *produced* — the decision file states which rejection it is, and the measurement
+ * is obtained here by running the compiler over the Cell as the lock describes it. A caller cannot
+ * supply these numbers (`decisionFromFile` refuses the field outright), which is what stops the
+ * deciding file from certifying its own rejection with two self-attested figures.
  *
- * Null when there is nothing to check, so a decision without compile evidence costs no config
- * read: `core` already refuses that pairing, and re-reporting it here would be a second voice.
+ * The compile runs under the Cell's **current** lock records, including this package's own. That is
+ * the shape the workflow produces: a size rejection is recorded because a compile that included
+ * this package came out over cap, so the compile to reproduce is the one under the strategy the
+ * package currently resolves to — not one with the package removed. A package the lock does not
+ * place in this Cell is not in its graph, so no compile of it could have measured this package.
  */
-async function artifactEvidenceProblems(entry, options) {
+async function compileEvidenceFor(entry, options) {
   const { decision } = entry;
-  if (decision.strategy !== "replace" || decision.artifactEvidence === undefined) {
-    return [];
+  if (decision.strategy !== "replace" || !core.isArtifactObservedRejectionCode(decision.rejection.code)) {
+    return { evidence: undefined, problems: [] };
   }
 
   const projectRoot = fromWorkingDirectory(options.project ?? ".");
   const cellTarget = cellTargetFor(entry, options);
-  const resolved = cellTarget === null ? { ok: true, codeBudgetCharacters: null } : await resolveCellBudget(projectRoot, cellTarget);
 
-  if (!resolved.ok) {
-    return [
-      `The decision for "${decision.packageName}" carries compile evidence, so its cap has to be checked against the Cell that was compiled, but that Cell could not be resolved: ${resolved.problem}`,
-    ];
+  if (cellTarget === null) {
+    return {
+      evidence: undefined,
+      problems: [
+        `The decision for "${decision.packageName}" rejects a Cell on a size the compiler measures, but names no Cell. A composed Cell and its cap belong to one Cell target — a null target is the record that applies to every Cell — so this would turn one Cell's size verdict into a rejection of the package everywhere. Name the Cell (\`--cell\` or the decision file's \`cellTarget\`).`,
+      ],
+    };
   }
 
-  const declared = resolved.codeBudgetCharacters;
-  if (declared === null) {
-    return [
-      `The decision for "${decision.packageName}" records \`artifactEvidence.budgetCharacters: ${String(decision.artifactEvidence.budgetCharacters)}\`, but ${cellTarget === null ? "no cell target is named, so no Cell declares one" : `Cell "${cellTarget}" declares no \`output.codeBudgetCharacters\``}. A cap that appears in the evidence but exists nowhere in the project would let this record measure against a ceiling nobody set. Declare the cap on the Cell, or drop the compile evidence.`,
-    ];
+  const lock = await resolver.readFgcLock(projectRoot);
+  const cellDecisions = lock.decisions.filter(record => record.cellTarget === cellTarget);
+  if (!cellDecisions.some(record => record.packageName === decision.packageName)) {
+    return {
+      evidence: undefined,
+      problems: [
+        `The decision for "${decision.packageName}" rejects Cell "${cellTarget}" on a size the compiler measures, but the lock places no decision for "${decision.packageName}" in that Cell — so no compile of it can have included this package. Record the strategy it resolves to first (the compile that measured the size ran under it).`,
+      ],
+    };
   }
 
-  if (declared !== decision.artifactEvidence.budgetCharacters) {
-    return [
-      `The decision for "${decision.packageName}" records \`artifactEvidence.budgetCharacters: ${String(decision.artifactEvidence.budgetCharacters)}\`, but Cell "${cellTarget}" declares \`output.codeBudgetCharacters: ${String(declared)}\`. The evidence has to measure against the cap the compile would actually apply, or the record states a rejection for a ceiling the project does not have.`,
-    ];
+  const projections = [];
+  for (const record of cellDecisions) {
+    projections.push(await projectionFor(record, projectRoot));
+  }
+  const failed = projections.filter(projection => projection.problem !== undefined);
+  if (failed.length > 0) {
+    return {
+      evidence: undefined,
+      problems: [
+        `The decision for "${decision.packageName}" needs Cell "${cellTarget}" compiled, but some of its records could not be projected for compilation: ${failed.map(projection => projection.problem).join(" ")}`,
+      ],
+    };
   }
 
-  return [];
+  const compiled = await compileDeclaredCell({
+    projectRoot,
+    cellTarget,
+    dependencies: projections.map(projection => projection.decision),
+    // The identity is composed over the same records `status` will rebuild it from: the Cell's
+    // decisions minus every record that already carries compile evidence. `identityExcludes` is
+    // that rule, stated once so the two sites cannot disagree — a disagreement here would make
+    // every `artifact-rejection` report `artifact-compile-changed` for ever.
+    identityDependencies: projections
+      .filter((_, index) => !identityExcludes(cellDecisions[index], decision.packageName))
+      .map(projection => projection.decision),
+  });
+  if (!compiled.ok) {
+    return {
+      evidence: undefined,
+      problems: [
+        `The decision for "${decision.packageName}" rejects the Cell on a size the compiler measures, but that compile could not be produced: ${compiled.problem}`,
+      ],
+    };
+  }
+
+  // The compiler only files the diagnostic when the artifact is genuinely over, so reaching here
+  // with a fitting measurement means the rejection has nothing behind it — reported as such rather
+  // than accepted, because a `replace` binds to this finding.
+  if (compiled.evidence.codeCharacters <= compiled.evidence.budgetCharacters) {
+    return {
+      evidence: undefined,
+      problems: [
+        `Cell "${cellTarget}" composes to ${String(compiled.evidence.codeCharacters)} characters against its declared cap of ${String(compiled.evidence.budgetCharacters)} — within the cap, so the compiler files no \`cell-code-budget-exceeded\` diagnostic and this rejection has nothing behind it.`,
+      ],
+    };
+  }
+
+  return { evidence: compiled.evidence, problems: [] };
+}
+
+/**
+ * Whether a lock record is excluded from a Cell's compile identity.
+ *
+ * The recorder and `status` must agree on this exactly, or the identity `status` rebuilds would
+ * differ from the one `record` wrote and every `artifact-rejection` would report
+ * `artifact-compile-changed` for ever. Stated once, as a predicate, so the two call sites cannot
+ * drift into disagreeing about which records the identity covers.
+ *
+ * Two ways a record is excluded, and they coincide after a write:
+ *
+ * - **It is the subject** (`subjectPackageName`) — the record this rejection is about. Recording it
+ *   turns its decision into `replace`, so its projection differs from the one the measuring compile
+ *   saw; including it would make the identity change at the moment of writing.
+ * - **It already carries compile evidence** — i.e. it is *a* recorded `artifact-rejection`. This is
+ *   the same rule seen from `status`, which assesses records one at a time and knows no "subject":
+ *   every artifact-rejection it assesses is the subject of its own identity, so the subject is
+ *   always in this set. That is what makes `identityExcludes(record, null)` at assessment time
+ *   compute the same set `identityExcludes(record, packageName)` computed at write time.
+ */
+function identityExcludes(record, subjectPackageName) {
+  return record.packageName === subjectPackageName || record.artifactEvidence !== undefined;
+}
+
+/**
+ * The compiler-facing decision for one lock record, or a problem.
+ *
+ * The lock is a persistence format; the compiler takes #4's decision union. `dependencyDecisionOf`
+ * is the projection between them, and an `extension` record additionally has to satisfy the
+ * extension catalog — a record the catalog cannot confirm would make the compile fail for a reason
+ * that has nothing to do with the size being measured, which would be reported as if it did.
+ */
+async function projectionFor(record, projectRoot) {
+  if (record.strategy === "extension") {
+    const catalog = await extensionCatalogFor({ project: projectRoot }, { decisions: [record] });
+    if (catalog.problems.length > 0) {
+      return { problem: `extension record "${record.packageName}" could not be confirmed: ${catalog.problems.join(" ")}` };
+    }
+  }
+  return { decision: core.dependencyDecisionOf(record) };
+}
+
+/**
+ * Compiles one declared Cell and returns the budget evidence the compiler produced.
+ *
+ * The plan comes from the registry (so the entry, the Cell's decisions and the declared cap are the
+ * project's rather than the caller's), and the bundler is the same Rolldown port the compiler ships
+ * — the point is to run the *real* compile, not an approximation of it.
+ *
+ * Returns a problem rather than throwing, because the callers report rather than die: `audit` on a
+ * project whose Cell does not build yet is a normal state, and the answer is a finding.
+ */
+async function compileDeclaredCell({ projectRoot, cellTarget, dependencies, identityDependencies }) {
+  try {
+    const compiler = await import("@forguncy-react-workspace/cell-compiler");
+    const registry = await core.loadForguncyConfig({ root: projectRoot, requireEntryFiles: true });
+    const plan = compiler.planCellCompile({ registry, cellId: cellTarget, dependencies });
+
+    // The cap comes from the Cell's own declaration through the plan, never from the caller — the
+    // same rule `--cell` follows, and the reason the compile here is the one the project would run.
+    const codeBudgetCharacters = plan.output?.codeBudgetCharacters;
+    if (codeBudgetCharacters === undefined) {
+      return {
+        ok: false,
+        problem: `Cell "${cellTarget}" declares no \`output.codeBudgetCharacters\`, so its compile applies no cap and cannot exceed one.`,
+      };
+    }
+
+    // The identity's entry half is read from the file the plan resolved. Both halves of the
+    // fingerprint exist only here, and a later reader re-reading this file composes the same digest.
+    const entrySource = await readFile(plan.input.entry, "utf8");
+    const identify = measurements =>
+      core.composeCellCompileFingerprint({
+        entrySource,
+        dependencies: identityDependencies,
+        codeBudgetCharacters: measurements.budgetCharacters,
+      });
+
+    const outcome = await compiler.compileCell(plan.input, {
+      bundler: compiler.createRolldownCellBundler({ dir: projectRoot }),
+      codeBudgetCharacters,
+    });
+
+    if (outcome.status !== "rejected") {
+      // Compiled cleanly: no budget diagnostic exists, so nothing measured a size. Reported as a
+      // fitting measurement so the caller's one "over cap?" test decides, rather than duplicating it.
+      const measurements = { budgetCharacters: codeBudgetCharacters, codeCharacters: outcome.artifact.code.length };
+      return { ok: true, evidence: { ...measurements, compileFingerprint: identify(measurements) } };
+    }
+
+    const measured = outcome.diagnostics.find(diagnostic => diagnostic.budgetEvidence !== undefined);
+    if (measured?.budgetEvidence === undefined) {
+      // Rejected for something else (a source construct, a remaining import): the size verdict is
+      // not what failed, so there is no budget evidence to cite.
+      const codes = outcome.diagnostics.map(diagnostic => diagnostic.code).join(", ");
+      return { ok: false, problem: `compiling Cell "${cellTarget}" was rejected by ${codes || "no named diagnostic"}, none of which measures a size.` };
+    }
+
+    return { ok: true, evidence: { ...measured.budgetEvidence, compileFingerprint: identify(measured.budgetEvidence) } };
+  } catch (error) {
+    return { ok: false, problem: error.message };
+  }
 }
 
 /**
@@ -1458,10 +1617,13 @@ async function commandAudit(options) {
   }
   const entry = decisionFromFile(await readJson(path, "decision file"));
   const { probe, probeResult } = await probeForDecision(entry, options);
+  // Compile-derived evidence is attached *before* the audit, so the audit checks the record the
+  // write would produce rather than a pre-evidence version of it (#77 round 5).
+  const compiled = await compileEvidenceFor(entry, options);
+  entry.decision = { ...entry.decision, ...(compiled.evidence === undefined ? {} : { artifactEvidence: compiled.evidence }) };
   const problems = [
     ...core.auditSelectionDecision({ decision: entry.decision, probe, ownership: entry.ownership }),
-    // Checks the shape validator cannot make, because it does not read the project config.
-    ...(await artifactEvidenceProblems(entry, options)),
+    ...compiled.problems,
   ];
 
   // The same acceptance checks `record` applies, over the lock this decision *would*
@@ -1506,9 +1668,11 @@ async function commandRecord(options) {
   }
   const entry = decisionFromFile(await readJson(path, "decision file"));
   const { probe, probeResult } = await probeForDecision(entry, options);
+  const compiled = await compileEvidenceFor(entry, options);
+  entry.decision = { ...entry.decision, ...(compiled.evidence === undefined ? {} : { artifactEvidence: compiled.evidence }) };
   const problems = [
     ...core.auditSelectionDecision({ decision: entry.decision, probe, ownership: entry.ownership }),
-    ...(await artifactEvidenceProblems(entry, options)),
+    ...compiled.problems,
   ];
 
   if (problems.length > 0) {
@@ -1678,6 +1842,46 @@ async function commandStatus(options) {
     }
   }
 
+  // The compile identity, rebuilt per Cell rather than per record (#77 round 5). It describes one
+  // composed Cell, so every `artifact-rejection` record scoped to that Cell shares it — and it is
+  // composed from the same three inputs the recorder used, read the same way: the entry's source,
+  // the Cell's decisions minus the subject, and the declared cap. A Cell whose identity cannot be
+  // rebuilt stays out of the map, so a record needing it reports `artifact-compile-unknown` rather
+  // than passing.
+  const rebuiltArtifacts = new Map();
+  const cellsNeedingIdentity = new Set(
+    lock.decisions
+      .filter(record => record.artifactEvidence !== undefined && record.cellTarget !== null)
+      .map(record => record.cellTarget),
+  );
+  for (const cellTarget of cellsNeedingIdentity) {
+    try {
+      const budget = await resolveCellBudget(projectRoot, cellTarget);
+      if (!budget.ok || budget.codeBudgetCharacters === null) {
+        continue;
+      }
+      const registry = await core.loadForguncyConfig({ root: projectRoot, requireEntryFiles: true });
+      const entrySource = await readFile(registry.require(cellTarget).entryPath, "utf8");
+      const identityDependencies = [];
+      for (const record of lock.decisions) {
+        if (record.cellTarget !== cellTarget || identityExcludes(record, null)) {
+          continue;
+        }
+        identityDependencies.push(core.dependencyDecisionOf(record));
+      }
+      rebuiltArtifacts.set(
+        cellTarget,
+        core.composeCellCompileFingerprint({
+          entrySource,
+          dependencies: identityDependencies,
+          codeBudgetCharacters: budget.codeBudgetCharacters,
+        }),
+      );
+    } catch {
+      // An unresolvable Cell or entry leaves the identity absent, which the freshness axis reports.
+    }
+  }
+
   const environment = await resolver.probeLockEnvironment(projectRoot, {
     lock,
     probeFingerprints: {},
@@ -1689,10 +1893,14 @@ async function commandStatus(options) {
     // a single shared map can only be right when no two records share a package name. The
     // versions, target and toolchain are shared because none of them depends on the Cell.
     const own = rebuiltFingerprints.get(recordIdentity(record));
-    const recordEnvironment =
-      own === undefined
-        ? environment
-        : { ...environment, probeFingerprints: { [record.packageName]: own } };
+    const artifactIdentity = record.cellTarget === null ? undefined : rebuiltArtifacts.get(record.cellTarget);
+    const recordEnvironment = {
+      ...environment,
+      // The compile identity is keyed by Cell target, so it is shared by every record scoped to
+      // that Cell rather than varying per package — unlike the probe fingerprint beside it.
+      ...(artifactIdentity === undefined ? {} : { artifactFingerprints: { [record.cellTarget]: artifactIdentity } }),
+      ...(own === undefined ? {} : { probeFingerprints: { [record.packageName]: own } }),
+    };
     const assessment = core.assessLockDecision(record, recordEnvironment);
 
     // A citation problem is a blocker, and it is reported *beside* the core assessment

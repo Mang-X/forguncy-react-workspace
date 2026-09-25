@@ -1023,6 +1023,30 @@ function inspectLockRecord(record: unknown, where: string): readonly string[] {
     }
   }
 
+  // The compile evidence, shape-checked here rather than only in the typed semantic pass (#77
+  // round 5, P2). `inspectLockRecord` runs over *untrusted* JSON, so a malformed value has to
+  // become an `FgcLockValidationError` finding rather than a native throw: an explicit
+  // `"artifactEvidence": null` would otherwise pass the structural phase and then blow up when the
+  // semantic pass destructures it. Only the shape is checked here; whether the evidence belongs to
+  // the cited code, and whether its numbers state the rejection, is the semantic pass's job.
+  if (record.artifactEvidence !== undefined) {
+    const evidence: unknown = record.artifactEvidence;
+    if (!isPlainObject(evidence)) {
+      problems.push(
+        `${where} must declare \`artifactEvidence\` as an object with \`codeCharacters\` and \`budgetCharacters\`, or omit it.`,
+      );
+    } else {
+      for (const field of ["codeCharacters", "budgetCharacters"]) {
+        const value = evidence[field];
+        if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+          problems.push(
+            `${where} must declare \`artifactEvidence.${field}\` as a non-negative finite character count, or omit \`artifactEvidence\`.`,
+          );
+        }
+      }
+    }
+  }
+
   inspectNullableString(problems, record, "resolvedVersion", where);
   inspectNullableString(problems, record, "rationale", where);
 
@@ -1394,6 +1418,19 @@ function validateRejectedCandidate(where: string, record: LockedDependencyDecisi
       : [
           `${where} is an architectural rejection: the capability belongs to Forguncy whatever version the package is, so recording a rejected candidate version would tie an ownership conflict to a release.`,
         ];
+  }
+
+  // A compile-observed rejection is about **one** composed Cell and that Cell's configured cap
+  // (#77 round 5, P1). `cellTarget: null` is not "unspecified" in this lock — it is the fallback
+  // record for every Cell — so accepting it here would let one Cell's size observation become
+  // "replace this package everywhere". Required only when the record carries the compile evidence
+  // revision 15 introduced: a pre-revision-15 record has none, and refusing it would make an
+  // existing lock unreadable instead of stale (`assessArtifactEvidenceFreshness` reports
+  // `artifact-compile-unknown` for exactly that shape).
+  if (record.artifactEvidence !== undefined && record.cellTarget === null) {
+    return [
+      `${where} records compile evidence for a "${record.rejection.kind === "technical" ? record.rejection.code : ""}" rejection without naming the Cell it measured. A composed Cell and its cap belong to one Cell target, and a null target is the record that applies to every Cell — so this would turn one Cell's size verdict into a rejection of the package everywhere. Name the Cell, or drop the compile evidence.`,
+    ];
   }
 
   if (rejectedCandidate === null || rejectedCandidate.version.trim().length === 0) {

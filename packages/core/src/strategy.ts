@@ -208,6 +208,18 @@ export interface ExtensionDependencyDecision {
  * number the writer chose.
  */
 export interface ArtifactBudgetEvidence {
+  /**
+   * The identity of the compile these numbers came from — `composeCellCompileFingerprint` applied
+   * to the composed artifact, the decision set and the cap (#77 round 5).
+   *
+   * This is what makes the evidence **checkable** rather than self-attested. Without it a caller
+   * could assert any `codeCharacters > budgetCharacters` and have the record verify; with it, a
+   * later reader recomputes the identity from the artifact it can reproduce and sees whether this
+   * is still the compile that was measured. It is also what `status` invalidates on, so an edit to
+   * the entry — or to any module it imports — or a moved dependency decision makes the record
+   * stale instead of silently fresh.
+   */
+  readonly compileFingerprint: string;
   /** Characters in the composed Cell source, as `compileCell` measured it. */
   readonly codeCharacters: number;
   /** The `codeBudgetCharacters` that compile was given, from the Cell's own config. */
@@ -296,13 +308,21 @@ export function validateDependencyDecisionShape(decision: DependencyDecision): r
       } else {
         // The numbers have to *say* the rejection: an over-cap claim with a measurement under the
         // cap is a contradiction, and recording both makes it checkable rather than trusted.
-        const { codeCharacters, budgetCharacters } = artifactEvidence;
+        const { codeCharacters, budgetCharacters, compileFingerprint } = artifactEvidence;
         for (const [name, value] of [["codeCharacters", codeCharacters], ["budgetCharacters", budgetCharacters]] as const) {
           if (!Number.isFinite(value) || value < 0) {
             problems.push(
               `Rejection of "${decision.packageName}" records \`artifactEvidence.${name}\` as ${String(value)}; it must be a non-negative finite character count.`,
             );
           }
+        }
+        // The compile identity is what makes the two numbers *about a compile* rather than typed in
+        // (#77 round 5). A blank or malformed value would leave the record unverifiable while still
+        // passing every numeric check, which is the state this field exists to end.
+        if (typeof compileFingerprint !== "string" || compileFingerprint.trim().length === 0) {
+          problems.push(
+            `Rejection of "${decision.packageName}" records \`artifactEvidence\` without a usable \`compileFingerprint\`. The identity of the compile is what ties these numbers to an artifact a reader can reproduce; record it from \`composeCellCompileFingerprint\`.`,
+          );
         }
         if (Number.isFinite(codeCharacters) && Number.isFinite(budgetCharacters) && codeCharacters <= budgetCharacters) {
           problems.push(
