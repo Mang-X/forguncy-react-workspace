@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
 import type { CellCodeBudgetBand } from "./cell-code-budget.ts";
@@ -15,6 +19,8 @@ import {
   findCellCodeBudgetBand,
 } from "./cell-code-budget.ts";
 import { RUNTIME_CONTRACT_DECISION } from "./governance.ts";
+
+const here = dirname(fileURLToPath(import.meta.url));
 
 /**
  * The measured budget, and the properties a consumer depends on.
@@ -395,5 +401,35 @@ describe("provenance", () => {
     expect(() => findCellCodeBudgetBand("enormous" as CellCodeBudgetBand)).toThrow(
       /Unknown cell code budget band "enormous"/,
     );
+  });
+
+  it("exports every type a consumer needs to name the measurement's shape", () => {
+    // This module exists so a downstream consumer can read the bands as
+    // machine-readable evidence, which means the *types* are part of the surface,
+    // not just the values. `representativeMeasurements` is typed
+    // `CellCodeMeasurementPoint`, so a consumer that stores a band's measured point
+    // in a variable — the obvious thing to do — needs that type by name.
+    //
+    // Asserted by reading the barrel's source rather than by importing, because a
+    // type has no runtime representation to check: `import type` is erased, so
+    // nothing at runtime can fail when the export is dropped. That is exactly why
+    // this needs a test — removing it from `index.ts` breaks consumers and every
+    // runtime assertion still passes.
+    const barrel = readFileSync(join(here, "index.ts"), "utf8");
+    const budgetTypeExports = /export type \{([^}]*)\} from "\.\/cell-code-budget\.ts"/.exec(barrel)?.[1];
+    expect(budgetTypeExports, "no type export clause for cell-code-budget").toBeDefined();
+
+    // The three the module's own signatures already require: the band union a caller
+    // passes to `findCellCodeBudgetBand`, the definition it gets back, the verdict
+    // `classifyCellCodeSize` returns — and the measurement point nested inside the
+    // definition, which is the one that was missing.
+    for (const name of [
+      "CellCodeBudgetBand",
+      "CellCodeBudgetBandDefinition",
+      "CellCodeBudgetVerdict",
+      "CellCodeMeasurementPoint",
+    ]) {
+      expect(budgetTypeExports, `${name} is not exported from the barrel`).toContain(name);
+    }
   });
 });

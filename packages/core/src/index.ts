@@ -620,7 +620,12 @@ export {
   classifyCellCodeSize,
   findCellCodeBudgetBand,
 } from "./cell-code-budget.ts";
-export type { CellCodeBudgetBand, CellCodeBudgetBandDefinition, CellCodeBudgetVerdict } from "./cell-code-budget.ts";
+export type {
+  CellCodeBudgetBand,
+  CellCodeBudgetBandDefinition,
+  CellCodeBudgetVerdict,
+  CellCodeMeasurementPoint,
+} from "./cell-code-budget.ts";
 
 export {
   assertDistinctTargetClaims,
