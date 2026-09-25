@@ -8,6 +8,7 @@ import type { FgcLockDocument, ForguncyTargetIdentity, LockedDependencyDecision 
 import {
   assertFgcLockDocument,
   canonicalizeFgcLock,
+  canonicalizeImports,
   citesDecision,
   createEmptyFgcLock,
   DECISION_EVIDENCE_KINDS,
@@ -456,6 +457,51 @@ describe("determinism", () => {
 
     expect(canonicalizeFgcLock(lock).decisions.map(record => record.cellTarget)).toEqual([null, "orders-table"]);
   });
+
+  // PR review of #77, P2. `imports` is set-like — the probe fingerprint already sorts it into one
+  // input — so two spellings of one surface must not be two byte sequences in a committed lock,
+  // or #8's "deterministic and reviewable" guarantee is false for a document that is otherwise
+  // fully ordered.
+  it("produces identical bytes whatever order a declared import surface was discovered in", () => {
+    const forwards = withRecord({ ...inlineRecord, imports: ["add", "clamp"] });
+    const backwards = withRecord({ ...inlineRecord, imports: ["clamp", "add"] });
+
+    expect(serializeFgcLock(forwards)).toBe(serializeFgcLock(backwards));
+  });
+
+  it("rejects a non-canonical import surface rather than silently reordering it", () => {
+    // Refused, not canonicalized away: the lock treats decision and evidence order the same way,
+    // so the writer is told to serialize instead of the document being reordered under a reviewer.
+    const unsorted = withRecord({ ...inlineRecord, imports: ["clamp", "add"] });
+
+    expect(validateFgcLockDocument(unsorted).join("\n")).toMatch(/not the canonical spelling/);
+    expect(validateFgcLockDocument(withRecord({ ...inlineRecord, imports: ["add", "clamp"] }))).toEqual([]);
+  });
+
+  it("rejects a duplicated import surface, which is a second spelling of one set", () => {
+    const duplicated = withRecord({ ...inlineRecord, imports: ["add", "add"] });
+
+    expect(validateFgcLockDocument(duplicated).join("\n")).toMatch(/not the canonical spelling/);
+  });
+
+  it("folds an empty import surface to null, the spelling this field uses for the namespace", () => {
+    // The one form the field must never carry: an empty array would compose a fingerprint naming
+    // a surface no build ever used. `canonicalizeImports` returns null for it, so a writer cannot
+    // produce it by canonicalizing, and a hand-written one is still refused.
+    expect(canonicalizeImports([])).toBeNull();
+    expect(canonicalizeImports(["add"])).toEqual(["add"]);
+    expect(canonicalizeImports(null)).toBeNull();
+    expect(canonicalizeImports(undefined)).toBeNull();
+    expect(validateFgcLockDocument(withRecord({ ...inlineRecord, imports: [] })).join("\n")).toMatch(/empty/);
+  });
+
+  it("omits the key entirely for the namespace surface, so a pre-#77 lock is untouched", () => {
+    // A record written before this field existed has no key, and canonicalizing it must not add
+    // one — otherwise the lock's own bytes would change for a reason nothing measured.
+    const serialized = serializeFgcLock(withRecord(inlineRecord));
+
+    expect(serialized).not.toContain("imports");
+  });
 });
 
 describe("schema versioning", () => {
@@ -542,6 +588,25 @@ describe("lock metadata validation", () => {
     expect(problemsFor({ ...architecturalRejection, resolvedVersion: "7.1.0" })).toMatch(
       /keeps no dependency for the compiled cell/,
     );
+  });
+
+  // PR review of #77, P1. The persisted contract has to be as strong as the path that writes it:
+  // revision 13 made the probe unable to file `cell-code-budget-exceeded` under ANY input, so a
+  // record citing it is stating a rejection no probe could have produced — and since a `replace`
+  // binds its whole justification to probe findings, that record is a refusal nothing supports.
+  // A hand-edited lock or one written by revision 12 would otherwise still validate.
+  it("refuses a technical rejection whose code no probe step can observe", () => {
+    const unobservable = {
+      ...technicalRejection,
+      rejection: { ...technicalRejection.rejection, code: "cell-code-budget-exceeded" as const },
+    };
+
+    expect(problemsFor(unobservable)).toMatch(/no probe step can observe/);
+    // …and says where the verdict does come from, so the writer is not left guessing.
+    expect(problemsFor(unobservable)).toMatch(/compiler's own diagnostic/);
+    // The sibling code that a probe *can* observe is untouched, so this is a rule about
+    // observability rather than about `replace`.
+    expect(problemsFor(technicalRejection)).toBe("");
   });
 
   it("ties a runtime-compatibility claim to a probe that actually passed", () => {

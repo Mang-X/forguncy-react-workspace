@@ -60,33 +60,45 @@
  * the distinction, so this cannot silently collapse back into a claim that the two
  * counts are one quantity.
  *
- * ## Why the cap verdict needs a declared import surface (#77 review, P1-c)
+ * ## Why this step cannot file the cap verdict at all (#77 revision 13)
  *
- * Which *direction* the difference runs in depends on the probe's entry shape, and that is
- * what makes a cap verdict provable or not:
+ * The two counts above are *different documents measured from different graphs*, and the second
+ * half of that is what settles the question. An earlier revision filed
+ * `cell-artifact-budget-exceeded` here, first on any over-cap measurement, then only when the
+ * build declared a named import surface (on the theory that named imports make the measurement a
+ * lower bound). The second form is **also unsound**, and the counterexample is in this repository:
  *
- * - **A namespace probe** (`import * as candidate from "<pkg>"`, the default) keeps every
- *   export reachable. That makes its size an **upper** bound on what a Cell carries: a Cell
- *   that imports one small binding lets the bundler drop the rest, so the Cell can be far
- *   under a cap the namespace bundle exceeds. Measured on `es-toolkit`: the namespace bundles
- *   to **249,750** characters while the single named binding `debounce` bundles to **2,865** —
- *   an 87x gap. Rejecting on that measurement would be a false technical rejection, and it
- *   would hand the Agent a `replace` basis the artifact does not support. An earlier revision
- *   of this module claimed the opposite ("a cap rejection here is sound, the package by itself
- *   is over, so the composed artifact certainly is"); that claim was **false**, and this is the
- *   measurement that falsifies it.
- * - **A named-import probe** (`imports: ["debounce"]`) measures only what those bindings pull
- *   in, so its size is a **lower** bound: a Cell importing them carries at least that much. A
- *   cap rejection on a lower bound *is* sound, because the composed Cell cannot be smaller than
- *   the code it certainly includes.
+ * - The probe's build is a **raw Rolldown build** (`build.ts`). The compiler's build installs
+ *   `createInterceptionResolver(request.dependencies)`, which replaces `host` and `extension`
+ *   dependencies with generated virtual modules / page globals. So the two builds do not share a
+ *   resolution graph. `react-library`'s `DatePicker` imports `createElement` from `react`: a
+ *   **named** probe of `DatePicker` measures **279** characters and its artifact contains the npm
+ *   `react` implementation inlined, while the real Cell's compile resolves `react` to the host
+ *   React and is *smaller*. A named-surface probe is therefore not a lower bound either — it can
+ *   be strictly larger than the Cell, which is the same false-rejection failure one entry shape
+ *   narrower.
+ * - The surface is also a **caller declaration**, not a fact read from the Cell. A Cell may import
+ *   a binding and tree-shake it because it is unused, or the declaration may simply differ from
+ *   the source; the synthetic entry keeps every declared binding observable by construction
+ *   (`export default { ... }`), so the probe can retain code the Cell never carries.
  *
- * So the cap is compared on every run and reported as a fact on every run, but the
- * **rejection** is filed only when the measurement bounds the Cell from below — i.e. when the
- * build declared a non-empty import surface. Without one the run still records
- * `size.codeCharacters`, `size.band` and `artifact.budgetCharacters`, and states in its detail
- * that the comparison is an upper bound rather than a verdict; the band remains advisory either
- * way. `size.bound` is the fact that says which of the two a report is, so a consumer never has
- * to infer it from the entry shape.
+ * So this step reports a **measurement of a synthetic candidate** and nothing more. It records
+ * `size.codeCharacters`, `size.band`, `artifact.budgetCharacters` and whether the candidate is
+ * over that cap, as facts an Agent weighs. It files **no** `cell-artifact-budget-exceeded` finding
+ * under any input, because no shape of this probe can prove the verdict — and a `replace` decision
+ * binds to those findings, so an unprovable one is a technical refusal the artifact does not
+ * support.
+ *
+ * The authority for the hard cap verdict is the compiler: `auditCodeBudget` applies
+ * `codeBudgetCharacters` to the **composed Cell source**, where the entry is the Cell's own and
+ * the resolution graph is the real one. That is the exact quantity the cap is about, and
+ * `cell-compiler`'s diagnostic is where it is decided. `PROBE_STEPS_OBSERVING_SIGNAL` records this
+ * by giving `cell-artifact-budget-exceeded` **no** observing step, so a report that attributes the
+ * finding to any probe step is refused by `validateProbeReport` rather than merely discouraged.
+ *
+ * `size.bound` still records which way this *estimate* leans (a namespace probe leans over, a
+ * named one leans under), because that is what makes the number interpretable — but it selects
+ * between two estimates, not between an estimate and a verdict.
  *
  * ## Band versus cap
  *
@@ -99,29 +111,27 @@
  *   wrote and rendered), so the bands are selected tolerances, not a cliff. A
  *   consumer weighs the band; nothing here refuses on it.
  * - The **cap** is `cellArtifactBudgetCharacters`, the project's own decision about
- *   how much it will refuse, and it is the **only** thing that may file
- *   `cell-artifact-budget-exceeded`. It is nullable and defaults to none: with no cap
- *   the step still passes and still records the measured facts and band, because a
- *   rejection naming a threshold nobody set would be a claim about a rule that does
- *   not exist.
+ *   how much it will refuse. This step **compares against it and reports the
+ *   comparison**, but the verdict is the compiler's (above). It is nullable and
+ *   defaults to none: with no cap the step still records the measured facts and band,
+ *   because a comparison against a threshold nobody set would be a claim about a rule
+ *   that does not exist.
  *
  * A cap that is not `null` is validated by `core`'s `assertCellCodeBudget` before
  * anything compares or fingerprints it — the same guard the compiler applies to its
  * own. An unvalidated one is worse here than in the compiler: `NaN` silently never
- * rejects, `Infinity` never does either, and `JSON.stringify` canonicalizes every
+ * compares over, `Infinity` never does either, and `JSON.stringify` canonicalizes every
  * non-finite number to `null` in the fingerprint — so `NaN`, `Infinity` and
  * `-Infinity` compose **one** fingerprint while `-Infinity` is the only one of the
- * three that rejects. Two runs under one declared input would then disagree about the
- * same artifact, which is the determinism #8 requires and the reason this is a throw
- * rather than a finding about the artifact.
+ * three that compares over. Two runs under one declared input would then disagree about
+ * the same artifact, which is the determinism #8 requires and the reason this is a
+ * throw rather than a finding about the artifact.
  *
- * When a cap *is* given and the character count is over it, the step itself still
- * **passes**: it succeeded at measuring, and the rejection finding carries the
- * disqualification. This is the report's central separation — a failed step says "we
- * could not find out", a successful step with a rejection says "we found out, and it
- * does not qualify" — and only the latter maps to #8's `probeRequirement:
- * "not-passed"` evidence profile for a `replace` decision bound to
- * `cell-code-budget-exceeded`.
+ * The step **passes** in every case, including one over the cap: it succeeded at
+ * measuring a candidate. That is the report's central separation — a failed step says
+ * "we could not find out", a successful step says "we found out" — and nothing this
+ * step finds disqualifies the candidate, because the disqualifying verdict belongs to
+ * the compile.
  */
 
 import type { ProbeFact, ProbeRejectionFinding, ProbeRisk, ProbeValidationEntry } from "@forguncy-react-workspace/core";
@@ -181,23 +191,29 @@ export interface SizeObservation {
 }
 
 /**
- * Which way the measurement bounds the Cell.
+ * Which way this *estimate* leans, never which way a verdict runs.
  *
- * `lower-bound` — the build declared a named import surface, so the Cell certainly carries at
- * least this much and a cap rejection is sound. `upper-bound` — the build kept the whole
- * namespace, so the Cell may carry less and a cap rejection would be a claim the artifact does
- * not support. See the module header.
+ * `upper-bound` — the build kept the whole namespace, so the Cell very likely carries less.
+ * `lower-bound` — the build named bindings, so the Cell very likely carries at least these.
+ * Neither is a bound on the compiled Cell: the probe's build and the compiler's do not share a
+ * resolution graph (see the module header), so both are estimates and **neither may file a
+ * rejection**. The value is recorded because it makes the number interpretable, not because it
+ * authorizes anything.
  */
 export type SizeBound = "lower-bound" | "upper-bound";
 
 /**
- * Observes size, classifies its band, and compares an optional cap.
+ * Observes size, classifies its band, and reports an optional cap comparison.
+ *
+ * Files **no** rejection findings, under any input: see the module header for why no probe
+ * shape can prove the cap verdict. The returned `rejectionFindings` is always empty and is kept
+ * in the shape so the caller does not branch on which step it is handling.
  *
  * @param budgetCharacters - The project's cell code budget in **characters**, or
  *   `null` when none applies. Not bytes: see the module header. A non-null value is
  *   validated here, before it is compared or folded into a fingerprint.
- * @param bound - Which way the measurement bounds the Cell, from the build's declared import
- *   surface. Only `lower-bound` may file a rejection: see the module header.
+ * @param bound - Which way this estimate leans, from the build's declared import surface.
+ *   Reported as a fact; it does not authorize a rejection. See `SizeBound`.
  */
 export function observeSize(
   output: readonly (OutputChunk | OutputAsset)[] | undefined,
@@ -253,54 +269,34 @@ export function observeSize(
   }
 
   const overCap = budgetCharacters !== null && size.codeCharacters > budgetCharacters;
-  // Only a lower bound may reject. An upper bound over the cap is reported (the facts above
-  // carry it, and the detail says so) but files nothing: the Cell may import a fraction of
-  // what the namespace bundle contains, so a rejection would be a technical refusal the
-  // artifact does not support — and `replace` decisions bind to these findings. See the
-  // module header for the measurement that settled this.
+  // Deliberately const-empty, and deliberately not a branch. Every input reachable at this step
+  // was tried over revisions 11-12 and none can prove the verdict, because the probe's build and
+  // the compiler's do not share a resolution graph and the import surface is a caller's
+  // declaration rather than a fact about the Cell. A `replace` decision binds to these findings,
+  // so filing an unprovable one is a technical refusal the artifact does not support. The
+  // authority is the compiler's `auditCodeBudget` on the composed source — see the module header,
+  // and `PROBE_STEPS_OBSERVING_SIGNAL`, which gives this signal no observing step at all.
   const rejectionFindings: ProbeRejectionFinding[] = [];
-  if (overCap && bound === "lower-bound") {
-    // Two situations produce this and they need different wording, exactly as the
-    // compiler's own diagnostic splits them. When the artifact is *large by
-    // measurement*, the band is the story. When it is inside the measured ordinary
-    // range, the **cap** is what is tight, and saying "over budget" without saying
-    // that would send the reader looking for a cost problem #21 says is not there.
-    const summary =
-      verdict.band === "inline"
-        ? `The generated artifact is ${String(size.codeCharacters)} characters, over this project's configured cap of ${String(budgetCharacters)} characters. The measured band is inline (#21), so this rejection is the cap's rather than a cost the measurement found.`
-        : `The generated artifact is ${String(size.codeCharacters)} characters, over this project's configured cap of ${String(budgetCharacters)} characters. The measured band is ${verdict.band} (#21).`;
 
-    rejectionFindings.push({
-      signal: "cell-artifact-budget-exceeded",
-      step: "size",
-      summary,
-      evidence: [
-        `characters:${String(size.codeCharacters)}`,
-        `band:${verdict.band}`,
-        `budgetCharacters:${String(budgetCharacters)}`,
-        `bound:${bound}`,
-        `decision:${CELL_CODE_BUDGET_DECISION.url}`,
-      ],
-    });
-  }
-
-  // The three cases read differently on purpose. "No cap" is not "fits the cap", and an
-  // upper bound over the cap is not a verdict — collapsing any of them into a bare
-  // measurement would leave a reader to infer which one they are looking at from the
-  // absence of a finding, which is exactly the inference the missing rejection used to be.
+  // The cases read differently on purpose. "No cap" is not "fits the cap", and an over-cap
+  // *estimate* is not a verdict — collapsing any of them into a bare measurement would leave a
+  // reader to infer which one they are looking at from the absence of a finding. Every branch
+  // that mentions the cap also says where the verdict actually comes from, so the fact is never
+  // read as a refusal.
   const detail = (() => {
-    const measured = `Measured ${String(size.codeCharacters)} character(s) of emitted code (band ${verdict.band}, #21)`;
+    const measured = `Measured ${String(size.codeCharacters)} character(s) of emitted code (band ${verdict.band}, #21) from the synthetic candidate build`;
     if (budgetCharacters === null) {
       return `${measured}, weighing ${String(size.totalBytes)} byte(s) as served (code ${String(size.codeBytes)}, assets ${String(size.assetBytes)}); no cell cap applies to this run.`;
     }
-    const against = `${measured} against a configured cap of ${String(budgetCharacters)} character(s)`;
-    if (!overCap) {
-      return `${against}; the artifact is within it.`;
-    }
-    if (bound === "lower-bound") {
-      return `${against}, which it exceeds. The build declared a named import surface, so the Cell certainly carries at least this much and the rejection is filed.`;
-    }
-    return `${against}, which it exceeds — but the build kept the whole package namespace, so this is an upper bound on what a Cell would carry rather than a verdict. No rejection is filed: a Cell importing a subset can tree-shake below the cap. Re-probe with a declared import surface to obtain a verdict.`;
+    const against = `${measured}, ${overCap ? "over" : "within"} this project's configured cap of ${String(budgetCharacters)} character(s)`;
+    // The estimate's leaning is named so the number is interpretable, and the authority is named
+    // so it is not acted on: the probe measures a candidate the compiler will not build, so only
+    // the compile can exceed a cap.
+    const leaning =
+      bound === "upper-bound"
+        ? "the build kept the whole package namespace, so the Cell may carry less"
+        : "the build declared named imports, so the Cell may still carry more once React, host and extension dependencies resolve differently";
+    return `${against}. This is an estimate of a candidate, not a cap verdict: ${leaning}, and the compile resolves host/extension dependencies the probe build does not. The compiler's own \`cell-code-budget-exceeded\` diagnostic on the composed Cell is what decides it.`;
   })();
 
   return {

@@ -10,7 +10,7 @@
       "libraryId": "tanstack-query",
       "probe": {
         "status": "passed",
-        "fingerprint": "probe=\"inline-bundle\";entry=\"@tanstack/react-query\";analysis=12;config={};bundler={\"attachDebugInfo\":\"none\",\"codeSplitting\":\"false\",\"format\":\"iife\",\"jsx\":\"react-jsx\",\"platform\":\"browser\"}",
+        "fingerprint": "probe=\"inline-bundle\";entry=\"@tanstack/react-query\";analysis=13;config={};bundler={\"attachDebugInfo\":\"none\",\"codeSplitting\":\"false\",\"format\":\"iife\",\"jsx\":\"react-jsx\",\"platform\":\"browser\"}",
         "versionIndependent": false
       },
       "target": {
@@ -32,6 +32,10 @@
         {
           "kind": "probe",
           "reference": "fgc-evidence/47198a7a4ab60d414b96841669d943b6bbde10cd96ace3925c3bf5cb2679f22f.json"
+        },
+        {
+          "kind": "probe",
+          "reference": "fgc-evidence/9ca557283524375a45ff32b47064b3e1a8ec9694f16eab168794d3cfe43324ea.json"
         },
         {
           "kind": "probe",

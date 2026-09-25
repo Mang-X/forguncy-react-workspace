@@ -134,15 +134,22 @@ function stableScalar(value: string): string {
  *   byte rule recorded a rejection the character rule may not make, or missed one it does — so a
  *   cached report from revision 10 must not answer a probe run at 11.
  * - `12` — the synthetic entry can declare a **named import surface** (`imports`), and the
- *   `build` step records it as `build.import-surface`. The surface decides whether the
- *   measured artifact bounds the Cell from below or above, which is what the `size` step's
- *   cap verdict now turns on: a namespace bundle over a cap proves nothing about a Cell that
- *   imports one binding (measured on `es-toolkit`: 249,750 characters for the namespace
- *   against 2,865 for `debounce` alone). Changes what the step reports for every artifact —
- *   `build.import-surface` is a new fact — and changes what a cap rejection *means*, so a
- *   report cached at 11 must not answer a run at 12.
+ *   `build` step records it as `build.import-surface`. Changes what the step reports for every
+ *   artifact — `build.import-surface` is a new fact.
+ * - `13` — the `size` step files **no** `cell-artifact-budget-exceeded` finding, under any
+ *   import surface. Revision 12 filed one when the surface was non-empty, on the theory that
+ *   named imports make the measurement a lower bound; that is false, because the probe's build
+ *   and the compiler's do not share a resolution graph — the compiler installs
+ *   `createInterceptionResolver`, so a `host`/`extension` dependency the probe inlined is a page
+ *   global in the Cell, and the probe's artifact can be **larger** than the Cell's. The
+ *   `react-library` fixture pins it: a *named* probe of `DatePicker` measures 279 characters with
+ *   the npm React implementation inlined, while the real Cell resolves `react` to the host. The
+ *   verdict belongs to the compiler's `auditCodeBudget` on the composed Cell source, and
+ *   `PROBE_STEPS_OBSERVING_SIGNAL` gives the signal no observing step so a report claiming it is
+ *   *invalid*. A report cached at 12 can carry exactly that finding, so it must not answer a run
+ *   at 13 — this is the invalidation #8 requires when a rejection's meaning changes.
  */
-export const PROBE_ANALYSIS_REVISION = 12;
+export const PROBE_ANALYSIS_REVISION = 13;
 
 export interface ComposeProbeFingerprintInput {
   /** Which probe ran, e.g. `inline-bundle`. */
@@ -153,10 +160,10 @@ export interface ComposeProbeFingerprintInput {
    * Named bindings the synthetic build imports, sorted; empty means the whole namespace.
    *
    * A declared input rather than a detail of the build, because it decides *which document*
-   * the size step measured — the namespace bundle or a tree-shaken named-binding bundle —
-   * and therefore whether a cap verdict is provable at all (see `size.ts` and
-   * `build.ts`). Two runs of one package with different surfaces measure different
-   * artifacts, so they must not share a fingerprint.
+   * the size step measured — the namespace bundle or a tree-shaken named-binding bundle — so
+   * two runs of one package with different surfaces measured different artifacts and must not
+   * share a fingerprint. It selects between two **estimates** and authorizes nothing: since
+   * revision 13 the step files no cap verdict under either surface (see `size.ts`).
    */
   readonly imports?: readonly string[];
   /** Probe configuration; the cell cap is folded in as `budgetCharacters` when present. */

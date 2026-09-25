@@ -57,7 +57,7 @@ import type {
   RejectedCandidateEvidence,
   ToolchainIdentity,
 } from "@forguncy-react-workspace/core";
-import { compareEvidenceLinks } from "@forguncy-react-workspace/core";
+import { canonicalizeImports, compareEvidenceLinks } from "@forguncy-react-workspace/core";
 
 import { findExactLockDecision, readFgcLock, upsertLockDecision, writeFgcLock } from "./lock-store.ts";
 
@@ -140,10 +140,13 @@ export function mergeDependencyDecisionUpdate(
     // #4's fields, including `packageName` and every strategy-specific one.
     ...update.decision,
     cellTarget: update.cellTarget ?? existing?.cellTarget ?? null,
-    // An empty array is normalized to null — the two spell one state, and the lock's own
-    // validator refuses the array form, so normalizing here keeps a caller that passed `[]`
-    // from producing a document nothing can read.
-    imports: update.imports === undefined ? (existing?.imports ?? null) : (update.imports?.length ? [...update.imports] : null),
+    // Canonicalized through `core`'s helper, which is the same definition the serializer and the
+    // lock's validator use. Doing it here rather than leaving it to the serializer is what makes
+    // the *written* file canonical: `["clamp","add"]` and `["add","clamp"]` name one surface (the
+    // fingerprint already sorts them), so recording either must produce one byte sequence. The
+    // helper also folds an empty array to null — the spelling this field uses for the whole
+    // namespace, and the one the lock's validator refuses as an array.
+    imports: update.imports === undefined ? canonicalizeImports(existing?.imports) : canonicalizeImports(update.imports),
     resolvedVersion: update.resolvedVersion ?? null,
     probe: update.probe,
     target: update.target ?? null,

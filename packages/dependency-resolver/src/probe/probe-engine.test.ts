@@ -46,6 +46,7 @@ import {
 } from "./probe-engine.ts";
 import { probeCacheRelativePath } from "./cache.ts";
 import { composeProbeFingerprint } from "./fingerprint.ts";
+import { runCandidateBuild } from "./build.ts";
 
 const FIXTURES_ROOT = fileURLToPath(new URL("../__fixtures__/probe", import.meta.url));
 
@@ -155,6 +156,48 @@ describe("runDependencyProbe: react library", () => {
     expect(report.facts.some(fact => fact.name === "peerDependencies.ranges")).toBe(true);
     expect(report.facts.some(fact => fact.name === "exports.types-present" && fact.value === true)).toBe(true);
     expect(rejectionSignals(report)).toEqual([]);
+  });
+
+  // The counterexample that settled #77 revision 13, pinned where the fixture lives. The probe
+  // builds a raw Rolldown candidate; the compiler installs `createInterceptionResolver`, which
+  // replaces a `host`/`extension` dependency with a virtual module or page global. `DatePicker`
+  // imports `createElement` from `react`, so the probe resolves npm React normally — and the
+  // test below reads the emitted code to show it. The compiler would externalize it instead,
+  // which is why the probe's artifact can be *larger* than the Cell's, no import surface makes
+  // the measurement a lower bound, and the size step files no rejection. If the artifact ever
+  // stops carrying npm React's implementation, this reasoning is void and the measurement needs
+  // re-deriving rather than the assertion relaxing.
+  it("inlines npm react into a named-surface candidate, which the compiler would externalize", async () => {
+    const namespace = await probe("react-library", "@fixture/date-picker", { cellArtifactBudgetCharacters: 1 });
+    const named = await probe("react-library", "@fixture/date-picker", {
+      cellArtifactBudgetCharacters: 1,
+      imports: ["DatePicker"],
+    });
+
+    // The emitted code is the observable, not a size comparison: the fixture's `react` module
+    // defines `createElement`, so finding it in the artifact proves the probe bundled a
+    // dependency the real compile replaces with the host global. A named surface does not change
+    // that — the binding is pulled in because `DatePicker` calls it. Read from `runCandidateBuild`
+    // rather than the probe result, because a report deliberately does not carry the artifact.
+    const built = await runCandidateBuild({
+      projectRoot: fixture("react-library"),
+      packageName: "@fixture/date-picker",
+      entry: "@fixture/date-picker",
+      imports: ["DatePicker"],
+    });
+    const emitted = built.output
+      .filter(item => item.type === "chunk")
+      .map(item => (item as { readonly code: string }).code)
+      .join("");
+    // The *definition*, not the bare identifier: an externalized `react` would still name
+    // `createElement` at the call site, so only the inlined body proves the npm implementation
+    // was bundled. This is the assertion that would fail if the probe ever did intercept `react`
+    // the way the compiler does.
+    expect(emitted).toContain("function createElement");
+    // Both surfaces lean the same way for this fixture, and neither may reject.
+    expect(named.report.facts.find(fact => fact.name === "size.bound")?.value).toBe("lower-bound");
+    expect(rejectionSignals(named.report)).not.toContain("cell-artifact-budget-exceeded");
+    expect(rejectionSignals(namespace.report)).not.toContain("cell-artifact-budget-exceeded");
   });
 });
 
@@ -662,41 +705,41 @@ describe("runDependencyProbe: broken build", () => {
 });
 
 describe("runDependencyProbe: budget", () => {
-  it("files cell-artifact-budget-exceeded while the size step still passes", async () => {
-    // `imports` is what makes this rejection sound rather than a guess: with a declared named
-    // surface the measured artifact is a lower bound on what the Cell carries. See the `size`
-    // step's header — a namespace run over the same cap files nothing.
-    const { report, assessment } = await probe("pure-esm-utility", "tiny-math", {
-      cellArtifactBudgetCharacters: 4,
-      imports: ["add"],
-    });
+  it("measures an over-cap candidate and reports the comparison without rejecting", async () => {
+    // #77 revision 13. Both surfaces are checked in one loop because revision 12 filed on the
+    // named one and this revision retracts that: the probe's build and the compiler's do not
+    // share a resolution graph (the compiler installs `createInterceptionResolver`, which
+    // rewrites `host`/`extension` dependencies), so even a named-surface probe can measure an
+    // artifact larger than the Cell. An unprovable `replace` basis is what this refuses.
+    for (const imports of [undefined, ["add"]] as const) {
+      const { report, assessment } = await probe("pure-esm-utility", "tiny-math", {
+        cellArtifactBudgetCharacters: 4,
+        ...(imports === undefined ? {} : { imports }),
+      });
 
-    const size = report.validation.find(entry => entry.step === "size")!;
-    expect(size.outcome).toBe("passed");
-    const finding = report.rejectionFindings.find(entry => entry.signal === "cell-artifact-budget-exceeded");
-    expect(finding?.step).toBe("size");
-    expect(finding?.evidence).toContain("bound:lower-bound");
-    expect(assessment.status).toBe("supports-rejection-only");
-    expect(assessment.rejectionFindings.map(entry => entry.signal)).toContain("cell-artifact-budget-exceeded");
+      const size = report.validation.find(entry => entry.step === "size")!;
+      const where = imports === undefined ? "namespace" : "named";
+      expect(size.outcome, where).toBe("passed");
+      // The comparison is still reported — the fact and the detail both carry it — because
+      // dropping the rejection must not drop the estimate an Agent weighs.
+      expect(report.facts.find(fact => fact.name === "artifact.budgetCharacters")?.value, where).toBe(4);
+      expect(size.detail, where).toMatch(/not a cap verdict/);
+      expect(rejectionSignals(report), where).not.toContain("cell-artifact-budget-exceeded");
+      expect(assessment.rejectionFindings, where).toEqual([]);
+      expect(assessment.status, where).toBe("supports-deployment");
+    }
   });
 
-  it("measures an over-cap namespace bundle without rejecting it, because it is an upper bound", async () => {
-    // The P1-c distinction at the engine level. `import * as candidate` keeps every export
-    // reachable, so the number is an upper bound on what a Cell would carry: a Cell importing
-    // one binding tree-shakes the rest. Filing `replace` evidence on it would hand the Agent a
-    // rejection the artifact does not support, and `replace` decisions bind to these findings.
-    const { report, assessment } = await probe("pure-esm-utility", "tiny-math", {
-      cellArtifactBudgetCharacters: 4,
-    });
+  it("records the estimate's leaning, which no longer authorizes anything", async () => {
+    // The fact survives revision 13 because it makes the number interpretable; it must NOT be
+    // read as authorization, which is why it is named for a leaning rather than a verdict.
+    const namespace = await probe("pure-esm-utility", "tiny-math", { cellArtifactBudgetCharacters: 4 });
+    const named = await probe("pure-esm-utility", "tiny-math", { cellArtifactBudgetCharacters: 4, imports: ["add"] });
 
-    const size = report.validation.find(entry => entry.step === "size")!;
-    expect(size.outcome).toBe("passed");
-    expect(report.facts.find(fact => fact.name === "size.bound")?.value).toBe("upper-bound");
-    // The comparison is still reported — the fact and the detail both carry it.
-    expect(report.facts.find(fact => fact.name === "artifact.budgetCharacters")?.value).toBe(4);
-    expect(size.detail).toContain("upper bound");
-    expect(rejectionSignals(report)).not.toContain("cell-artifact-budget-exceeded");
-    expect(assessment.rejectionFindings).toEqual([]);
+    expect(namespace.report.facts.find(fact => fact.name === "size.bound")?.value).toBe("upper-bound");
+    expect(named.report.facts.find(fact => fact.name === "size.bound")?.value).toBe("lower-bound");
+    // …and the lower-bound lean still files nothing.
+    expect(rejectionSignals(named.report)).not.toContain("cell-artifact-budget-exceeded");
   });
 
   it("folds the declared import surface into the fingerprint, and only when there is one", async () => {

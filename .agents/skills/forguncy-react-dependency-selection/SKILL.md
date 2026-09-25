@@ -48,14 +48,23 @@ S=.agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.m
 node $S policy
 
 # 2) 实测一个已安装的候选包（只测量，不给策略）
+#    --cell 取 forguncy.config 里该 Cell 声明的 codeBudgetCharacters 作为**估算**上限；
+#    --imports 声明 Cell 会具名导入的绑定，让估算偏向"下"。两者都进指纹。
 node $S probe --project examples/probe-proving-cases es-toolkit
+node $S probe --project <projectRoot> --cell <cellId> --imports debounce es-toolkit
 
 # 3) 校验一个决策文件（只报问题，不做决定）
 #    --project 是 probe 该包的位置；架构拒绝不 probe，可省略
+#    决策文件里写了 cellTarget，就不必再传 --cell；写了 imports 同理，两处不一致会被拒绝
 node $S audit --project <projectRoot> --decision decision.json
 
 # 4) 校验后写入 fgc.lock.json；audit 不通过则拒绝写入
 node $S record --project <projectRoot> --decision decision.json
+
+# 注意：probe 只给出尺寸**估算**（band + 与 cap 的比较），任何情况下都不产生
+# cell-artifact-budget-exceeded。硬上限判定属于编译器对该 Cell 的 codeBudgetCharacters
+# 诊断——probe 的构建图与真实编译不同，合成候选可能比真实 Cell 更大。
+# 决策文件里的 imports 与 cellTarget 写法见 references/decision-recording.md。
 
 # 5) 读回锁并报告每条记录是否仍然有效
 node $S status --project <projectRoot>

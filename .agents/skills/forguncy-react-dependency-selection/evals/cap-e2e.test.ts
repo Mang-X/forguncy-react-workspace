@@ -236,41 +236,41 @@ describe("CLI contract: the declared cell code cap reaches probe, audit, record 
   const CAP_EXCEEDED = 1_000;
   const CAP_MET = 900_000;
 
-  it("shows the declared cap as a fact, folds it into the fingerprint, and rejects on it", async () => {
+  it("shows the declared cap as a fact and folds it into the fingerprint, without rejecting", async () => {
     await withCappedCell(CAP_EXCEEDED, async root => {
-      // `--imports` is part of the invocation rather than an extra: a cap rejection is only
-      // sound on a **lower** bound, which is what a declared named surface produces. The
-      // namespace run below pins the other direction.
-      const probed = await cli(["probe", "--project", root, "--cell", "bench", "--imports", "debounce", "es-toolkit"]);
-      expect(probed.code, probed.stderr).toBe(0);
-      const report = json<ProbePayload>(probed);
+      // #77 revision 13: no probe run files the cap verdict, under any surface. Both are
+      // exercised here because revision 12 filed on the named one and this revision retracts
+      // that — the probe's build and the compiler's do not share a resolution graph.
+      for (const extra of [[], ["--imports", "debounce"]]) {
+        const probed = await cli(["probe", "--project", root, "--cell", "bench", ...extra, "es-toolkit"]);
+        expect(probed.code, probed.stderr).toBe(0);
+        const report = json<ProbePayload>(probed);
+        const where = extra.length === 0 ? "namespace" : "named";
 
-      // The cap is reported, so a caller can see which ceiling was applied.
-      expect(report.facts.find(fact => fact.name === "artifact.budgetCharacters")?.value).toBe(CAP_EXCEEDED);
-      // It is a *declared input*, so it has to compose into the fingerprint — otherwise a
-      // record measured under one cap would look fresh under another.
-      expect(report.fingerprint).toContain('"budgetCharacters":1000');
-      // And it is the only thing that may reject: the band is advisory, the cap is not.
-      expect(report.rejectionFindings.map(finding => finding.signal)).toContain("cell-artifact-budget-exceeded");
-      expect(report.facts.find(fact => fact.name === "size.bound")?.value).toBe("lower-bound");
+        // The cap is reported, so a caller can see which ceiling was applied.
+        expect(report.facts.find(fact => fact.name === "artifact.budgetCharacters")?.value, where).toBe(CAP_EXCEEDED);
+        // It is a *declared input*, so it has to compose into the fingerprint — otherwise a
+        // record measured under one cap would look fresh under another.
+        expect(report.fingerprint, where).toContain('"budgetCharacters":1000');
+        // …and the verdict is the compiler's, so no probe run files it.
+        expect(report.rejectionFindings.map(finding => finding.signal), where).not.toContain(
+          "cell-artifact-budget-exceeded",
+        );
+        expect(report.validation.find(entry => entry.step === "size")?.detail, where).toMatch(/not a cap verdict/);
+      }
     });
   }, CASE_TIMEOUT_MS);
 
-  it("measures a namespace run over the same cap without rejecting, because it is an upper bound", async () => {
-    // The complement of the case above, and the whole of the P1-c fix end to end: without a
-    // declared surface the probe keeps every export, so its size is an upper bound on what the
-    // Cell carries and an over-cap number is a measurement rather than a verdict. Measured on
-    // `es-toolkit`, the namespace bundles to 249,750 characters against 2,865 for `debounce`
-    // alone — filing `replace` evidence on the namespace number would be a rejection the
-    // artifact does not support.
+  it("still leans the estimate by the declared surface, which no longer authorizes a rejection", async () => {
+    // The leaning survives because it makes the number interpretable, and the *lower* lean is
+    // the one to check: it is the direction revision 12 treated as provable, so a regression
+    // back to filing on it would show up here rather than only in the unit tests.
     await withCappedCell(CAP_EXCEEDED, async root => {
-      const probed = await cli(["probe", "--project", root, "--cell", "bench", "es-toolkit"]);
-      expect(probed.code, probed.stderr).toBe(0);
-      const report = json<ProbePayload>(probed);
+      const named = await cli(["probe", "--project", root, "--cell", "bench", "--imports", "debounce", "es-toolkit"]);
+      expect(named.code, named.stderr).toBe(0);
+      const report = json<ProbePayload>(named);
 
-      expect(report.facts.find(fact => fact.name === "size.bound")?.value).toBe("upper-bound");
-      // The comparison is still made and still reported — only the *verdict* is withheld.
-      expect(report.facts.find(fact => fact.name === "artifact.budgetCharacters")?.value).toBe(CAP_EXCEEDED);
+      expect(report.facts.find(fact => fact.name === "size.bound")?.value).toBe("lower-bound");
       expect(report.rejectionFindings.map(finding => finding.signal)).not.toContain("cell-artifact-budget-exceeded");
     });
   }, CASE_TIMEOUT_MS);

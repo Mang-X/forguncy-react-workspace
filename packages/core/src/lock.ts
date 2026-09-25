@@ -240,15 +240,20 @@ export interface LockRecordMetadata {
    */
   readonly cellTarget: string | null;
   /**
-   * The named bindings the probe's synthetic entry imported, sorted; null when it kept the
-   * whole namespace.
+   * The named bindings the probe's synthetic entry imported, in canonical (sorted, deduplicated)
+   * order; null when it kept the whole namespace.
    *
-   * Recorded because the surface is one of the fingerprint's declared inputs *and* because it
-   * is the fact a reader needs to interpret the record's own size evidence: a namespace probe
-   * measures an **upper** bound on what a Cell would carry, a named-binding probe a **lower**
-   * one, and only the latter may support a cap rejection. Without this field a lock citing a
-   * `cell-code-budget-exceeded` rejection could not show which of the two it rested on, and
-   * `status` could not rebuild the fingerprint the record was measured under.
+   * Recorded for two reasons, and **neither of them authorizes a rejection** (#77 revision 13:
+   * no probe run files the cap verdict, because the probe's build and the compiler's do not share
+   * a resolution graph and the surface is a caller's declaration anyway):
+   *
+   * - It is one of the fingerprint's declared inputs, so `status` has to read it back to rebuild
+   *   the fingerprint the record was measured under. Without it a named-surface record would be
+   *   rebuilt as a namespace run and report `probe-fingerprint-changed` for a measurement that
+   *   had not moved.
+   * - It makes the record's own size evidence interpretable: a namespace probe's number leans
+   *   over what a Cell carries, a named one leans under. A reader weighing the estimate needs to
+   *   know which it is; the estimate itself is never disqualifying.
    *
    * Optional, not required, and the read path is why: `inspectLockRecord` accepts an **absent**
    * key as the namespace surface, and `parseFgcLockDocument` casts the parsed JSON without
@@ -419,6 +424,30 @@ export const RUNTIME_CONFIRMED_TECHNICAL_REJECTION_CODES: readonly TechnicalReje
   "host-module-identity-mismatch",
   "global-namespace-collision",
   "runtime-api-unavailable",
+];
+
+/**
+ * Technical rejections no probe can observe, so a probe report cannot be their evidence.
+ *
+ * #77 revision 13 made the probe a pure measurement: it files no
+ * `cell-artifact-budget-exceeded` finding under any input, because the synthetic candidate it
+ * builds does not share a resolution graph with the compiled Cell and the declared import
+ * surface is a caller's declaration. `PROBE_STEPS_OBSERVING_SIGNAL` records that as an **empty**
+ * observer list, which makes a *report* claiming the finding invalid.
+ *
+ * This list is the other half of the same rule, for the document: a lock can be hand-written or
+ * produced by an older revision, so without it a record could still state the one rejection the
+ * current runtime path refuses to produce — and remain structurally valid. The invariant is
+ * therefore inverted rather than dropped: since the finding is unprovable from a probe, a
+ * `replace` resting on it is refused outright.
+ *
+ * Kept as a named list here rather than derived from `probe-protocol.ts` because `lock` may not
+ * import it (that module already imports `lock`, so the edge would be a cycle). A test recomputes
+ * this list from the protocol table instead, so the two cannot drift silently — the same shape as
+ * {@link RUNTIME_CONFIRMED_TECHNICAL_REJECTION_CODES}, which is also a judgement recorded as data.
+ */
+export const UNOBSERVABLE_TECHNICAL_REJECTION_CODES: readonly TechnicalRejectionCode[] = [
+  "cell-code-budget-exceeded",
 ];
 
 /**
@@ -779,17 +808,45 @@ export function isCanonicallyOrdered(decisions: readonly LockedDependencyDecisio
 }
 
 /**
- * The canonical document: decisions in canonical order, evidence links sorted.
+ * The canonical spelling of a declared import surface: sorted, deduplicated, or `null`.
  *
- * Sorting the links matters for the same reason as sorting the decisions — an
- * Agent that discovers evidence in a different order must not produce a diff.
+ * The field is a **set** — `imports: ["add", "clamp"]` and `["clamp", "add"]` name one surface,
+ * and the probe fingerprint already sorts them into one input — so the lock has to store one
+ * byte sequence for it or #8's "deterministic and reviewable" guarantee is false for a document
+ * that is otherwise fully ordered. `canonicalizeFgcLock` applies this, `inspectLockRecord`
+ * rejects a document that has not, and the recording API writes it, so all three agree by
+ * construction rather than by three copies of a sort.
+ *
+ * An empty array is the namespace surface, which this format spells as `null`: returning `null`
+ * here means a caller cannot write the one spelling the lock's own validator refuses.
+ */
+export function canonicalizeImports(imports: readonly string[] | null | undefined): readonly string[] | null {
+  if (imports === null || imports === undefined) {
+    return null;
+  }
+  const unique = [...new Set(imports)].sort();
+  return unique.length === 0 ? null : unique;
+}
+
+/**
+ * The canonical document: decisions in canonical order, evidence links sorted, and each
+ * declared import surface in set spelling.
+ *
+ * Sorting matters for the same reason each time — an Agent that lists the same things in a
+ * different order must not produce a diff.
  */
 export function canonicalizeFgcLock(lock: FgcLockDocument): FgcLockDocument {
   return {
     schemaVersion: lock.schemaVersion,
     decisions: [...lock.decisions]
       .sort(compareLockDecisions)
-      .map(record => ({ ...record, evidence: [...record.evidence].sort(compareEvidenceLinks) })),
+      .map(record => ({
+        ...record,
+        evidence: [...record.evidence].sort(compareEvidenceLinks),
+        // Omitted entirely for the namespace surface, so a record written before this field
+        // existed still serializes without the key — the same reason the fingerprint omits it.
+        ...(record.imports == null ? {} : { imports: canonicalizeImports(record.imports) }),
+      })),
   };
 }
 
@@ -926,8 +983,9 @@ function inspectLockRecord(record: unknown, where: string): readonly string[] {
   // `imports` is inspected on its own rather than through `inspectStringArrayOrAbsent`, because
   // null is a *meaning* here — the namespace surface — and that helper rejects it. The two
   // spellings of "no named surface" are an absent key (a lock written before #77) and an explicit
-  // null (what the merge writes); both are valid, and the only rejected forms are an empty array,
-  // which would compose a fingerprint carrying a surface no build ever used, and a blank name.
+  // null (what the merge writes); both are valid, and the rejected forms are an empty array, which
+  // would compose a fingerprint carrying a surface no build ever used, a blank name, and — since
+  // revision 13 — a non-canonical spelling (unsorted, or with duplicates).
   if (record.imports !== undefined && record.imports !== null) {
     if (!Array.isArray(record.imports) || record.imports.some(item => typeof item !== "string")) {
       problems.push(`${where} must declare \`imports\` as an array of strings, or null for the whole namespace.`);
@@ -937,6 +995,19 @@ function inspectLockRecord(record: unknown, where: string): readonly string[] {
       );
     } else if (record.imports.some(name => name.trim().length === 0)) {
       problems.push(`${where} records a blank binding name in \`imports\`; every entry must name an imported binding.`);
+    } else {
+      // The surface is set-like — the fingerprint sorts it — so two spellings of one surface must
+      // not be two byte sequences in a committed lock. This is a *validation* rather than a
+      // silent canonicalization, matching how the lock treats decision and evidence order: the
+      // reader is told to serialize, instead of the document being quietly reordered under a
+      // reviewer. `canonicalizeImports` is the one definition both this and the serializer use,
+      // so the accepted spelling cannot drift from the produced one.
+      const canonical = canonicalizeImports(record.imports);
+      if (canonical.join("\u0000") !== record.imports.join("\u0000")) {
+        problems.push(
+          `${where} records \`imports\` as [${record.imports.join(", ")}], which is not the canonical spelling [${canonical.join(", ")}]. The surface is a set: serialize through \`serializeFgcLock\` (or record through \`recordDependencyDecision\`) so two spellings of one surface cannot be two lock bytes.`,
+        );
+      }
     }
   }
 
@@ -1311,6 +1382,18 @@ function validateRejectedCandidate(where: string, record: LockedDependencyDecisi
       : [
           `${where} is an architectural rejection: the capability belongs to Forguncy whatever version the package is, so recording a rejected candidate version would tie an ownership conflict to a release.`,
         ];
+  }
+
+  // The evidence-shape invariant (#77 revision 13). A record citing a code no probe can observe
+  // cannot rest on a probe report, and a `replace` binds its whole justification to these
+  // findings — so the document would state a rejection the runtime path refuses to produce. It is
+  // refused here rather than left to the writer, because a lock can be hand-edited or written by
+  // an older revision, and a persisted contract weaker than the path that writes it is how the
+  // unsound rejection comes back.
+  if (UNOBSERVABLE_TECHNICAL_REJECTION_CODES.includes(record.rejection.code)) {
+    return [
+      `${where} is a technical rejection with code "${record.rejection.code}", which no probe step can observe: the probe measures a synthetic candidate whose build does not share the compiler's resolution graph, so its size can exceed the compiled Cell's. The authority for this verdict is the compiler's own diagnostic on the composed Cell. Record the strategy that actually resolved, or a rejection a probe finding supports.`,
+    ];
   }
 
   if (rejectedCandidate === null || rejectedCandidate.version.trim().length === 0) {

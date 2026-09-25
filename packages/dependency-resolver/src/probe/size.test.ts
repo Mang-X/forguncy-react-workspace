@@ -5,16 +5,15 @@
  * engine"
  * https://github.com/Mang-X/forguncy-react-workspace/issues/17
  *
- * Governing Specs: #16 — only this step may observe
- * `cell-artifact-budget-exceeded`, and a step that measured successfully still
- * *passes* when the measurement is over the cap (the rejection carries the
- * disqualification). #21 — the bands the step classifies against, and the unit
- * (characters) it now compares. #77 — which separated the advisory band from the
- * project's cap and settled that only the cap may reject; and then, on review,
- * settled that only a **lower** bound may: a namespace probe measures an upper
- * bound on what a Cell carries, so an over-cap namespace bundle is a measurement
- * rather than a verdict. The `bound` argument carries that distinction, and its
- * default is the non-rejecting direction.
+ * Governing Specs: #16 — this step records the generated artifact size, and a step
+ * that measured successfully still *passes*. #21 — the bands the step classifies
+ * against, and the unit (characters) the comparison uses. #77 — which separated the
+ * advisory band from the project's cap, and then (revision 13) settled that this step
+ * may not file the cap verdict *at all*: the probe's build and the compiler's do not
+ * share a resolution graph, so the probe measures a synthetic candidate that can be
+ * larger than the Cell, and no import surface fixes that. The verdict belongs to the
+ * compiler's `auditCodeBudget` on the composed source. Every test below asserts a
+ * measurement and facts; none asserts a rejection from this step.
  */
 
 import { describe, expect, it } from "vitest";
@@ -148,73 +147,64 @@ describe("observeSize", () => {
     expect(observation.rejectionFindings).toEqual([]);
   });
 
-  // The report's central separation: measuring succeeded; the rejection finding
-  // carries "it does not qualify".
-  it("passes the step while filing cell-artifact-budget-exceeded when a lower bound is over the cap", () => {
-    // `"lower-bound"` is not decoration: it is the argument that makes this rejection sound.
-    // The build declared a named import surface, so the Cell certainly carries at least these
-    // characters and the composed artifact cannot come in under the cap. See the module header.
-    const observation = observeSize([chunk("var a = 12345;")], 4, "lower-bound");
+  // The report's central separation, and revision 13's whole point: measuring succeeded and the
+  // step passes, but a probe measurement never carries a disqualification — the verdict is the
+  // compiler's. This is the assertion that the step cannot file the signal at all.
+  it("files no rejection for an over-cap candidate under ANY import surface", () => {
+    // Both bounds, because revision 12 filed on `lower-bound` and revision 13 retracts that: the
+    // probe's build and the compiler's do not share a resolution graph, so even a named-surface
+    // measurement can exceed the Cell's. See the module header for the `react-library` fixture
+    // that falsifies the lower-bound claim (a *named* probe of `DatePicker` inlines npm React).
+    for (const bound of ["lower-bound", "upper-bound"] as const) {
+      const observation = observeSize([chunk("var a = 12345;")], 4, bound);
 
-    expect(observation.validation.outcome).toBe("passed");
+      expect(observation.validation.outcome, bound).toBe("passed");
+      expect(observation.rejectionFindings, bound).toEqual([]);
+    }
+  });
+
+  it("reports the over-cap comparison as a fact, so the estimate is still visible", () => {
+    // Dropping the rejection must not drop the comparison: an Agent still needs to see that the
+    // candidate is over the cap, and the detail must say where the verdict comes from so the
+    // number is not acted on as a refusal.
+    const observation = observeSize([chunk("var a = 12345;")], 4);
+
     expect(factValue(observation, "artifact.budgetCharacters")).toBe(4);
-    const finding = observation.rejectionFindings[0];
-    expect(finding?.signal).toBe("cell-artifact-budget-exceeded");
-    expect(finding?.step).toBe("size");
-    expect(finding?.evidence).toContain(`characters:${String("var a = 12345;".length)}`);
-    expect(finding?.evidence).toContain("band:inline");
-    expect(finding?.evidence).toContain("budgetCharacters:4");
-    expect(finding?.evidence).toContain("bound:lower-bound");
+    expect(factValue(observation, "size.codeCharacters")).toBe("var a = 12345;".length);
+    expect(observation.validation.detail).toContain("over this project's configured cap");
+    expect(observation.validation.detail).toMatch(/not a cap verdict/);
+    expect(observation.validation.detail).toContain("cell-code-budget-exceeded");
   });
 
-  it("blames the cap, not the measurement, when a tight cap rejects an ordinary artifact", () => {
-    // The trap the acceptance criteria name: a size inside the measured ordinary range
-    // with a tight configured cap. The rejection is real, but it is the *cap's* — the
-    // measurement says this artifact is fine, and a summary that read "over budget"
-    // without saying so would send the reader looking for a cost problem #21 says is
-    // not there. This is the same split `cell-compiler`'s diagnostic makes.
-    const observation = observeSize([chunk("var a = 1;")], 4, "lower-bound");
-
-    expect(factValue(observation, "size.band")).toBe("inline");
-    const finding = observation.rejectionFindings[0];
-    expect(finding?.signal).toBe("cell-artifact-budget-exceeded");
-    expect(finding?.summary).toContain("configured cap");
-    expect(finding?.summary).toMatch(/rejection is the cap's rather than a cost the measurement found/);
-  });
-
-  it("records which way the measurement bounds the Cell, on every run", () => {
-    // The fact that makes the other size facts interpretable: a reader seeing a number over a
-    // cap needs to know whether that is a verdict or an upper bound, and it must not have to
-    // infer it from the entry shape or from the absence of a finding.
+  it("records which way the estimate leans, on every run", () => {
+    // The fact that makes the number interpretable. It selects between two *estimates*, not
+    // between an estimate and a verdict — see `SizeBound` — so its presence must not be read as
+    // authorization.
     expect(factValue(observeSize([chunk("var a = 1;")], null), "size.bound")).toBe("upper-bound");
     expect(factValue(observeSize([chunk("var a = 1;")], null, "lower-bound"), "size.bound")).toBe("lower-bound");
     expect(factValue(observeSize([chunk("var a = 1;")], 4), "size.bound")).toBe("upper-bound");
   });
 
-  it("defaults to the upper bound, so a caller that declared no surface cannot reject by omission", () => {
-    // The direction that matters for safety. A namespace probe is the default entry shape, so a
-    // caller who passes no `bound` has declared no import surface — and the default must be the
-    // one that files nothing, not the one that files a rejection on evidence the run lacks.
-    // Falsified against the old behaviour: before #77's review the default was the rejection.
+  it("defaults to the upper bound, which is the direction that leans over", () => {
+    // A namespace probe is the default entry shape, so a caller that passes no `bound` declared
+    // no import surface. The default leans over — the *less* flattering direction for the
+    // candidate — so a caller cannot get a friendlier estimate by omitting the argument. A cap is
+    // passed because the leaning is only stated where it is interpretable, i.e. against a cap.
     const observation = observeSize([chunk("x".repeat(10_000))], 4);
 
-    expect(observation.rejectionFindings).toEqual([]);
-    expect(observation.validation.outcome).toBe("passed");
+    expect(factValue(observation, "size.bound")).toBe("upper-bound");
+    expect(observation.validation.detail).toContain("kept the whole package namespace");
   });
 
-  it("reports an over-cap upper bound as a measurement and names the way to get a verdict", () => {
-    // The P1-c case in one assertion. A namespace bundle over the cap is NOT a rejection: the
-    // Cell may import a fraction of it. Measured on `es-toolkit`, the namespace bundles to
-    // 249,750 characters against 2,865 for the single named binding `debounce` — an 87x gap,
-    // which is exactly the false rejection this branch exists to refuse.
+  it("names the resolution-graph gap as the reason the estimate is not a verdict", () => {
+    // The load-bearing sentence. Without it a reader sees a number over a cap and no finding and
+    // has to guess whether the step declined to reject or simply forgot; with it, the reason is
+    // the one that actually holds — host/extension dependencies resolve differently in the real
+    // compile.
     const observation = observeSize([chunk("x".repeat(10_000))], 4);
 
-    expect(factValue(observation, "artifact.budgetCharacters")).toBe(4);
-    expect(factValue(observation, "size.bound")).toBe("upper-bound");
-    expect(observation.rejectionFindings).toEqual([]);
-    expect(observation.validation.outcome).toBe("passed");
-    expect(observation.validation.detail).toContain("upper bound");
-    expect(observation.validation.detail).toContain("Re-probe with a declared import surface");
+    expect(observation.validation.detail).toMatch(/host\/extension dependencies/);
+    expect(observation.validation.detail).toContain("composed Cell");
   });
 
   it("files no rejection when the artifact fits the cap", () => {

@@ -31,12 +31,30 @@
   "extensionIdentity": "sha256:…",
 
   "cellTarget": null,                  // 默认 null，即适用于每个 target
+  "imports": ["debounce"],             // 可选：Cell 会具名导入的绑定，用于让尺寸估算偏向"下"。
+                                       // 省略或 null = 整个命名空间（估算偏向"上"）。详见下节。
   "validatedAgainstRuntime": false,    // 置 true 需 cite runtime-observation 且 smoke 步骤通过
   "evidence": [{ "kind": "spec-issue", "reference": "…" }]
 }
 ```
 
 架构拒绝（能力归 Forguncy）**不要**手写 `rejection`：`rejection` 就是归属评估自己给的那条，手写会被 `record` 拒绝（code 必须一致）。同理，架构拒绝不记 `alternatives`——替代的是能力的所有者（宿主），不是包。
+
+## `cellTarget` 与 `imports`：一个 Cell，两个声明输入
+
+这两项都进 probe 的**指纹**，所以它们必须是**测量时**就定好的输入，而不是事后从记录里猜出来的：
+
+- **`cellTarget`**：这个决策作用于哪个 Cell（`forguncy.config` 里的 `cells.<id>`）。它决定 probe 用哪个 `output.codeBudgetCharacters` 作为上限来**估算**。决策文件里写了就等于 `--cell`，命令行**不必**再重复一遍；两处都写且不一致会被拒绝（一个记录只能对应一个 Cell 身份）。
+- **`imports`**：Cell 会具名导入的绑定列表。它让 probe 的合成入口从 `import * as candidate` 变成 `import { … }`，从而让估算偏向**下**（"至少这么大"）而不是偏向**上**（"至多这么大"）。字段是**集合**：排序去重后落盘，`["a","b"]` 与 `["b","a"]` 必然是同一份字节。空数组不是合法写法——"整个命名空间"的写法是 `null` 或省略。
+
+### 硬上限判定不由 probe 给出（#77 revision 13）
+
+`--cell` 声明的上限会被**估算**并与 `size.codeCharacters` 比较，比较结果作为 `artifact.budgetCharacters` 事实记入报告，但 **probe 在任何情况下都不产生 `cell-artifact-budget-exceeded`**，`imports` 偏向"下"也不产生。原因有二，且都与"这个数字不是那个数字"有关：
+
+1. probe 用原始 Rolldown 构建一个**合成候选**；编译器的 Cell 构建会装上 `createInterceptionResolver`，把 `host`/`extension` 依赖换成虚拟模块或页面全局。两个构建的**解析图不同**，所以 probe 的产物可以**大于**真实 Cell。仓库里的 `react-library` fixture 就是反例：`DatePicker` 的**具名** probe 会把 npm `react` 的 `createElement` 内联进去，而真实编译会把 `react` 解析到宿主 React——真实 Cell 反而更小。
+2. `imports` 是**调用方的声明**，不是从 Cell 读出来的事实：Cell 可能导入了却因未使用被 tree-shake 掉，声明也可能与源码不符。
+
+因此 `cell-artifact-budget-exceeded` 的**唯一**权威是编译器：`auditCodeBudget` 对**合成后的 Cell 源码**应用 `codeBudgetCharacters`，那里入口是 Cell 自己的、解析图是真的。probe 报告里的尺寸数字是**估算**，供 Agent 参考；它不是拒绝依据。`PROBE_STEPS_OBSERVING_SIGNAL` 里这个信号没有任何观测步骤，所以一份把该 finding 归到任何 probe 步骤的报告会被 `validateProbeReport` 判为**无效**，而不只是"不推荐"。
 
 ## 脚本对决策文件做的事
 

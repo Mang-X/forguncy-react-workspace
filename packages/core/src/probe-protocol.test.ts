@@ -35,7 +35,8 @@ import {
   serializeProbeReport,
   validateProbeReport,
 } from "./probe-protocol.ts";
-import { SELECTION_SIGNALS } from "./selection-signals.ts";
+import { REPLACEMENT_SIGNAL_REJECTIONS, SELECTION_SIGNALS } from "./selection-signals.ts";
+import { UNOBSERVABLE_TECHNICAL_REJECTION_CODES } from "./lock.ts";
 import type {
   ProbeEnvironment,
   ProbeOutcome,
@@ -412,11 +413,12 @@ describe("findings must come from a step that can produce them", () => {
       }
     }
 
-    // A channel is not an evidence capability: these three share `build-output` and
-    // see different things.
-    expect(probeStepsObserving("cell-artifact-budget-exceeded")).toEqual(["size"]);
+    // A channel is not an evidence capability: these two share `build-output` and
+    // see different things — and the budget signal is not one of them at all, because no
+    // probe step can prove it (#77 revision 13).
+    expect(probeStepsObserving("cell-artifact-budget-exceeded")).toEqual([]);
     expect(probeStepsObserving("dynamic-module-loading-cannot-be-eliminated")).toEqual(["artifact-scan"]);
-    expect(probeStepObservesSignal("size", "cell-artifact-budget-exceeded")).toBe(true);
+    expect(probeStepObservesSignal("size", "cell-artifact-budget-exceeded")).toBe(false);
     expect(probeStepObservesSignal("build", "cell-artifact-budget-exceeded")).toBe(false);
     expect(probeStepObservesSignal("size", "dynamic-module-loading-cannot-be-eliminated")).toBe(false);
     // The `build` step reports whether the build succeeded; it does not read the
@@ -506,17 +508,46 @@ describe("findings must come from a step that can produce them", () => {
 
   it("refuses a finding attributed to a step that cannot produce it", () => {
     // Self-consistent and still false: right family, non-empty evidence, the step ran,
-    // and the channel overlaps — but `build` does not measure a budget.
+    // and the channel overlaps — but `build` does not scan the output for survivors.
+    // `dynamic-module-loading-cannot-be-eliminated` is the instrument rather than the budget
+    // signal, because the budget signal now has no observing step at all: it would be refused
+    // for a different reason and this test would stop asserting the wrong-step rule.
     const problems = validateProbeReport(
       probeReport({
         rejectionFindings: [
-          { signal: "cell-artifact-budget-exceeded", step: "build", summary: "over budget", evidence: ["3.1 MB"] },
+          {
+            signal: "dynamic-module-loading-cannot-be-eliminated",
+            step: "build",
+            summary: "a chunk survived",
+            evidence: ["chunk-a.js"],
+          },
         ],
       }),
     );
 
     expect(problems.some(problem => problem.includes("cannot produce this observation"))).toBe(true);
-    expect(problems.some(problem => problem.includes("size"))).toBe(true);
+    expect(problems.some(problem => problem.includes("artifact-scan"))).toBe(true);
+  });
+
+  it("refuses the budget signal from every step, because no probe step can prove it", () => {
+    // #77 revision 13. The probe builds a synthetic candidate through raw Rolldown while the
+    // compiler builds the Cell through `createInterceptionResolver`, so a probe artifact can be
+    // larger than the Cell's — no probe measurement is a cap verdict, and `replace` binds to
+    // these findings. The empty observer list makes a report that claims one *invalid*, not
+    // merely discouraged: the message names the reason rather than an alternative step.
+    for (const step of ["size", "build", "artifact-scan"] as const) {
+      const problems = validateProbeReport(
+        probeReport({
+          rejectionFindings: [
+            { signal: "cell-artifact-budget-exceeded", step, summary: "over budget", evidence: ["3.1 MB"] },
+          ],
+        }),
+      );
+
+      expect(problems.some(problem => problem.includes("cannot produce this observation")), step).toBe(true);
+      // …and says *why* there is no alternative step, so a reader is not left looking for one.
+      expect(problems.some(problem => problem.includes("no probe step observes this signal")), step).toBe(true);
+    }
   });
 
   it("refuses a survivor finding attributed to the size measurement", () => {
@@ -723,5 +754,25 @@ describe("canonical ordering is total", () => {
     });
 
     expect(serializeProbeReport(report)).toBe(serializeProbeReport(shuffledAgain));
+  });
+});
+
+describe("the unobservable-rejection list cannot drift from the protocol table", () => {
+  it("names exactly the technical codes whose signals no probe step observes", () => {
+    // The list lives in `lock.ts` because the lock validator may not import this module (this
+    // module already imports `lock`, so the edge would be a cycle). Recomputing it here is what
+    // keeps the two from disagreeing: add a signal with no observer, or give one an observer, and
+    // this fails rather than the lock silently accepting a rejection nothing can prove.
+    const derived = REPLACEMENT_SIGNAL_REJECTIONS.filter(
+      mapping => probeStepsObserving(mapping.signal).length === 0,
+    )
+      .map(mapping => mapping.code)
+      .sort();
+
+    expect([...UNOBSERVABLE_TECHNICAL_REJECTION_CODES].sort()).toEqual(derived);
+    // And the list is not vacuous: an empty derivation would make the assertion above pass while
+    // the lock's rule did nothing. `cell-code-budget-exceeded` is the code #77 revision 13 made
+    // unprovable, so it is the one that has to be there.
+    expect(derived).toContain("cell-code-budget-exceeded");
   });
 });

@@ -576,11 +576,19 @@ export const REPLACEMENT_SIGNAL_REJECTIONS: readonly ReplacementSignalRejection[
     // What it becomes false *against* is a project's cap, not the measurement
     // (#77): the measured band is advisory and a band alone never files this, so
     // the remediation names the cap and the two ways to get under one.
+    //
+    // Observed by no probe step (#77 revision 13). The probe measures a synthetic
+    // candidate through a build that does not install the compiler's
+    // `createInterceptionResolver`, so its artifact can be *larger* than the Cell's —
+    // a named import surface does not fix that, and the surface is a caller's
+    // declaration besides. The verdict is the compiler's `auditCodeBudget` on the
+    // composed Cell source; `PROBE_STEPS_OBSERVING_SIGNAL` records the empty list so a
+    // report claiming this finding from any step is invalid.
     signal: "cell-artifact-budget-exceeded",
     kind: "technical",
     code: "cell-code-budget-exceeded",
     remediation:
-      "Prefer a lighter alternative, a host-provided capability, or a verified extension; keep the package only if a validated build brings it under the project's configured cell code cap, or if the cap itself was set tighter than this cell needs.",
+      "Prefer a lighter alternative, a host-provided capability, or a verified extension; keep the package only if a compiled Cell comes in under the project's configured cell code cap, or if the cap itself was set tighter than this cell needs.",
   },
   {
     signal: "runtime-assets-not-embeddable",
