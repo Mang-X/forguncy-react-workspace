@@ -514,6 +514,101 @@ describe("the Skill's documented walkthrough runs as written", () => {
     expect(howToUse).not.toMatch(/可执行的那一半在 selection-cases\.test\.ts 里并由 CI 运行[^；]*；本文件记录无法由测试执行的那一半/);
   });
 
+  it("executes every `repeatable_commands` entry that has no placeholder", async () => {
+    // PR #112 review round 3, P3. The README said the `repeatable_commands` entries were
+    // "executed by the two tests above" — but `cli-contract.test.ts` and `cap-e2e.test.ts` have
+    // zero references to this JSON; only `walkthrough.test.ts` reads it, and only the
+    // `walkthrough` key. The reviewer's correction is right, and the honest fix is not to weaken
+    // the sentence but to make it true where it can be: **an entry with no placeholder is a
+    // command a machine can run verbatim**, so it should be run rather than described.
+    //
+    // `policy` is exactly that case, and it was executed by nothing — round 1's defect (a
+    // documented command no test ran) surviving one key over. Entries with `<placeholders>` are
+    // templates by construction and stay documentation; this case asserts which of the two each
+    // entry is, so the split is stated in the test rather than left to a reader of the README.
+    const commands = readExecutionCases().repeatable_commands;
+    const entries = Object.entries(commands).filter(([key]) => !key.startsWith("//"));
+    expect(entries.length, "no repeatable command to check, so this case asserts nothing").toBeGreaterThanOrEqual(5);
+
+    const placeholderFree = entries.filter(([, value]) => !/<[\w/-]+>/.test(value));
+    // Asserted non-empty: if every entry grew a placeholder, the loop below would run nothing and
+    // this case would pass while checking nothing — and `policy` really is runnable today.
+    expect(placeholderFree.length, "no entry is runnable verbatim, so nothing is executed here").toBeGreaterThanOrEqual(1);
+
+    for (const [key, value] of placeholderFree) {
+      // The command is the file's own string, resolved only where it names the script by its
+      // repository-relative path (the CLI is spawned by absolute path). Nothing else is rewritten.
+      //
+      // `node` is dropped from the front and the script path is **dropped too**, because `cli`
+      // already supplies both — the same reason `commandsIn` slices its argv. Only the subcommand
+      // and its flags remain. Keeping the path as argv[0] would make it the command word and every
+      // entry would exit 2 on a usage error, which is what this case first did.
+      const tokens = value
+        .split(/\s+/)
+        .map(token => (token.endsWith("select_dependency.mjs") ? join(REPOSITORY_ROOT, CLI_RELATIVE) : token));
+      const argv = tokens.slice(tokens.indexOf(join(REPOSITORY_ROOT, CLI_RELATIVE)) + 1);
+      // The script name must have been found, or the slice above silently returns everything
+      // (including `node`) and the assertion below would be about the wrong argv.
+      expect(tokens, `\`${key}\` must name the selection script`).toContain(join(REPOSITORY_ROOT, CLI_RELATIVE));
+      const result = await cli(argv);
+      expect(result.code, `\`${key}\` must run as written: ${value}\n${result.stdout}${result.stderr}`).toBe(0);
+      // `--json` is the default for `policy`, and its output is the surface the Agent is told to
+      // ground on, so a command that exits 0 while printing nothing useful would still be broken.
+      expect(() => JSON.parse(result.stdout), `\`${key}\` must print its JSON surface`).not.toThrow();
+    }
+  }, CASE_TIMEOUT_MS);
+
+  it("says which `repeatable_commands` entries a test reads, and which are documentation", () => {
+    // The other half of the correction: the prose may not claim more coverage than exists. This
+    // recomputes the executed set from the tests themselves — `repeatable_commands.<key>` appears
+    // in a suite's source — and requires `how_to_use` to agree, so the summary cannot outrun the
+    // tests the way `cli-contract.test.ts 与 cap-e2e.test.ts 覆盖` did.
+    const executed = new Set<string>();
+    for (const suite of ["walkthrough.test.ts"]) {
+      const source = readFileSync(join(REPOSITORY_ROOT, `${SKILL_DIRECTORY}/evals/${suite}`), "utf8");
+      for (const match of source.matchAll(/repeatable_commands\.(\w+)/g)) {
+        executed.add(match[1]!);
+      }
+      // The placeholder-free case above reads the object rather than one key, so it covers entries
+      // by a route a `repeatable_commands.<key>` scan cannot see. Stated here so the recomputation
+      // is not read as the whole truth.
+      if (source.includes("placeholderFree")) {
+        for (const [key, value] of Object.entries(readExecutionCases().repeatable_commands)) {
+          if (!key.startsWith("//") && !/<[\w/-]+>/.test(value)) {
+            executed.add(key);
+          }
+        }
+      }
+    }
+    expect(executed.size, "no entry is read by a test, so this guard asserts nothing").toBeGreaterThanOrEqual(1);
+    expect(executed.has("walkthrough")).toBe(true);
+
+    const howToUse = readExecutionCases().how_to_use;
+    for (const key of executed) {
+      expect(howToUse, `\`${key}\` is executed by a test but \`how_to_use\` does not say so`).toContain(key);
+    }
+    // And the entries that are documentation must be named as such, so the sentence cannot be
+    // neutral about them either. `probe`/`audit`/`record`/`status` carry placeholders and are read
+    // by nothing; `policy` is runnable but is now executed, so it is not in this list.
+    for (const key of ["probe", "audit", "record", "status"]) {
+      expect(executed.has(key), `\`${key}\` is asserted to be documentation, so no test may read it`).toBe(false);
+      expect(howToUse).toContain(key);
+    }
+
+    // The README carries the same claim and had the same defect — review round 3 quoted its
+    // "由上面两个测试执行", which named `cli-contract.test.ts`/`cap-e2e.test.ts` as executing a
+    // JSON neither of them reads. Guarding only `how_to_use` left the README's copy of the
+    // sentence uncovered: restoring the overclaim there passed the whole suite when this case was
+    // first written, which is how the gap was found. Both files are asserted for that reason.
+    const readme = readFileSync(join(REPOSITORY_ROOT, `${SKILL_DIRECTORY}/README.md`), "utf8");
+    for (const key of executed) {
+      expect(readme, `README does not say \`${key}\` is executed`).toContain(key);
+    }
+    // The two suites that cover CLI *behaviour* without reading this JSON must not be described as
+    // executing its entries. Asserted as an absence, because that phrasing is the defect itself.
+    expect(readme).not.toMatch(/repeatable_commands[^。\n]*由上面两个测试执行/);
+  });
+
   it("lists the walkthrough test in the Skill's own asset list, which named the other suites", async () => {
     // The same drift in the README's asset section: it enumerated the eval files and had not been
     // updated for `walkthrough.test.ts`. Asserted here rather than left to review because it is

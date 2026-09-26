@@ -52,7 +52,11 @@
 - `evals/walkthrough.test.ts`：把 `SKILL.md` 的走查块与 `execution_cases.json` 的 `repeatable_commands.walkthrough` 当命令**执行**（不是重抄一遍），并守住"手填编译证据"那条被撤回的说明不再出现。
 - `evals/cli-contract.test.ts`：**CLI 级**回归测试，真正 spawn 脚本，覆盖证据可追溯、`--runtime-smoke` 可达性、conformance 门。
 - `evals/cap-e2e.test.ts`：`--cell` 声明的 code budget 端到端（probe / audit / record / status 都拿到同一个上限）。
-- `evals/execution_cases.json`：语义用例（不可执行的判断，人工/Agent 复核）**加上** `repeatable_commands`（可重复跑的命令，由上面两个测试执行）。每条 case 的 `executed_by` 指出谁执行它。
+- `evals/execution_cases.json`：语义用例（不可执行的判断，人工/Agent 复核）**加上** `repeatable_commands`（可重复跑的命令）。每条 case 的 `executed_by` 指出谁执行它。
+  - `repeatable_commands` 分两类，**改这些字符串只有当条目被当作源执行时才会让测试失败**：
+    - **被执行的**：`walkthrough` 由 `walkthrough.test.ts` 读出并原样跑；没有占位符的条目（当前是 `policy`）由同一套件逐条执行。
+    - **文档**：`probe` / `audit` / `record` / `status` 含 `<root>` / `<package>` / `<file>` 占位符，是模板而非可原样执行的命令，没有任何测试读取它们。
+  - CLI 的**行为**由 `cli-contract.test.ts` 与 `cap-e2e.test.ts` 覆盖，但这两个套件不读这个 JSON——它们覆盖的是行为，不是这些命令字符串。
 - `evals/trigger_cases.json` + `evals/semantic_config.json`：路由评测（precision 1.0 / recall 1.0，阈值 0.30）。
 
 ## 关键选项
