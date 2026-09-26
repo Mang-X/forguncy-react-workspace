@@ -691,10 +691,31 @@ describe("the normalized mapping set", () => {
   });
 
   it("says which rows are the project's and which are the repository's", () => {
+    // The rows are read off the *result*, not from `EXTENSION_EXTERNAL_MAPPINGS`: the
+    // result clones its rows, so the table's own objects are foreign to it. The earlier
+    // version of this test passed `tanStackQueryRow` (a table row) and expected
+    // `"builtin"`, which the old implementation answered by defaulting — the test could
+    // not tell a correct answer from a fallback. Review of #110, non-blocking item.
     const normalized = normalizeOrThrow({ cells: {}, extensions: { mappings: [projectMappingConfig()] } });
 
     expect(extensionMappingOrigin(normalized, normalized.projectMappings[0]!)).toBe("project");
-    expect(extensionMappingOrigin(normalized, tanStackQueryRow!)).toBe("builtin");
+    expect(extensionMappingOrigin(normalized, normalized.builtinMappings[0]!)).toBe("builtin");
+  });
+
+  it("says it does not know, rather than calling a foreign row the repository's", () => {
+    // A row that belongs to neither list has no origin in this result. Answering
+    // `"builtin"` for it is a confident wrong answer, and it is the *common* case rather
+    // than an edge: every row outside a result is foreign to it, including the shipped
+    // table's own rows and another result's rows.
+    const normalized = normalizeOrThrow({ cells: {}, extensions: { mappings: [projectMappingConfig()] } });
+    const other = normalizeOrThrow({ cells: {} });
+
+    expect(extensionMappingOrigin(normalized, tanStackQueryRow!)).toBeUndefined();
+    expect(extensionMappingOrigin(normalized, other.builtinMappings[0]!)).toBeUndefined();
+    expect(extensionMappingOrigin(normalized, projectMapping({ packageName: "never-normalized" }))).toBeUndefined();
+    // And the two answers that *are* knowable still come back, so the `undefined` above is
+    // not a check that refuses everything.
+    expect(extensionMappingOrigin(other, other.builtinMappings[0]!)).toBe("builtin");
   });
 
   it("reports its source, its rows and its project-row count in one block", () => {
@@ -713,6 +734,89 @@ describe("the normalized mapping set", () => {
     // If this ever fails, every conflict diagnostic above is measuring against a
     // broken baseline.
     expect(() => assertExtensionExternalMappingsAreUnambiguous(EXTENSION_EXTERNAL_MAPPINGS)).not.toThrow();
+  });
+
+  it("checks the built-in table even when the config declares no `extensions` block", () => {
+    // Review of #110, finding 1. The absent state used to return before the guards, so the
+    // set's *validation* depended on whether a semantically empty `extensions: {}` was
+    // written — two configs producing the same mapping set disagreed about admissibility.
+    // Measured on the first version, with one pinned contract:
+    //
+    //   { cells: {} }                    -> ok: true
+    //   { cells: {}, extensions: {} }    -> ok: false
+    const contract = { hostModuleIds: ["@tanstack/react-query"] };
+
+    const absent = normalizeExtensionMappings({ cells: {} }, { contract });
+    const declared = normalizeExtensionMappings({ cells: {}, extensions: {} }, { contract });
+
+    expect(absent.ok).toBe(false);
+    expect(declared.ok).toBe(false);
+    if (absent.ok || declared.ok) return;
+    // The same finding, not merely the same verdict: a config that says nothing and one
+    // that declares an empty block have to be told the same thing.
+    expect(absent.diagnostics).toEqual(declared.diagnostics);
+    expect(absent.diagnostics.map(diagnostic => diagnostic.code)).toEqual(["extension-mapping-conflict"]);
+  });
+
+  it("refuses a caller-pinned built-in table that is inadmissible, with no `extensions` declared", () => {
+    // The other half of the same finding: the option is public, so a pinned table can be
+    // wrong — and it used to be returned as a normalized result whenever the config was
+    // silent. Three ways, each a check that was skipped.
+    const base = {
+      packageName: "pinned-package",
+      libraryId: "pinned-library",
+      globalName: "PinnedLibrary",
+      metadataSource: "verified-catalog" as const,
+      metadataReference: "some/catalog",
+      verificationRule: "A pinned row.",
+      verifiedBy: ["designer-api"] as const,
+      note: "pinned",
+    };
+
+    // A forged evidence channel.
+    const forged = normalizeExtensionMappings(
+      { cells: {} },
+      { builtinMappings: [projectMapping({ ...base, verifiedBy: ["assumption"] as never })] },
+    );
+    expect(forged.ok).toBe(false);
+    if (!forged.ok) {
+      expect(forged.diagnostics.map(diagnostic => diagnostic.code)).toEqual(["invalid-extension-mapping"]);
+      // The path names the pinned table rather than the module the caller never consulted.
+      expect(forged.diagnostics[0]?.path).toBe("options.builtinMappings");
+    }
+
+    // A reserved global.
+    const reserved = normalizeExtensionMappings(
+      { cells: {} },
+      { builtinMappings: [projectMapping({ ...base, globalName: "antd" })] },
+    );
+    expect(reserved.ok).toBe(false);
+
+    // Two rows claiming one module id.
+    const ambiguous = normalizeExtensionMappings(
+      { cells: {} },
+      {
+        builtinMappings: [
+          projectMapping({ ...base }),
+          projectMapping({ ...base, libraryId: "other-library", globalName: "OtherLibrary" }),
+        ],
+      },
+    );
+    expect(ambiguous.ok).toBe(false);
+    if (!ambiguous.ok) {
+      expect(ambiguous.diagnostics.map(diagnostic => diagnostic.code)).toEqual(["extension-mapping-conflict"]);
+      expect(ambiguous.diagnostics[0]?.path).toBe("options.builtinMappings");
+    }
+  });
+
+  it("still normalizes an absent block against the shipped table, which the guards accept", () => {
+    // The bound on the two tests above: running the guards on the absent path must not turn
+    // the default into a refusal. The shipped table passes its own contract, so the
+    // documented default behaviour is unchanged.
+    const normalized = normalizeOrThrow({ cells: {} });
+
+    expect(normalized.source).toBe("builtin-default");
+    expect(normalized.mappings).toEqual(EXTENSION_EXTERNAL_MAPPINGS);
   });
 
   it("normalizes a pinned built-in table, so a caller checks against the table it named", () => {

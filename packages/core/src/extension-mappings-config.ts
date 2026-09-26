@@ -73,6 +73,25 @@
  * writing a second merge implementation: `assertExtensionExternalMappingsAreUnambiguous`
  * already answers exactly that question, and a second answer could disagree with it.
  *
+ * ## Every state is checked, including the absent one
+ *
+ * The absent `extensions` block is **not** an early return: it contributes the built-in
+ * rows and then goes through the same two guards and the same `contract` option as any
+ * other state. The first version returned before the guards, which made the set's
+ * *validation* depend on whether a semantically empty `extensions: {}` happened to be
+ * written — measured, on one pinned contract:
+ *
+ * | config | first version |
+ * | --- | --- |
+ * | `{ cells: {} }` | `ok: true` — the host-bridge collision was never looked for |
+ * | `{ cells: {}, extensions: {} }` | `ok: false` — `extension-mapping-conflict` |
+ *
+ * Two configs that produce the *same mapping set* therefore disagreed about whether that
+ * set was admissible, and a caller-pinned `builtinMappings` containing a reserved global,
+ * a forged evidence channel or a duplicate module id was returned as a normalized result
+ * whenever the config said nothing. "Single normalization exit" has to mean the exit
+ * checks what it emits, not only what the config added.
+ *
  * ## What is deliberately absent
  *
  * No `strategy` field, and no way to express one. A mapping says how an `extension`
@@ -455,32 +474,27 @@ export function normalizeExtensionMappings(
   const diagnostics: ExtensionMappingsDiagnostic[] = [];
 
   const raw = isConfigRecord(config) ? config[EXTENSION_MAPPINGS_CONFIG_FIELD] : undefined;
-  const project = raw === undefined ? undefined : readProjectMappings(raw, diagnostics);
+  const projectDeclared = raw !== undefined;
+  const project = projectDeclared ? readProjectMappings(raw, diagnostics) : undefined;
+  // A malformed block reports its own diagnostics and contributes no rows; the built-in
+  // table is still assembled and checked below, so a caller with a broken table *and* a
+  // malformed block reads both rather than only the block.
+  const projectRows = project?.mappings ?? [];
 
-  if (project === undefined) {
-    if (diagnostics.length > 0) {
-      return { ok: false, diagnostics };
-    }
-    // Absent, so the default applies — and the default is the built-in table as it
-    // stands, which is what keeps a config that says nothing behaving as it did.
-    return {
-      ok: true,
-      mappings: freezeMappings({
-        mappings: [...builtinMappings],
-        projectMappings: [],
-        source: "builtin-default",
-        includesBuiltinMappings: true,
-        builtinMappings,
-      }),
-    };
-  }
+  // The default is the built-in table, applied when the config says nothing — so the
+  // absent state contributes rows exactly as the declared-and-defaulted one does, and the
+  // two reach the guards below identically. See the header for why that matters.
+  const includesBuiltinMappings = projectDeclared
+    ? readBuiltinMappings(isConfigRecord(raw) ? raw : {}, diagnostics)
+    : DEFAULT_BUILTIN_MAPPINGS;
 
-  const includesBuiltinMappings = readBuiltinMappings(
-    isConfigRecord(raw) ? raw : {},
-    diagnostics,
-  );
+  const mappings = includesBuiltinMappings ? [...builtinMappings, ...projectRows] : [...projectRows];
 
-  const mappings = includesBuiltinMappings ? [...builtinMappings, ...project.mappings] : [...project.mappings];
+  // Where a built-in row came from, for the two guards' paths. The option exists so a
+  // caller can pin a table, and naming it `EXTENSION_EXTERNAL_MAPPINGS` then would point
+  // at a module the caller never consulted.
+  const builtinTablePath =
+    options.builtinMappings === undefined ? "EXTENSION_EXTERNAL_MAPPINGS" : "options.builtinMappings";
 
   // #12's own guards, over the assembled set. Run even when the project declared no
   // rows, because `builtinMappings: false` with nothing declared is a *stated* empty
@@ -493,11 +507,11 @@ export function normalizeExtensionMappings(
       // A project row is reported at its own config path; a built-in row can only fail
       // here if the repository's own table is broken, which the table's own test
       // asserts, so the path names the table rather than inventing a config location.
-      const index = project.mappings.indexOf(mapping);
+      const index = projectRows.indexOf(mapping);
       const path =
         index >= 0
           ? `${EXTENSION_MAPPINGS_CONFIG_FIELD}.mappings[${index}]`
-          : "EXTENSION_EXTERNAL_MAPPINGS";
+          : builtinTablePath;
       diagnostics.push(
         diag(
           "invalid-extension-mapping",
@@ -520,16 +534,13 @@ export function normalizeExtensionMappings(
   try {
     assertExtensionExternalMappingsAreUnambiguous(mappings, options.contract);
   } catch (error) {
-    // Located at the project's rows, because the built-in table is checked by its own
-    // test and a collision between the two is necessarily the project's addition: the
-    // shipped table cannot conflict with itself, so naming the project's rows is the
-    // actionable location rather than a guess.
+    // Located at the project's rows, because a collision the project added is theirs to
+    // fix; with no project rows the finding is about the built-in table itself, so the
+    // path names that table instead of a config block the config never declared.
     diagnostics.push(
       diag(
         "extension-mapping-conflict",
-        project.mappings.length > 0
-          ? `${EXTENSION_MAPPINGS_CONFIG_FIELD}.mappings`
-          : "EXTENSION_EXTERNAL_MAPPINGS",
+        projectRows.length > 0 ? `${EXTENSION_MAPPINGS_CONFIG_FIELD}.mappings` : builtinTablePath,
         error instanceof ExtensionExternalContractError ? error.message : String(error),
       ),
     );
@@ -543,8 +554,12 @@ export function normalizeExtensionMappings(
     ok: true,
     mappings: freezeMappings({
       mappings,
-      projectMappings: [...project.mappings],
-      source: includesBuiltinMappings ? "project-extended" : "project-only",
+      projectMappings: [...projectRows],
+      source: projectDeclared
+        ? includesBuiltinMappings
+          ? "project-extended"
+          : "project-only"
+        : "builtin-default",
       includesBuiltinMappings,
       builtinMappings,
     }),
@@ -620,17 +635,31 @@ function freezeMappings(result: NormalizedExtensionMappings): NormalizedExtensio
 }
 
 /**
- * Whether the project supplied a mapping for a package, and which set it came from.
+ * Which set a row of *this* result came from, or `undefined` when it is not one of them.
  *
- * Offered so a report can answer "is this row the project's or the repository's"
- * without comparing object identity against two lists, which is the shape a caller
- * gets wrong once and then repeats.
+ * Offered so a report can answer "is this row the project's or the repository's" without
+ * comparing object identity against two lists, which is the shape a caller gets wrong once
+ * and then repeats.
+ *
+ * `undefined` for a row that belongs to neither list, and that third answer is the point.
+ * The first version asked only `projectMappings.includes(mapping)` and answered `"builtin"`
+ * otherwise — so a *foreign* row, including one from another normalized result or from
+ * `EXTENSION_EXTERNAL_MAPPINGS` itself, was labelled the repository's. Since the result
+ * clones its rows, every row outside it is foreign by construction, which makes that the
+ * common case rather than an edge: a caller passing the table's own row got a confident
+ * wrong answer. Reporting "I do not know where this came from" is the honest output, and
+ * the return type makes a caller handle it rather than fall into a default.
+ *
+ * The comparison stays by identity — `mappings` and its two subsets share one clone per
+ * row, so identity is exactly "is this row of this result".
  */
 export function extensionMappingOrigin(
   normalized: NormalizedExtensionMappings,
   mapping: ExtensionExternalMapping,
-): "project" | "builtin" {
-  return normalized.projectMappings.includes(mapping) ? "project" : "builtin";
+): "project" | "builtin" | undefined {
+  if (normalized.projectMappings.includes(mapping)) return "project";
+  if (normalized.builtinMappings.includes(mapping)) return "builtin";
+  return undefined;
 }
 
 /** A report block for a CI log or a PR body. */
