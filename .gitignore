@@ -19,3 +19,12 @@ coverage/
 # passes here and fails there, which is worse than having no test at all.
 !packages/dependency-resolver/src/__fixtures__/probe/dot-fgc-directory/node_modules/dot-fgc/src/.fgc/
 !packages/dependency-resolver/src/__fixtures__/probe/dot-fgc-directory/node_modules/dot-fgc/src/.fgc/**
+
+# The `import-only-esm` fixture (#89) ships a package whose entry is `dist/esm/index.js`,
+# beside a nameless `dist/esm/package.json` — the shape whose nearest manifest declares no
+# `name`. The blanket `dist/` rule above would drop both from the commit, so the fixture
+# would exist locally and be absent on CI, where the locator would then find a package with
+# no entry and the test would fail there while passing here. Re-included after that rule for
+# the same reason as the `.fgc/` case: git applies these in order.
+!packages/dependency-resolver/src/__fixtures__/probe/import-only-esm/node_modules/nested-marker/dist/
+!packages/dependency-resolver/src/__fixtures__/probe/import-only-esm/node_modules/nested-marker/dist/**

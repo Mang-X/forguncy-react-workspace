@@ -132,6 +132,18 @@ export type {
   UnresolvedInstalledPackageReason,
 } from "./install-graph.ts";
 
+// Where an installed package lives, asked of the host rather than of a private
+// `exports` walk (#89). Exported because it is the one answer to "which artifact
+// does this name name" that both the lock's version map and the probe's identity
+// step are built on, and a consumer checking either independently should be able
+// to ask the same question rather than re-derive it.
+export { locatePackage } from "./package-locator.ts";
+export type {
+  LocatedPackage,
+  PackageLocation,
+  PackageLocationFailureReason,
+} from "./package-locator.ts";
+
 export {
   mergeDependencyDecisionUpdate,
   recordDependencyDecision,

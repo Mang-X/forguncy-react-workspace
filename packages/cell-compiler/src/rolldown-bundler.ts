@@ -56,7 +56,14 @@ import { realpathSync, statSync } from "node:fs";
 import path from "node:path";
 
 import type { DependencyDecision, ExtensionExternalDiagnostic } from "@forguncy-react-workspace/core";
-import { rolldown, type OutputAsset, type OutputChunk } from "rolldown";
+import { CELL_RUNTIME_BINDING_CONTRACT } from "@forguncy-react-workspace/core";
+import {
+  rolldown,
+  type OutputAsset,
+  type OutputChunk,
+  type PluginContext,
+  type ResolveIdExtraOptions,
+} from "rolldown";
 // `scan` is Rolldown's analysis-only entry: it runs the resolve and transform
 // stages and stops, with no `renderChunk` and no `generateBundle`. That is the
 // whole point of using it here rather than `rolldown()` + `generate()` — see
@@ -77,6 +84,7 @@ import type { ExtensionExternalsPlan } from "./extension-externals.ts";
 import { planExtensionExternals } from "./extension-externals.ts";
 import type { HostBridgeDiagnostic, HostBridgePlan } from "./host-bridge.ts";
 import { planHostBridge } from "./host-bridge.ts";
+import { CELL_RUNTIME_BINDING_ID, renderRuntimeBindingModule } from "./runtime-binding.ts";
 
 // ---------------------------------------------------------------------------
 // Options
@@ -108,6 +116,34 @@ export function createRolldownCellBundler(options: CreateRolldownCellBundlerOpti
 }
 
 /**
+ * One intercepted specifier, as the pair (virtual module id, source to load).
+ *
+ * Two shapes rather than one, because the runtime binding is the first interception whose
+ * source is not a pure function of the mapping: it has to carry the *resolved* façade
+ * specifier, which only a plugin hook can obtain. `runtime-binding` names the bare
+ * specifier to resolve; `source` carries text that is already final.
+ */
+type Interception =
+  | { readonly kind: "source"; readonly id: string; readonly source: string; readonly moduleType: "commonjs" }
+  | {
+      readonly kind: "runtime-binding";
+      readonly id: string;
+      readonly facadeSpecifier: string;
+      readonly moduleType: "esm";
+    };
+
+interface InterceptionResolver {
+  readonly interceptionFor: (specifier: string, importer: string | undefined) => Interception | undefined;
+  readonly referencedSpecifiers: Set<string>;
+  readonly referencedPackages: Set<string>;
+  readonly fallThroughResolutions: Map<string, string>;
+  readonly hostFindings: Map<string, HostBridgeDiagnostic>;
+  readonly extensionFindings: Map<string, ExtensionExternalDiagnostic>;
+  /** Consulted once with no references, so a plan-level finding cannot hide. */
+  readonly primeDiagnostics: () => void;
+}
+
+/**
  * The interception machinery, shared by the pre-bundle pass and the build.
  *
  * Extracted rather than duplicated because the two must agree exactly: the
@@ -118,17 +154,24 @@ export function createRolldownCellBundler(options: CreateRolldownCellBundlerOpti
  * The plan caches and finding maps are per-call state, so one build cannot see
  * another's interceptions. `referencedSpecifiers` is the set the report needs; the
  * caller reads it after the pass that populated it.
+ *
+ * ## The three branches, and why the third needs the importer
+ *
+ * The host bridge and the extension externals are keyed on the specifier alone: an
+ * authored `import ... from "react"` means the page object wherever it appears. The
+ * runtime binding (#82) is the first interception that is **not** keyed on the specifier
+ * alone, because the module it generates imports the very package it replaces. Without
+ * the `importer` argument the generated module would be intercepted by its own branch —
+ * a cycle that resolves to a module importing itself — so the binding is skipped for
+ * importers that are generated (`\0`-prefixed), and the binding's own import is resolved
+ * by the caller to the real façade.
+ *
+ * That resolution cannot happen here: it needs Rolldown's `this.resolve`, which exists
+ * only inside a plugin hook. So the branch reports the specifier it needs resolved and the
+ * *callers* do it, through {@link resolveCellSpecifier} — one implementation, two call
+ * sites, which is the same rule this function exists to enforce.
  */
-function createInterceptionResolver(decisions: readonly DependencyDecision[]): {
-  readonly interceptionFor: (specifier: string) => { readonly id: string; readonly source: string } | undefined;
-  readonly referencedSpecifiers: Set<string>;
-  readonly referencedPackages: Set<string>;
-  readonly fallThroughResolutions: Map<string, string>;
-  readonly hostFindings: Map<string, HostBridgeDiagnostic>;
-  readonly extensionFindings: Map<string, ExtensionExternalDiagnostic>;
-  /** Consulted once with no references, so a plan-level finding cannot hide. */
-  readonly primeDiagnostics: () => void;
-} {
+function createInterceptionResolver(decisions: readonly DependencyDecision[]): InterceptionResolver {
   // Every bare specifier resolved at all, intercepted or not. This is the set #14's
   // workspace audit traces its closure from, so it must include the ones the plans
   // *did* intercept — a workspace package the host bridge claimed is still a module
@@ -157,9 +200,30 @@ function createInterceptionResolver(decisions: readonly DependencyDecision[]): {
     return plan;
   }
 
-  function interceptionFor(specifier: string): { readonly id: string; readonly source: string } | undefined {
+  function interceptionFor(specifier: string, importer: string | undefined): Interception | undefined {
     referencedPackages.add(packageNameOfSpecifier(specifier));
     referencedSpecifiers.add(specifier);
+
+    // The runtime binding (#82), and the one branch that is skipped rather than taken for
+    // a generated importer. Its own module imports this same specifier, so intercepting
+    // that import would make the binding import itself; the skip is what leaves the
+    // binding's own import to ordinary resolution — to the façade's real source, in the
+    // same place the authored import lands.
+    //
+    // Deliberately before the two plan branches, and that ordering is not arbitrary: the
+    // façade is workspace source (#14) with no dependency decision, so neither plan claims
+    // it. Putting the branch last would still work today and would silently stop working
+    // the day a table row named the façade — which is exactly the kind of latent ordering
+    // dependence the two branches below document themselves for.
+    if (specifier === CELL_RUNTIME_BINDING_CONTRACT.facadeSpecifier) {
+      if (importer !== undefined && isGeneratedModuleId(importer)) return undefined;
+      return {
+        kind: "runtime-binding",
+        id: CELL_RUNTIME_BINDING_ID,
+        facadeSpecifier: specifier,
+        moduleType: "esm",
+      };
+    }
 
     let hostPlan = hostPlans.get(specifier);
     if (hostPlan === undefined) {
@@ -176,7 +240,14 @@ function createInterceptionResolver(decisions: readonly DependencyDecision[]): {
     // the two branches from drifting into looking like they answer different questions.
     if (hostPlan.activation === "stated" && hostPlan.wireable) {
       const host = hostPlan.interceptions.find(candidate => candidate.moduleId === specifier);
-      if (host !== undefined) return { id: `${HOST_VIRTUAL_PREFIX}${specifier}`, source: host.source };
+      if (host !== undefined) {
+        return {
+          kind: "source",
+          id: `${HOST_VIRTUAL_PREFIX}${specifier}`,
+          source: host.source,
+          moduleType: "commonjs",
+        };
+      }
     }
 
     let extensionPlan = extensionPlans.get(specifier);
@@ -190,7 +261,14 @@ function createInterceptionResolver(decisions: readonly DependencyDecision[]): {
     // the artifact is refused in the same vocabulary an unwired extension import is.
     if (extensionPlan.activation === "stated" && extensionPlan.wireable) {
       const extension = extensionPlan.interceptions.find(candidate => candidate.moduleId === specifier);
-      if (extension !== undefined) return { id: `${EXTENSION_VIRTUAL_PREFIX}${specifier}`, source: extension.source };
+      if (extension !== undefined) {
+        return {
+          kind: "source",
+          id: `${EXTENSION_VIRTUAL_PREFIX}${specifier}`,
+          source: extension.source,
+          moduleType: "commonjs",
+        };
+      }
     }
     return undefined;
   }
@@ -210,6 +288,117 @@ function createInterceptionResolver(decisions: readonly DependencyDecision[]): {
       consultExtensionPlan([]);
     },
   };
+}
+
+/**
+ * Whether a module id names a virtual module rather than a file on disk.
+ *
+ * The three interposed modules this package registers are `\0`-prefixed — the host bridge,
+ * the extension externals and the runtime binding — which is the convention that
+ * distinguishes "a module we composed" from "a module that exists" without a list of ids to
+ * keep in step. `runtime-binding.ts`'s header relies on the same prefix, so the two modules
+ * agree about it by convention rather than by importing a shared constant.
+ *
+ * The entry shim is deliberately *not* in this set: its id is a plain `cell-entry-shim.js`,
+ * and it is never an importer of the façade, so the one decision this predicate serves does
+ * not arise for it. Widening the predicate to cover it would mean the shim's id could no
+ * longer be the stable, path-free string `assertEntryComponentBinding` matches warnings
+ * against.
+ */
+function isGeneratedModuleId(id: string): boolean {
+  return id.startsWith("\0");
+}
+
+/**
+ * What {@link resolveCellSpecifier} hands back: an interception to load, or nothing.
+ *
+ * A named type rather than `ResolveIdResult`, because `moduleType` is the one field this
+ * compiler needs and Rolldown's `PartialResolvedId` does not declare it — it is a
+ * `SourceDescription` field. Naming the shape keeps the two facts visible: the id and the
+ * module type travel together, and the module type is either `"commonjs"` for the two
+ * plans' `module.exports` modules or `"esm"` for the runtime binding, which is genuinely
+ * ESM. The assignability to Rolldown's own result type is the hook's business, not this
+ * function's, and is what it was before this extraction.
+ */
+type CellSpecifierResolution = { readonly id: string; readonly moduleType: "commonjs" | "esm" };
+
+/**
+ * The `resolveId` half of both passes' plugin, so the two cannot drift.
+ *
+ * Extracted for the reason {@link createInterceptionResolver} is: the preflight's claim is
+ * that the specifiers it audits are the ones the build resolves, and a fix applied to one
+ * hook and not the other is exactly how that stops being true. The runtime binding is where
+ * it nearly happened — its own façade import has to be resolved with `this.resolve`, which
+ * exists only inside a hook, so writing that resolution in one hook and not the other would
+ * have left the preflight auditing a specifier set the build does not produce.
+ *
+ * `this.resolve` is passed in rather than reached for, because it exists only on a plugin
+ * context and this function is not a hook. Everything else the hook needs is closed over.
+ *
+ * `moduleType` is set per interception rather than uniformly, and the values describe what
+ * each generated source *is*: the host bridge's and the extension externals' are
+ * `module.exports = …`, so `"commonjs"` — the interop the extension unit tests exercise
+ * through a real build, so an authored `import { x }` and a namespace import each enumerate
+ * the interposed module correctly — while the runtime binding's is `import` / `export *`.
+ *
+ * Scope note on that field, because it is easy to read as more than it is: the value was
+ * measured not to change this build's output — the binding compiles and runs identically
+ * with `"commonjs"` — so `"esm"` is a truthful label rather than a load-bearing setting.
+ * It is stated per interception anyway, because a label that happens not to matter today is
+ * exactly the kind that becomes wrong without anyone noticing once a Rolldown version
+ * starts honouring it.
+ */
+async function resolveCellSpecifier(
+  context: PluginContext,
+  resolver: InterceptionResolver,
+  virtualModules: Map<string, string>,
+  source: string,
+  importer: string | undefined,
+  options: ResolveIdExtraOptions,
+): Promise<CellSpecifierResolution | null> {
+  if (!isBareSpecifier(source)) return null;
+  const interception = resolver.interceptionFor(source, importer);
+  if (interception === undefined) {
+    // Record where Rolldown's own resolution lands, so a specifier that simply is not
+    // installed is still reported as referenced rather than dropped — the audit decides
+    // what that means, not this pass.
+    const resolved = await context.resolve(source, importer, { ...options, skipSelf: true });
+    if (resolved !== null && resolved.external !== true) {
+      resolver.fallThroughResolutions.set(source, resolved.id);
+    }
+    return null;
+  }
+
+  if (interception.kind === "runtime-binding") {
+    // The binding's own import of the façade must resolve to the façade's real source,
+    // which means resolving it *here*, against the importer that asked for it — the
+    // authored module — rather than against the `\0` id that has no directory. Resolving
+    // it against the binding's id is the bug this arm exists to prevent: Rolldown then
+    // falls back to the process cwd, and from a directory that has no link to the façade
+    // the import goes external, which ships an artifact naming an undefined IIFE
+    // parameter.
+    const resolvedFacade = await context.resolve(interception.facadeSpecifier, importer, {
+      ...options,
+      skipSelf: true,
+    });
+    if (resolvedFacade === null || resolvedFacade.external === true) {
+      // Thrown rather than left to fall through, and the distinction matters: falling
+      // through would resolve the authored import by ordinary means — the façade's source
+      // is inlined, no binding is generated — and produce an artifact that compiles and
+      // then fails at its first façade call with `provider-not-installed`. That is the
+      // exact defect #82 exists to remove, so an unresolvable façade must not be able to
+      // reproduce it silently. Both passes convert a thrown error into a
+      // `bundler-failure` diagnostic, which names this message.
+      throw new Error(
+        `The Cell imports "${interception.facadeSpecifier}", which could not be resolved from "${importer ?? "the entry"}", so the generated runtime binding has nothing to install from. Install the façade as a dependency of the project the Cell is compiled in.`,
+      );
+    }
+    virtualModules.set(interception.id, renderRuntimeBindingModule(resolvedFacade.id));
+    return { id: interception.id, moduleType: interception.moduleType };
+  }
+
+  virtualModules.set(interception.id, interception.source);
+  return { id: interception.id, moduleType: interception.moduleType };
 }
 
 /**
@@ -260,20 +449,7 @@ async function resolveEntrySpecifiersWithRolldown(
         {
           name: "cell-compiler-entry-specifier-scan",
           async resolveId(source, importer, options) {
-            if (!isBareSpecifier(source)) return null;
-            const interception = resolver.interceptionFor(source);
-            if (interception === undefined) {
-              // Record where Rolldown's own resolution lands, so a specifier that
-              // simply is not installed is still reported as referenced rather than
-              // dropped — the audit decides what that means, not this pass.
-              const resolved = await this.resolve(source, importer, { ...options, skipSelf: true });
-              if (resolved !== null && resolved.external !== true) {
-                resolver.fallThroughResolutions.set(source, resolved.id);
-              }
-              return null;
-            }
-            virtualModules.set(interception.id, interception.source);
-            return { id: interception.id, moduleType: "commonjs" };
+            return resolveCellSpecifier(this, resolver, virtualModules, source, importer, options);
           },
           load(id) {
             const source = virtualModules.get(id);
@@ -746,30 +922,10 @@ async function bundleWithRolldown(dir: string, request: CellBundlingRequest): Pr
           name: "cell-compiler-rolldown-bundler",
           async resolveId(source, importer, options) {
             if (source === CELL_ENTRY_SHIM_ID) return CELL_ENTRY_SHIM_ID;
-            if (!isBareSpecifier(source)) return null;
-            const interception = resolver.interceptionFor(source);
-            if (interception === undefined) {
-              // Not intercepted: record where Rolldown's own resolution lands
-              // so the report can attribute the bundled module to this exact
-              // bare specifier. `skipSelf: true` keeps this probe from re-entering
-              // this hook; the subsequent `return null` lets the normal
-              // resolution pass run once for the real build.
-              const resolved = await this.resolve(source, importer, {
-                ...options,
-                skipSelf: true,
-              });
-              if (resolved !== null && resolved.external !== true) {
-                fallThroughResolutions.set(source, resolved.id);
-              }
-              return null;
-            }
-            virtualModules.set(interception.id, interception.source);
-            // `moduleType: "commonjs"` because both plans' generated sources
-            // are `module.exports = …` — the same interop the extension unit
-            // tests exercise through a real build, so an authored
-            // `import { x }` and a namespace import each enumerate the
-            // interposed module correctly.
-            return { id: interception.id, moduleType: "commonjs" };
+            // The same resolution the preflight runs — see `resolveCellSpecifier` for why
+            // it is shared rather than written here a second time, and why the runtime
+            // binding's own façade import is resolved inside it.
+            return resolveCellSpecifier(this, resolver, virtualModules, source, importer, options);
           },
           load(id) {
             if (id === CELL_ENTRY_SHIM_ID) return shimSource;
