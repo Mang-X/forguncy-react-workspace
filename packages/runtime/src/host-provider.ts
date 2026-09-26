@@ -24,7 +24,13 @@
  * hand the two values over. Stating the requirement is this module's job;
  * emitting it is the artifact/compiler boundary's (#6/#7), which
  * `RUNTIME_FACADE_PACKAGING_POLICY.compilerOwnsImportLowering` leaves there on
- * purpose. So the requirement is recorded here, as the shape a generated binding
+ * purpose. That emitter now exists — #82 added it as
+ * `CELL_RUNTIME_BINDING_CONTRACT` in `core` (the names, declared as data) plus
+ * `cell-compiler`'s `runtime-binding.ts` (the generated module), which the
+ * bundler interposes in place of an authored façade import. This module is
+ * unchanged by that: it states the shape, and the compiler satisfies it.
+ *
+ * So the requirement is recorded here, as the shape a generated binding
  * has to satisfy and nothing more:
  *
  * 1. build the provider from the Cell's own `props` and `useDataSource`;

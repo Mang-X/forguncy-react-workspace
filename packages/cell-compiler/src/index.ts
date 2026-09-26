@@ -190,6 +190,17 @@ export type {
   PlanExtensionExternalsOptions,
 } from "./extension-externals.ts";
 
+// The runtime binding (#82): the generated module that installs the host provider inside a
+// Cell, so authored source that calls `runtimeFacade()` works in a compiled artifact rather
+// than only under the local harness.
+export {
+  CELL_RUNTIME_BINDING_HOST_NAMES,
+  CELL_RUNTIME_BINDING_ID,
+  RUNTIME_BINDING_GENERATED_BANNER,
+  renderRuntimeBindingModule,
+  runtimeBindingNamesAreVerified,
+} from "./runtime-binding.ts";
+
 // The workspace-source contract (#14): workspace packages are source, not runtime modules,
 // and the pnpm/Vite+ workspace graph it is resolved against (#15).
 export {
