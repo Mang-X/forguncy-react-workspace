@@ -93,6 +93,21 @@ export const RECOGNIZED_LOCKFILE_NAMES: readonly string[] = [
   "bun.lockb",
 ];
 
+/**
+ * Lockfiles that are **not** text, and so are digested as raw bytes.
+ *
+ * `bun.lockb` is Bun's binary lockfile (Bun moved its default to the text `bun.lock` in 1.2, but
+ * older projects still carry the binary one). Reading it as UTF-8 is not merely lossy: invalid
+ * byte sequences are replaced with U+FFFD, so two *different* byte strings can decode to the same
+ * string. Measured — `[0x41, 0xff, 0x42]` and `[0x41, 0xfe, 0x42]` both decode to `"A�B"` and
+ * composed the identical digest, which means a lockfile edit could leave the identity unchanged.
+ *
+ * For these files the digest is over the raw bytes and carries **no** line-ending normalization:
+ * a binary file has no line-ending convention, and rewriting bytes that are not text would be a
+ * different distortion of the same kind.
+ */
+const BINARY_LOCKFILE_NAMES: ReadonlySet<string> = new Set(["bun.lockb"]);
+
 /** The workspace configuration file pnpm reads, which is where overrides and patches are declared. */
 export const WORKSPACE_CONFIG_FILE = "pnpm-workspace.yaml";
 
@@ -119,6 +134,18 @@ export const WORKSPACE_CONFIG_FILE = "pnpm-workspace.yaml";
 function digestOf(text: string): string {
   const normalized = text.replace(/\r\n/g, "\n");
   return `sha256:${createHash("sha256").update(normalized, "utf8").digest("hex")}`;
+}
+
+/**
+ * The content digest of a **binary** file's bytes, with no decoding and no normalization.
+ *
+ * The counterpart to {@link digestOf} for the files `BINARY_LOCKFILE_NAMES` names. Decoding first
+ * would replace each invalid byte sequence with U+FFFD, so distinct byte strings could compose one
+ * digest — measured, `[0x41, 0xff, 0x42]` and `[0x41, 0xfe, 0x42]` both became `"A�B"`. A
+ * digest that two different files can share is not an identity.
+ */
+function digestOfBytes(bytes: Uint8Array): string {
+  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
 /**
@@ -153,72 +180,137 @@ type FileState =
   | { readonly kind: "read"; readonly text: string }
   | { readonly kind: "unreadable" };
 
+/** The same three states for a file read as bytes, for the lockfiles that are not text. */
+type BinaryFileState =
+  | { readonly kind: "absent" }
+  | { readonly kind: "read"; readonly bytes: Uint8Array }
+  | { readonly kind: "unreadable" };
+
+/** Classifies a read failure: absence (`ENOENT`/`ENOTDIR`) versus a file that is there and unreadable. */
+function failedKind(error: unknown): "absent" | "unreadable" {
+  // Anything else (`EACCES`, `EISDIR`, an I/O error) is a file that is there and cannot be read.
+  // Collapsing them would report "no lockfile" for a lockfile the reader can see in their own
+  // directory listing.
+  const code = (error as { readonly code?: unknown } | null)?.code;
+  return code === "ENOENT" || code === "ENOTDIR" ? "absent" : "unreadable";
+}
+
 async function readTextFile(path: string): Promise<FileState> {
   try {
     return { kind: "read", text: await readFile(path, "utf8") };
   } catch (error) {
-    // `ENOENT`/`ENOTDIR` are absence; anything else (`EACCES`, `EISDIR`, an I/O error) is a file
-    // that is there and cannot be read. Collapsing them would report "no lockfile" for a lockfile
-    // the reader can see in their own directory listing.
-    const code = (error as { readonly code?: unknown } | null)?.code;
-    if (code === "ENOENT" || code === "ENOTDIR") {
-      return { kind: "absent" };
-    }
-    return { kind: "unreadable" };
+    return { kind: failedKind(error) };
+  }
+}
+
+async function readBinaryFile(path: string): Promise<BinaryFileState> {
+  try {
+    const bytes = await readFile(path);
+    // Copied into a plain `Uint8Array` because `readFile` may hand back a pooled `Buffer` view,
+    // and the digest must be over exactly this file's bytes rather than a shared backing store.
+    return { kind: "read", bytes: new Uint8Array(bytes) };
+  } catch (error) {
+    return { kind: failedKind(error) };
   }
 }
 
 /**
- * Where a project's install graph actually lives.
+ * One lockfile that some ancestor holds, and where.
  *
- * **Ancestors, not just the project root**, and that is not a convenience: a workspace member has
- * no lockfile of its own and resolves through its workspace root's install, which is exactly the
- * shape `examples/probe-proving-cases` has in this repository (measured — it declares
- * `es-toolkit` and resolves it from the root's `node_modules`, with the lockfile two levels up).
- * Reading only `projectRoot` would report `install-graph-unknown` for a project whose install
- * graph is perfectly well described, and withhold decisions the compiler accepts — the same
- * misdirection as reporting a missing dependency because the *project's* manifest was corrupt
- * (#89).
- *
- * The walk is the one `install-graph.ts` already performs for `node_modules`, and for the same
- * reason: the graph a name resolves in is the nearest ancestor that owns an install, not the
- * directory the caller happened to name.
- *
- * The digest is over file **content**, so two projects nested at different depths under one
- * workspace compose the same identity — which is correct, because they share one install.
- *
- * The walk is deliberately **more permissive than {@link lockfileDigest}**: it returns the first
- * ancestor holding *any* recognized lockfile name, while the digest then decides which lockfile is
- * authoritative from that root's `packageManager`. A root found by a name the manifest does not
- * claim therefore yields `null` from the digest, which is `unknown` — the safe direction. Reading
- * every ancestor's manifest during the walk to narrow it would cost more and could only turn an
- * unknown into a value, which is the direction that produces false fresh.
+ * `digest` is the file's content identity: text files are digested with line-ending normalization,
+ * binary ones from their raw bytes (see {@link BINARY_LOCKFILE_NAMES}).
  */
-async function findInstallRoot(projectRoot: string): Promise<string | null> {
+interface LockfileClaim {
+  readonly directory: string;
+  readonly name: string;
+  readonly digest: string;
+}
+
+/** Why no single lockfile could be identified. */
+type InstallLockfileResult =
+  | { readonly kind: "found"; readonly claim: LockfileClaim }
+  | { readonly kind: "none" }
+  | { readonly kind: "unknown" };
+
+/**
+ * The one lockfile that describes this project's install, or why it cannot be named.
+ *
+ * **Ancestors, not just the project root**, because a workspace member has no lockfile of its own
+ * and resolves through its workspace root's install — the shape `examples/probe-proving-cases` has
+ * in this repository (measured: it declares `es-toolkit` and resolves it from the root's
+ * `node_modules`, with the lockfile two levels up). Reading only `projectRoot` would report
+ * `install-graph-unknown` for a project whose install graph is perfectly well described, and
+ * withhold decisions the compiler accepts — the same misdirection as reporting a missing dependency
+ * because the *project's* manifest was corrupt (#89).
+ *
+ * **Every ancestor is counted, and more than one claim is `unknown`.** This is the part a
+ * first-match walk got wrong, and it is not hypothetical: a workspace member keeps its own
+ * `node_modules` (so it looks self-contained) and often does *not* re-declare the root's
+ * `packageManager`. Measured — a member holding a leftover `package-lock.json`, with the real
+ * `pnpm-lock.yaml` one level up and dependencies resolving from the root's `node_modules`: the walk
+ * stopped at the member, hashed a lockfile that describes no install, and the digest stayed put
+ * while the root lock and its transitive dependencies moved. A lockfile's *presence* is not proof
+ * that it owns the install this project resolves in, and guessing which one does is how that false
+ * fresh happens.
+ *
+ * Each directory is asked only about the names its **own** manifest claims (see
+ * {@link candidateNamesFor}), so a root that names a manager is not disqualified by an unrelated
+ * stray lockfile of another manager's spelling. `unreadable` short-circuits to `unknown` rather
+ * than being skipped: reporting an identity taken from a different file would describe an install
+ * this process never read.
+ */
+async function findInstallLockfile(projectRoot: string): Promise<InstallLockfileResult> {
   // Absolute before the walk, so the ancestor search is over real directories rather than over the
   // caller's spelling of them. A relative root would still walk, but `dirname` on it eventually
   // reaches `""` and then `"."`, and the loop would terminate on a path that means "wherever the
   // process happens to be" — an identity that depends on the cwd.
   let directory = resolve(projectRoot);
+  const claims: LockfileClaim[] = [];
+
   for (;;) {
-    for (const name of RECOGNIZED_LOCKFILE_NAMES) {
-      const state = await readTextFile(join(directory, name));
-      if (state.kind === "read") {
-        return directory;
+    const names = candidateNamesFor(await readProjectManifest(directory));
+    for (const name of names) {
+      const path = join(directory, name);
+      // A binary lockfile is digested from its bytes: decoding it first would let two distinct byte
+      // strings compose one digest (`BINARY_LOCKFILE_NAMES` carries the measurement).
+      if (BINARY_LOCKFILE_NAMES.has(name)) {
+        const state = await readBinaryFile(path);
+        if (state.kind === "unreadable") {
+          return { kind: "unknown" };
+        }
+        if (state.kind === "read") {
+          claims.push({ directory, name, digest: digestOfBytes(state.bytes) });
+        }
+        continue;
       }
+
+      const state = await readTextFile(path);
       if (state.kind === "unreadable") {
-        // A lockfile that is *there* and cannot be read stops the walk rather than being skipped
-        // for an ancestor's: skipping would report an identity for a graph this process could not
-        // actually read, which is the "complete-looking identity" #94's third criterion forbids.
-        return null;
+        return { kind: "unknown" };
+      }
+      if (state.kind === "read") {
+        claims.push({ directory, name, digest: digestOf(state.text) });
       }
     }
+
     const parent = dirname(directory);
     if (parent === directory) {
-      return null;
+      break;
     }
     directory = parent;
   }
+
+  if (claims.length === 0) {
+    return { kind: "none" };
+  }
+  if (claims.length > 1) {
+    // Two lockfiles both claim to describe this install — a member's leftover beside the workspace
+    // root's, or two spellings in one directory. Which one resolution uses is exactly what could
+    // not be established, and #94's third criterion forbids presenting an unestablished identity as
+    // a complete one.
+    return { kind: "unknown" };
+  }
+  return { kind: "found", claim: claims[0]! };
 }
 
 /** A package manager named by a manifest's `packageManager` field, reduced to its kind. */
@@ -247,7 +339,23 @@ function packageManagerKind(manifest: ParsedConfig): "pnpm" | "npm" | "yarn" | "
   }
 }
 
-/** The lockfile each manager writes, in the order that manager's versions used. */
+/**
+ * The lockfile spellings each manager can write, **unordered**.
+ *
+ * An ordering here would be a claim about which spelling that manager prefers, and for npm that
+ * claim is version-dependent in a way this module cannot model safely: npm 11 documents
+ * `npm-shrinkwrap.json` as taking precedence over `package-lock.json`, so an order of
+ * `[package-lock, shrinkwrap]` hashes the file npm ignores. Measured: with both present and a
+ * `packageManager` of `npm@11.0.0`, editing the *effective* shrinkwrap left the digest
+ * byte-identical while editing the shadowed lock moved it — exactly backwards.
+ *
+ * A hardcoded order cannot be repaired by reversing it either, because the rule is not stable
+ * across versions and this module has no verified model of npm 12. So the candidates are a *set*
+ * and {@link findInstallLockfile} answers `unknown` when more than one is present. That is
+ * the conservative direction #94 asks for: an identity that cannot be established must not be
+ * presented as a complete one, and "unknown" costs a re-measurement while a wrong choice ships
+ * stale evidence.
+ */
 const LOCKFILES_BY_MANAGER: Readonly<Record<string, readonly string[]>> = {
   pnpm: ["pnpm-lock.yaml"],
   npm: ["package-lock.json", "npm-shrinkwrap.json"],
@@ -256,52 +364,18 @@ const LOCKFILES_BY_MANAGER: Readonly<Record<string, readonly string[]>> = {
 };
 
 /**
- * The lockfile's content digest at the install root.
+ * The lockfile names one directory's manifest claims, from that manifest's `packageManager`.
  *
- * **Which lockfile is authoritative is decided by the project's `packageManager`, not by a fixed
- * priority list.** A migrating project easily leaves both `pnpm-lock.yaml` and `package-lock.json`
- * behind, and hashing whichever came first in a hardcoded order meant the digest could cover a
- * lockfile that describes no install: measured on a project whose `packageManager` was `npm@…`
- * with a stale `pnpm-lock.yaml` beside it, moving the *effective* npm lock's transitive dependency
- * left the digest byte-identical — a false fresh. The order below is therefore a *preference within
- * one manager* (npm may write either of its two spellings), not a ranking across managers.
+ * A directory that names a manager is asked only about that manager's spellings, so a stray
+ * lockfile of another manager's spelling cannot disqualify it. A directory that names none is asked
+ * about every recognized name: with no declaration, any of them could be the one resolution uses.
  *
- * When the manager cannot be determined, a **single** recognized lockfile is still a usable answer:
- * a project with exactly one has told us what it is. Two or more candidates is **unknown** rather
- * than a guess — `null`, which the freshness axis reports as stale. Guessing one of two lockfiles
- * is how the false fresh above happens, and #94's third criterion forbids presenting an
- * unestablished identity as a complete one.
+ * Deliberately independent of {@link findInstallLockfile}'s counting: this answers "what could this
+ * directory be the install root of", and the walk decides whether exactly one claim survived.
  */
-async function lockfileDigest(installRoot: string, manifest: ParsedConfig): Promise<string | null> {
+function candidateNamesFor(manifest: ParsedConfig): readonly string[] {
   const manager = packageManagerKind(manifest);
-  const candidates = manager === null ? RECOGNIZED_LOCKFILE_NAMES : (LOCKFILES_BY_MANAGER[manager] ?? []);
-
-  /** Every readable candidate's text, in the order tried. */
-  const readable: { readonly name: string; readonly text: string }[] = [];
-  for (const name of candidates) {
-    const state = await readTextFile(join(installRoot, name));
-    if (state.kind === "unreadable") {
-      // A lockfile that is *there* and cannot be read is unknown, and it stops the search rather
-      // than being skipped for another: reporting a digest taken from a different file would
-      // describe an install this process never read.
-      return null;
-    }
-    if (state.kind === "read") {
-      readable.push({ name, text: state.text });
-      if (manager !== null) {
-        // One manager, one lockfile: the first spelling it uses is the answer.
-        return digestOf(state.text);
-      }
-    }
-  }
-
-  // No manager named. One lockfile is an answer — a project with exactly one has told us what it
-  // is. Several are not: which of them is authoritative is exactly what could not be determined.
-  if (readable.length > 1) {
-    return null;
-  }
-  const only = readable[0];
-  return only === undefined ? null : digestOf(only.text);
+  return manager === null ? RECOGNIZED_LOCKFILE_NAMES : (LOCKFILES_BY_MANAGER[manager] ?? []);
 }
 
 /** A parsed YAML or JSON object, or why it could not be produced. */
@@ -515,35 +589,33 @@ async function installedVersion(base: string, request: string): Promise<string |
  * `install-graph.ts` makes for an unresolved version.
  */
 export async function readInstallGraphIdentity(projectRoot: string): Promise<InstallGraphIdentity> {
-  const installRoot = await findInstallRoot(projectRoot);
-  if (installRoot === null) {
-    // No ancestor owns an install this toolchain recognizes, so there is no graph to describe.
-    // Reported as unknown rather than as an identity over the project's own files: those files
-    // would describe a resolution *request*, which is the reading #94 exists to replace.
+  const lockfile = await findInstallLockfile(projectRoot);
+  if (lockfile.kind !== "found") {
+    // No ancestor owns an install this toolchain can name — or more than one appears to. Either way
+    // there is no graph to describe confidently, and the answer is unknown rather than an identity
+    // over the project's own files: those files would describe a resolution *request*, which is the
+    // reading #94 exists to replace.
     return { lockfile: null, patches: null, configuration: null };
   }
 
-  // Read at the **install root**, not at `projectRoot`: patches and overrides are declared where
-  // the install is, so a workspace member's `patchedDependencies` live in the root's
+  // The install root is the directory the single lockfile claim came from, so the patches and
+  // configuration are read from **there** rather than from `projectRoot`: overrides and patches are
+  // declared where the install is, so a workspace member's `patchedDependencies` live in the root's
   // `pnpm-workspace.yaml`. Reading them one level down would report "no patches" for a project
   // whose install carries them, and the record would look fresh through exactly the change this
   // axis exists to catch.
+  const installRoot = lockfile.claim.directory;
   const [workspace, manifest] = await Promise.all([
     readWorkspaceConfig(installRoot),
     readProjectManifest(installRoot),
   ]);
-
-  // The manifest is read first because the lockfile *choice* depends on it: which lockfile is
-  // authoritative is answered by the project's `packageManager` (see `lockfileDigest`), so it
-  // cannot be resolved in parallel with the field that decides it.
-  const lockfile = await lockfileDigest(installRoot, manifest);
 
   const [patches, configuration] = await Promise.all([
     patchesDigest(installRoot, workspace, manifest),
     configurationDigest(workspace, manifest),
   ]);
 
-  return { lockfile, patches, configuration };
+  return { lockfile: lockfile.claim.digest, patches, configuration };
 }
 
 /**

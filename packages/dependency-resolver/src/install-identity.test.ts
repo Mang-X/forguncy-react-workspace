@@ -452,6 +452,105 @@ describe("#94: an install state that cannot be established is explicitly unknown
     expect(await forManager(PNPM, "pnpm v1\n", "2.0.0")).toBe(pnpmBase);
   });
 
+  it("is unknown when one manager's two lockfile spellings are both present", async () => {
+    // PR #114 review round 2, P1. npm does not have a version-stable rule here: npm 11 documents
+    // `npm-shrinkwrap.json` as taking precedence over `package-lock.json`, so an order of
+    // `[package-lock, shrinkwrap]` hashes the file npm ignores. Measured with both present under
+    // `npm@11.0.0`: editing the *effective* shrinkwrap left the digest byte-identical while editing
+    // the shadowed lock moved it — exactly backwards.
+    //
+    // This module has no verified model of npm's version-dependent rule, so two candidates are
+    // `unknown` rather than a pick. Reversing the hardcoded order would only move which case is
+    // wrong.
+    const both = async (shrinkwrap: string, packageLock: string): Promise<string | null> =>
+      withProject(async root => {
+        await project(root, {
+          packageManager: "npm@11.0.0",
+          lockfile: null,
+          extra: {
+            "npm-shrinkwrap.json": JSON.stringify({ which: shrinkwrap }),
+            "package-lock.json": JSON.stringify({ which: packageLock }),
+          },
+        });
+        return (await readInstallGraphIdentity(root)).lockfile;
+      });
+
+    expect(await both("s1", "p1")).toBeNull();
+    // And neither file can silently dominate: both runs are unknown however they move.
+    expect(await both("s2", "p1")).toBeNull();
+    expect(await both("s1", "p2")).toBeNull();
+
+    // The control: with only one of the spellings present, npm 11 still yields a usable identity —
+    // so this is not a blanket refusal to read an npm lockfile.
+    const onlyShrinkwrap = await withProject(async root => {
+      await project(root, {
+        packageManager: "npm@11.0.0",
+        lockfile: null,
+        extra: { "npm-shrinkwrap.json": JSON.stringify({ which: "s1" }) },
+      });
+      return (await readInstallGraphIdentity(root)).lockfile;
+    });
+    expect(onlyShrinkwrap).not.toBeNull();
+  });
+
+  it("is unknown when a nested project carries a leftover lock the workspace root also has", async () => {
+    // PR #114 review round 2, P1. A lockfile's *presence* is not proof that it owns the install this
+    // project resolves in. Measured: a workspace member holding a leftover `package-lock.json`, with
+    // the real `pnpm-lock.yaml` one level up and dependencies resolving from the root's
+    // `node_modules` — the walk stopped at the member, hashed a lockfile describing no install, and
+    // the digest stayed put while the root lock and its transitive dependencies moved.
+    const memberWithLeftover = async (leftover: string): Promise<string | null> =>
+      withProject(async root => {
+        await project(root, { packageManager: "pnpm@11.18.0", lockfile: null });
+        await writeFileAt(join(root, "pnpm-lock.yaml"), "root pnpm lock\n");
+        const member = join(root, "packages", "member");
+        await writeFileAt(join(member, "package.json"), JSON.stringify({ name: "member", version: "0.0.0" }));
+        await writeFileAt(join(member, "package-lock.json"), JSON.stringify({ leftover }));
+        return (await readInstallGraphIdentity(member)).lockfile;
+      });
+
+    // Two ancestors claim a lockfile, so which one owns the install is unestablished.
+    expect(await memberWithLeftover("v1")).toBeNull();
+    expect(await memberWithLeftover("v2")).toBeNull();
+
+    // The control, and it is the case the ancestor walk exists for: a member with no lockfile of its
+    // own still resolves to the workspace root's, so the stricter rule did not disable that.
+    const memberClean = await withProject(async root => {
+      await project(root, { packageManager: "pnpm@11.18.0", lockfile: null });
+      await writeFileAt(join(root, "pnpm-lock.yaml"), "root pnpm lock\n");
+      const member = join(root, "packages", "member");
+      await writeFileAt(join(member, "package.json"), JSON.stringify({ name: "member", version: "0.0.0" }));
+      return (await readInstallGraphIdentity(member)).lockfile;
+    });
+    expect(memberClean).not.toBeNull();
+  });
+
+  it("digests a binary lockfile from its bytes, so distinct files cannot collide", async () => {
+    // PR #114 review round 2, P2. `bun.lockb` is binary, and reading it as UTF-8 replaces invalid
+    // byte sequences with U+FFFD: measured, `[0x41, 0xff, 0x42]` and `[0x41, 0xfe, 0x42]` both
+    // decoded to "A�B" and composed the identical digest, so a lockfile edit could leave the
+    // identity unchanged. A digest two different files can share is not an identity.
+    const forBytes = async (bytes: Uint8Array): Promise<string | null> =>
+      withProject(async root => {
+        await project(root, { packageManager: "bun@1.1.0", lockfile: null });
+        await mkdir(dirname(join(root, "bun.lockb")), { recursive: true });
+        await writeFile(join(root, "bun.lockb"), bytes);
+        return (await readInstallGraphIdentity(root)).lockfile;
+      });
+
+    const a = new Uint8Array([0x41, 0xff, 0x42]);
+    const b = new Uint8Array([0x41, 0xfe, 0x42]);
+
+    // The premise: the two files differ as bytes but are indistinguishable as decoded text.
+    expect(Buffer.compare(Buffer.from(a), Buffer.from(b))).not.toBe(0);
+    expect(Buffer.from(a).toString("utf8")).toBe(Buffer.from(b).toString("utf8"));
+
+    const digestA = await forBytes(a);
+    const digestB = await forBytes(b);
+    expect(digestA).not.toBeNull();
+    expect(digestA).not.toBe(digestB);
+  });
+
   it("is unknown when no manager is named and several lockfiles could be authoritative", async () => {
     // Guessing one of two is how the false fresh above happens, so the answer is `unknown` rather
     // than a value — #94's third criterion: an unestablished identity must not look complete.
