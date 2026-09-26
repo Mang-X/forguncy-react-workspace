@@ -66,7 +66,7 @@
 
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { InstallGraphIdentity, ToolchainIdentity } from "@forguncy-react-workspace/core";
@@ -96,8 +96,29 @@ export const RECOGNIZED_LOCKFILE_NAMES: readonly string[] = [
 /** The workspace configuration file pnpm reads, which is where overrides and patches are declared. */
 export const WORKSPACE_CONFIG_FILE = "pnpm-workspace.yaml";
 
+/**
+ * The content digest of one file's text, with line endings normalized to `\n` first.
+ *
+ * **Normalization is required, not cosmetic**, and this was measured the hard way: the digest of a
+ * file is not a property of the project unless it is independent of how git happened to check that
+ * file out. This repository sets `core.autocrlf=true`, so a Windows working tree holds `pnpm-lock.yaml`
+ * with CRLF while the committed bytes — and therefore CI's checkout — are LF. Hashing raw bytes made
+ * one project produce two identities, and a lock re-recorded on Windows reported
+ * `install-graph-changed` on Linux for a graph that had not moved.
+ *
+ * The line-ending convention a checkout uses is a fact about the *checkout*, not about the install.
+ * `git` already normalizes the other direction on commit for exactly this reason, and #94's
+ * portability criterion — "the same real inputs in different directories compose the same identity"
+ * — cannot be met while a digest depends on the platform that read the file.
+ *
+ * The cost is that a change which only rewrites line endings no longer invalidates. That is the
+ * correct answer rather than a tolerated one: such a change cannot alter what a bundler resolves or
+ * emits, so reporting `install-graph-changed` for it would be a false positive of the same class as
+ * tying a record to a Node patch release.
+ */
 function digestOf(text: string): string {
-  return `sha256:${createHash("sha256").update(text, "utf8").digest("hex")}`;
+  const normalized = text.replace(/\r\n/g, "\n");
+  return `sha256:${createHash("sha256").update(normalized, "utf8").digest("hex")}`;
 }
 
 /**
@@ -167,7 +188,11 @@ async function readTextFile(path: string): Promise<FileState> {
  * workspace compose the same identity — which is correct, because they share one install.
  */
 async function findInstallRoot(projectRoot: string): Promise<string | null> {
-  let directory = projectRoot;
+  // Absolute before the walk, so the ancestor search is over real directories rather than over the
+  // caller's spelling of them. A relative root would still walk, but `dirname` on it eventually
+  // reaches `""` and then `"."`, and the loop would terminate on a path that means "wherever the
+  // process happens to be" — an identity that depends on the cwd.
+  let directory = resolve(projectRoot);
   for (;;) {
     for (const name of RECOGNIZED_LOCKFILE_NAMES) {
       const state = await readTextFile(join(directory, name));
@@ -353,9 +378,23 @@ async function configurationDigest(
   return digestOf(canonicalJson({ workspace: workspaceFields, manifest: manifestFields }));
 }
 
-/** The installed version of a package, resolved from `base`'s location, or null. */
+/**
+ * The installed version of a package, resolved from `base`'s location, or null.
+ *
+ * `base` is made **absolute** before the lookup, and that is not a formality: `locatePackage`'s
+ * host primitive (`module.findPackageJSON`) takes a `file:` URL or an absolute path and throws
+ * `ERR_INVALID_URL` for a relative one. Measured — `readToolchainIdentity("examples/x")` reported
+ * `vitePlus: null` while the identical project named by an absolute path reported `"0.3.2"`,
+ * because the relative call was silently classified as "not installed".
+ *
+ * That asymmetry is exactly the class of defect #94 exists to remove: an identity that depends on
+ * how a caller *spelled* a path rather than on what is installed. Every caller in this repository
+ * passes an absolute root, so the bug was invisible until a test compared the two spellings — and
+ * it would have surfaced as a record reported `toolchain-unknown` for a project whose toolchain is
+ * perfectly well installed.
+ */
 async function installedVersion(base: string, request: string): Promise<string | null> {
-  const location = await locatePackage(base, request);
+  const location = await locatePackage(resolve(base), request);
   if (location.outcome === "failed") {
     return null;
   }

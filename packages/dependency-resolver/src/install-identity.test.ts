@@ -30,7 +30,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative as relativePath } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
@@ -156,6 +156,29 @@ describe("#94: identity comes from the install graph, not from a declaration", (
     expect(rePatched.patches).not.toBe(patched.patches);
   });
 
+  it("does not change when a file's line endings differ, only its content", async () => {
+    // The defect this closes was found on CI rather than here, and it is the reason the digest
+    // normalizes: this repository sets `core.autocrlf=true`, so a Windows working tree holds
+    // `pnpm-lock.yaml` with CRLF while the committed bytes — and CI's checkout — are LF. Hashing raw
+    // bytes gave one project two identities, and a lock re-recorded on Windows reported
+    // `install-graph-changed` on Linux for a graph that had not moved.
+    //
+    // The line-ending convention is a fact about the *checkout*, not about the install, so the
+    // digest must be a function of content. The fixture writes the two spellings explicitly, since
+    // a temp file's own endings would otherwise be whatever this platform produced.
+    const body = "lockfileVersion: '9.0'\nimporters:\n  .: {}\n";
+    const lf = await withProject(async root => {
+      await project(root, { lockfile: body });
+      return readInstallGraphIdentity(root);
+    });
+    const crlf = await withProject(async root => {
+      await project(root, { lockfile: body.replace(/\n/g, "\r\n") });
+      return readInstallGraphIdentity(root);
+    });
+
+    expect(crlf).toEqual(lf);
+  });
+
   it("does not change when only the project's absolute directory changes", async () => {
     const first = await withProject(async root => {
       await project(root);
@@ -276,7 +299,48 @@ describe("#94: the versions recorded are the ones that actually ran", () => {
       expect(identity.node).not.toContain(".");
     });
   });
+
+  it("produces one identity for a project however the caller spells its root", async () => {
+    // Measured while wiring this up: `locatePackage`'s host primitive takes a `file:` URL or an
+    // absolute path and throws `ERR_INVALID_URL` for a relative one, which this module read as
+    // "not installed" — so a relative root reported `vitePlus: null` for a project whose Vite+ was
+    // perfectly well installed. Every caller here passes an absolute root, so the bug was invisible
+    // until the two spellings were compared, and it would have shipped as a record reported
+    // `toolchain-unknown` for no reason.
+    await withProject(async root => {
+      await project(root);
+      await install(root, "vite-plus", { name: "vite-plus", version: "0.3.9" });
+
+      const spelledRelatively = relativeToCwd(root);
+      // Asserted rather than skipped silently: if this ever becomes `null` the case stops measuring
+      // the relative branch, and a green run would mean nothing.
+      expect(spelledRelatively, "this platform cannot spell the temp root relatively").not.toBeNull();
+
+      const absolute = await readToolchainIdentity(root);
+      const relative = await readToolchainIdentity(spelledRelatively!);
+
+      expect(relative).toEqual(absolute);
+      expect(relative.vitePlus).toBe("0.3.9");
+    });
+  });
 });
+
+/**
+ * `root` as a path relative to the process's cwd, so a caller's *spelling* is what differs.
+ *
+ * `mkdtemp` returns an absolute path; walking back to a relative one is what a caller passing
+ * `"examples/x"` produces. A `..`-prefixed result is a legitimate relative spelling and is used as
+ * is — an earlier version of this helper discarded it as "not a real relative path", which meant
+ * every case fell back to the absolute form and the assertion passed without ever exercising the
+ * relative branch. That is the same "passes for the wrong reason" defect the test exists to catch.
+ *
+ * A temp directory on a different drive from the cwd has no relative form at all; the absolute one
+ * is then the only honest input, and the case is skipped rather than asserted vacuously.
+ */
+function relativeToCwd(root: string): string | null {
+  const relative = relativePath(process.cwd(), root);
+  return isAbsolute(relative) ? null : relative;
+}
 
 describe("#94: an install state that cannot be established is explicitly unknown", () => {
   it("reports no lockfile as null rather than as an identity", async () => {

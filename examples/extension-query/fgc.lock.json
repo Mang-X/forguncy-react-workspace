@@ -20,11 +20,11 @@
         "hostReactVersion": "19.2.7"
       },
       "probedWith": {
-        "vitePlus": null,
+        "vitePlus": "0.3.2",
         "rolldown": "1.2.9",
         "node": "24",
         "installGraph": {
-          "lockfile": "sha256:5823ea3a3998ea5aa624ba030b9fff64fc726264f95db99a86525bdb4cf3f6ea",
+          "lockfile": "sha256:09e15e813e8769d947498e624d445eca06ba90219ef3f9e24669f87753629832",
           "patches": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
           "configuration": "sha256:0a222e1ab9808e51a198525c19d9261d62d93702947ac02c47f7ee0207b10926"
         }
