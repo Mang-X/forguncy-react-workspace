@@ -55,7 +55,6 @@
  */
 
 import { readdir } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { join } from "node:path";
 
 import type { ProbeFact, ProbeRejectionFinding, ProbeRisk, ProbeValidationEntry } from "@forguncy-react-workspace/core";
@@ -320,7 +319,7 @@ async function collectGraph(identity: ResolvedPackageIdentity): Promise<readonly
     for (const current of frontier) {
       // Node resolution for a package's own dependencies walks from that
       // package's location upward, not from the project root.
-      const requireFromCurrent = createRequire(join(current.directory, "package.json"));
+      const baseFromCurrent = join(current.directory, "package.json");
       const depNames: string[] = [];
       for (const field of ["dependencies", "optionalDependencies", "peerDependencies"] as const) {
         const deps = current.manifest[field];
@@ -329,11 +328,10 @@ async function collectGraph(identity: ResolvedPackageIdentity): Promise<readonly
         }
       }
       for (const depName of [...new Set(depNames)].sort(compareStrings)) {
-        // Two-attempt + climb-to-named-manifest: a strict `exports` map that
-        // does not export `./package.json` resolves the bare entry to a file,
-        // and the owning manifest is found by walking up from that file rather
-        // than appending `package.json` to the entry path.
-        const located = await locateManifest(requireFromCurrent, depName);
+        // Identity, not entry resolution: `locateManifest` asks the host which
+        // package a name names, so a dependency whose `exports` publishes only an
+        // `import` branch is in the graph rather than silently dropped (#89).
+        const located = await locateManifest(baseFromCurrent, depName);
         if (located === null) {
           // Not installed (optional peer, platform-skipped): absence is not
           // evidence either way, so it is simply not in the graph.
