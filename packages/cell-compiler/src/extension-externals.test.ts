@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   EXTENSION_EXTERNAL_MAPPINGS,
+  normalizeExtensionMappings,
   type DependencyDecision,
   type ExtensionExternalMapping,
   type ExtensionLibraryListing,
@@ -178,6 +179,25 @@ function listing(overrides: Partial<ExtensionLibraryListing> = {}): ExtensionLib
 
 function codes(plan: { readonly diagnostics: readonly { readonly code: string }[] }): readonly string[] {
   return plan.diagnostics.map(diagnostic => diagnostic.code);
+}
+
+/**
+ * A config's normalized mapping set, or a failure that prints the diagnostics.
+ *
+ * The config here is the shape a project commits, and the normalization is `core`'s own
+ * — so the table the compiler is handed below is the table a real project's config
+ * produces, rather than a list this test assembled by hand.
+ */
+function normalizeOrThrow(config: unknown): { readonly mappings: readonly ExtensionExternalMapping[] } {
+  const result = normalizeExtensionMappings(config);
+  if (!result.ok) {
+    throw new Error(
+      `Expected this config to normalize:\n${result.diagnostics
+        .map(diagnostic => `${diagnostic.path}: [${diagnostic.code}] ${diagnostic.message}`)
+        .join("\n")}`,
+    );
+  }
+  return result.mappings;
 }
 
 // The cross-module check below compiles the same decisions through #6's boundary, so
@@ -763,5 +783,131 @@ describe("planning the extension externals", () => {
     expect(codes(plan)).toEqual(["extension-mapping-missing"]);
     expect(plan.wireable).toBe(true);
     expect(extensionExternalModuleIds(plan)).toEqual(["@tanstack/react-query"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A project's own mappings, from config to artifact (#85)
+// ---------------------------------------------------------------------------
+
+describe("a project's own mappings reach the compile (#85)", () => {
+  it("compiles a package the built-in table has never heard of, with no change to `core`", async () => {
+    // #85's first criterion, asserted where it actually matters: through the *plan the
+    // compiler wires*, over a config the project wrote, with `core`'s table untouched.
+    // The block above proves the plan honours a caller's table; this proves the table a
+    // *config* produces is such a table, which is the gap #85 exists to close.
+    const normalized = normalizeOrThrow({
+      cells: {},
+      extensions: {
+        mappings: [
+          {
+            packageName: "@acme/widgets",
+            libraryId: "acme-widgets",
+            globalName: "AcmeWidgets",
+            metadataSource: "verified-catalog",
+            metadataReference: "acme/forguncy-library",
+            verificationRule: "A verified catalog entry whose id and global the listing confirms.",
+            verifiedBy: ["product-documentation"],
+          },
+        ],
+      },
+    });
+
+    expect(EXTENSION_EXTERNAL_MAPPINGS.map(row => row.packageName)).not.toContain("@acme/widgets");
+
+    const plan = planExtensionExternals({
+      mappings: normalized.mappings,
+      decisions: [extensionDecision("@acme/widgets", "acme-widgets", "AcmeWidgets")],
+      referencedSpecifiers: ["@acme/widgets"],
+    });
+
+    expect(plan.wireable).toBe(true);
+    expect(plan.diagnostics).toEqual([]);
+    expect(extensionExternalModuleIds(plan)).toEqual(["@acme/widgets"]);
+    expect(plan.interceptions[0]?.source).toContain('globalThis["AcmeWidgets"]');
+    // The TanStack Query row is still there, because a project row adds rather than
+    // replaces — so adding one extension cannot silently drop another.
+    expect(plan.catalog.map(entry => entry.moduleId)).toContain("@tanstack/react-query");
+  });
+
+  it("derives the artifact's `frontendLibraries` from a project row, exactly once", () => {
+    // The metadata half of the same criterion: a project row has to reach
+    // `frontendLibraries`, and the canonicalization has to collapse a row's declared
+    // module ids back into one reference.
+    //
+    // Asserted on the plan rather than through `compileCell`, and that is the scope
+    // boundary rather than an omission: `compileCell` takes no mapping option yet, so
+    // wiring the config into the pre-bundle pass, the bundler and the artifact metadata
+    // is #86's work. What #85 owes is that the normalized rows *produce* the right
+    // metadata, which is the derivation `collectFrontendLibraries` runs over the same
+    // decisions the artifact is assembled from.
+    const normalized = normalizeOrThrow({
+      cells: {},
+      extensions: {
+        mappings: [
+          {
+            packageName: "@acme/widgets",
+            moduleIds: ["@acme/widgets-core"],
+            libraryId: "acme-widgets",
+            globalName: "AcmeWidgets",
+            metadataSource: "verified-catalog",
+            metadataReference: "acme/forguncy-library",
+            verificationRule: "A verified catalog entry whose id and global the listing confirms.",
+            verifiedBy: ["product-documentation"],
+          },
+        ],
+      },
+    });
+
+    const plan = planExtensionExternals({
+      mappings: normalized.mappings,
+      decisions: [extensionDecision("@acme/widgets-core", "acme-widgets", "AcmeWidgets")],
+      referencedSpecifiers: ["@acme/widgets-core"],
+    });
+
+    // Two module ids resolved through one row, and one reference — #12's "one extension
+    // stands in for more than one package", which a project row inherits.
+    //
+    // The two lists are read separately on purpose, because they answer different
+    // questions: the *catalog* is the row's whole capability (both ids), while the
+    // *interceptions* are what this artifact activates (the id it actually imports).
+    // Asserting only the second would leave "the row covers its sibling" unpinned.
+    const projectIds = plan.catalog
+      .map(entry => entry.moduleId)
+      .filter(moduleId => moduleId.startsWith("@acme/"));
+    expect(projectIds).toEqual(["@acme/widgets", "@acme/widgets-core"]);
+    // The built-ins are still in the catalog, which is what "additive" means in practice:
+    // a project row was added and the TanStack Query row is still planned for.
+    expect(plan.catalog.map(entry => entry.moduleId)).toContain("@tanstack/react-query");
+    expect(extensionExternalModuleIds(plan)).toEqual(["@acme/widgets-core"]);
+    expect(plan.libraries).toEqual([frontendLibraryReference("acme-widgets")]);
+    expect(plan.diagnostics).toEqual([]);
+  });
+
+  it("refuses a config whose project row collides with the built-in table, before any compile", () => {
+    // #85's third criterion at the config boundary: the conflict is a *config* error
+    // with a config path, so it is reported before a bundler is ever asked to build —
+    // not discovered later as a plan diagnostic that cannot say which file was wrong.
+    const result = normalizeExtensionMappings({
+      cells: {},
+      extensions: {
+        mappings: [
+          {
+            packageName: "@tanstack/react-query",
+            libraryId: "other-library",
+            globalName: "OtherGlobal",
+            metadataSource: "verified-catalog",
+            metadataReference: "acme/forguncy-library",
+            verificationRule: "A second claim for a package the built-in table already maps.",
+            verifiedBy: ["product-documentation"],
+          },
+        ],
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.diagnostics.map(diagnostic => diagnostic.code)).toEqual(["extension-mapping-conflict"]);
+    expect(result.diagnostics[0]?.path).toBe("extensions.mappings");
   });
 });

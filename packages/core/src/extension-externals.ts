@@ -549,6 +549,26 @@ export interface ExtensionExternalMapping {
 }
 
 /**
+ * The fields a mapping row may carry, as a project config writes them.
+ *
+ * Beside {@link ExtensionExternalMapping} for the reason `CELL_ALLOWED_FIELDS` sits beside
+ * `CellConfig`: the list is used verbatim in an unknown-field diagnostic, and a list kept
+ * anywhere else would drift from the interface the first time a field was added. A test
+ * derives this list from a complete row rather than trusting the two to agree.
+ */
+export const EXTENSION_MAPPING_ALLOWED_FIELDS = [
+  "packageName",
+  "moduleIds",
+  "libraryId",
+  "globalName",
+  "metadataSource",
+  "metadataReference",
+  "verificationRule",
+  "verifiedBy",
+  "note",
+] as const;
+
+/**
  * #12's mapping table.
  *
  * One row, and that is the honest size of it: #12 names the existing TanStack Query

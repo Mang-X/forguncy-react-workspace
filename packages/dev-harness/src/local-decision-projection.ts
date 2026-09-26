@@ -81,6 +81,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   auditLockDecisionConformance,
+  extensionCatalogForMappings,
   localCompilationDependencies,
 } from "@forguncy-react-workspace/dependency-resolver/local";
 import type { ConformanceDiagnostic, ExtensionCatalog } from "@forguncy-react-workspace/dependency-resolver/local";
@@ -112,17 +113,21 @@ export const LOCAL_DEV_UNOBSERVABLE_STALENESS_REASONS: readonly LockStalenessRea
 /**
  * `core`'s verified extension mappings, projected onto the catalog shape this audit reads.
  *
- * Derived rather than listed — the same three fields `extension-query-poc.test.ts` takes — so a row
- * added to the mapping table reaches both callers. `metadataSource`, `verificationRule` and the
- * rest of a mapping row are the compiler's business and are not part of this shape.
+ * Through `dependency-resolver`'s `extensionCatalogForMappings` rather than by hand, and that is a
+ * correction rather than tidiness: the hand-written version in this file projected
+ * `packageName`/`libraryId`/`globalName` and **dropped `moduleIds`**, so a decision naming
+ * `@tanstack/query-core` — a package the table maps as one of the TanStack Query row's module ids —
+ * was reported `extension-library-not-verified` by the harness while the compiler accepted it. The
+ * shared projection expands `moduleIds` into their own catalog rows, which is what
+ * `auditExtensionRecord` matches against, so the harness and the compiler now agree about which
+ * packages a row answers for.
+ *
+ * A project's own mappings reach this by being passed in (see
+ * {@link projectLocalDecisions}'s `extensionCatalog`), not by being read from a second table here.
  */
-export const DEFAULT_LOCAL_EXTENSION_CATALOG: ExtensionCatalog = {
-  mappings: EXTENSION_EXTERNAL_MAPPINGS.map(mapping => ({
-    packageName: mapping.packageName,
-    libraryId: mapping.libraryId,
-    globalName: mapping.globalName,
-  })),
-};
+export const DEFAULT_LOCAL_EXTENSION_CATALOG: ExtensionCatalog = extensionCatalogForMappings(
+  EXTENSION_EXTERNAL_MAPPINGS,
+);
 
 /** The directory this package's own files live in, from the module URL — as `host-modules.ts` does. */
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));

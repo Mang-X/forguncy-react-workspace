@@ -96,6 +96,46 @@ describe("loading a project config", () => {
     expect(error.message).toContain(join(untypedRoot, "forguncy.config.mjs"));
   });
 
+  it("validates a hand-written config's extension mappings, not only a typed one's", async () => {
+    // #85's last criterion, asked as a question about *this* loader: "JSON/TS 配置、目录和
+    // listing 的职责边界在本票和测试中一致". A `.ts` config gets `defineForguncyConfig`'s
+    // excess-property checking in the editor, and a `.mjs` one — or a hand-edited `.ts` —
+    // gets none of it, so the shape has to be checked from the loaded module rather than
+    // trusted. Written to a scratch directory rather than added as a fixture: this is
+    // about what the loader does with a document it did not author.
+    const root = scratchDir();
+    writeFileSync(
+      join(root, "forguncy.config.mjs"),
+      [
+        "export default {",
+        "  cells: {},",
+        "  extensions: {",
+        "    mappings: [",
+        "      {",
+        "        packageName: '@tanstack/react-query',",
+        "        libraryId: 'other-library',",
+        "        globalName: 'OtherGlobal',",
+        "        metadataSource: 'verified-catalog',",
+        "        metadataReference: 'some/other-catalog',",
+        "        verificationRule: 'A second claim for a package the built-in table already maps.',",
+        "        verifiedBy: ['product-documentation'],",
+        "      },",
+        "    ],",
+        "  },",
+        "};",
+        "",
+      ].join("\n"),
+    );
+
+    const error = await captureLoadError(() => loadForguncyConfig({ root }));
+
+    // The collision with the built-in table is reported with its config path, through the
+    // same error type and `codes` accessor every other config problem uses — so a caller
+    // does not have to know which sub-module found it.
+    expect(error.codes).toContain("extension-mapping-conflict");
+    expect(error.diagnostics.map(diagnostic => diagnostic.path)).toContain("extensions.mappings");
+  });
+
   it("normalizes through the same path as every other consumer", async () => {
     // Reading from disk and being handed the document by a host loader must not be
     // two implementations that can drift: both have to produce one registry.

@@ -15,6 +15,7 @@ import {
   auditLockDecisionConformance,
   conformanceErrors,
   DEFAULT_HOST_BRIDGE_MANIFEST,
+  extensionCatalogForMappings,
   FGC_LOCK_SCHEMA_VERSION,
   forguncyTargetIdentity,
   JSX_RUNTIME_MODULE_IDS,
@@ -451,6 +452,76 @@ describe("extension records against #12", () => {
     // is not real".
     expect(codes(absent)).toEqual(["extension-catalog-missing"]);
     expect(codes(empty)).toEqual(["extension-library-not-verified"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The catalog a project's mappings imply (#85)
+// ---------------------------------------------------------------------------
+
+describe("a catalog projected from a mapping set (#85)", () => {
+  it("expands a row's `moduleIds` into their own catalog rows", () => {
+    // The shape `auditExtensionRecord` matches on is per *package*, while a mapping row
+    // is keyed by its primary package and lists its siblings. A projection that copied
+    // only `packageName` therefore answered for a strict subset of the packages the
+    // compiler accepts — measured on the shipped table before this function existed:
+    // the hand-written projection in `dev-harness` produced a catalog containing only
+    // `@tanstack/react-query`, and a decision naming `@tanstack/query-core` came back
+    // `extension-library-not-verified` as a **blocking** error while `planExtensionExternals`
+    // accepted the same decision.
+    const projected = extensionCatalogForMappings([
+      { packageName: "primary-package", moduleIds: ["sibling-package"], libraryId: "lib", globalName: "Lib" },
+    ]);
+
+    expect(projected.mappings).toEqual([
+      { packageName: "primary-package", libraryId: "lib", globalName: "Lib" },
+      { packageName: "sibling-package", libraryId: "lib", globalName: "Lib" },
+    ]);
+  });
+
+  it("makes a decision naming a row's sibling package checkable, where the old projection refused it", () => {
+    // The regression itself, asserted end to end rather than on the projection's shape:
+    // the harness and the compiler must agree about which packages a row answers for.
+    const projected = extensionCatalogForMappings([
+      { packageName: "@tanstack/react-query", moduleIds: ["@tanstack/query-core"], libraryId: "tanstack-query", globalName: "TanStackQuery" },
+    ]);
+
+    expect(
+      auditLockDecisionConformance(lock(extensionRecord("@tanstack/query-core", "tanstack-query", "TanStackQuery")), {
+        extensionCatalog: projected,
+      }),
+    ).toEqual([]);
+  });
+
+  it("carries no provenance, so the audit is not handed fields it cannot check", () => {
+    // The direction is deliberate: a mapping set produces a catalog, never the reverse,
+    // because a catalog cannot say which npm package an extension provides (#12's rule)
+    // and the audit has nothing to check a `metadataReference` against.
+    const projected = extensionCatalogForMappings([
+      { packageName: "some-package", libraryId: "lib", globalName: "Lib" },
+    ]);
+
+    expect(Object.keys(projected.mappings[0]!).sort()).toEqual(["globalName", "libraryId", "packageName"]);
+  });
+
+  it("projects a project's own rows and the built-in table through one function", () => {
+    // The seam #85 leaves to #87: a project row reaches the audit the same way a
+    // built-in row does, so "the harness audits as the compiler does" holds for both.
+    const projected = extensionCatalogForMappings([
+      { packageName: "@tanstack/react-query", moduleIds: ["@tanstack/query-core"], libraryId: "tanstack-query", globalName: "TanStackQuery" },
+      { packageName: "@acme/widgets", libraryId: "acme-widgets", globalName: "AcmeWidgets" },
+    ]);
+
+    expect(projected.mappings.map(mapping => mapping.packageName)).toEqual([
+      "@tanstack/react-query",
+      "@tanstack/query-core",
+      "@acme/widgets",
+    ]);
+    expect(
+      auditLockDecisionConformance(lock(extensionRecord("@acme/widgets", "acme-widgets", "AcmeWidgets")), {
+        extensionCatalog: projected,
+      }),
+    ).toEqual([]);
   });
 });
 

@@ -1,8 +1,8 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createCellRegistry, ForguncyConfigError } from "@forguncy-react-workspace/core";
-import type { CellRegistry, ForguncyConfig, RegisteredCell } from "@forguncy-react-workspace/core";
+import { createCellRegistry, ForguncyConfigError, normalizeExtensionMappings } from "@forguncy-react-workspace/core";
+import type { CellRegistry, ForguncyConfig, NormalizedExtensionMappings, RegisteredCell } from "@forguncy-react-workspace/core";
 import { describe, expect, it } from "vitest";
 
 import { FORGUNCY_PLUGIN_NAME, cellVirtualModuleId, forguncy, virtualModuleCellId } from "./index.ts";
@@ -19,6 +19,20 @@ function multiCellConfig(): ForguncyConfig {
       orderBoard: { entry: "./cells/order-board/src/index.ts", target: { pageName: "销售订单", cell: "D4" } },
     },
   };
+}
+
+/**
+ * The mapping set a forged registry carries.
+ *
+ * Taken from the real normalization rather than hand-written, because
+ * `isCellRegistry` requires the field: a forged registry that omitted it would be
+ * refused by the plugin's shape check and re-normalized from the raw config, so the
+ * belt-and-braces containment path these tests exercise would never run.
+ */
+function forgedExtensionMappings(): NormalizedExtensionMappings {
+  const result = normalizeExtensionMappings({});
+  if (!result.ok) throw new Error("Normalizing an empty config must succeed.");
+  return result.mappings;
 }
 
 function captureConfigError(run: () => unknown): ForguncyConfigError {
@@ -230,6 +244,7 @@ describe("the virtual Cell module seam", () => {
         dependencyLockPath: "fgc.lock.json",
         dependencyLockPathAbsolute: join(validMultiRoot, "fgc.lock.json"),
       },
+      extensionMappings: forgedExtensionMappings(),
       cells: [cell],
       cellIds: [cell.id],
       get: id => (id === cell.id ? cell : undefined),

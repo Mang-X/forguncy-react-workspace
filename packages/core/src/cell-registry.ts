@@ -38,6 +38,9 @@ import {
   targetLocatorKey,
 } from "./forguncy-config.ts";
 import type { CellCodeBudgetOverrides, ForguncyTargetLocator, TargetLocatorModel } from "./forguncy-config.ts";
+import { normalizeExtensionMappings } from "./extension-mappings-config.ts";
+import type { NormalizedExtensionMappings } from "./extension-mappings-config.ts";
+import type { ExtensionExternalMapping } from "./extension-externals.ts";
 
 /** Fields allowed inside a `target`. */
 export const TARGET_ALLOWED_FIELDS = ["pageName", "cell"] as const;
@@ -72,6 +75,12 @@ export type ConfigDiagnosticCode =
   | "cells-not-an-object"
   | "unsupported-schema-version"
   | "unknown-config-field"
+  // Extension mappings (#85).
+  | "unknown-extensions-field"
+  | "invalid-extension-mappings"
+  | "invalid-extension-mapping"
+  | "unknown-extension-mapping-field"
+  | "extension-mapping-conflict"
   // Portability.
   | "machine-specific-path"
   | "secret-looking-field"
@@ -191,6 +200,16 @@ export interface CellRegistry {
   readonly schemaVersion: number;
   readonly targetLocatorModel: TargetLocatorModel;
   readonly runtime: NormalizedRuntimeTarget;
+  /**
+   * The project's extension mapping set, normalized once (Issue #85).
+   *
+   * Carried on the registry rather than re-read by each stage, so the compiler's
+   * externals plan, the dev harness's substitutions and the sync's verification all
+   * read the same rows — and so "which extensions does this project declare" is
+   * answered where the rest of the config is, rather than by whichever stage happened
+   * to load `core`'s built-in table.
+   */
+  readonly extensionMappings: NormalizedExtensionMappings;
   readonly cells: readonly RegisteredCell[];
   /** Ids in declaration order. */
   readonly cellIds: readonly string[];
@@ -213,6 +232,15 @@ export interface CreateCellRegistryOptions {
    * mutation rather than after.
    */
   readonly requireEntryFiles?: boolean;
+  /**
+   * The built-in extension mapping table the project's rows merge with.
+   *
+   * Defaults to `core`'s own. An option because the merge and collision rules are
+   * decided *against a table*, and a caller — or a test — that wants to know which
+   * table a config was measured against should not have to infer it from the shipped
+   * default. Nothing in the repository passes it; it exists so the rule is exercisable.
+   */
+  readonly builtinExtensionMappings?: readonly ExtensionExternalMapping[];
 }
 
 const WINDOWS_DRIVE_PATH = /^[A-Za-z]:[\\/]/;
@@ -871,6 +899,23 @@ export function createCellRegistry(config: unknown, options: CreateCellRegistryO
 
   const runtimeResult = validateRuntime(config.runtime, root, diagnostics);
 
+  // The extension mappings are normalized through their own module and their findings
+  // folded into this one list, so a project with a bad row and a bad entry gets one
+  // error naming both — which is what "reports every problem in one pass" means here.
+  //
+  // The normalization's own codes are members of this module's vocabulary rather than a
+  // second set: the config has one error type and one `codes` accessor, and a caller
+  // branching on the failure class should not have to know which sub-module found it.
+  const extensionMappingsResult = normalizeExtensionMappings(
+    config,
+    options.builtinExtensionMappings === undefined
+      ? {}
+      : { builtinMappings: options.builtinExtensionMappings },
+  );
+  if (!extensionMappingsResult.ok) {
+    diagnostics.push(...extensionMappingsResult.diagnostics);
+  }
+
   const resolvedCells: ResolvedCell[] = [];
   if (isConfigRecord(config.cells)) {
     // Declaration order, not alphabetical: the registry should read back the way
@@ -895,6 +940,15 @@ export function createCellRegistry(config: unknown, options: CreateCellRegistryO
     dependencyLockPathAbsolute: resolve(root, DEFAULT_DEPENDENCY_LOCK_PATH),
   };
 
+  // The narrowing is the compiler's rather than a `!`. A failed normalization
+  // contributed a diagnostic, so the throw above already returned — but a `!` here
+  // would silently become a lie the first time a normalization finding was recorded
+  // without blocking, and this check cannot.
+  if (!extensionMappingsResult.ok) {
+    throw new ForguncyConfigError(extensionMappingsResult.diagnostics, context);
+  }
+  const extensionMappings: NormalizedExtensionMappings = extensionMappingsResult.mappings;
+
   const cells: RegisteredCell[] = resolvedCells.map(cell => ({
     id: cell.id,
     entry: cell.entry.authored,
@@ -914,6 +968,7 @@ export function createCellRegistry(config: unknown, options: CreateCellRegistryO
     schemaVersion: FORGUNCY_CONFIG_SCHEMA_VERSION,
     targetLocatorModel: TARGET_LOCATOR_MODEL,
     runtime,
+    extensionMappings,
     cells,
     cellIds: cells.map(cell => cell.id),
     get: id => byId.get(id),
@@ -1051,6 +1106,15 @@ export function isCellRegistry(value: unknown): value is CellRegistry {
     typeof value.get === "function" &&
     typeof value.require === "function" &&
     typeof value.byTarget === "function" &&
-    isConfigRecord(value.runtime)
+    isConfigRecord(value.runtime) &&
+    // `extensionMappings` is required, and the check is not decoration: this predicate
+    // is what lets a host adopt a registry *without* re-validating it, so a value that
+    // passed here is one every consumer will read `extensionMappings` off. A registry
+    // from an older shape has no such field, and admitting it would hand the compiler
+    // `undefined` where a mapping set belongs — failing far from the config that was
+    // actually wrong. Refusing it here re-normalizes from the raw config instead, which
+    // is the correct answer for a document that has one.
+    isConfigRecord(value.extensionMappings) &&
+    Array.isArray((value.extensionMappings as { readonly mappings?: unknown }).mappings)
   );
 }

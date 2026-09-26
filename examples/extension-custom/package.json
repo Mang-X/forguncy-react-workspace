@@ -1,0 +1,29 @@
+{
+  "name": "@examples/extension-custom",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "//": [
+    "The minimal non-built-in extension fixture Issue #85 hands to #86 (compile),",
+    "#87 (Skill / dev / sync) and #88 (real-designer validation).",
+    "",
+    "Deliberately empty: `@example/chart-kit` is decided `extension` by this project's",
+    "config, so the compiler's resolver hook answers the import from the extension's page",
+    "global before node resolution ever runs — the same property `examples/host-antd`",
+    "relies on for `antd`. Installing the package would be a silent escape hatch for a",
+    "broken interception: a missed mapping would then quietly inline an npm copy instead",
+    "of failing the compile, which is the state #12's non-goals forbid.",
+    "",
+    "Nothing here claims the extension exists. #85 supplies the *configuration* path for",
+    "an extension this repository has not packaged; #88 is where a real one is validated",
+    "against a real designer, and `MangMax/forguncy-frontend-library` owns building it.",
+    "",
+    "`@forguncy-react-workspace/core` is a devDependency because its only use is",
+    "`defineForguncyConfig` in the committed config, which the config loader imports — the",
+    "same arrangement `examples/dev-harness` records at length. The Cell's authored source",
+    "does not import `core`, so nothing in the artifact's module graph reaches it."
+  ],
+  "devDependencies": {
+    "@forguncy-react-workspace/core": "workspace:*"
+  }
+}
