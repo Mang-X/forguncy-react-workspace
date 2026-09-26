@@ -11,6 +11,7 @@ on:
 permissions:
   contents: read
   issues: read
+  pull-requests: read
 
 concurrency:
   group: issue-board-${{ github.ref }}
@@ -23,7 +24,13 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - name: Read live Issue snapshot
+      - uses: voidzero-dev/setup-vp@v1.17.0
+        with:
+          node-version: "24"
+          cache: true
+          run-install: |
+            - args: ['--frozen-lockfile']
+      - name: Read live Issue and open PR snapshot
         env:
           GH_TOKEN: ${{ github.token }}
           BOARD_REPOSITORY: ${{ github.repository }}
@@ -49,6 +56,12 @@ jobs:
             return all;
           }
           const records = await pages(`${base}issues?state=all&per_page=100&sort=created&direction=asc`);
+          const openPRs = await pages(`${base}pulls?state=open&per_page=100`);
+          for (const pr of openPRs) {
+            const item = { ...pr, pull_request: { url: pr.url, html_url: pr.html_url, merged_at: pr.merged_at ?? null } };
+            const at = records.findIndex(record => record.number === pr.number);
+            if (at < 0) records.push(item); else records[at] = item;
+          }
           const native = {}; const incomplete = [];
           for (const issue of records.filter(item => !item.pull_request)) {
             const count = issue.issue_dependencies_summary?.total_blocked_by;
@@ -56,14 +69,14 @@ jobs:
             try { native[issue.number] = await pages(`${base}issues/${issue.number}/dependencies/blocked_by?per_page=100`); }
             catch (error) { incomplete.push(issue.number); console.warn(`Dependency read incomplete for #${issue.number}: ${error.message}`); }
           }
-          const snapshot = { schemaVersion: 2, repo, fetchedAt: new Date().toISOString(), records, native, incomplete };
+          const snapshot = { schemaVersion: 2, prReadComplete: true, repo, fetchedAt: new Date().toISOString(), records, native, incomplete };
           await writeFile('dist/issue-board/snapshot.json', JSON.stringify(snapshot, null, 2) + '\n');
           console.log(`Snapshot: ${records.filter(item => !item.pull_request).length} issues, ${records.filter(item => item.pull_request).length} PR records, ${incomplete.length} incomplete dependency reads.`);
           NODE
       - name: Run board regressions and build
         run: |
-          if [ -f tools/issue-board/model.test.mjs ]; then node --test tools/issue-board/*.test.mjs; fi
-          if [ -f tools/issue-board/build.mjs ]; then node tools/issue-board/build.mjs dist/issue-board/snapshot.json dist/issue-board/index.html; fi
+          node --test tools/issue-board/*.node-test.mjs
+          node tools/issue-board/build.mjs dist/issue-board/snapshot.json dist/issue-board/index.html
       - uses: actions/upload-artifact@v4
         with:
           name: forguncy-issue-board
