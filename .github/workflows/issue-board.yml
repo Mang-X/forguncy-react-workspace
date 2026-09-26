@@ -30,6 +30,8 @@ jobs:
           cache: true
           run-install: |
             - args: ['--frozen-lockfile']
+      - name: Run board regressions
+        run: node --test tools/issue-board/*.node-test.mjs
       - name: Read live Issue and open PR snapshot
         env:
           GH_TOKEN: ${{ github.token }}
@@ -38,13 +40,15 @@ jobs:
           mkdir -p dist/issue-board
           node --input-type=module <<'NODE'
           import { writeFile } from 'node:fs/promises';
+          import { normalizeRepoApiUrl } from './tools/issue-board/api-url.mjs';
           const repo = process.env.BOARD_REPOSITORY;
           const base = `https://api.github.com/repos/${repo}/`;
           const headers = { Accept: 'application/vnd.github+json', Authorization: `Bearer ${process.env.GH_TOKEN}` };
           async function pages(initial) {
             const all = []; const seen = new Set(); let url = initial;
             while (url) {
-              if (!url.startsWith(base) || seen.has(url) || seen.size > 100) throw new Error('Invalid pagination');
+              url = normalizeRepoApiUrl(url);
+              if (seen.has(url) || seen.size >= 100) throw new Error(`Invalid pagination: ${url}`);
               seen.add(url);
               const response = await fetch(url, { headers, signal: AbortSignal.timeout(30000) });
               if (!response.ok) throw new Error(`GitHub HTTP ${response.status}: ${url}`);
@@ -73,11 +77,10 @@ jobs:
           await writeFile('dist/issue-board/snapshot.json', JSON.stringify(snapshot, null, 2) + '\n');
           console.log(`Snapshot: ${records.filter(item => !item.pull_request).length} issues, ${records.filter(item => item.pull_request).length} PR records, ${incomplete.length} incomplete dependency reads.`);
           NODE
-      - name: Run board regressions and build
-        run: |
-          node --test tools/issue-board/*.node-test.mjs
-          node tools/issue-board/build.mjs dist/issue-board/snapshot.json dist/issue-board/index.html
+      - name: Build single-file board
+        run: node tools/issue-board/build.mjs dist/issue-board/snapshot.json dist/issue-board/index.html
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: forguncy-issue-board
           path: |
