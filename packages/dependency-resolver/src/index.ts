@@ -160,6 +160,7 @@ export {
   conformanceErrors,
   CONFORMANCE_PROBLEM_CODES,
   DEFAULT_HOST_BRIDGE_MANIFEST,
+  extensionCatalogForMappings,
   JSX_RUNTIME_MODULE_IDS,
   PRESET_PROVIDED_HOST_GLOBALS,
   validateLockDecisionConformance,

@@ -86,6 +86,7 @@ export * from "./governance.ts";
 export * from "./runtime-contract.ts";
 export * from "./host-bridge.ts";
 export * from "./extension-externals.ts";
+export * from "./extension-mappings-config.ts";
 export * from "./lock.ts";
 export * from "./lock-migration.ts";
 export * from "./lock-freshness.ts";
