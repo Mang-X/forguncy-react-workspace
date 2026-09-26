@@ -93,14 +93,22 @@ export class ProbeIdentityError extends Error {
  * only honest wording would be the vaguest one. `EACCES` and `EISDIR` are what a reader
  * acts on; "not readable JSON" would send them to check the syntax of a file they
  * cannot open.
+ *
+ * `realpath` names its own clause because it failed before any manifest path existed:
+ * saying "its manifest could not be read" there would name an operation that was never
+ * attempted.
  */
 function describeManifestFailure(detail: ManifestUnreadableDetail | undefined): string {
-  if (detail?.operation === "read") {
-    return detail.code === undefined
-      ? "its manifest could not be read"
-      : `its manifest could not be read (${detail.code})`;
+  const suffix = detail?.code === undefined ? "" : ` (${detail.code})`;
+  switch (detail?.operation) {
+    case "realpath":
+      return `the directory holding it could not be resolved${suffix}`;
+    case "read":
+      return `its manifest could not be read${suffix}`;
+    case "parse":
+    case undefined:
+      return "its manifest is not readable JSON";
   }
-  return "its manifest is not readable JSON";
 }
 
 function describeIdentityFailure(

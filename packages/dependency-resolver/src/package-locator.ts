@@ -134,9 +134,22 @@ export type PackageLocationFailureReason =
  * when the real fault was `EISDIR`.
  */
 export interface ManifestUnreadableDetail {
-  /** Which operation failed: reading the file, or parsing what was read. */
-  readonly operation: "read" | "parse";
-  /** The `code` of the underlying error, when it has one (`EACCES`, `EISDIR`, …). */
+  /**
+   * Which step failed.
+   *
+   * `realpath` is its own step rather than being reported as a `read`: the failure is
+   * reaching the *directory* the host named, which happens before any manifest path is
+   * formed. Folding it into `read` would name an operation that was never attempted.
+   */
+  readonly operation: "realpath" | "read" | "parse";
+  /**
+   * The `code` of the underlying error, when it has one.
+   *
+   * Carried from the thrown error, never chosen. `realpath` raises `ENOENT`, `EACCES`,
+   * `ELOOP` or an I/O code depending on *why* the directory is unreachable, and a
+   * hardcoded code would make the evidence false for every reason but one — the same
+   * defect this file already fixed for the resolution and read branches.
+   */
   readonly code: string | undefined;
 }
 
@@ -259,10 +272,21 @@ export async function locatePackage(base: string, request: string): Promise<Pack
     // The manifest *path* may not exist (the host reports the root of a directory that
     // has no `package.json`), so the realpath is taken on the directory, which does.
     directory = await realpath(dirname(found));
-  } catch {
-    // The directory the host named cannot be reached at all, which is a different
-    // fact from a manifest it reached and could not read.
-    return { outcome: "failed", reason: "manifest-unreadable", detail: { operation: "read", code: "ENOENT" } };
+  } catch (error) {
+    // The *directory* is unreachable, which is a different fact from a manifest it
+    // reached and could not read — and the code says which: `ENOENT`/`ENOTDIR` mean the
+    // host named a directory that is not there (the package is not installed), while
+    // `EACCES`, `ELOOP` and I/O codes mean it is there and cannot be reached.
+    //
+    // The code is taken from the error, never chosen. Measured: `realpath` raises
+    // `ELOOP` for a junction cycle and `EACCES` for an unreadable directory, so a
+    // hardcoded `ENOENT` would have made the evidence false for every reason but one —
+    // the same defect the resolution and read branches above were fixed for.
+    const code = errorCode(error);
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      return { outcome: "failed", reason: "not-installed" };
+    }
+    return { outcome: "failed", reason: "manifest-unreadable", detail: { operation: "realpath", code } };
   }
   const resolvedManifestPath = join(directory, "package.json");
 

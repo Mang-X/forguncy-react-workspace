@@ -28,7 +28,7 @@ import { dirname, join } from "node:path";
 import { mkdtemp, mkdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { locatePackage } from "./package-locator.ts";
 
@@ -198,6 +198,100 @@ describe("locatePackage: failure stays a specific failure", () => {
         outcome: "failed",
         reason: "invalid-specifier",
       });
+    }
+  });
+
+  it("carries the realpath failure's own code rather than inventing ENOENT", async () => {
+    // Injected at the module seam rather than on disk, and that is a measurement, not a
+    // preference: `realpath` raises `ELOOP` for a junction cycle and `EACCES` for an
+    // unreadable directory — measured — but neither is reachable *through this function*
+    // on a real filesystem, because `findPackageJSON` refuses to return a path through a
+    // cycle at all (`ERR_MODULE_NOT_FOUND`). A filesystem fixture therefore cannot
+    // produce this branch, and a test that appeared to would be exercising the host's
+    // refusal instead.
+    //
+    // The branch used to record `code: "ENOENT"` unconditionally, which made the
+    // evidence false for every real reason but one — the same defect the resolution and
+    // read branches above were fixed for. `operation: "realpath"` is also its own value:
+    // the failure happens before any manifest path is formed, so reporting it as `read`
+    // named an operation that was never attempted.
+    const root = await mkdtemp(join(tmpdir(), "fgc-locator-realpath-"));
+    await writeFile(join(root, "package.json"), JSON.stringify({ name: "host", version: "0.0.0" }), "utf8");
+    await mkdir(join(root, "node_modules", "linked"), { recursive: true });
+    await writeFile(
+      join(root, "node_modules", "linked", "package.json"),
+      JSON.stringify({ name: "linked", version: "1.0.0" }),
+      "utf8",
+    );
+
+    // The seam has to be installed **and the module re-imported**, because this file's
+    // static `import` of `locatePackage` already captured the real `node:fs/promises`.
+    // `resetModules` before the dynamic import is what makes the mock reach the code
+    // under test; without it the test would silently exercise the real `realpath` and
+    // pass for the wrong reason.
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async importOriginal => {
+      const actual = await importOriginal<typeof import("node:fs/promises")>();
+      return {
+        ...actual,
+        realpath: async () => {
+          const error = new Error("too many symbolic links") as NodeJS.ErrnoException;
+          error.code = "ELOOP";
+          throw error;
+        },
+      };
+    });
+
+    try {
+      const { locatePackage: locateWithMockedRealpath } = await import("./package-locator.ts");
+      const result = await locateWithMockedRealpath(join(root, "package.json"), "linked");
+
+      expect(result).toMatchObject({
+        outcome: "failed",
+        reason: "manifest-unreadable",
+        detail: { operation: "realpath", code: "ELOOP" },
+      });
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  });
+
+  it("still reports an unreachable directory as not-installed, not as unreadable", async () => {
+    // The other half of the same branch: `ENOENT` from `realpath` means the directory the
+    // host named is not there, which is absence rather than an unreadable manifest. The
+    // predicate has to keep both answers apart, so this asserts the split rather than
+    // only the new arm.
+    const root = await mkdtemp(join(tmpdir(), "fgc-locator-realpath-gone-"));
+    await writeFile(join(root, "package.json"), JSON.stringify({ name: "host", version: "0.0.0" }), "utf8");
+    await mkdir(join(root, "node_modules", "vanished"), { recursive: true });
+    await writeFile(
+      join(root, "node_modules", "vanished", "package.json"),
+      JSON.stringify({ name: "vanished", version: "1.0.0" }),
+      "utf8",
+    );
+
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async importOriginal => {
+      const actual = await importOriginal<typeof import("node:fs/promises")>();
+      return {
+        ...actual,
+        realpath: async () => {
+          const error = new Error("no such file or directory") as NodeJS.ErrnoException;
+          error.code = "ENOENT";
+          throw error;
+        },
+      };
+    });
+
+    try {
+      const { locatePackage: locateWithMockedRealpath } = await import("./package-locator.ts");
+      const result = await locateWithMockedRealpath(join(root, "package.json"), "vanished");
+
+      expect(result).toEqual({ outcome: "failed", reason: "not-installed" });
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
     }
   });
 
