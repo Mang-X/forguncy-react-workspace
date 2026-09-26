@@ -70,10 +70,21 @@ export const SYNC_RUNTIME_ROUTES = ["write", "unchanged"] as const;
 
 export type SyncRuntimeRoute = (typeof SYNC_RUNTIME_ROUTES)[number];
 
-/** What each route did before the validation half, for a reader of a coverage gap. */
+/**
+ * What each route did before the validation half, for a reader of a coverage gap.
+ *
+ * "checked save status and saved if it was required", not "saved": the save is conditional on
+ * the product's own answer (`completeSyncFlow` calls `saveProject` only when
+ * `getProjectSaveStatus()` reports unsaved changes, and a clean run marks the step `skipped`).
+ * A route description asserting a save would claim a call a clean run never makes — the same
+ * defect as a diagnostic naming a mutation on a run that wrote nothing, one field over. Both
+ * routes are conditional, so both say so.
+ */
 export const SYNC_RUNTIME_ROUTE_MEANINGS: Readonly<Record<SyncRuntimeRoute, string>> = {
-  write: "the run wrote the Cell, then saved, checked the project and generated the page",
-  unchanged: "the run found the Cell already holding this artifact, wrote nothing, and still saved, checked the project and generated the page",
+  write:
+    "the run wrote the Cell, then checked the save status and saved if the project required it, checked the project and generated the page",
+  unchanged:
+    "the run found the Cell already holding this artifact, wrote nothing, and still checked the save status and saved if the project required it, checked the project and generated the page",
 };
 
 export interface SyncGuarantee {

@@ -230,4 +230,20 @@ describe("what has been executed on each route through the flow", () => {
     expect(write.runtimeRoutes).toEqual(["write"]);
     expect(unexecutedRuntimeRouteCoverage().some(gap => gap.guaranteeId === "written-without-manual-copy")).toBe(false);
   });
+
+  // The route description is part of the exported metadata a coverage gap surfaces, so it
+  // describes the flow rather than what a particular run did. The save is conditional on the
+  // product's own answer, and a clean run marks the step `skipped` — so a meaning asserting
+  // "saved" would claim a call that run never makes, which is the same defect as a diagnostic
+  // naming a mutation on a run that wrote nothing.
+  it("describes the conditional save rather than asserting one", () => {
+    for (const route of SYNC_RUNTIME_ROUTES) {
+      const meaning = SYNC_RUNTIME_ROUTE_MEANINGS[route];
+
+      expect(meaning, route).toContain("checked the save status");
+      expect(meaning, route).toContain("if the project required it");
+      // "still saved" / "then saved" would assert the call happened.
+      expect(meaning, route).not.toMatch(/\bsaved\b(?! if)/);
+    }
+  });
 });
