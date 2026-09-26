@@ -10,7 +10,7 @@ import { readFgcLock, resolveInstalledVersions } from "@forguncy-react-workspace
 import {
   DEFAULT_LOCAL_EXTENSION_CATALOG,
   LOCAL_DEV_UNOBSERVABLE_STALENESS_REASONS,
-  installedVitePlusToolchain,
+  installedToolchain,
   projectLocalDecisions,
 } from "./local-decision-projection.ts";
 import { removeTempProject } from "./temp-project.ts";
@@ -52,12 +52,19 @@ import { removeTempProject } from "./temp-project.ts";
 const RECORDED_VERSION = "5.102.8";
 
 /** A temp project whose lock records one `extension` decision, with the package installed. */
-function projectWithDecision(overrides: {
+async function projectWithDecision(overrides: {
   readonly decision?: Record<string, unknown>;
   readonly installedVersion?: string;
-} = {}): string {
+} = {}): Promise<string> {
   const root = mkdtempSync(join(tmpdir(), "dev-harness-projection-"));
   onTestFinished(() => removeTempProject(root));
+
+  // The lockfile is written **first**, before the identity below is read. #94 reads identity from
+  // the install graph, so a lockfile created afterwards would make the recorded `probedWith` say
+  // "no lockfile" while the environment the projection compares against says otherwise — and the
+  // fixture would report `install-graph-changed` for a project where nothing moved. The content is
+  // irrelevant: the digest is over bytes, and both sides read the same file.
+  writeFileSync(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n", "utf8");
 
   const base = {
     packageName: "@tanstack/react-query",
@@ -78,7 +85,7 @@ function projectWithDecision(overrides: {
     },
     // The toolchain the fixture records is the one this process reports, so the axis compares equal
     // rather than manufacturing `toolchain-changed`.
-    probedWith: { vitePlus: installedVitePlusToolchain()?.vitePlus as string },
+    probedWith: await installedToolchain(root),
     extension: { version: RECORDED_VERSION, identity: "sha256:aa" },
     rejectedCandidate: null,
     rationale: "fixture",
@@ -117,13 +124,13 @@ async function project(root: string, cellTarget: string | null = null) {
     cellTarget,
     resolvedVersions: versions,
     target: RUNTIME_CONTRACT_TARGET,
-    toolchain: installedVitePlusToolchain(),
+    toolchain: await installedToolchain(root),
   });
 }
 
 describe("a record this process cannot fully judge is kept and reported, not withheld", () => {
   it("keeps a valid extension decision whose only unobservable evidence is the page's", async () => {
-    const projection = await project(projectWithDecision());
+    const projection = await project(await projectWithDecision());
 
     // Kept, which is the whole design decision: withholding here would drop every extension decision
     // on every project and let the Cell resolve through npm instead.
@@ -163,7 +170,7 @@ describe("a record this process can judge is withheld, exactly as the compiler w
   it("withholds a decision whose installed version has moved", async () => {
     // The reason is `package-version-changed`, which this process can see for itself — so the local
     // loop does not act on the record, which is the compiler's answer rather than a stricter one.
-    const projection = await project(projectWithDecision({ installedVersion: "6.0.0" }));
+    const projection = await project(await projectWithDecision({ installedVersion: "6.0.0" }));
 
     expect(projection.decisions).toEqual([]);
     expect(projection.withheld.map(entry => entry.packageName)).toEqual(["@tanstack/react-query"]);
@@ -177,7 +184,7 @@ describe("a record this process can judge is withheld, exactly as the compiler w
     // a record whose reasons are *one observable and several unobservable* must be withheld. The
     // first implementation wrote `reasons.every(isLocallyObservable) === false`, which is true when
     // any reason is unobservable — the opposite answer — and no type could catch it.
-    const projection = await project(projectWithDecision({ installedVersion: "6.0.0" }));
+    const projection = await project(await projectWithDecision({ installedVersion: "6.0.0" }));
 
     const reasons = projection.withheld[0]?.stalenessReasons ?? [];
     expect(reasons).toContain("package-version-changed");
@@ -192,7 +199,7 @@ describe("the target-selection half stays fixed", () => {
     // both records for a package, and the audit then sees an `extension` decision for a Cell that
     // decided `inline`. Measured before the fix: all three of `probe`, `other` and `null` came back
     // with two records, so the defect was back through the projection.
-    const root = projectWithDecision();
+    const root = await projectWithDecision();
     const lock = JSON.parse(readFileSync(join(root, "fgc.lock.json"), "utf8")) as {
       decisions: Record<string, unknown>[];
     };
@@ -216,7 +223,7 @@ describe("the target-selection half stays fixed", () => {
 describe("a conformance error refuses, because the compiler would not compile it", () => {
   it("reports a decision the mapping table cannot bind as a conformance error", async () => {
     const projection = await project(
-      projectWithDecision({
+      await projectWithDecision({
         decision: {
           // The table intercepts `@tanstack/react-query`; this id is the same *shape* and binds
           // nothing, which is what the audit reports.
@@ -237,7 +244,7 @@ describe("a conformance error refuses, because the compiler would not compile it
   it("finds no conformance error in a lock shaped the way the compiler accepts", async () => {
     // The control: the same fixture without the deliberate disagreement. Without this, the test above
     // would pass for a projection that reported every lock as non-conformant.
-    const projection = await project(projectWithDecision());
+    const projection = await project(await projectWithDecision());
 
     expect(projection.conformanceErrors).toEqual([]);
   });

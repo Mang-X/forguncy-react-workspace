@@ -58,6 +58,14 @@ export const LOCK_STALENESS_REASONS = [
   "forguncy-target-unknown",
   "toolchain-changed",
   "toolchain-unknown",
+  // The install graph moved, or this process cannot say which one it has. Separate from the
+  // toolchain pair because the two are different facts with different fixes: a toolchain move
+  // means re-probe, an install-graph move means the resolution itself changed — a transitive
+  // bump, an `overrides` entry, a patch — and the reader's next step is `install`, then
+  // re-probe. Collapsing them into `toolchain-changed` would tell a reader to upgrade a tool
+  // when the defect is in their installed tree (#94).
+  "install-graph-changed",
+  "install-graph-unknown",
   "extension-version-changed",
   "extension-version-unknown",
   "extension-identity-changed",
@@ -180,6 +188,7 @@ export function assessLockDecision(
   reasons.push(...assessPackageVersionFreshness(record, environment, policy));
   reasons.push(...assessTargetFreshness(record, environment, policy));
   reasons.push(...assessToolchainFreshness(record, environment));
+  reasons.push(...assessInstallGraphFreshness(record, environment, policy));
   reasons.push(...assessExtensionFreshness(record, environment));
   reasons.push(...assessArtifactEvidenceFreshness(record, environment));
 
@@ -283,20 +292,159 @@ function assessTargetFreshness(
   return matchesForguncyTargetIdentity(record.target, current) ? [] : ["forguncy-target-changed"];
 }
 
+/**
+ * Whether the toolchain that produced a record is still the one installed.
+ *
+ * Three components, and the asymmetry between them is deliberate rather than an oversight:
+ *
+ * - `vitePlus` keeps #8's weaker reading. A record may declare that version genuinely immaterial
+ *   (`null`), and that declaration means "do not re-open me for this". Re-reading it as "unknown"
+ *   would silently re-open every record that made the declaration, which is a decision no
+ *   freshness rule may make on a project's behalf.
+ * - `rolldown` and `node` are **strict in both directions**: a recorded value with nothing current
+ *   to compare is `toolchain-unknown`, not a pass. These are not declarable-immaterial — they
+ *   decide what the measured artifact *is*, so "cannot say" must never read as "unchanged".
+ * - The install graph is its own axis ({@link assessInstallGraphFreshness}); it is a fact about
+ *   the resolution rather than about the tools, and it has its own reason pair.
+ *
+ * An `undefined` component — the shape a record written before this axis existed parses into —
+ * is treated exactly as `null` is, so a legacy record reports `toolchain-unknown` rather than
+ * passing on a field that is absent.
+ */
 function assessToolchainFreshness(
   record: LockedDependencyDecision,
   environment: LockEnvironment,
 ): readonly LockStalenessReason[] {
-  const recorded = record.probedWith?.vitePlus ?? null;
-  const current = environment.toolchain?.vitePlus ?? null;
-
-  if (recorded === null) {
+  const recorded = record.probedWith;
+  if (recorded === null || recorded === undefined) {
     return [];
   }
-  if (current === null) {
-    return ["toolchain-unknown"];
+
+  const current = environment.toolchain;
+  const reasons: LockStalenessReason[] = [];
+
+  // `vitePlus` first, and by its own rule, so a record that declared it immaterial still gets
+  // its other components checked instead of being waved through by that one field's `null`.
+  const recordedVitePlus = recorded.vitePlus ?? null;
+  if (recordedVitePlus !== null) {
+    const currentVitePlus = current?.vitePlus ?? null;
+    if (currentVitePlus === null) {
+      reasons.push("toolchain-unknown");
+    } else if (currentVitePlus !== recordedVitePlus) {
+      reasons.push("toolchain-changed");
+    }
   }
-  return current === recorded ? [] : ["toolchain-changed"];
+
+  // One reason per component would report a single toolchain move as several stalenesses, and the
+  // reader's next step is the same for all of them: re-probe. So the reason is the *fact* and the
+  // component is not part of its identity — which is why this loop deduplicates rather than
+  // pushing a second `toolchain-changed` when two components moved together.
+  for (const component of ["rolldown", "node"] as const) {
+    const recordedComponent = recorded[component] ?? null;
+    if (recordedComponent === null) {
+      continue;
+    }
+    const currentComponent = current?.[component] ?? null;
+    if (currentComponent === null) {
+      if (!reasons.includes("toolchain-unknown")) {
+        reasons.push("toolchain-unknown");
+      }
+    } else if (currentComponent !== recordedComponent && !reasons.includes("toolchain-changed")) {
+      reasons.push("toolchain-changed");
+    }
+  }
+
+  return reasons;
+}
+
+/**
+ * Whether the install graph a record was measured against is still the one installed.
+ *
+ * Decision source: #94. This is the axis whose absence let a transitive dependency change, a patch
+ * land, or a real bundler be upgraded while the record kept reporting `fresh` — the record's
+ * `resolvedVersion` names one package and could not see any of it.
+ *
+ * **Two distinct answers, and the split is the point.** `install-graph-changed` means this process
+ * *has* an identity and it differs: the resolution moved, so the measurement is about an install
+ * nobody has any more. `install-graph-unknown` means this process **cannot say** — no lockfile it
+ * recognises, or a record from before the axis existed. #94's acceptance is explicit that the
+ * second must never be rendered as the first, and both must be non-fresh: an identity that cannot
+ * be confirmed cannot confirm the evidence either.
+ *
+ * **A record with no install-graph identity is checked, not skipped.** That is the tempting
+ * shortcut — treat "the record does not state one" as "this axis does not apply" — and it is
+ * exactly the hole: a lock written by the previous toolchain would keep every record fresh
+ * forever, and the fix would be invisible on the one lock most likely to need it. So the
+ * comparison is one-sided in the direction that matters: the *current* identity is required, and
+ * a record that does not carry one reports `install-graph-unknown` until it is re-recorded.
+ */
+function assessInstallGraphFreshness(
+  record: LockedDependencyDecision,
+  environment: LockEnvironment,
+  policy: LockEvidencePolicy,
+): readonly LockStalenessReason[] {
+  // Which records this axis governs is read off the policy table rather than listed here, so it
+  // cannot drift from the profile that decides it. `probeRequirement: "none"` is the
+  // architectural rejection, and it is skipped for the reason `invalidatedByTargetChange: false`
+  // already states: its evidence is the *ownership* decision, which no version of anything in an
+  // install graph can move. An architectural rejection probes nothing and cites no measurement,
+  // so demanding an install-graph identity of it would report a gap where there is no claim to
+  // verify — the same defect as reporting `forguncy-target-changed` for one.
+  if (policy.probeRequirement === "none") {
+    return [];
+  }
+
+  // No toolchain recorded at all means no probe ran, and #8's "when material" rule makes that the
+  // `probe-never-run` axis's business rather than this one's — the same skip `assessToolchainFreshness`
+  // makes one function up, and for the same reason. Reporting this axis too would state one absence
+  // twice, and the reader's next step (`run the probe`) is already named by the other reason.
+  if (record.probedWith === null || record.probedWith === undefined) {
+    return [];
+  }
+
+  // An environment with no toolchain at all has already been reported as `toolchain-unknown` by the
+  // axis above, for every component it records — restating the same absence here would report one
+  // gap twice and send the reader looking for a second problem. This axis speaks only when it has
+  // something the other one could not say.
+  if (environment.toolchain === null || environment.toolchain === undefined) {
+    return [];
+  }
+
+  // A toolchain *is* recorded, so the record claims a probe ran — and a probe that ran resolved
+  // against some install graph. Not saying which is the pre-#94 shape, and it is reported rather
+  // than skipped: that is the whole hole, since such a record would otherwise stay fresh forever
+  // on the one lock most likely to need re-measuring.
+  const recorded = record.probedWith.installGraph ?? null;
+  if (recorded === null) {
+    return ["install-graph-unknown"];
+  }
+
+  const current = environment.toolchain?.installGraph ?? null;
+  if (current === null) {
+    return ["install-graph-unknown"];
+  }
+
+  // Compared component-wise rather than by composing the three into one digest at the comparison
+  // site. The *reason* is the same whichever component moved — the reader's action is "install,
+  // then re-probe" in every case — but the loop is what makes an unobservable component stop the
+  // comparison rather than pass it, which a single composed string could not express: a digest
+  // over `{lockfile: "x", patches: null}` is a value, and comparing two of them would report
+  // `changed` for a component neither side could read.
+  const components = ["lockfile", "patches", "configuration"] as const;
+  for (const component of components) {
+    const recordedComponent = recorded[component];
+    const currentComponent = current[component];
+    // A component that is `null` on *either* side cannot be compared. The record states it
+    // could not observe it, or this process cannot — and "cannot say" is unknown, not equal.
+    if (recordedComponent === null || currentComponent === null) {
+      return ["install-graph-unknown"];
+    }
+    if (recordedComponent !== currentComponent) {
+      return ["install-graph-changed"];
+    }
+  }
+
+  return [];
 }
 
 function assessExtensionFreshness(

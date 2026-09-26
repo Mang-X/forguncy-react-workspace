@@ -73,7 +73,7 @@ import { recordDependencyDecision } from "./decision-recording.ts";
 import { readFgcLock } from "./lock-store.ts";
 import { auditSelectionDecision } from "@forguncy-react-workspace/core";
 import { probeCacheRelativePath, probeLockEnvironment, probeRunLockEvidence, runDependencyProbe } from "./index.ts";
-import { readToolchainIdentity } from "./probe/identity.ts";
+import { readToolchainIdentity } from "./install-identity.ts";
 
 /**
  * Wall-clock allowance for one case.

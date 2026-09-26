@@ -93,9 +93,12 @@ import {
   buildProbeEnvironment,
   defaultProbeTarget,
   ProbeIdentityError,
-  readToolchainIdentity,
   resolvePackageIdentity,
 } from "./identity.ts";
+// Identity is #94's: the installed install graph and the tools that actually ran, read from one
+// function so the engine, the cache, the CLI's `status` and the dev harness cannot each read a
+// different version of the same fact.
+import { readToolchainIdentity } from "../install-identity.ts";
 import { observeNodeBuiltins } from "./node-scan.ts";
 import { observeRuntimePatterns } from "./runtime-pattern-scan.ts";
 import { compareStrings } from "./scan-utils.ts";
@@ -281,6 +284,69 @@ function smokeSkipReason(hookPresent: boolean, failedEarlier: boolean): string {
 }
 
 /**
+ * Whether two toolchain identities describe the same install and the same tools.
+ *
+ * Field-by-field rather than by object identity, for the reason `matchesForguncyTargetIdentity`
+ * gives: one side is deserialized from a cached JSON document and can never share an object with
+ * the live value.
+ *
+ * **An absent component is not equal to a present one**, and the direction is deliberate: a cached
+ * report written before #94 records no `rolldown`, `node` or `installGraph`, so it compares unequal
+ * and the run re-probes. Reading "the cache does not say" as "the cache agrees" is exactly how a
+ * warm `.fgc/probe-cache/` would keep serving evidence the new identity exists to invalidate.
+ *
+ * **`unknown` on both sides is *not* agreement either**, and that is a second, separate case. The
+ * strict components (`rolldown`, `node`, and every `installGraph` digest) are the ones that decide
+ * what the measured artifact *is*; when a run cannot establish them, a cache hit would claim the
+ * stored report describes *this* run on the strength of two identical silences. Measured: a project
+ * with no recognizable lockfile records `{lockfile: null, patches: null, configuration: null}` on
+ * the first probe, and after a transitive dependency moved in `node_modules` with the root package
+ * version unchanged, the second run compared equal and served the stale report — the exact defect
+ * #94 exists to remove.
+ *
+ * `vitePlus` keeps its #8 reading and is the one exception: `null` there is a *declaration* that the
+ * version is immaterial (see `ToolchainIdentity`), which is a positive statement rather than a
+ * silence, so two such declarations do agree. Every other component must be *known and equal* to
+ * produce a hit; a strict component unknown on either side forces a re-probe, which costs a build
+ * and never serves evidence the install no longer supports.
+ */
+function sameToolchainIdentity(cached: ToolchainIdentity, current: ToolchainIdentity): boolean {
+  const nullable = (value: string | null | undefined): string | null => value ?? null;
+
+  // `vitePlus`: nullable agreement, including two immateriality declarations.
+  if (nullable(cached.vitePlus) !== nullable(current.vitePlus)) {
+    return false;
+  }
+
+  // Strict string components: both sides must *know* the value and agree on it.
+  for (const component of ["rolldown", "node"] as const) {
+    const a = nullable(cached[component]);
+    const b = nullable(current[component]);
+    if (a === null || b === null || a !== b) {
+      return false;
+    }
+  }
+
+  // The install graph: absent, unknown, or unequal all force a re-probe.
+  const cachedGraph = cached.installGraph ?? null;
+  const currentGraph = current.installGraph ?? null;
+  if (cachedGraph === null || currentGraph === null) {
+    return false;
+  }
+  for (const component of ["lockfile", "patches", "configuration"] as const) {
+    const a = nullable(cachedGraph[component]);
+    const b = nullable(currentGraph[component]);
+    // A digest either side cannot establish means "cannot say", and #94 requires that to be
+    // non-fresh rather than excused. Even two `null`s: both runs failing to identify the install
+    // graph is not the same as both runs having identified the same one.
+    if (a === null || b === null || a !== b) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * Whether a cached report may answer *this* run.
  *
  * The lock fingerprint deliberately excludes package version, toolchain and
@@ -312,7 +378,12 @@ function cacheHitAnswersThisRun(
   if (cached.environment.packageVersion !== identity.packageVersion) {
     return false;
   }
-  if (cached.environment.toolchain.vitePlus !== toolchain.vitePlus) {
+  // The whole toolchain, not only `vitePlus` (#94). Comparing one component let a cached report
+  // answer a run that had upgraded Rolldown, moved to another Node, or — the case that matters
+  // most — installed a different transitive graph or a patch, because none of those moved the one
+  // string being compared. A cache hit is a claim that the stored report describes *this* run, so
+  // every component the report records has to agree.
+  if (!sameToolchainIdentity(cached.environment.toolchain, toolchain)) {
     return false;
   }
   const cachedSmoke = cached.validation.find(entry => entry.step === "runtime-smoke");

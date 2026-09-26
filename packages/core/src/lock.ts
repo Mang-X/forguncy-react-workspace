@@ -131,10 +131,136 @@ export function matchesForguncyTargetIdentity(
   );
 }
 
-/** The toolchain that produced a record's technical evidence. */
+/**
+ * The install graph a probe resolved against, as content identities rather than versions.
+ *
+ * Decision source: GitHub Issue #94 — "Probe 身份：采集真实安装图、补丁和实际构建工具版本"
+ * https://github.com/Mang-X/forguncy-react-workspace/issues/94
+ *
+ * Why digests and not a resolved-version map: the question a stale record has to answer is
+ * "would this probe see the same files if it ran now", and that is a property of the whole
+ * resolution — a transitive bump, an `overrides` entry, a patch applied to a dependency the
+ * record never names. Recording the versions of the packages a decision *mentions* cannot answer
+ * it, which is the hole #94 found: `resolvedVersion` was unchanged while the artifact was not.
+ *
+ * **Scope, stated so the invalidation is predictable.** The digests cover the lockfile the
+ * resolution came from, the declared patch set, and the project configuration that affects
+ * resolution. They are deliberately **conservative**: a change to a dependency no probed package
+ * can reach still invalidates, because deciding reachability is the bundler's answer and this
+ * layer does not re-derive it. Narrowing to the reachable subgraph is a later optimisation, not a
+ * licence to guess here.
+ *
+ * **Portable by construction.** Every digest is over file *content*; no path — and certainly no
+ * absolute path — is part of the input. The same real inputs in two directories therefore compose
+ * the same identity, which is what lets a lock written on one machine be judged on another.
+ *
+ * **A `null` component is unknown, and unknown is stale** (`lock-freshness.ts`). It is never
+ * "immaterial": an identity that cannot say which install graph it used cannot confirm the
+ * evidence still holds, and a lock whose whole purpose is reproducibility must not be the one
+ * place that guesses in favour of the newer claim.
+ */
+export interface InstallGraphIdentity {
+  /**
+   * Content digest of the package manager lockfile the install came from, e.g. `sha256:1f0c…`.
+   *
+   * `null` when the project has no lockfile this toolchain recognizes. Null is not "no install
+   * graph" — it is "this probe cannot say which install graph it used". Such a project can still
+   * be probed; it cannot have its probe evidence *verified*, and freshness says so.
+   */
+  readonly lockfile: string | null;
+  /**
+   * Content digest of the declared patch set: the declarations *and* the patch files they name.
+   *
+   * Both halves are needed. The declarations say which patches apply; the file contents say what
+   * they do, and a patch edited without a re-install is exactly the change a declaration-only
+   * digest would miss.
+   */
+  readonly patches: string | null;
+  /**
+   * Content digest of the project configuration that affects resolution — `pnpm-workspace.yaml`
+   * (overrides, catalogs, workspace globs, patch declarations) and the manifest's package-manager
+   * field.
+   *
+   * Separate from the lockfile because the two move independently: a config edited without a
+   * re-install leaves a lockfile that describes a resolution nobody has any more.
+   */
+  readonly configuration: string | null;
+}
+
+/**
+ * The toolchain that produced a record's technical evidence.
+ *
+ * **Every component is an identity of the *actual* thing used, not of a declared string.** The
+ * defect #94 closes: a probe resolved a different transitive dependency, applied a patch, or ran
+ * a different Rolldown, and the record still reported `fresh` — because the only thing compared
+ * was `vite-plus` as *spelled* in the project's manifest, and a manifest is a request rather than
+ * an install result. Two projects that both write `"vite-plus": "0.3.2"` can run different
+ * bundlers, and one can carry a patched transitive dependency the other does not.
+ *
+ * `rolldown` and `node` are **unknown when `null`**, and unknown is stale rather than immaterial
+ * (`toolchain-unknown`). `vitePlus` keeps its older, weaker reading — see its own note — because
+ * #8 allowed a record to declare that version genuinely immaterial, and re-reading that
+ * declaration as "unknown" would silently re-open every record that made it.
+ */
 export interface ToolchainIdentity {
-  /** Vite+ version, e.g. `0.3.2`. */
+  /**
+   * Vite+ version, e.g. `0.3.2`.
+   *
+   * Read from the **installed** `vite-plus` manifest rather than from the declaring manifest's
+   * range: `"^0.3.2"` and `"0.3.2"` name different installed tools, and only the installed one
+   * says what ran. `null` when it is not installed where the project resolves.
+   *
+   * The one component whose `null` may mean "genuinely immaterial" rather than "unknown": #8 asks
+   * for the toolchain "when material", and a record that declares it immaterial is not re-opened
+   * by a Vite+ upgrade. `validateProbedWith` states when that declaration is legal.
+   */
   readonly vitePlus: string | null;
+  /**
+   * The Rolldown version the bundler actually ran, e.g. `1.2.9`.
+   *
+   * Resolved as `rolldown` **from the project**, which is the module a build imports — not the
+   * copy Vite+ carries internally. Those are different tools with independent versions, and
+   * conflating them is the error this field exists to make impossible: upgrading one is not
+   * upgrading the other, and a record measured through the project's Rolldown says nothing about
+   * a build that goes through Vite+'s.
+   *
+   * Optional for the read path's sake, exactly as {@link installGraph} is: a record written before
+   * this axis existed has no key here, and the type must not assert one the parser does not
+   * guarantee. Freshness reads an **absent** value the same way it reads `null` — unknown, hence
+   * `toolchain-unknown` — so the weaker annotation costs no verification strength.
+   */
+  readonly rolldown?: string | null;
+  /**
+   * The Node **major line** the probe ran under, e.g. `24`. Optional for {@link rolldown}'s reason.
+   *
+   * Deliberately not the full `24.21.0`, and the reason is the granularity at which this component
+   * can change what was measured. A Node major is a runtime change — module resolution, the
+   * `exports` conditions a bundler evaluates, the loader a package is read through — and any of
+   * those can move an artifact. A patch release cannot: Node's own release policy makes patch
+   * lines bugfix-only, so a record tied to `24.21.0` would report `toolchain-changed` for a
+   * security update that changed no resolution at all.
+   *
+   * That false positive is not hypothetical in this repository: CI pins `node-version: "24"`, which
+   * resolves to whatever the newest 24.x is, so a full version here would rot every committed lock
+   * in the tree on a schedule unrelated to the project — and a reason that fires for nothing is a
+   * reason readers learn to ignore. `rolldown` and `vitePlus` stay exact for the opposite reason:
+   * a bundler patch changes emitted bytes, which is exactly what a size measurement is about.
+   *
+   * Recorded and compared at the same granularity, so there is one spelling of this fact rather
+   * than a precise one on the record and a coarse one in the rule.
+   */
+  readonly node?: string | null;
+  /**
+   * The install graph the probe resolved against.
+   *
+   * Optional so a record written before this axis existed still parses: the read path treats an
+   * **absent** key exactly as it treats `null`, i.e. unknown, and reports `install-graph-unknown`
+   * rather than refusing the document — #8's migration contract, and the same shape
+   * `imports` and `artifactEvidence` already take. A required field would be a type asserting a
+   * key a prior toolchain's lock does not have, so every consumer would read `undefined` where
+   * the annotation promised an object.
+   */
+  readonly installGraph?: InstallGraphIdentity | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -776,6 +902,14 @@ const LOCK_KEY_ORDER: readonly string[] = [
   "productBuild",
   "hostReactVersion",
   "vitePlus",
+  // #94's toolchain components, in the order a reader wants them: the tools that ran, then the
+  // graph they resolved against.
+  "rolldown",
+  "node",
+  "installGraph",
+  "lockfile",
+  "patches",
+  "configuration",
   "version",
   "identity",
   "kind",
@@ -1163,9 +1297,39 @@ function inspectTarget(target: Record<string, unknown>, where: string): readonly
   return problems;
 }
 
+/**
+ * The toolchain object, as a lock record or a probe report spells it.
+ *
+ * `vitePlus` is required-as-nullable; the components #94 added are checked only when **present**,
+ * because a record written by the previous toolchain does not have them. Requiring them here would
+ * refuse such a document at parse time, and #8's migration contract is that an older lock stays
+ * **readable and stale** rather than unreadable — the staleness axis reports
+ * `install-graph-unknown`, which is the actionable answer, and a parser error is not.
+ *
+ * `installGraph` is inspected structurally when present so a typo'd or non-string component is
+ * caught here rather than reaching the freshness comparison, where a non-string would compare
+ * unequal to a string digest and report `install-graph-changed` — a staleness claim the evidence
+ * does not support, since the record is malformed rather than moved.
+ */
 function inspectToolchain(toolchain: Record<string, unknown>, where: string): readonly string[] {
   const problems: string[] = [];
   inspectNullableString(problems, toolchain, "vitePlus", where);
+  for (const field of ["rolldown", "node"]) {
+    if (toolchain[field] !== undefined) {
+      inspectNullableString(problems, toolchain, field, where);
+    }
+  }
+  const installGraph = toolchain["installGraph"];
+  if (installGraph === undefined || installGraph === null) {
+    return problems;
+  }
+  if (!isPlainObject(installGraph)) {
+    problems.push(`${where} must declare \`installGraph\` as an object or null.`);
+    return problems;
+  }
+  for (const field of ["lockfile", "patches", "configuration"]) {
+    inspectNullableString(problems, installGraph, field, `${where}.installGraph`);
+  }
   return problems;
 }
 

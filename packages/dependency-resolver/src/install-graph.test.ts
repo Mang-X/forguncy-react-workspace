@@ -12,12 +12,35 @@ import {
 } from "@forguncy-react-workspace/core";
 
 import {
+
+/**
+ * The install/toolchain identity the fixtures in this file share (#94).
+ *
+ * Spelled once and used by both the records and the environment, because a record and an
+ * environment that spelled one identity two ways would report `install-graph-changed` on a case
+ * that means "these agree". Every component is present: an absent one is `unknown`, and unknown
+ * is stale by design, so a partial literal would make each case pass or fail for a reason it
+ * does not name.
+ */
+
   compilationDependencies,
   readFgcLock,
   recordDependencyDecision,
   recordedPackageNames,
   resolveInstalledVersions,
 } from "./index.ts";
+
+const FIXTURE_TOOLCHAIN = {
+  vitePlus: "0.3.2",
+  rolldown: "1.2.9",
+  node: "24.21.0",
+  installGraph: {
+    lockfile: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    patches: "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    configuration: "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+  },
+} as const;
+
 
 async function writeFileAt(path: string, contents: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
@@ -307,7 +330,7 @@ describe("the install graph as the staleness input", () => {
     return {
       resolvedVersions: versions,
       target: RUNTIME_CONTRACT_TARGET,
-      toolchain: { vitePlus: "0.3.2" },
+      toolchain: FIXTURE_TOOLCHAIN,
       probeFingerprints,
       extensionVersions: {},
       extensionIdentities: {},
@@ -321,7 +344,7 @@ describe("the install graph as the staleness input", () => {
       decision: { strategy: "inline", packageName: "dayjs" },
       probe: { status: "passed", fingerprint: FINGERPRINT, versionIndependent: false },
       resolvedVersion: "1.11.13",
-      probedWith: { vitePlus: "0.3.2" },
+      probedWith: FIXTURE_TOOLCHAIN,
       target: forguncyTargetIdentity(),
       evidence: [{ kind: "probe", reference: "docs/probes/inline-dayjs.md" }],
     });
@@ -358,7 +381,7 @@ describe("the install graph as the staleness input", () => {
       decision: { strategy: "inline", packageName },
       probe: { status: "passed", fingerprint: FINGERPRINT, versionIndependent: false },
       resolvedVersion: "1.11.13",
-      probedWith: { vitePlus: "0.3.2" },
+      probedWith: FIXTURE_TOOLCHAIN,
       target: forguncyTargetIdentity(),
       evidence: [{ kind: "probe", reference: "docs/probes/inline-dayjs.md" }],
     });

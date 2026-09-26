@@ -39,7 +39,6 @@
  * `packageVersion: ""`. The report path exists for a candidate that exists.
  */
 
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { ProbeEnvironment, ToolchainIdentity } from "@forguncy-react-workspace/core";
@@ -308,35 +307,10 @@ export async function resolvePackageIdentity(projectRoot: string, packageName: s
   };
 }
 
-/** Toolchain as the report records it: the Vite+ version this workspace pins, or null. */
-export async function readToolchainIdentity(projectRoot: string): Promise<ToolchainIdentity> {
-  try {
-    const text = await readFile(join(projectRoot, "package.json"), "utf8");
-    const parsed: unknown = JSON.parse(text);
-    if (parsed !== null && typeof parsed === "object") {
-      const record = parsed as {
-        readonly devDependencies?: unknown;
-        readonly dependencies?: unknown;
-      };
-      const vitePlus = pickVersion(record.devDependencies) ?? pickVersion(record.dependencies);
-      return { vitePlus };
-    }
-  } catch {
-    // No readable workspace manifest: a null toolchain is the honest answer and
-    // `toolchain-unknown` in freshness treats it as such.
-  }
-  return { vitePlus: null };
-}
-
-function pickVersion(deps: unknown): string | null {
-  if (deps !== null && typeof deps === "object") {
-    const vitePlus = (deps as Record<string, unknown>)["vite-plus"];
-    if (typeof vitePlus === "string" && vitePlus.trim().length > 0) {
-      return vitePlus.trim();
-    }
-  }
-  return null;
-}
+// `readToolchainIdentity` used to live here, reading the *declared* `vite-plus` string out of the
+// project manifest. It moved to `install-identity.ts` (#94) and now reads the installed graph and
+// the tools that actually ran. What is left in this module is the artifact's identity — which
+// package, version, license and source — and the two shapes a report is built from.
 
 /** The `environment` section: identity of everything the other sections observe against. */
 export function buildProbeEnvironment(

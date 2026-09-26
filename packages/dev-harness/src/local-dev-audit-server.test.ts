@@ -7,8 +7,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it, onTestFinished } from "vitest";
 import { createServer } from "vite";
 
-import type { LockedDependencyDecision } from "@forguncy-react-workspace/core";
+import type { LockedDependencyDecision, ToolchainIdentity } from "@forguncy-react-workspace/core";
 import { createEmptyFgcLock } from "@forguncy-react-workspace/core";
+import { readToolchainIdentity } from "@forguncy-react-workspace/dependency-resolver/local";
 
 import { readProjectDependencyDecisions } from "./local-dev-audit.ts";
 import { removeTempProject } from "./temp-project.ts";
@@ -72,8 +73,14 @@ const exampleRoot = join(repositoryRoot, "examples", "dev-harness");
  * only input that matters, and it is written to the path the config declares.
  */
 
-/** A legal `extension` record, so the audit has something to require a choice for. */
-function extensionDecision(packageName: string): LockedDependencyDecision {
+/**
+ * A legal `extension` record, so the audit has something to require a choice for.
+ *
+ * `probedWith` is a parameter rather than a literal because it has to be the identity the project
+ * this record is written into actually reports (#94) — a literal would make the record
+ * `install-graph-changed` against its own project, and the audit would withhold it.
+ */
+function extensionDecision(packageName: string, probedWith: ToolchainIdentity): LockedDependencyDecision {
   return {
     strategy: "extension",
     packageName,
@@ -88,7 +95,7 @@ function extensionDecision(packageName: string): LockedDependencyDecision {
       productBuild: "12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623",
       hostReactVersion: "19.2.7",
     },
-    probedWith: { vitePlus: "0.3.2" },
+    probedWith,
     extension: { version: "5.102.8", identity: "sha256:37df6a5941008a3de11d76d481ff9ab43331e6ed0b278a0ada69f803710bde3e" },
     rejectedCandidate: null,
     rationale: "A bundled copy would give every Cell its own QueryClient.",
@@ -119,9 +126,19 @@ async function projectWithExtensionLock(): Promise<{ root: string; cleanup: () =
   const { tmpdir } = await import("node:os");
   const root = await mkdtemp(join(tmpdir(), "dev-harness-audit-"));
 
+  // A lockfile, and the record's `probedWith` is read *after* it for the same reason the package
+  // stub below exists (#94): identity comes from the install graph, and `install-graph-unknown` is
+  // a reason a local process can judge — so a project with no install identity is one the compiler
+  // would withhold, and these tests would exercise the withholding path instead of the
+  // missing-choice path they name.
+  await writeFile(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n", "utf8");
+
   await writeFile(
     join(root, "fgc.lock.json"),
-    JSON.stringify({ schemaVersion: 1, decisions: [extensionDecision("@tanstack/react-query")] }),
+    JSON.stringify({
+      schemaVersion: 1,
+      decisions: [extensionDecision("@tanstack/react-query", await readToolchainIdentity(root))],
+    }),
     "utf8",
   );
   await mkdir(join(root, "cells", "probe", "src"), { recursive: true });
@@ -176,10 +193,16 @@ describe("the declared lock path is honoured, which `readFgcLock(projectRoot)` c
     // The decisions live in a subdirectory the project declared, and *nothing* is at the default
     // location — so a reader that ignored the declaration would find no file at all.
     await mkdir(join(root, "locks"), { recursive: true });
+    // A lockfile in the project root, so the record's identity can be the project's own (#94).
+    // Written before the lock below for the same reason `projectWithExtensionLock` states.
+    await writeFile(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n", "utf8");
     const declaredPath = join(root, "locks", "fgc.lock.json");
     await writeFile(
       declaredPath,
-      JSON.stringify({ schemaVersion: 1, decisions: [extensionDecision("@tanstack/react-query")] }),
+      JSON.stringify({
+        schemaVersion: 1,
+        decisions: [extensionDecision("@tanstack/react-query", await readToolchainIdentity(root))],
+      }),
       "utf8",
     );
     // A Cell entry that exists, so the only thing that can refuse this server is the audit.

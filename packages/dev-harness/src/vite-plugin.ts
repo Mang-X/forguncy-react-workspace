@@ -86,7 +86,7 @@ import {
 } from "./local-dev-audit.ts";
 import {
   formatLocalDecisionProjection,
-  installedVitePlusToolchain,
+  installedToolchain,
   projectLocalDecisions,
 } from "./local-decision-projection.ts";
 
@@ -792,10 +792,11 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
         // project's `runtime.forguncyVersion` is checked against it rather than substituted for it:
         // it names a version, not a build, so it cannot answer a comparison that asks for the build.
         target: RUNTIME_CONTRACT_TARGET,
-        // Read through this package's own resolution, so the toolchain a record is compared against
-        // is the one actually driving the loop. Absent means the comparison reports `toolchain-unknown`
-        // rather than passing, which is the honest answer for a harness installed without `vite-plus`.
-        toolchain: installedVitePlusToolchain(),
+        // The project's install graph, with `vitePlus` read through this package's own resolution
+        // because that is the tool actually driving the loop (#94). `registry.root` is the graph
+        // the Cells resolve in, which is the graph a record describes — and the one #94 exists
+        // for, since it can move while every version a record names stays put.
+        toolchain: await installedToolchain(registry.root),
       });
 
       const audit = auditHarnessConfiguration({
