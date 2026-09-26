@@ -52,6 +52,30 @@ export type SyncGuaranteeId = (typeof SYNC_GUARANTEE_IDS)[number];
 export const EXECUTED_AGAINST_DESIGNER =
   "Forguncy 12.0.100.0 (designer assembly 12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623), a live MCP designer session against a disposable page; re-run with packages/mcp-sync/scripts/validate-sync-against-designer.mjs, evidence on #20.";
 
+/**
+ * The routes a run can take through the flow's validation half.
+ *
+ * A *route* rather than a guarantee, because #92 showed the two are independent: the write
+ * route replaces the Cell and the unchanged route finds it already correct, and both feed the
+ * same save-status read, error gate, generation and locator. So #20's execution can discharge
+ * "the project's errors were checked after the sync" for the write route while saying nothing
+ * whatever about the unchanged route — the script it ran asserted the *opposite* there (the
+ * second run stopped before those steps, `write-cell-source=not-reached`).
+ *
+ * Collapsing the two back onto one `executedAt` is what would overstate coverage: a reader
+ * asking "is the unchanged path validated?" would be answered by evidence from a run that
+ * never reached it. Named here so the question is answerable.
+ */
+export const SYNC_RUNTIME_ROUTES = ["write", "unchanged"] as const;
+
+export type SyncRuntimeRoute = (typeof SYNC_RUNTIME_ROUTES)[number];
+
+/** What each route did before the validation half, for a reader of a coverage gap. */
+export const SYNC_RUNTIME_ROUTE_MEANINGS: Readonly<Record<SyncRuntimeRoute, string>> = {
+  write: "the run wrote the Cell, then saved, checked the project and generated the page",
+  unchanged: "the run found the Cell already holding this artifact, wrote nothing, and still saved, checked the project and generated the page",
+};
+
 export interface SyncGuarantee {
   readonly id: SyncGuaranteeId;
   /** The promise, in the Spec's wording. */
@@ -62,6 +86,22 @@ export interface SyncGuarantee {
   readonly howToCheck: string;
   /** Set when the guarantee is deliberately weaker than it reads. */
   readonly caveat?: string;
+  /**
+   * The routes this promise spans, on the guarantees some run has been recorded against.
+   *
+   * Present exactly when {@link SyncGuarantee.executedAt} is, and that pairing is the point:
+   * the route list is part of an execution *claim*, so recording a run forces the question
+   * "which route?" to be answered rather than left to a reader's assumption. It is keyed on
+   * the execution rather than on `level`, because a locally checkable promise can still have
+   * a real-project run against it — `sync-is-idempotent` does — and that run covers routes
+   * too. A guarantee no run has touched has no execution claim to qualify, and is wholly
+   * reported by {@link unexecutedRealRuntimeSyncGuarantees} instead.
+   *
+   * The list of routes the promise *spans*, not the ones executed — a route present here
+   * without a matching {@link SyncGuarantee.executedRoutes} entry is exactly the gap
+   * {@link unexecutedRuntimeRouteCoverage} reports.
+   */
+  readonly runtimeRoutes?: readonly SyncRuntimeRoute[];
   /**
    * Where the check was actually run, when it has been.
    *
@@ -75,8 +115,22 @@ export interface SyncGuarantee {
    * compatibility, and a completed runtime validation is not a permanent property of the
    * code: the record below names the environment it ran in, and a different Forguncy
    * version is a re-run rather than an inheritance.
+   *
+   * The *environment* of the most recent execution. Which routes it covered is
+   * {@link SyncGuarantee.executedRoutes}, and the two are separate because one environment can
+   * have covered only some of them.
    */
   readonly executedAt?: string;
+  /**
+   * Which of {@link SyncGuarantee.runtimeRoutes} the execution in `executedAt` covered.
+   *
+   * Required whenever `executedAt` is present, and a subset of `runtimeRoutes` — both are
+   * asserted, so a route cannot be claimed as executed without being one the promise spans,
+   * and an execution cannot be recorded without saying what it covered. Omitting a route here
+   * is the honest and deliberate statement "this route has not been executed", which is what
+   * a behaviour added later looks like until someone runs it.
+   */
+  readonly executedRoutes?: readonly SyncRuntimeRoute[];
 }
 
 export const SYNC_GUARANTEES: readonly SyncGuarantee[] = [
@@ -92,7 +146,11 @@ export const SYNC_GUARANTEES: readonly SyncGuarantee[] = [
       "Sync against a real project and read the Cell back: the persisted `cellTypeProps` carries the generated `code` and the `frontendLibraries` references that were planned, and no step was performed by hand.",
     caveat:
       "The local half is the mutation payload — its field names are the platform's (`pageName`, `cell`, `cellType`, `cellTypeProps.code`, `cellTypeProps.frontendLibraries[].libraryId`) and `planCellSync` refuses to emit anything else. Whether the write is *accepted* is the platform's answer, not this contract's.",
+    // Write only, and that is not an omission: the promise is that a write lands, and it has
+    // no meaning on a run that wrote nothing. #92's unchanged route does not touch it.
+    runtimeRoutes: ["write"],
     executedAt: EXECUTED_AGAINST_DESIGNER,
+    executedRoutes: ["write"],
   },
   {
     id: "extension-metadata-verified-before-mutation",
@@ -108,10 +166,14 @@ export const SYNC_GUARANTEES: readonly SyncGuarantee[] = [
     statement: "Project errors are checked immediately after sync.",
     level: "real-runtime",
     howToCheck:
-      "Complete a sync against a real project and assert `api.app.checkProjectErrors` was called after the mutation and that a non-zero `errorCount` failed the operation instead of being reported as success.",
+      "Complete a sync against a real project and assert `api.app.checkProjectErrors` was called after the sync's own work — on either route, write or unchanged — and that a non-zero `errorCount` failed the operation instead of being reported as success.",
     caveat:
       "Locally, only the flow's shape is checkable: `assertMcpSyncFlowIsCoherent` proves the step exists, is a post-mutation step, and runs before the page is generated, and the executor's own tests assert the call order it performs against a stub port. Neither can prove a *real* project returned the count the run reports; only a real project can.",
+    // #92 made the gate reachable on a run that wrote nothing, so the promise now spans two
+    // routes and #20's run — which is the write route — covers one of them.
+    runtimeRoutes: ["write", "unchanged"],
     executedAt: EXECUTED_AGAINST_DESIGNER,
+    executedRoutes: ["write"],
   },
   {
     id: "runtime-locator-returned",
@@ -121,7 +183,11 @@ export const SYNC_GUARANTEES: readonly SyncGuarantee[] = [
       "Assert a completed sync returns a runtime locator for the target page, and that a generation failure is reported as a structured failure rather than an empty result.",
     caveat:
       "The locator's *field name* is this contract's, not the platform's — #5 records the URL the flow produced, not the response object it arrived in — so the correspondence is the adapter's to get right and only a real project can confirm it.",
+    // Same split as the error gate: #92 returns a locator from a run that wrote nothing, and
+    // that route is a different moment in the flow from the write route #20 executed.
+    runtimeRoutes: ["write", "unchanged"],
     executedAt: EXECUTED_AGAINST_DESIGNER,
+    executedRoutes: ["write"],
   },
   {
     id: "sync-is-idempotent",
@@ -131,8 +197,10 @@ export const SYNC_GUARANTEES: readonly SyncGuarantee[] = [
     howToCheck:
       "Stamp the same artifact twice and assert the stamped code is byte-identical; assert the plan's mutation serializes identically across runs; and assert that a target whose marker carries this artifact's fingerprint is classified `identical` and planned as a skip.",
     caveat:
-      "Two halves are outside a local check, and #20 executed both: a second `setCells` with an identical payload left the Cell byte-identical, and a merged Cell kept its `rowSpan`/`colSpan` when the mutation omitted them. What a local check establishes is that sync asks for no change it does not need.",
+      "Two halves are outside a local check, and #20 executed both: a second `setCells` with an identical payload left the Cell byte-identical, and a merged Cell kept its `rowSpan`/`colSpan` when the mutation omitted them. What a local check establishes is that sync asks for no change it does not need. #92 adds a third: on the `unchanged` route the run writes nothing but can still *persist the project* when the product reports it dirty, which is why that route reports `mutated` — a state #20's write-only execution never produced.",
+    runtimeRoutes: ["write", "unchanged"],
     executedAt: EXECUTED_AGAINST_DESIGNER,
+    executedRoutes: ["write"],
   },
   {
     id: "probable-designer-divergence-detected",
@@ -185,7 +253,54 @@ export function realRuntimeSyncGuarantees(): readonly SyncGuarantee[] {
  * is empty as of #20, and kept as a function rather than asserted once because the next
  * guarantee added at `real-runtime` level should appear here rather than being assumed
  * discharged by the run that preceded it.
+ *
+ * Read {@link unexecutedRuntimeRouteCoverage} with it. This answers "has this promise been
+ * executed at all?"; that answers "on every route it spans?", and the second is the question
+ * a route added to an already-executed promise turns into a real one. This function returns
+ * nothing for such a promise — correctly, since *a* run did discharge it — which is exactly
+ * why a route-level gap cannot be seen from here.
  */
 export function unexecutedRealRuntimeSyncGuarantees(): readonly SyncGuarantee[] {
   return realRuntimeSyncGuarantees().filter(guarantee => guarantee.executedAt === undefined);
+}
+
+/** One promise and one route it spans that no recorded execution has covered. */
+export interface UnexecutedRuntimeRoute {
+  readonly guaranteeId: SyncGuaranteeId;
+  readonly route: SyncRuntimeRoute;
+  /** What a run on this route does, so the gap is readable without a second lookup. */
+  readonly routeMeaning: string;
+}
+
+/**
+ * The per-route coverage gaps: every (promise, route) pair a real project must establish and
+ * no recorded execution has.
+ *
+ * The reason this exists beside {@link unexecutedRealRuntimeSyncGuarantees}: a promise can be
+ * executed on one route and unexecuted on another, and the promise-level function cannot see
+ * that. #92 is the case that produced it — the error gate and the locator gained an
+ * `unchanged` route, #20's run covers only the write route, and
+ * `unexecutedRealRuntimeSyncGuarantees()` stays empty either way.
+ *
+ * Empty is the honest state to aim for, and it is *not* reached by executing the canonical
+ * script alone: as of #92 that script asserts the unchanged path through two corrected port
+ * calls (the shipped adapter cannot reach it on the available designer build — see the script
+ * header), so its run is executor-level evidence and does not close these entries. Closing
+ * them needs a run through the shipped adapter on the pinned product version.
+ */
+export function unexecutedRuntimeRouteCoverage(): readonly UnexecutedRuntimeRoute[] {
+  const gaps: UnexecutedRuntimeRoute[] = [];
+  // Every guarantee, not `realRuntimeSyncGuarantees()`. The axis is the *execution claim*
+  // (`runtimeRoutes` is present exactly when `executedAt` is), not the level: a locally
+  // checkable promise can have a real-project execution recorded against it — and
+  // `sync-is-idempotent` does and is affected here, because #92 gave the unchanged route a
+  // save that can persist the project, which its "does not materially change project state"
+  // wording is about. Filtering by level would silently drop exactly that entry.
+  for (const guarantee of SYNC_GUARANTEES) {
+    for (const route of guarantee.runtimeRoutes ?? []) {
+      if (guarantee.executedRoutes?.includes(route)) continue;
+      gaps.push({ guaranteeId: guarantee.id, route, routeMeaning: SYNC_RUNTIME_ROUTE_MEANINGS[route] });
+    }
+  }
+  return gaps;
 }

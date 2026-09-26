@@ -8,6 +8,24 @@
  * a live designer session with a disposable page, and it is recorded here so the run is
  * reproducible and its raw observations are the evidence rather than a summary of them.
  *
+ * ## What a run of this discharges, and the one thing it does not (#92)
+ *
+ * `guarantees.ts` records which routes each real-project promise has been executed on, and
+ * `unexecutedRuntimeRouteCoverage()` reports the rest. Read them before reporting a run here
+ * as coverage, because the two do not line up automatically:
+ *
+ * - Steps 1–6 exercise the **write** route, which is what `EXECUTED_AGAINST_DESIGNER` records
+ *   and what #20's run discharged.
+ * - Step 7 now also asserts the **unchanged** route (#92: no write, but the error check and
+ *   the generation still run, with this run's own locator). That route is recorded as
+ *   **unexecuted** on purpose, and a run of this script does not change that: on the
+ *   designer builds available here the shipped adapter cannot reach it — `readOneCell`
+ *   requires `cellType === "ReactCellTypeCellType"` while the product writes that name and
+ *   reads back `"ReactCellType"`, so a second sync reports `refused`, and 12.0.101.0 has no
+ *   `api.app.generatePageAsync` at all. Closing those entries needs a run through the
+ *   shipped adapter on the pinned product version; `validate-unchanged-against-designer.mjs`
+ *   covers the executor half in the meantime and says why it is executor-level only.
+ *
  * ## Why it is a script and not a vitest test
  *
  * It needs a running Forguncy designer with a project open. A `vp test` that required one

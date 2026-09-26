@@ -157,9 +157,17 @@ export {
   realRuntimeSyncGuarantees,
   SYNC_GUARANTEE_IDS,
   SYNC_GUARANTEES,
+  SYNC_RUNTIME_ROUTE_MEANINGS,
+  SYNC_RUNTIME_ROUTES,
   unexecutedRealRuntimeSyncGuarantees,
+  unexecutedRuntimeRouteCoverage,
 } from "./guarantees.ts";
-export type { SyncGuarantee, SyncGuaranteeId } from "./guarantees.ts";
+export type {
+  SyncGuarantee,
+  SyncGuaranteeId,
+  SyncRuntimeRoute,
+  UnexecutedRuntimeRoute,
+} from "./guarantees.ts";
 
 // The generated-artifact fingerprint and its marker
 export {
