@@ -178,15 +178,15 @@ describe("observeSize", () => {
 
   it("records which way the estimate leans, on every run", () => {
     // The fact that makes the number interpretable. It selects between two *estimates*, not
-    // between an estimate and a verdict — see `SizeBound` — so its presence must not be read as
-    // authorization.
+    // between an estimate and a verdict — see `SizeEstimateBias` — so its presence must not be
+    // read as authorization.
     expect(factValue(observeSize([chunk("var a = 1;")], null), "size.estimateBias")).toBe("upper-leaning");
     expect(factValue(observeSize([chunk("var a = 1;")], null, "lower-leaning"), "size.estimateBias")).toBe("lower-leaning");
     expect(factValue(observeSize([chunk("var a = 1;")], 4), "size.estimateBias")).toBe("upper-leaning");
   });
 
-  it("defaults to the upper bound, which is the direction that leans over", () => {
-    // A namespace probe is the default entry shape, so a caller that passes no `bound` declared
+  it("defaults to leaning over, which is the less flattering direction", () => {
+    // A namespace probe is the default entry shape, so a caller that passes no `bias` declared
     // no import surface. The default leans over — the *less* flattering direction for the
     // candidate — so a caller cannot get a friendlier estimate by omitting the argument. A cap is
     // passed because the leaning is only stated where it is interpretable, i.e. against a cap.

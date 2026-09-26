@@ -740,7 +740,8 @@ function parseImportsOption(value, where) {
  * would not carry.
  *
  * An empty result is `null`, the whole-namespace probe, because that is the one state the lock
- * spells as absent and the one state under which no cap rejection is sound. See `size.ts`.
+ * spells as absent. No cap rejection is sound under *any* surface — see `size.ts` — so what this
+ * distinction carries is which way the estimate leans, not whether a verdict is available.
  */
 function importsFor(entry, options) {
   const requested = parseImportsOption(options.imports, "--imports");
@@ -1713,8 +1714,9 @@ async function updateFor(entry, probe, probeResult, cellTarget, imports) {
     cellTarget,
     // The declared import surface the measurement was taken under, or null for the whole
     // namespace. Recorded because it is one of the fingerprint's declared inputs *and* because
-    // it is what a reader needs to interpret the record's own size evidence: only a named
-    // surface makes a `cell-code-budget-exceeded` rejection sound. See `size.ts`.
+    // it is what a reader needs to interpret the record's own size evidence: it says which way
+    // that estimate leans. It does not make a `cell-code-budget-exceeded` rejection sound under
+    // any surface — that verdict is the compiler's, recorded as `artifactEvidence`. See `size.ts`.
     imports,
     // Rule 4 of #8: a `replace` record keeps no dependency for the compiled cell, so
     // recording a resolved version there would imply the package is still installed for

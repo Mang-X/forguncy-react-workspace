@@ -84,9 +84,10 @@ export interface DependencyDecisionUpdate {
    * whole-namespace probe.
    *
    * Stated rather than derived from the fingerprint: the fingerprint is one opaque string and
-   * a reader asking "does this record's cap rejection rest on a lower bound" must not have to
-   * parse it. It also has to survive into the record for `status` to recompose the same
-   * fingerprint at all.
+   * a reader asking "which way does this record's size estimate lean" must not have to parse
+   * it. It also has to survive into the record for `status` to recompose the same fingerprint
+   * at all. It is not a basis for a cap rejection — none of these figures authorizes one; the
+   * verdict is the compiler's, recorded separately as `artifactEvidence`.
    */
   readonly imports?: readonly string[] | null;
   /** The measurement being recorded. */

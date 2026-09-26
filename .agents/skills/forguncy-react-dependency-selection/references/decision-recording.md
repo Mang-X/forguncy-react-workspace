@@ -31,8 +31,8 @@
   "extensionIdentity": "sha256:…",
 
   "cellTarget": null,                  // 默认 null，即适用于每个 target
-  "imports": ["debounce"],             // 可选：Cell 会具名导入的绑定，用于让尺寸估算偏向"下"。
-                                       // 省略或 null = 整个命名空间（估算偏向"上"）。详见下节。
+  "imports": ["debounce"],             // 可选：Cell 会具名导入的绑定，让尺寸估算偏向"小"（非下界）。
+                                       // 省略或 null = 整个命名空间（估算偏向"大"）。详见下节。
   "artifactEvidence": {                // rejection.code 为 cell-code-budget-exceeded 时**必填**：
     "codeCharacters": 200000,          // 编译器对该 Cell 报出的实际测量值，逐字誊自它自己的
     "budgetCharacters": 100000         // cell-code-budget-exceeded 诊断。详见下面「硬上限判定」。
@@ -49,7 +49,11 @@
 这两项都进 probe 的**指纹**，所以它们必须是**测量时**就定好的输入，而不是事后从记录里猜出来的：
 
 - **`cellTarget`**：这个决策作用于哪个 Cell（`forguncy.config` 里的 `cells.<id>`）。它决定 probe 用哪个 `output.codeBudgetCharacters` 作为上限来**估算**。决策文件里写了就等于 `--cell`，命令行**不必**再重复一遍；两处都写且不一致会被拒绝（一个记录只能对应一个 Cell 身份）。
-- **`imports`**：Cell 会具名导入的绑定列表。它让 probe 的合成入口从 `import * as candidate` 变成 `import { … }`，从而让估算偏向**下**（"至少这么大"）而不是偏向**上**（"至多这么大"）。字段是**集合**：排序去重后落盘，`["a","b"]` 与 `["b","a"]` 必然是同一份字节。空数组不是合法写法——"整个命名空间"的写法是 `null` 或省略。
+- **`imports`**：Cell 会具名导入的绑定列表。它让 probe 的合成入口从 `import * as candidate` 变成 `import { … }`，从而改变估算的**偏向方向**：具名时数字**偏小**（大概低估），命名空间时**偏大**（大概高估）。
+
+  两个方向都只是**偏向**，**都不是上下界**（#77 revision 13 用 `react-library` 的 `DatePicker` 反例推翻了两个方向的关系，见 `size.ts`），因此也**都不授权任何拒绝**——probe 在任何 surface 下都不产生 `cell-artifact-budget-exceeded`。
+
+  字段是**集合**：排序去重后落盘，`["a","b"]` 与 `["b","a"]` 必然是同一份字节。空数组不是合法写法——"整个命名空间"的写法是 `null` 或省略。
 
 ### 硬上限判定不由 probe 给出（#77 revision 13）
 
