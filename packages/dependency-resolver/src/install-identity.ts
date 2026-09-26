@@ -186,6 +186,13 @@ async function readTextFile(path: string): Promise<FileState> {
  *
  * The digest is over file **content**, so two projects nested at different depths under one
  * workspace compose the same identity — which is correct, because they share one install.
+ *
+ * The walk is deliberately **more permissive than {@link lockfileDigest}**: it returns the first
+ * ancestor holding *any* recognized lockfile name, while the digest then decides which lockfile is
+ * authoritative from that root's `packageManager`. A root found by a name the manifest does not
+ * claim therefore yields `null` from the digest, which is `unknown` — the safe direction. Reading
+ * every ancestor's manifest during the walk to narrow it would cost more and could only turn an
+ * unknown into a value, which is the direction that produces false fresh.
  */
 async function findInstallRoot(projectRoot: string): Promise<string | null> {
   // Absolute before the walk, so the ancestor search is over real directories rather than over the
@@ -214,18 +221,87 @@ async function findInstallRoot(projectRoot: string): Promise<string | null> {
   }
 }
 
-/** The lockfile's content digest at the install root, or `null` when there is none. */
-async function lockfileDigest(installRoot: string): Promise<string | null> {
-  for (const name of RECOGNIZED_LOCKFILE_NAMES) {
+/** A package manager named by a manifest's `packageManager` field, reduced to its kind. */
+function packageManagerKind(manifest: ParsedConfig): "pnpm" | "npm" | "yarn" | "bun" | null {
+  if (manifest.kind !== "parsed") {
+    return null;
+  }
+  const declared = manifest.value["packageManager"];
+  if (typeof declared !== "string") {
+    return null;
+  }
+  // The field is `<name>@<version>`; the name is what decides which lockfile is authoritative.
+  const name = declared.split("@")[0]?.trim().toLowerCase() ?? "";
+  switch (name) {
+    case "pnpm":
+      return "pnpm";
+    case "npm":
+      return "npm";
+    case "yarn":
+      return "yarn";
+    case "bun":
+      return "bun";
+    default:
+      // An unrecognized or absent manager says nothing about which lockfile is authoritative.
+      return null;
+  }
+}
+
+/** The lockfile each manager writes, in the order that manager's versions used. */
+const LOCKFILES_BY_MANAGER: Readonly<Record<string, readonly string[]>> = {
+  pnpm: ["pnpm-lock.yaml"],
+  npm: ["package-lock.json", "npm-shrinkwrap.json"],
+  yarn: ["yarn.lock"],
+  bun: ["bun.lock", "bun.lockb"],
+};
+
+/**
+ * The lockfile's content digest at the install root.
+ *
+ * **Which lockfile is authoritative is decided by the project's `packageManager`, not by a fixed
+ * priority list.** A migrating project easily leaves both `pnpm-lock.yaml` and `package-lock.json`
+ * behind, and hashing whichever came first in a hardcoded order meant the digest could cover a
+ * lockfile that describes no install: measured on a project whose `packageManager` was `npm@…`
+ * with a stale `pnpm-lock.yaml` beside it, moving the *effective* npm lock's transitive dependency
+ * left the digest byte-identical — a false fresh. The order below is therefore a *preference within
+ * one manager* (npm may write either of its two spellings), not a ranking across managers.
+ *
+ * When the manager cannot be determined, a **single** recognized lockfile is still a usable answer:
+ * a project with exactly one has told us what it is. Two or more candidates is **unknown** rather
+ * than a guess — `null`, which the freshness axis reports as stale. Guessing one of two lockfiles
+ * is how the false fresh above happens, and #94's third criterion forbids presenting an
+ * unestablished identity as a complete one.
+ */
+async function lockfileDigest(installRoot: string, manifest: ParsedConfig): Promise<string | null> {
+  const manager = packageManagerKind(manifest);
+  const candidates = manager === null ? RECOGNIZED_LOCKFILE_NAMES : (LOCKFILES_BY_MANAGER[manager] ?? []);
+
+  /** Every readable candidate's text, in the order tried. */
+  const readable: { readonly name: string; readonly text: string }[] = [];
+  for (const name of candidates) {
     const state = await readTextFile(join(installRoot, name));
-    if (state.kind === "read") {
-      return digestOf(state.text);
-    }
     if (state.kind === "unreadable") {
+      // A lockfile that is *there* and cannot be read is unknown, and it stops the search rather
+      // than being skipped for another: reporting a digest taken from a different file would
+      // describe an install this process never read.
       return null;
     }
+    if (state.kind === "read") {
+      readable.push({ name, text: state.text });
+      if (manager !== null) {
+        // One manager, one lockfile: the first spelling it uses is the answer.
+        return digestOf(state.text);
+      }
+    }
   }
-  return null;
+
+  // No manager named. One lockfile is an answer — a project with exactly one has told us what it
+  // is. Several are not: which of them is authoritative is exactly what could not be determined.
+  if (readable.length > 1) {
+    return null;
+  }
+  const only = readable[0];
+  return only === undefined ? null : digestOf(only.text);
 }
 
 /** A parsed YAML or JSON object, or why it could not be produced. */
@@ -308,16 +384,49 @@ function patchDeclarations(config: ParsedConfig): Record<string, string> | null 
   return normalized;
 }
 
+/** One declared patch, with the content of the file it names. */
+interface PatchEntry {
+  readonly declaration: string;
+  /** The path as the declaration spells it — repository-relative, so two checkouts agree. */
+  readonly path: string;
+  readonly content: string;
+}
+
+/** Resolves each declaration's file content, or `null` when one cannot be read. */
+async function patchEntries(
+  projectRoot: string,
+  declarations: Readonly<Record<string, string>>,
+): Promise<readonly PatchEntry[] | null> {
+  const entries: PatchEntry[] = [];
+  for (const declaration of Object.keys(declarations).sort()) {
+    const path = declarations[declaration]!;
+    const state = await readTextFile(join(projectRoot, ...path.split(/[\\/]/)));
+    if (state.kind !== "read") {
+      return null;
+    }
+    entries.push({ declaration, path, content: digestOf(state.text) });
+  }
+  return entries;
+}
+
 /**
- * The declared patch set, as one digest over both halves.
+ * The declared patch set, as one digest over every declaration and the file each names.
  *
  * Both halves are load-bearing. The **declaration** says which patches apply; the **file content**
  * says what they do, and a patch edited without a re-install is exactly the change a
- * declaration-only digest would miss. The path is included as the declaration spells it —
- * repository-relative — so two checkouts of one project agree.
+ * declaration-only digest would miss.
  *
- * `null` when the declaration cannot be read or a named patch file is missing. A project with no
- * declarations yields the digest of an empty set, which is a *known* answer rather than an
+ * **The two sources stay separate in the digest**, and that is a correctness requirement rather
+ * than tidiness. Merging them into one `declaration → path` map let `package.json` shadow
+ * `pnpm-workspace.yaml` for the same key — so with both declaring a patch for one dependency, the
+ * digest covered the manifest's file while pnpm applied the workspace's. Measured: editing the
+ * *effective* (workspace) patch, with no re-install and an unchanged lockfile, left the digest
+ * byte-identical and the record reporting `fresh` — a false fresh of exactly the class #94 removes.
+ * Keeping the sources apart means an edit to either one moves the digest, so the conservative
+ * direction is preserved whichever site a package manager of some future version honours.
+ *
+ * `null` when a declaration cannot be read or a named patch file is missing. A project with no
+ * declarations yields the digest of two empty lists, which is a *known* answer rather than an
  * unknown one.
  */
 async function patchesDigest(projectRoot: string, workspace: ParsedConfig, manifest: ParsedConfig): Promise<string | null> {
@@ -327,18 +436,14 @@ async function patchesDigest(projectRoot: string, workspace: ParsedConfig, manif
     return null;
   }
 
-  const merged: Record<string, string> = { ...fromWorkspace, ...fromManifest };
-  const entries: { readonly declaration: string; readonly path: string; readonly content: string }[] = [];
-  for (const declaration of Object.keys(merged).sort()) {
-    const path = merged[declaration]!;
-    const state = await readTextFile(join(projectRoot, ...path.split(/[\\/]/)));
-    if (state.kind !== "read") {
-      return null;
-    }
-    entries.push({ declaration, path, content: digestOf(state.text) });
+  const workspaceEntries = await patchEntries(projectRoot, fromWorkspace);
+  const manifestEntries = await patchEntries(projectRoot, fromManifest);
+  if (workspaceEntries === null || manifestEntries === null) {
+    return null;
   }
 
-  return digestOf(canonicalJson(entries));
+  // Keyed by source, so a declaration present in both is two entries rather than one shadowed one.
+  return digestOf(canonicalJson({ workspace: workspaceEntries, manifest: manifestEntries }));
 }
 
 /**
@@ -423,11 +528,15 @@ export async function readInstallGraphIdentity(projectRoot: string): Promise<Ins
   // `pnpm-workspace.yaml`. Reading them one level down would report "no patches" for a project
   // whose install carries them, and the record would look fresh through exactly the change this
   // axis exists to catch.
-  const [lockfile, workspace, manifest] = await Promise.all([
-    lockfileDigest(installRoot),
+  const [workspace, manifest] = await Promise.all([
     readWorkspaceConfig(installRoot),
     readProjectManifest(installRoot),
   ]);
+
+  // The manifest is read first because the lockfile *choice* depends on it: which lockfile is
+  // authoritative is answered by the project's `packageManager` (see `lockfileDigest`), so it
+  // cannot be resolved in parallel with the field that decides it.
+  const lockfile = await lockfileDigest(installRoot, manifest);
 
   const [patches, configuration] = await Promise.all([
     patchesDigest(installRoot, workspace, manifest),

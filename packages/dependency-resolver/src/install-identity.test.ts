@@ -72,11 +72,19 @@ async function project(
     readonly patch?: string;
     readonly lockfile?: string | null;
     readonly extra?: Record<string, string>;
+    /** The manifest's `packageManager`, which decides which lockfile is authoritative. */
+    readonly packageManager?: string;
   } = {},
 ): Promise<void> {
   await writeFileAt(
     join(root, "package.json"),
-    JSON.stringify({ name: "consumer", version: "0.0.0", private: true, type: "module" }),
+    JSON.stringify({
+      name: "consumer",
+      version: "0.0.0",
+      private: true,
+      type: "module",
+      ...(options.packageManager === undefined ? {} : { packageManager: options.packageManager }),
+    }),
   );
   if (options.lockfile !== null) {
     await writeFileAt(join(root, "pnpm-lock.yaml"), options.lockfile ?? "lockfileVersion: '9.0'\n");
@@ -206,6 +214,54 @@ describe("#94: identity comes from the install graph, not from a declaration", (
     });
 
     expect(after.lockfile).not.toBe(before.lockfile);
+  });
+
+  it("keeps the two patch sources apart, so editing the effective one moves the digest", async () => {
+    // PR #114 review, P1. Both files may declare a patch for one dependency, and pnpm applies the
+    // *workspace* one. Merging the sources into one `declaration → path` map let `package.json`
+    // shadow it, so the digest covered a patch that was never applied: measured, editing the
+    // effective workspace patch with an unchanged lockfile and no re-install left the digest
+    // byte-identical — a false fresh of exactly the class #94 removes.
+    const withPatches = async (workspacePatch: string): Promise<string | null> =>
+      withProject(async root => {
+        await project(root, {
+          extra: {
+            "package.json": JSON.stringify({
+              name: "consumer",
+              version: "0.0.0",
+              patchedDependencies: { "b@1.0.0": "patches/manifest.patch" },
+            }),
+            "pnpm-workspace.yaml": "patchedDependencies:\n  b@1.0.0: patches/workspace.patch\n",
+            "patches/workspace.patch": workspacePatch,
+            "patches/manifest.patch": "manifest patch\n",
+          },
+        });
+        return (await readInstallGraphIdentity(root)).patches;
+      });
+
+    const before = await withPatches("workspace patch v1\n");
+    const after = await withPatches("workspace patch v2\n");
+    const manifestEdited = await withProject(async root => {
+      await project(root, {
+        extra: {
+          "package.json": JSON.stringify({
+            name: "consumer",
+            version: "0.0.0",
+            patchedDependencies: { "b@1.0.0": "patches/manifest.patch" },
+          }),
+          "pnpm-workspace.yaml": "patchedDependencies:\n  b@1.0.0: patches/workspace.patch\n",
+          "patches/workspace.patch": "workspace patch v1\n",
+          "patches/manifest.patch": "manifest patch EDITED\n",
+        },
+      });
+      return (await readInstallGraphIdentity(root)).patches;
+    });
+
+    expect(before).not.toBeNull();
+    // The effective source moving is the case that matters.
+    expect(after).not.toBe(before);
+    // And the shadowed one still counts, so neither source can be edited without invalidating.
+    expect(manifestEdited).not.toBe(before);
   });
 
   it("changes when the configuration that affects resolution changes", async () => {
@@ -356,15 +412,80 @@ describe("#94: an install state that cannot be established is explicitly unknown
     });
   });
 
+  it("follows `packageManager` to the authoritative lockfile when several are present", async () => {
+    // PR #114 review, P2. A migrating project easily leaves both `pnpm-lock.yaml` and
+    // `package-lock.json` behind. Hashing whichever came first in a hardcoded order meant the digest
+    // could cover a lockfile that describes no install: measured on an npm project with a stale pnpm
+    // lock beside it, moving the *effective* npm lock's transitive dependency left the digest
+    // byte-identical.
+    // Both lockfiles are present in every run, and the case varies exactly one of them at a time.
+    // A 2x2 matrix over (which file moved) x (which manager is named), so "follows the manager"
+    // and "ignores the other file" are two separate assertions rather than one coincidence.
+    const forManager = async (packageManager: string, pnpmText: string, npmDeps: string): Promise<string | null> =>
+      withProject(async root => {
+        // `lockfile: null` so the helper does not also write a pnpm lockfile: this case is about
+        // which of several *present* lockfiles is authoritative, and both must be written here.
+        await project(root, {
+          packageManager,
+          lockfile: null,
+          extra: {
+            "pnpm-lock.yaml": pnpmText,
+            "package-lock.json": JSON.stringify({ name: "consumer", dependencies: { b: npmDeps } }),
+          },
+        });
+        return (await readInstallGraphIdentity(root)).lockfile;
+      });
+
+    const NPM = "npm@11.0.0";
+    const PNPM = "pnpm@11.18.0";
+
+    // npm project: the npm lock is followed, the pnpm lock is ignored.
+    const npmBase = await forManager(NPM, "pnpm v1\n", "1.0.0");
+    expect(npmBase).not.toBeNull();
+    expect(await forManager(NPM, "pnpm v1\n", "2.0.0")).not.toBe(npmBase);
+    expect(await forManager(NPM, "pnpm v2\n", "1.0.0")).toBe(npmBase);
+
+    // pnpm project: the mirror image, so the choice is the manager's rather than "always prefer one
+    // name" — a fixed priority list would have answered identically in both halves.
+    const pnpmBase = await forManager(PNPM, "pnpm v1\n", "1.0.0");
+    expect(await forManager(PNPM, "pnpm v2\n", "1.0.0")).not.toBe(pnpmBase);
+    expect(await forManager(PNPM, "pnpm v1\n", "2.0.0")).toBe(pnpmBase);
+  });
+
+  it("is unknown when no manager is named and several lockfiles could be authoritative", async () => {
+    // Guessing one of two is how the false fresh above happens, so the answer is `unknown` rather
+    // than a value — #94's third criterion: an unestablished identity must not look complete.
+    const twoLocks = await withProject(async root => {
+      await project(root, {
+        lockfile: null,
+        extra: { "pnpm-lock.yaml": "a\n", "package-lock.json": JSON.stringify({ name: "consumer" }) },
+      });
+      return (await readInstallGraphIdentity(root)).lockfile;
+    });
+    // A lone lockfile *is* an answer even with no manager named: one file has told us what it is.
+    const oneLock = await withProject(async root => {
+      await project(root, {
+        lockfile: null,
+        extra: { "package-lock.json": JSON.stringify({ name: "consumer" }) },
+      });
+      return (await readInstallGraphIdentity(root)).lockfile;
+    });
+
+    expect(twoLocks).toBeNull();
+    expect(oneLock).not.toBeNull();
+  });
+
   it("reports a project with no patches as a known empty set, not as unknown", async () => {
     await withProject(async root => {
       await project(root);
 
       const identity = await readInstallGraphIdentity(root);
 
-      // "No patches declared" is a fact, not a gap — the digest of an empty set. Conflating it with
-      // `null` would make every unpatched project permanently stale.
-      expect(identity.patches).toBe(digestOf("[]"));
+      // "No patches declared" is a fact, not a gap — the digest of two empty source lists (the
+      // digest moved from a bare array to a per-source object in the PR #114 review fix, so that
+      // one source cannot shadow the other). Conflating it with `null` would make every unpatched
+      // project permanently stale.
+      expect(identity.patches).toBe(digestOf(JSON.stringify({ manifest: [], workspace: [] })));
     });
   });
 
