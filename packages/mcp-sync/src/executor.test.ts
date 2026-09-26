@@ -6,11 +6,12 @@
  * Two halves of #20 need separating, and this file is careful about which is which:
  *
  * - **What a local test can establish.** That the executor calls the flow's operations in
- *   #19's order, that a held plan sends nothing, that a non-zero error count fails the run,
- *   that a save happens exactly when the project says it is dirty, and that the locator is
- *   returned only when the write landed and the page generated. All of it is asserted
- *   against a *recording* stub, which is the only honest way to test a call sequence whose
- *   real half is a designer session.
+ *   #19's order, that a refused plan sends nothing *and runs no validation*, that an
+ *   unchanged target sends nothing *but still runs the validation and returns its own
+ *   locator*, that a non-zero error count fails the run on either path, that a save happens
+ *   exactly when the project says it is dirty, and that the locator is returned only when
+ *   the page generated. All of it is asserted against a *recording* stub, which is the only
+ *   honest way to test a call sequence whose real half is a designer session.
  * - **What it cannot.** Whether a real designer accepts these calls, in this order, with
  *   these payloads. The stub is a stub: it records that `setCells` was called, not that the
  *   Cell was written. #20's real-designer validation is recorded on the Issue, and AGENTS.md
@@ -40,7 +41,7 @@ import type {
   ReadCellSourceResult,
 } from "./port.ts";
 import { planCellSync, planSetCellsDispatch } from "./sync-plan.ts";
-import type { CellSyncPlan, PlanCellSyncOptions } from "./sync-plan.ts";
+import type { CellSyncDispatch, CellSyncPlan, CellSyncRefusalDispatch, PlanCellSyncOptions } from "./sync-plan.ts";
 import type { CellTarget } from "./target.ts";
 
 const TARGET: CellTarget = { pageName: "OrderPage", cell: "A1" };
@@ -272,14 +273,14 @@ describe("executing a sync", () => {
 // The write is not reached
 // ---------------------------------------------------------------------------
 
-describe("when the plan holds", () => {
+describe("when the plan refuses", () => {
   it("sends nothing for a diverged target, though it did read it", async () => {
     const { port, calls } = recordingPort({ read: { kind: "react-cell", code: "designer work", frontendLibraries: [] } });
 
     const run = await executeCellSync(runOptions(port));
 
-    expect(run.status).toBe("held");
-    if (run.status !== "held") return;
+    expect(run.status).toBe("refused");
+    if (run.status !== "refused") return;
     expect(run.dispatch.reason).toBe("gate-refused");
     // The load-bearing assertion: the two reads happened, and *nothing that mutates* did. A
     // refusal that still called `setCells` would be the exact failure #19's safety section
@@ -297,13 +298,13 @@ describe("when the plan holds", () => {
     });
   });
 
-  it("holds a Cell holding something that is not a React Cell", async () => {
+  it("refuses a Cell holding something that is not a React Cell", async () => {
     const { port, calls } = occupiedPort("the value \"designer note\"");
 
     const run = await executeCellSync(runOptions(port));
 
-    expect(run.status).toBe("held");
-    if (run.status !== "held") return;
+    expect(run.status).toBe("refused");
+    if (run.status !== "refused") return;
     expect(run.plan.divergence.kind).toBe("foreign-code");
     expect(methodOrder(calls)).toEqual(["listFrontendLibraries", "readCellSource"]);
     expect(stepStatuses(run)["write-cell-source"]).toBe("not-reached");
@@ -314,20 +315,28 @@ describe("when the plan holds", () => {
 
     const run = await executeCellSync(runOptions(port, { artifact: { code: CODE_BODY, frontendLibraries: [] } }));
 
-    expect(run.status).toBe("held");
-    if (run.status !== "held") return;
+    expect(run.status).toBe("refused");
+    if (run.status !== "refused") return;
     expect(run.dispatch.reason).toBe("nothing-to-write");
     expect(methodOrder(calls)).toEqual(["listFrontendLibraries", "readCellSource"]);
   });
 
-  it("reports a held run as held, never as written", async () => {
-    const { port } = recordingPort({ read: { kind: "react-cell", code: "designer work", frontendLibraries: [] } });
+  // The property that makes `refused` worth a status of its own: a refusal stops the flow,
+  // so it has no verification result and no locator to hand a browser step.
+  it("reports a refusal as refused, with no locator and no validation steps run", async () => {
+    const { port, calls } = recordingPort({ read: { kind: "react-cell", code: "designer work", frontendLibraries: [] } });
 
     const run = await executeCellSync(runOptions(port));
     const text = formatCellSyncRun(run);
 
-    expect(text).toContain("held");
+    expect(text).toContain("Sync run: OrderPage!A1 — refused");
+    expect(text).toContain("Refused: gate-refused");
     expect(text).not.toContain("Runtime locator");
+    // The three gates that would have produced a verification result were never reached:
+    // a refusal must not be reported with the evidence of a deployment that did not happen.
+    expect(methodOrder(calls)).not.toContain("checkProjectErrors");
+    expect(methodOrder(calls)).not.toContain("generatePageAsync");
+    expect("runtime" in run).toBe(false);
   });
 });
 
@@ -336,7 +345,7 @@ describe("when the plan holds", () => {
 // ---------------------------------------------------------------------------
 
 describe("syncing the same artifact twice", () => {
-  it("is a skip the second time, with no write", async () => {
+  it("is unchanged the second time, with no write but with the validation steps", async () => {
     // The first run's *own output* is what the second run reads back — the round trip
     // through the designer is what a real project performs, and #20 measured it byte-identical.
     // The read comes from the port, which is the only way a run can learn a target's state.
@@ -348,12 +357,173 @@ describe("syncing the same artifact twice", () => {
 
     const run = await executeCellSync(runOptions(port, { artifact }));
 
-    expect(run.status).toBe("held");
-    if (run.status !== "held") return;
+    expect(run.status).toBe("unchanged");
+    if (run.status !== "unchanged") return;
     expect(run.plan.divergence.kind).toBe("identical");
-    expect(run.dispatch.reason).toBe("already-identical");
-    // Read, then decide not to write. Nothing that mutates was called.
-    expect(methodOrder(calls)).toEqual(["listFrontendLibraries", "readCellSource"]);
+    // Read, then decide not to write — and *then* verify. The absence of `setCells` is what
+    // "unchanged" means; the three calls after it are what the issue asks for, because the
+    // Cell being already correct says nothing about the project's errors or the page.
+    expect(methodOrder(calls)).toEqual([
+      "listFrontendLibraries",
+      "readCellSource",
+      "getProjectSaveStatus",
+      "checkProjectErrors",
+      "generatePageAsync",
+    ]);
+    expect(stepStatuses(run)).toEqual({
+      "resolve-cell-target": "ran",
+      "verify-extension-metadata": "ran",
+      "read-target-state": "ran",
+      // `skipped`, not `not-reached`: the flow chose not to write rather than dying before
+      // the write, and `SyncRunStepStatus` exists to keep those two readings apart.
+      "write-cell-source": "skipped",
+      "save-project-if-required": "skipped",
+      "check-project-errors": "ran",
+      "generate-page": "ran",
+      "return-runtime-locator": "ran",
+    });
+    // Nothing was written and the project reported itself clean, so this run changed no
+    // project state — the field is carried so a caller can tell that from the save case.
+    expect(run.mutated).toBe(false);
+  });
+
+  // The save is the one thing an `unchanged` run can still do to the project, and a caller
+  // deciding whether to discard a backup has to be told. "Nothing was written" is a claim
+  // about the Cell, not about the project.
+  it("reports the save it performed as a change to the project", async () => {
+    const artifact = generated();
+    const { port, calls } = recordingPort({
+      read: { kind: "react-cell", code: stampSyncMarker(artifact), frontendLibraries: artifact.frontendLibraries },
+      saveStatus: { containsUnsavedChanges: true },
+    });
+
+    const run = await executeCellSync(runOptions(port, { artifact }));
+
+    expect(run.status).toBe("unchanged");
+    if (run.status !== "unchanged") return;
+    expect(methodOrder(calls)).not.toContain("setCells");
+    expect(methodOrder(calls)).toContain("saveProject");
+    expect(stepStatuses(run)["save-project-if-required"]).toBe("ran");
+    expect(run.mutated).toBe(true);
+  });
+
+  // The issue's acceptance criterion, as an assertion: "unchanged and a manual conflict
+  // refusal show different reasons; an old locator may not be used to claim the current
+  // generation succeeded". The locator here is produced by *this* run's generation call —
+  // which is why the two statuses are separate at all.
+  it("returns a locator this run generated, not one carried over from a previous write", async () => {
+    const artifact = generated();
+    const { port, calls } = recordingPort({
+      read: { kind: "react-cell", code: stampSyncMarker(artifact), frontendLibraries: artifact.frontendLibraries },
+      runtime: { pageName: TARGET.pageName, pageUrl: "http://localhost:63982/Forguncy/OrderPage?run=second" },
+    });
+
+    const run = await executeCellSync(runOptions(port, { artifact }));
+
+    expect(run.status).toBe("unchanged");
+    if (run.status !== "unchanged") return;
+    expect(run.runtime.pageUrl).toBe("http://localhost:63982/Forguncy/OrderPage?run=second");
+    // Generated by this run: the call is in the record, not merely the value.
+    expect(methodOrder(calls)).toContain("generatePageAsync");
+  });
+
+  // The other half of the same rule, and the one a caller would otherwise get wrong: a skip
+  // does not exempt the project from the error gate. The Cell being already correct is not
+  // evidence that the project builds.
+  it("fails an unchanged run whose project reports errors", async () => {
+    const artifact = generated();
+    const { port, calls } = recordingPort({
+      read: { kind: "react-cell", code: stampSyncMarker(artifact), frontendLibraries: artifact.frontendLibraries },
+      errors: { errorCount: 1 },
+    });
+
+    const run = await executeCellSync(runOptions(port, { artifact }));
+
+    expect(run.status).toBe("failed");
+    if (run.status !== "failed") return;
+    expect(run.diagnostics.map(diagnostic => diagnostic.code)).toEqual(["project-errors-after-sync"]);
+    // Nothing was written, so the project was not mutated by this run.
+    expect(run.mutated).toBe(false);
+    expect(methodOrder(calls)).not.toContain("generatePageAsync");
+  });
+
+  it("fails an unchanged run whose generation produces no locator", async () => {
+    const artifact = generated();
+    const { port } = recordingPort({
+      read: { kind: "react-cell", code: stampSyncMarker(artifact), frontendLibraries: artifact.frontendLibraries },
+      runtime: { pageName: TARGET.pageName, pageUrl: "  " },
+    });
+
+    const run = await executeCellSync(runOptions(port, { artifact }));
+
+    expect(run.status).toBe("failed");
+    if (run.status !== "failed") return;
+    expect(run.diagnostics.map(diagnostic => diagnostic.code)).toEqual(["runtime-generation-failed"]);
+    expect(run.mutated).toBe(false);
+  });
+
+  // "A failed save still fails; the safety gate is not closed to make idempotency work."
+  // The skip is about the *Cell*, not about the project: a dirty project whose save the
+  // product declines is left unpersisted on this path too, and reporting it as a finished
+  // sync would make a second sync quietly the moment the project state stops being checked.
+  it("fails an unchanged run when the product declines a save it needed", async () => {
+    const artifact = generated();
+    const { port, calls } = recordingPort({
+      read: { kind: "react-cell", code: stampSyncMarker(artifact), frontendLibraries: artifact.frontendLibraries },
+      saveStatus: { containsUnsavedChanges: true },
+      saveResult: { saved: false },
+    });
+
+    const run = await executeCellSync(runOptions(port, { artifact }));
+
+    expect(run.status).toBe("failed");
+    if (run.status !== "failed") return;
+    expect(run.diagnostics.map(diagnostic => diagnostic.code)).toEqual(["project-errors-after-sync"]);
+    // The save persisted nothing, and no Cell was written — so nothing was mutated, and the
+    // caller is told so rather than being handed a locator for an unpersisted project.
+    expect(run.mutated).toBe(false);
+    expect(methodOrder(calls)).not.toContain("generatePageAsync");
+  });
+
+  it("reports an unchanged run as a finished sync, naming its own locator", async () => {
+    const artifact = generated();
+    const { port } = recordingPort({
+      read: { kind: "react-cell", code: stampSyncMarker(artifact), frontendLibraries: artifact.frontendLibraries },
+    });
+
+    const run = await executeCellSync(runOptions(port, { artifact }));
+    const text = formatCellSyncRun(run);
+
+    expect(text).toContain("Sync run: OrderPage!A1 — unchanged");
+    expect(text).toContain("Runtime locator: http://localhost:63982/Forguncy/OrderPage");
+    expect(text).toContain("Project persisted by this run: false");
+    // Not reported as a refusal: the two read as different reasons on purpose.
+    expect(text).not.toContain("Refused:");
+  });
+
+  // The acceptance criterion "the same source with different frontendLibraries is
+  // recognised correctly". Byte-identical code is not enough to skip: the designer's cell
+  // properties panel can change the library list without touching the source, so a run that
+  // skipped on the code alone would leave the page loading the wrong libraries — and would
+  // report it as a successful sync.
+  it("writes when the source matches but the references do not", async () => {
+    const artifact = generated();
+    const { port, calls, written } = recordingPort({
+      read: {
+        kind: "react-cell",
+        code: stampSyncMarker(artifact),
+        frontendLibraries: [frontendLibraryReference("lib-added-in-designer")],
+      },
+    });
+
+    const run = await executeCellSync(runOptions(port, { artifact }));
+
+    expect(run.plan.divergence.kind).toBe("previous-generation");
+    expect(run.status).toBe("written");
+    // Not a skip, and not a refusal: the write simply re-asserts both halves.
+    expect(methodOrder(calls)).toContain("setCells");
+    expect(written).toHaveLength(1);
+    expect(written[0].cells[0].cellTypeProps.frontendLibraries).toEqual([]);
   });
 
   it("plans a byte-identical payload for two runs of the same artifact", async () => {
@@ -639,6 +809,39 @@ describe("executing a batch of declared Cells", () => {
 // ---------------------------------------------------------------------------
 
 describe("the executor cannot send what the plan held", () => {
+  // The status split is enforced by a type, so the assertion *is* the annotation: `refused`
+  // carries a `CellSyncRefusalDispatch`, whose reason set excludes `already-identical`, so
+  // reporting a skip under the refusal status does not compile. Widening that set is the
+  // falsification — it turns this annotation into a compile error, which is the only thing
+  // that can catch the regression. There is deliberately no runtime read of `Assignable`
+  // here: `const x: Assignable<...> = false` would assert its own initializer, and a
+  // "runtime guard" that cannot fail is worse than none.
+  it("cannot report an already-identical skip as a refusal", () => {
+    /** Compile-time only: whether `From` may be passed where `To` is expected. */
+    type Assignable<From, To> = [From] extends [To] ? true : false;
+    type HoldDispatch = Extract<CellSyncDispatch, { readonly kind: "hold" }>;
+
+    const skipIsNotARefusal: Assignable<Extract<HoldDispatch, { readonly reason: "already-identical" }>, CellSyncRefusalDispatch> = false;
+    const refusalIsARefusal: Assignable<CellSyncRefusalDispatch, CellSyncRefusalDispatch> = true;
+
+    // The runtime half is read off *real values* rather than off the type aliases above: a
+    // skip's dispatch is built by the plan and must name the skip, which is the fact the
+    // annotation encodes.
+    const identical = planCellSync({
+      target: TARGET,
+      artifact: generated(),
+      decisions: [],
+      deployed: { kind: "read", code: stampSyncMarker(generated()), frontendLibraries: generated().frontendLibraries },
+    });
+    const dispatch = planSetCellsDispatch(identical);
+
+    expect(skipIsNotARefusal).toBe(false);
+    expect(refusalIsARefusal).toBe(true);
+    expect(dispatch.kind).toBe("hold");
+    if (dispatch.kind !== "hold") return;
+    expect(dispatch.reason).toBe("already-identical");
+  });
+
   it("only reaches `setCells` through the dispatch's own request", async () => {
     // Read from the same function the executor reads, so "what may be sent" and "what is
     // sent" cannot drift: an `issue` dispatch is the only case with a request to send.

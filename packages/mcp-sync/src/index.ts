@@ -237,6 +237,8 @@ export type {
   CellSyncHoldReason,
   CellSyncMutation,
   CellSyncPlan,
+  CellSyncRefusalDispatch,
+  CellSyncRefusalReason,
   CellSyncWrite,
   PlanCellSyncOptions,
   SyncStepPlan,

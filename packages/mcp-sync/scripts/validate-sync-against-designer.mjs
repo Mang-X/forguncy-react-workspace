@@ -356,10 +356,28 @@ async function main() {
   record("7. second run", {
     status: secondRun.status,
     steps: secondRun.steps.map(step => `${step.order}.${step.stepId}=${step.status}`),
+    runtime: secondRun.status === "unchanged" ? secondRun.runtime : undefined,
   });
+  // #92's criterion: the second sync issues no write *and* still validates. The status is
+  // `unchanged`, not `refused` — a skip is a finished sync rather than a conflict — and the
+  // steps after the write are the ones that make the locator below trustworthy.
   check(
-    "the second run issues no write",
-    secondRun.status === "held" && secondRun.steps.find(step => step.stepId === "write-cell-source")?.status === "not-reached",
+    "the second run issues no write, and reports unchanged rather than refused",
+    secondRun.status === "unchanged" &&
+      // `skipped`, not `not-reached`: an unchanged target is a deliberate non-write (#92).
+      secondRun.steps.find(step => step.stepId === "write-cell-source")?.status === "skipped",
+    secondRun.status,
+  );
+  check(
+    "the unchanged run still checked the project and generated the page",
+    secondRun.status === "unchanged" &&
+      secondRun.steps.find(step => step.stepId === "check-project-errors")?.status === "ran" &&
+      secondRun.steps.find(step => step.stepId === "generate-page")?.status === "ran",
+  );
+  check(
+    "the unchanged run returned a locator this run generated",
+    secondRun.status === "unchanged" && secondRun.runtime.pageUrl.includes(encodeURIComponent(PAGE)),
+    secondRun.status === "unchanged" ? secondRun.runtime.pageUrl : secondRun.status,
   );
 
   // --- Divergence: a Cell the repository did not write is refused -------------------
@@ -372,11 +390,11 @@ async function main() {
   record("8. a hand-written Cell", {
     divergence: foreignRun.plan.divergence.kind,
     status: foreignRun.status,
-    dispatch: foreignRun.status === "held" ? foreignRun.dispatch.reason : undefined,
+    dispatch: foreignRun.status === "refused" ? foreignRun.dispatch.reason : undefined,
   });
   check(
     "a hand-written Cell is refused, not overwritten",
-    foreignRun.status === "held" &&
+    foreignRun.status === "refused" &&
       foreignRun.plan.divergence.kind === "foreign-code" &&
       foreignRun.dispatch.reason === "gate-refused",
   );

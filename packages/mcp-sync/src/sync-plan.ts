@@ -472,9 +472,15 @@ export function formatCellSyncPlan(plan: CellSyncPlan): string {
  *
  * Four reasons, and they are not interchangeable: the *next step* differs. A refused gate
  * stops the run and has to be reported; a resolved conflict has to be looked at by a person;
- * an identical target continues to the read-only steps, because a caller that asked for a
- * deployment locator should get one whether or not the write was needed; and an artifact
- * that is not compiler output means there was never anything to send.
+ * an identical target continues to the validation steps — save status, error check,
+ * generation, locator — because a caller that asked for a deployment locator should get one
+ * whether or not the write was needed; and an artifact that is not compiler output means
+ * there was never anything to send.
+ *
+ * Three of the four stop the run and one does not, which is what
+ * {@link CellSyncRefusalReason} names and what the executor's `refused` status is built on:
+ * at this layer the shared fact is "the dispatch did not issue", and the difference between
+ * a skip and a stop is a property of these reasons rather than of a caller's reading of them.
  */
 export const CELL_SYNC_HOLD_REASONS = [
   "nothing-to-write",
@@ -493,6 +499,49 @@ export type CellSyncHoldReason = (typeof CELL_SYNC_HOLD_REASONS)[number];
  * describing a state it can never be reached in.
  */
 type PayloadHoldReason = Exclude<CellSyncHoldReason, "nothing-to-write">;
+
+/**
+ * The hold reasons that stop the flow, as opposed to the one that does not.
+ *
+ * `already-identical` is a *skip*: the target already holds this artifact, so the mutation
+ * is not issued and the read-only steps after it still run. Every other hold reason stops
+ * the run where it is — `nothing-to-write` because there is no payload at all,
+ * `gate-refused` and `target-diverged` because a condition has to be resolved by a person.
+ *
+ * Named here rather than at the executor, because it is a property of this vocabulary: an
+ * executor deciding for itself which reasons stop the flow would be a second copy of a rule
+ * this table already states, and the copy is where the two would drift.
+ */
+export type CellSyncRefusalReason = Exclude<CellSyncHoldReason, "already-identical">;
+
+/**
+ * The hold case, parameterized by which reasons it may carry.
+ *
+ * Parameterized rather than fixed, so {@link CellSyncRefusalDispatch} is the *same* shape
+ * with a narrower reason set instead of a second declaration of it: a field added to a hold
+ * is added to both, and the two cannot drift into disagreeing about what a hold carries.
+ *
+ * Distributive over `R` on purpose — one variant per reason, rather than one variant whose
+ * `reason` is a union. That is what makes `dispatch.reason === "already-identical"` narrow
+ * the *whole dispatch*: with a union-typed `reason` the check would narrow only the property,
+ * and an executor could read a skip's `reason` while still holding a value the refusal type
+ * accepts. The distribution is the mechanism behind "a skip cannot be reported as a refusal",
+ * so it is load-bearing rather than a stylistic choice about how to spell a union.
+ */
+type CellSyncHoldDispatch<R extends CellSyncHoldReason = CellSyncHoldReason> = R extends CellSyncHoldReason
+  ? { readonly kind: "hold"; readonly reason: R; readonly detail: string }
+  : never;
+
+/**
+ * A hold that stops the run, as opposed to the skip.
+ *
+ * The executor's `refused` status takes this rather than the full {@link CellSyncDispatch}
+ * hold, which makes "a skip reported as a refusal" a type error instead of a mistake a
+ * reader has to notice: `already-identical` is not assignable here, so a run cannot carry
+ * the skip under the refusal status, and `refused` cannot be constructed from a dispatch
+ * that did not stop the flow.
+ */
+export type CellSyncRefusalDispatch = CellSyncHoldDispatch<CellSyncRefusalReason>;
 
 /**
  * Which hold reason each gate implies, if any.
@@ -542,11 +591,7 @@ export type CellSyncDispatch =
        */
       readonly request: IssuedSetCellsRequest;
     }
-  | {
-      readonly kind: "hold";
-      readonly reason: CellSyncHoldReason;
-      readonly detail: string;
-    };
+  | CellSyncHoldDispatch;
 
 /** Why a plan was held, in one sentence an executor can put in a log line. */
 function holdDetail(plan: CellSyncPlan, reason: PayloadHoldReason): string {
@@ -566,7 +611,7 @@ function holdDetail(plan: CellSyncPlan, reason: PayloadHoldReason): string {
       return `Refused before the write: ${blocking.join(", ")}. See the plan's diagnostics for the remediation.`;
     }
     case "already-identical":
-      return "The target already holds this artifact, so the mutation is not issued. The read-only steps after it still run.";
+      return "The target already holds this artifact, so the mutation is not issued. The steps that validate the deployment — save status, project errors, generation and the locator — still run, because a skip says the Cell is already correct and nothing about whether the project is valid or the page still generates.";
     case "target-diverged":
       return `The target diverged and the policy refused to overwrite it: ${plan.divergence.detail}`;
   }
