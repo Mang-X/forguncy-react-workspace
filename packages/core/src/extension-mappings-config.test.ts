@@ -809,6 +809,77 @@ describe("the normalized mapping set", () => {
     }
   });
 
+  it("locates an ambiguous pinned built-in table in that table, even when an unrelated project row exists", () => {
+    // Review of #110, round 3. The path used to be decided by `projectRows.length > 0`
+    // alone, which is sound only while the built-in half is coherent by itself — true of
+    // the shipped table and not of a caller-pinned one. Measured with one ambiguous table:
+    //
+    //   no project rows                     -> @options.builtinMappings
+    //   plus one unrelated valid project row -> @extensions.mappings
+    //
+    // One table, one defect, two locations — and the second pointed at a row with nothing
+    // to do with it. The built-in table's own coherence is now checked first, so a
+    // collision inside it is reported against it whatever the project declared.
+    const ambiguousBuiltins: readonly ExtensionExternalMapping[] = [
+      projectMapping({ packageName: "dup-package" }),
+      projectMapping({ packageName: "dup-package", libraryId: "other-library", globalName: "OtherLibrary" }),
+    ];
+    const unrelatedProjectRow = projectMappingConfig({
+      packageName: "@acme/widgets",
+      libraryId: "acme-widgets",
+      globalName: "AcmeWidgets",
+    });
+
+    const withProjectRow = normalizeExtensionMappings(
+      { cells: {}, extensions: { mappings: [unrelatedProjectRow] } },
+      { builtinMappings: ambiguousBuiltins },
+    );
+    const withoutProjectRow = normalizeExtensionMappings({ cells: {} }, { builtinMappings: ambiguousBuiltins });
+
+    expect(withProjectRow.ok).toBe(false);
+    expect(withoutProjectRow.ok).toBe(false);
+    if (withProjectRow.ok || withoutProjectRow.ok) return;
+    // The same finding and the same path: an unrelated project row cannot move it.
+    expect(withProjectRow.diagnostics).toEqual(withoutProjectRow.diagnostics);
+    expect(withProjectRow.diagnostics[0]?.path).toBe("options.builtinMappings");
+    expect(withProjectRow.diagnostics[0]?.message).toContain("dup-package");
+  });
+
+  it("still attributes a genuine project collision to the project's rows", () => {
+    // The bound on the test above, and the property the ordering has to preserve: when the
+    // built-in half is coherent, a combined failure can only be the project's addition — so
+    // the project's path is the right answer and not a fallback. The project row claims a
+    // package the shipped table already maps, which is a collision only the project can fix.
+    const diagnostics = diagnosticsOf({
+      cells: {},
+      extensions: { mappings: [projectMappingConfig({ packageName: "@tanstack/react-query" })] },
+    });
+
+    expect(diagnostics.map(diagnostic => diagnostic.code)).toEqual(["extension-mapping-conflict"]);
+    expect(diagnostics[0]?.path).toBe("extensions.mappings");
+  });
+
+  it("reports nothing about a pinned table the config has opted out of", () => {
+    // `builtinMappings: false` leaves the pinned table unused, and a finding about a table
+    // the artifact never touches is the false positive the per-row loop already declines to
+    // report. The built-in half's coherence check is skipped for the same reason.
+    const normalized = normalizeOrThrow(
+      {
+        cells: {},
+        extensions: { builtinMappings: false, mappings: [projectMappingConfig()] },
+      },
+      {
+        builtinMappings: [
+          projectMapping({ packageName: "dup-package" }),
+          projectMapping({ packageName: "dup-package", libraryId: "other-library", globalName: "OtherLibrary" }),
+        ],
+      },
+    );
+
+    expect(normalized.source).toBe("project-only");
+    expect(normalized.mappings).toHaveLength(1);
+  });
+
   it("still normalizes an absent block against the shipped table, which the guards accept", () => {
     // The bound on the two tests above: running the guards on the absent path must not turn
     // the default into a refusal. The shipped table passes its own contract, so the

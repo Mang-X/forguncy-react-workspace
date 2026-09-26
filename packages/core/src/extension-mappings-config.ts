@@ -531,18 +531,39 @@ export function normalizeExtensionMappings(
   // silently halved the report for exactly the configs that were most wrong. A row that
   // failed to read is simply absent from `mappings`, which can only *miss* a collision
   // and never invent one — so running over the rows that did read is sound.
-  try {
-    assertExtensionExternalMappingsAreUnambiguous(mappings, options.contract);
-  } catch (error) {
-    // Located at the project's rows, because a collision the project added is theirs to
-    // fix; with no project rows the finding is about the built-in table itself, so the
-    // path names that table instead of a config block the config never declared.
-    diagnostics.push(
-      diag(
-        "extension-mapping-conflict",
-        projectRows.length > 0 ? `${EXTENSION_MAPPINGS_CONFIG_FIELD}.mappings` : builtinTablePath,
-        error instanceof ExtensionExternalContractError ? error.message : String(error),
-      ),
+  //
+  // The built-in table's *own* coherence is checked first, and that ordering is what makes
+  // the path on a combined failure trustworthy. Attributing any combined collision to
+  // `extensions.mappings` is only sound when the built-in half is coherent by itself —
+  // which the shipped table is, and which a caller-pinned one need not be. Measured, with
+  // one ambiguous pinned table:
+  //
+  //   no project rows                     -> extension-mapping-conflict@options.builtinMappings
+  //   plus one unrelated valid project row -> extension-mapping-conflict@extensions.mappings
+  //
+  // One table, one defect, two different locations depending on an unrelated row — and the
+  // second points at a row that has nothing to do with it. Checking the built-in half first
+  // removes the coincidence: a collision inside it is reported against it whatever the
+  // project declared, and only a collision that survives a coherent built-in half is
+  // attributed to the project's rows.
+  //
+  // Skipped when the built-in table contributes no rows, because `builtinMappings: false`
+  // leaves it unused — and a finding about a table the artifact never touches is the false
+  // positive the per-row loop above already declines to report. The combined check then
+  // covers the project's rows alone, which is the same thing.
+  const builtinTableIsCoherent = !includesBuiltinMappings
+    ? true
+    : reportCrossRowFindings(builtinMappings, builtinTablePath, diagnostics, options.contract);
+
+  if (builtinTableIsCoherent) {
+    // A failure here cannot be the built-in table's: it was just checked, and on its own it
+    // is coherent. So the collision is between a project row and something else, which is
+    // the project's to fix — hence one path, with no fallback to the built-in table.
+    reportCrossRowFindings(
+      mappings,
+      `${EXTENSION_MAPPINGS_CONFIG_FIELD}.mappings`,
+      diagnostics,
+      options.contract,
     );
   }
 
@@ -564,6 +585,38 @@ export function normalizeExtensionMappings(
       builtinMappings,
     }),
   };
+}
+
+/**
+ * #12's cross-row guard over a row list, reported at a given path.
+ *
+ * A helper rather than two `try`/`catch` blocks, because the two call sites differ only in
+ * which rows they check and where a finding points — and a second copy of the reporting
+ * would be the "second answer to one question" this module's header says it exists to
+ * avoid.
+ *
+ * Returns whether the list was coherent, which is what lets the caller decide whether a
+ * later combined check can be attributed to the project.
+ */
+function reportCrossRowFindings(
+  rows: readonly ExtensionExternalMapping[],
+  path: string,
+  out: ExtensionMappingsDiagnostic[],
+  contract: ExtensionExternalContractOptions | undefined,
+): boolean {
+  try {
+    assertExtensionExternalMappingsAreUnambiguous(rows, contract);
+    return true;
+  } catch (error) {
+    out.push(
+      diag(
+        "extension-mapping-conflict",
+        path,
+        error instanceof ExtensionExternalContractError ? error.message : String(error),
+      ),
+    );
+    return false;
+  }
 }
 
 /**
