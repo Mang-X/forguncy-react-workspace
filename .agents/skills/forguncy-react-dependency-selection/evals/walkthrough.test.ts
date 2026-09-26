@@ -130,10 +130,22 @@ function flattened(source: string): string {
   return source.replace(/\s+/g, " ");
 }
 
-/** The one block that carries the walkthrough, located by the fixture path it names. */
+/**
+ * The one block that carries the walkthrough, located by the **sequence** it must contain.
+ *
+ * Anchored on the two `decisions/*.json` records rather than on the fixture path, deliberately.
+ * The fixture path appears twice in the block — in the `W=` assignment and in the copy command —
+ * so a locator matching it survives deleting the copy step, and the "runs as a shell script" case
+ * then fails with *"must carry a runnable walkthrough block"* instead of the cleanliness assertion
+ * it exists for. Found by falsification: removing the copy line looked like a caught defect but
+ * was actually a broken locator, which is a guard reporting the wrong reason.
+ *
+ * The two decision files are the block's invariant — without them there is no walkthrough — so
+ * they are what identifies it.
+ */
 function walkthroughBlock(): string {
-  const block = bashBlocks(readFileSync(join(REPOSITORY_ROOT, SKILL_DOCUMENT), "utf8")).find(candidate =>
-    candidate.includes("probe-proving-cases/walkthrough"),
+  const block = bashBlocks(readFileSync(join(REPOSITORY_ROOT, SKILL_DOCUMENT), "utf8")).find(
+    candidate => candidate.includes("decisions/inline.json") && candidate.includes("decisions/oversize.json"),
   );
   // A block that cannot be found would make every assertion below vacuously pass, so the
   // lookup's own failure is the assertion.
@@ -228,7 +240,101 @@ async function readLock(root: string): Promise<{ decisions: readonly LockRecord[
   return JSON.parse(await readFile(join(root, "fgc.lock.json"), "utf8")) as { decisions: readonly LockRecord[] };
 }
 
+/** The `evals/execution_cases.json` document: the Agent-side half of the evaluation cases. */
+const EXECUTION_CASES = `${SKILL_DIRECTORY}/evals/execution_cases.json`;
+
+interface ExecutionCases {
+  readonly repeatable_commands: Readonly<Record<string, string>>;
+  readonly cases: readonly { readonly id: string; readonly executed_by?: string }[];
+}
+
+function readExecutionCases(): ExecutionCases {
+  return JSON.parse(readFileSync(join(REPOSITORY_ROOT, EXECUTION_CASES), "utf8")) as ExecutionCases;
+}
+
+/**
+ * A scratch root for running the doc's block as a **shell script** rather than command by command.
+ *
+ * The two existing helpers between them cannot cover the block's first two lines: `commandsIn`
+ * only extracts `node $S` lines, and `withWalkthroughCopy` copies with `cp` itself — so the
+ * `mkdir -p "$W" && cp -r …/. "$W"/` line the reader is told to run was executed by no test at
+ * all. That is the same shape of gap the PR review found in `execution_cases.json`: prose nobody
+ * runs. A shell is what the block is written for, so a shell is what runs it here.
+ */
+async function withShellScriptRoot<T>(body: (root: string, script: (source: string) => string) => Promise<T>): Promise<T> {
+  const parent = join(REPOSITORY_ROOT, "examples", "probe-proving-cases", ".fgc");
+  await mkdir(parent, { recursive: true });
+  const root = await mkdtemp(join(parent, "walkthrough-block-"));
+  try {
+    return await body(root, source => source);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    const remaining = await readdir(parent).catch(() => null);
+    if (remaining !== null && remaining.length === 0) {
+      await rm(parent, { recursive: true, force: true });
+    }
+  }
+}
+
+/** Runs a shell script, returning the exit code and both streams rather than throwing. */
+async function shell(script: string): Promise<CommandResult> {
+  // `bash` on both platforms: the block is POSIX shell and Git for Windows ships bash, so the
+  // test exercises the same interpreter a contributor would retype into.
+  try {
+    const { stdout, stderr } = await run("bash", ["-c", script], { cwd: REPOSITORY_ROOT, maxBuffer: 64 * 1024 * 1024 });
+    return { code: 0, stdout, stderr };
+  } catch (error) {
+    const failure = error as { code?: number; stdout?: string; stderr?: string };
+    return { code: failure.code ?? -1, stdout: failure.stdout ?? "", stderr: failure.stderr ?? "" };
+  }
+}
+
 describe("the Skill's documented walkthrough runs as written", () => {
+  it("runs its whole block as a shell script, twice, without touching the committed fixture", async () => {
+    // PR #112 review, P2's sibling. The reviewed defect was an entry that named one command from
+    // a sequence; the same reasoning applies to this block's *first two lines*, which no test
+    // executed: `commandsIn` extracts only `node $S` lines and `withWalkthroughCopy` does its own
+    // copying, so the `mkdir && cp` the reader is told to run was untested prose.
+    //
+    // Three properties, each of which the earlier tests could not see:
+    //  1. the copy step works as written (a `mkdir` without `-p`, or a path typo, fails here);
+    //  2. it is **idempotent** — `cp -r src dst` nests `dst/walkthrough/` on a second run, so a
+    //     reader who re-runs the block would silently measure a different project. The block uses
+    //     `cp -r src/. dst/` for that reason, and only running it twice tests it;
+    //  3. the committed fixture stays clean, which is the property that makes the copy step
+    //     necessary rather than decorative.
+    await withShellScriptRoot(async root => {
+      const block = walkthroughBlock();
+      // `$W` is the block's own scratch path; re-point it at this case's temporary root so two
+      // suites cannot collide, and leave every other byte — including the copy command — alone.
+      const script = block
+        .replace(/^W=.*$/m, `W=${root.split("\\").join("/")}`)
+        .split("examples/probe-proving-cases/walkthrough")
+        .join(join(REPOSITORY_ROOT, WALKTHROUGH_RELATIVE).split("\\").join("/"));
+
+      const committed = join(REPOSITORY_ROOT, WALKTHROUGH_RELATIVE);
+      const before = (await readdir(committed)).sort();
+
+      const first = await shell(script);
+      expect(first.code, `${script}\n${first.stdout}${first.stderr}`).toBe(0);
+      // The copy landed in the scratch root, which is what makes the committed-tree check below
+      // a statement about a copy that really ran.
+      expect(existsSync(join(root, "forguncy.config.ts"))).toBe(true);
+      expect(existsSync(join(root, "fgc.lock.json"))).toBe(true);
+
+      // The second run is the idempotency check: the block must be re-runnable, and a nested
+      // `walkthrough/` would both fail here and mean the reader measured the wrong tree.
+      const second = await shell(script);
+      expect(second.code, `${script}\n${second.stdout}${second.stderr}`).toBe(0);
+      expect(existsSync(join(root, "walkthrough")), "re-running the block must not nest the fixture").toBe(false);
+
+      // And the committed fixture is untouched — no lock, no evidence, no new file at all.
+      expect(existsSync(join(committed, "fgc.lock.json"))).toBe(false);
+      expect(existsSync(join(committed, "fgc-evidence"))).toBe(false);
+      expect((await readdir(committed)).sort()).toEqual(before);
+    });
+  }, CASE_TIMEOUT_MS);
+
   it("names decision files that exist, so the doc cannot point at nothing", () => {
     // The lookup is the assertion: `decisionPathsIn` reads the paths out of the doc, and this
     // checks the repository actually carries them. A walkthrough whose example files were never
@@ -295,6 +401,86 @@ describe("the Skill's documented walkthrough runs as written", () => {
       expect(decisions.every(existsSync)).toBe(true);
     });
   }, CASE_TIMEOUT_MS);
+
+  it("runs `execution_cases.json`'s walkthrough command on a clean checkout", async () => {
+    // PR #112 review, P2. `execution_cases.json` had no executing test — its commands were prose
+    // nobody ran — so it shipped a `walkthrough` entry naming only the oversize `record`. On a
+    // clean checkout that command is refused: the `cell-code-budget-exceeded` evidence has to be
+    // measured on a compile that included the package, so a strategy record must exist for that
+    // Cell first, and there is none. The entry therefore reproduced exactly the defect #91 is
+    // about — a documented command whose only outcome is a refusal.
+    //
+    // This is the case that would have caught it, and it is written as "the command the file
+    // gives must work from nothing" rather than "the file must contain these three commands",
+    // because a test that asserted the string would pass on any string.
+    const command = readExecutionCases().repeatable_commands.walkthrough;
+    expect(command, `${EXECUTION_CASES} must carry a walkthrough command`).toBeDefined();
+
+    await withWalkthroughCopy(async (projectRoot, decisions) => {
+      // A clean state is the copy itself: `record` has never run here, so there is no lock and
+      // no record for the Cell. That is the state the reviewer ran the documented command in.
+      expect(existsSync(join(projectRoot, "fgc.lock.json"))).toBe(false);
+
+      // The entry is a `&&`-joined sequence, so it is run through a shell rather than as argv —
+      // a `record … && record …` string is only meaningful to a shell, and splitting it here
+      // would be this test re-implementing the shell it is about.
+      //
+      // The root is substituted **forward-slashed**: the entry is shell text, and a Windows
+      // `C:\Users\…` root would have its backslashes read as escapes by `sh`/`bash` — the
+      // command would then name a path that does not exist and this case would fail for a reason
+      // that has nothing to do with what it checks. Node accepts either separator, and CI is
+      // POSIX, so forward slashes are the one form that is correct in both places.
+      const root = projectRoot.split("\\").join("/");
+      const resolved = command
+        .replace(/\.agents\/skills[^\s]*select_dependency\.mjs/g, join(REPOSITORY_ROOT, CLI_RELATIVE).split("\\").join("/"))
+        .split("<root>")
+        .join(root);
+      const shell = process.platform === "win32" ? "bash" : "sh";
+      let result: CommandResult;
+      try {
+        const { stdout, stderr } = await run(shell, ["-c", resolved], { cwd: REPOSITORY_ROOT, maxBuffer: 64 * 1024 * 1024 });
+        result = { code: 0, stdout, stderr };
+      } catch (error) {
+        const failure = error as { code?: number; stdout?: string; stderr?: string };
+        result = { code: failure.code ?? -1, stdout: failure.stdout ?? "", stderr: failure.stderr ?? "" };
+      }
+      // The whole sequence succeeds, which is the property the standalone entry did not have.
+      expect(result.code, `${command}\n${result.stdout}${result.stderr}`).toBe(0);
+
+      // And it produced the full walkthrough's outcome, not merely exit 0 — a sequence that
+      // silently skipped the rejection would also exit 0.
+      //
+      // **One** record, not two. The lock is keyed by `(packageName, cellTarget)`, so the
+      // rejection *replaces* the inline record for that Cell rather than sitting beside it. The
+      // pre-rejection decision survives as `subjectDecision`, which is what makes this assertion
+      // the ordering check: an oversize-only run would have been refused outright (no subject
+      // record to measure from), and a run in the wrong order could not have saved `inline` here.
+      const lock = await readLock(projectRoot);
+      expect(lock.decisions.map(entry => entry.strategy)).toEqual(["replace"]);
+      const rejection = lock.decisions[0]!;
+      expect(rejection.artifactEvidence?.budgetCharacters).toBe(8_000);
+      expect(rejection.artifactEvidence?.subjectDecision).toEqual({ strategy: "inline" });
+
+      // Every decision file the entry names is committed, so the sequence cannot point at a
+      // file the repository does not carry.
+      expect(decisions.every(existsSync)).toBe(true);
+    });
+  }, CASE_TIMEOUT_MS);
+
+  it("marks the walkthrough entry as a sequence, so its order is stated rather than implied", () => {
+    // The `//walkthrough` sibling is where the ordering requirement and the writable-copy
+    // requirement live, because the value itself cannot carry prose. Asserted so the entry
+    // cannot lose its explanation while keeping its commands.
+    const commands = readExecutionCases().repeatable_commands;
+    const note = commands["//walkthrough"];
+    expect(note, `${EXECUTION_CASES} must explain the walkthrough sequence`).toBeDefined();
+    expect(note).toMatch(/sequence/i);
+    expect(note).toMatch(/inline/);
+    // And the value really is the ordered sequence the note describes, rather than one command.
+    expect(commands.walkthrough).toMatch(/decisions\/inline\.json/);
+    expect(commands.walkthrough).toMatch(/decisions\/oversize\.json/);
+    expect(commands.walkthrough!.indexOf("inline.json")).toBeLessThan(commands.walkthrough!.indexOf("oversize.json"));
+  });
 
   it("refuses the oversize rejection on a Cell that declares no ceiling, as the prose says", async () => {
     // The walkthrough's prose claims this, so it is executed rather than trusted. It is also the

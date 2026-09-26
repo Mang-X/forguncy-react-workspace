@@ -82,21 +82,33 @@ node $S status --project <projectRoot>
 
 上面的命令在仓库里有一个**可运行的**项目：`examples/probe-proving-cases/walkthrough`
 （Cell `capped` 声明了 `codeBudgetCharacters: 8000`，`uncapped` 不声明上限）。它的两个决策文件
-就在 `walkthrough/decisions/` 下，可直接执行：
+就在 `walkthrough/decisions/` 下。
+
+**先复制到可写的临时目录再跑**：`record` 会在项目根写 `fgc.lock.json` 与 `fgc-evidence/`，
+直接对着提交进仓库的 fixture 跑会把它们变成工作树里的未跟踪文件。复制到该 example 的
+`.fgc/`（已被 git 忽略）下，probe 的祖先查找仍然能解析到 `es-toolkit`：
 
 ```bash
 S=.agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs
-W=examples/probe-proving-cases/walkthrough
+W=examples/probe-proving-cases/.fgc/walkthrough-demo
+mkdir -p "$W" && cp -r examples/probe-proving-cases/walkthrough/. "$W"/
 
-# 先记录该包在这个 Cell 里的策略——超限拒绝要在"它确实进过这个 Cell"的编译上测量
+# 1) 先记录该包在这个 Cell 里的策略——超限拒绝要在"它确实进过这个 Cell"的编译上测量
 node $S record --project $W --decision $W/decisions/inline.json
 
-# 再记录超限拒绝：脚本编译 capped，从编译器诊断取数写入锁
+# 2) 再记录超限拒绝：脚本编译 capped，从编译器诊断取数写入锁
 node $S record --project $W --decision $W/decisions/oversize.json
 
-# 读回：artifact-rejection profile，freshness 为 fresh
+# 3) 读回：artifact-rejection profile，freshness 为 fresh
 node $S status --project $W
 ```
+
+（`cp -r src/. dst/` 而不是 `cp -r src dst`：后者在重跑时会套成 `dst/walkthrough/`。）
+
+
+三步是一个**序列**，不能只跑第 2 步：`cell-code-budget-exceeded` 的测量必须发生在"该包确实
+进过这个 Cell"的那次编译上，而在干净状态下还没有适用于 `capped` 的既有记录，只跑第 2 步会被
+以 unattributable 拒绝。第 1 步就是产生那条既有记录的。
 
 把 `uncapped` 写进 `oversize.json` 的 `cellTarget` 会被拒绝——那个 Cell 没有声明上限，编译
 不产生该诊断，所以没有可记录的超限。

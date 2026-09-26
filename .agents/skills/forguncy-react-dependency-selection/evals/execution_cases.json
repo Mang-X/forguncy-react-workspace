@@ -8,7 +8,8 @@
     "audit": "node .agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs audit --decision <file>",
     "record": "node .agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs record --project <root> --decision <file>",
     "status": "node .agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs status --project <root>",
-    "walkthrough": "node .agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs record --project examples/probe-proving-cases/walkthrough --decision examples/probe-proving-cases/walkthrough/decisions/oversize.json"
+    "//walkthrough": "A sequence, not one command: the `cell-code-budget-exceeded` measurement has to be taken on a compile that included the package, so `decisions/inline.json` must be recorded before `decisions/oversize.json`. `<root>` must be a writable copy of examples/probe-proving-cases/walkthrough, not the committed directory — record writes fgc.lock.json and fgc-evidence/ into it. See SKILL.md 走一遍 for the copy step.",
+    "walkthrough": "node .agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs record --project <root> --decision <root>/decisions/inline.json && node .agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs record --project <root> --decision <root>/decisions/oversize.json && node .agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs status --project <root>"
   },
   "cases": [
     {
