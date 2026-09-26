@@ -1121,6 +1121,16 @@ export const FRONTEND_LIBRARY_RUNTIME_SEMANTICS = {
  * the platform *re-evaluates* the artifact when a property changes — and so whether a
  * re-render reads fresh `props` — is not decidable from this repository; it is recorded
  * as an open question below and belongs to #83/#84.
+ *
+ * ## What the contract deliberately does not require
+ *
+ * There is no teardown member. The binding installs and never uninstalls, and that is
+ * recorded here rather than left to be inferred from an absent field: a requirement
+ * stated in prose that no generated code meets is worse than no requirement, because a
+ * reader takes it as a description of what ships. Whether a teardown is needed is a
+ * lifecycle question, and the evidence for it does not exist yet — so the contract states
+ * the ordering it can guarantee and leaves the rest to #83, which owns the multi-Cell and
+ * unmount behaviour.
  */
 export const CELL_RUNTIME_BINDING_CONTRACT = {
   /**

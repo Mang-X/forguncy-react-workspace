@@ -569,6 +569,23 @@ describe("the rendered runtime binding module", () => {
     expect(source).toContain("export *");
   });
 
+  it("installs and never uninstalls, which is what the contract's prose now says", () => {
+    // Review found the drift this pins: `host-provider.ts` listed "uninstall it when the
+    // Cell is torn down" among the requirements a generated binding has to satisfy, and no
+    // generated binding did — the comment described a state the code was not in, and a
+    // reader would have taken it as what ships.
+    //
+    // The assertion is on the *rendered source*, not on the prose, because that is the side
+    // that can be checked: the doc now states the binding installs and does not uninstall,
+    // and this is what makes that statement falsifiable. It fails the moment someone adds a
+    // teardown call to the template without deciding the lifecycle question first — which
+    // is #83's, and not something the compiler may settle from an unverified premise.
+    const source = renderRuntimeBindingModule("/abs/path/to/runtime/index.ts");
+
+    expect(source).toContain(CELL_RUNTIME_BINDING_CONTRACT.installMember);
+    expect(source).not.toContain("uninstallRuntimeFacadeProvider");
+  });
+
   it("keeps its names out of the entry wrapper's union", () => {
     // The two generated modules declare their host names separately, and the separation is
     // load-bearing rather than tidy. `CELL_ENTRY_WRAPPER_HOST_NAMES` is the union over the

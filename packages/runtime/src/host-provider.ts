@@ -35,9 +35,34 @@
  *
  * 1. build the provider from the Cell's own `props` and `useDataSource`;
  * 2. install it before the first façade call, which in practice means before the
- *    Cell's element renders;
- * 3. uninstall it when the Cell is torn down, so a later harness in the same
- *    copy starts from the state this module documents.
+ *    Cell's element renders.
+ *
+ * **#82's generated binding satisfies those two and no more.** It has no teardown
+ * path, so do not read this list as a description of what the compiler currently
+ * emits: an earlier version of this comment carried a third item ("uninstall it
+ * when the Cell is torn down") as though the generated binding met it, which no
+ * code did. The correction is deliberate, and what replaces it is the honest
+ * status rather than a substitute third requirement.
+ *
+ * Whether a teardown is needed at all is *not decided here*, and the argument is
+ * recorded rather than the conclusion:
+ *
+ * - The slot is per copy (`provider.ts`) and the package is flattened per Cell
+ *   (#14), so a Cell's provider is unreachable from another Cell's copy — which
+ *   is what `RUNTIME_FACADE_PACKAGING_POLICY.perCellDuplicateAllowed` buys.
+ * - Within one copy, re-installing the same kind replaces, so a re-render or an
+ *   HMR pass is served without an uninstall.
+ *
+ * Those two are why the missing teardown is not a *known* defect. They are not a
+ * proof that it is not one: whether the platform re-evaluates the artifact when a
+ * Cell is torn down or its properties change is not decidable from this
+ * repository (`RUNTIME_CONTRACT_UNKNOWNS`' `artifact-re-evaluated-per-render`),
+ * and multi-instance and lifecycle behaviour has to be settled by execution
+ * rather than by this reasoning. That is #83's subject, with the real-page
+ * confirmation in #84. A caller that needs the slot cleared today has
+ * `uninstallRuntimeFacadeProvider()`; the generated binding deliberately does not
+ * call it, because doing so on a guess would be the compiler inventing lifecycle
+ * policy from an unverified premise.
  *
  * ## Why the factory is thin on purpose
  *
