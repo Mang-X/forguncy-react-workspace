@@ -1,5 +1,6 @@
 /**
- * #20's real-designer validation: the executor, against Forguncy 12.0.100.0.
+ * #20's real-designer validation: the executor, against Forguncy 12.0.100.0 — re-run by #115
+ * against 12.0.101.0 through the shipped adapter.
  *
  * This is not an automated test. It is the *executed* half of #20's acceptance criteria —
  * "No manual copy/paste is needed for a generated Cell artifact", "Syncing the same
@@ -8,23 +9,32 @@
  * a live designer session with a disposable page, and it is recorded here so the run is
  * reproducible and its raw observations are the evidence rather than a summary of them.
  *
- * ## What a run of this discharges, and the one thing it does not (#92)
+ * ## What a run of this discharges, and what #115 changed about it
  *
- * `guarantees.ts` records which routes each real-project promise has been executed on, and
- * `unexecutedRuntimeRouteCoverage()` reports the rest. Read them before reporting a run here
- * as coverage, because the two do not line up automatically:
+ * `guarantees.ts` records which routes and which product version each real-project promise has
+ * been executed on; `unexecutedRuntimeRouteCoverage()` and `unexecutedRuntimeVersionCoverage()`
+ * report the rest. Read those before reporting a run here as coverage.
  *
- * - Steps 1–6 exercise the **write** route, which is what `EXECUTED_AGAINST_DESIGNER` records
- *   and what #20's run discharged.
- * - Step 7 now also asserts the **unchanged** route (#92: no write, but the error check and
- *   the generation still run, with this run's own locator). That route is recorded as
- *   **unexecuted** on purpose, and a run of this script does not change that: on the
- *   designer builds available here the shipped adapter cannot reach it — `readOneCell`
- *   requires `cellType === "ReactCellTypeCellType"` while the product writes that name and
- *   reads back `"ReactCellType"`, so a second sync reports `refused`, and 12.0.101.0 has no
- *   `api.app.generatePageAsync` at all. Closing those entries needs a run through the
- *   shipped adapter on the pinned product version; `validate-unchanged-against-designer.mjs`
- *   covers the executor half in the meantime and says why it is executor-level only.
+ * Both routes are now reached through the **shipped adapter**, which is what makes a run of
+ * this script adapter-level evidence rather than executor-level:
+ *
+ * - Steps 1–6 exercise the **write** route.
+ * - Step 7 asserts the **unchanged** route (#92: no write, but the error check and the
+ *   generation still run, with this run's own locator).
+ *
+ * That was not true before #115. The two calls below were the blocker, and both are now fixed
+ * in `designer-transport.ts`: `readOneCell` compared the Cell's read-back `cellType` against the
+ * *write* alias, so a second sync reported `refused` instead of `identical` — with the old
+ * comparison restored, step 6 of this very script fails with `foreign-code` / `refused` — and
+ * 12.0.101.0 has no `api.app.generatePageAsync`, only `api.app.generateProject`.
+ *
+ * The script itself is unchanged by #115 apart from this header: what the repository needed was
+ * the adapter fixed, not the evidence loosened. `validate-unchanged-against-designer.mjs` is the
+ * sibling run that drives the unchanged route on its own and asserts the refusal path.
+ *
+ * The *version* axis is a separate gap and this run does not close it: it ran on 12.0.101.0,
+ * and 12.0.100.0 — the version #5 pinned and #20 executed, before the recognition change — is
+ * not installed on the machine #115 ran on, so `unexecutedRuntimeVersionCoverage()` reports it.
  *
  * ## Why it is a script and not a vitest test
  *

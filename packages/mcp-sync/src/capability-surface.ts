@@ -73,6 +73,7 @@ export const SYNC_EVIDENCE_SOURCE_IDS = [
   "issue-5-designer-probe",
   "forguncy-library-guide",
   "issue-20-designer-execution",
+  "issue-115-designer-probe",
 ] as const;
 
 export type SyncEvidenceSourceId = (typeof SYNC_EVIDENCE_SOURCE_IDS)[number];
@@ -111,6 +112,14 @@ export const SYNC_EVIDENCE_SOURCES: Readonly<Record<SyncEvidenceSourceId, SyncEv
       "#20's own executed evidence against a real designer session — recorded on the Issue (https://github.com/Mang-X/forguncy-react-workspace/issues/20). Environment: MCP `http://localhost:11234/mcp`, `serverInfo = Forguncy 12.0.100.0`, designer assembly `12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623`; project `前端拓展包集成示例.fgcc`; the product's own API reference, which the designer serves over MCP VFS at `/apis/**`.",
     scope:
       "The two operations #5 left unnamed, *performed* (this source is an execution, not a reading of one) and the product reference that documents them: `api.page.getCells` and `api.page.getCellCodeContext` (both read a Cell's persisted state) and `api.app.saveProject` (persists it). It also records what `api.page.readCellCode` does — the segmented reader — and the measurement that decides which of the two readers the divergence check uses: `readCellCode` returned exactly 12,000 characters with `hasMore: true` for a 17,125-character cell, while `getCells` returned all 17,125 characters of the same `cellTypeProps.code`. It records the designer's own `baseHash` equals `sha256` of the stored code string byte-for-byte (LF line endings, trailing newline preserved). What it does **not** record: any claim that these calls are stable across Forguncy versions other than 12.0.100.0, or that `getCells` has no size budget — only that none was observed at 17,125 characters.",
+  },
+  "issue-115-designer-probe": {
+    id: "issue-115-designer-probe",
+    channel: "designer-api",
+    citation:
+      "#115's own executed evidence against a live designer session (https://github.com/Mang-X/forguncy-react-workspace/issues/115). Environment: MCP `http://localhost:11234/mcp`, `serverInfo = Forguncy 12.0.101.0`, designer assembly `12.0.101.0+92cefba44ce06dc75c2633bf5f6c6771e4ee41f0`; project `前端拓展包集成示例.fgcc`; the product's own API reference served over MCP VFS at `/apis/**`.",
+    scope:
+      "The two shapes #115 found to be version-sensitive between the pinned 12.0.100.0 and this 12.0.101.0 build. (1) **The read-back cell-type name.** `api.page.setCells` accepted `ReactCellTypeCellType`, `ReactCellType` and the display name `React AI 单元格` for the same cell type — which the `setCells` reference states as 内置别名、类型名或显示名 — and all three read back through `api.page.getCells` as `cellType: \"ReactCellType\"`, with the same `cellTypeProps.code` byte for byte. The product's own reference (`/apis/cellTypes/ReactCellType.md`, `/apis/cellTypes/index.md`) also calls the type `ReactCellType`; `ReactCellTypeCellType` appears in neither. `UserControlPageCellType` wrote and read back as itself with `cellTypeProps: { overflowMode }` and no `code`. (2) **The generation call.** `api.app.generatePageAsync` is not an own property of `api.app` on this build and calling it throws; `api.app.generateProject` exists, is documented at `/apis/app/generateProject.md` (permission `read/safe`, request `{ skipCheckProjectError? }`, response `{ url, message, checkResult, success? }`), and was executed: with `{}` and with `{ skipCheckProjectError: true }` it resolved `success: true` with `url = \"http://localhost:63982/Forguncy\"` and `checkResult.errorCount: 0` — the same runtime *base* #20 measured, so the page-route mapping is unchanged. What it does **not** record: any re-measurement of `12.0.100.0`. That build is not installed on this machine, so neither shape is claimed for it, and nothing here narrows or widens #20's own findings.",
   },
 };
 
@@ -180,12 +189,17 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
   {
     id: "read-cell-source",
     summary: "Read the source and library references a target Cell currently holds.",
-    evidenceSources: ["issue-5-designer-probe", "forguncy-library-guide", "issue-20-designer-execution"],
+    evidenceSources: [
+      "issue-5-designer-probe",
+      "forguncy-library-guide",
+      "issue-20-designer-execution",
+      "issue-115-designer-probe",
+    ],
     confirmation: "established",
     method: "api.page.getCells",
     portMethod: "readCellSource",
     usedByStepIds: ["read-target-state"],
-    note: "Established by #20's execution rather than by #5's probe, which is why the call is `getCells` and not `readCellCode`. Both read a Cell's persisted state and both were run; `readCellCode` was rejected as the divergence reader on evidence, not on preference: it is a segmented reader (`一次最多返回 200 行和 12000 个字符`) and returned `hasMore: true` at 12,000 characters of a 17,125-character cell, so using it would splice a truncated prefix into the marker parse and report a whole generated Cell as `malformed-marker` — the one refusal that tells a person their source was edited. `getCells` returned that same cell's full 17,125 characters. It also reports the two things the divergence check needs *together* — `cellTypeProps.code` and `cellTypeProps.frontendLibraries` — where the code readers return source alone, and it distinguishes 'the Cell is blank' (absent from `cells`) from 'the Cell holds something that is not a ReactCellType' (present, with a `value` or another `cellType`).",
+    note: "Established by #20's execution rather than by #5's probe, which is why the call is `getCells` and not `readCellCode`. Both read a Cell's persisted state and both were run; `readCellCode` was rejected as the divergence reader on evidence, not on preference: it is a segmented reader (`一次最多返回 200 行和 12000 个字符`) and returned `hasMore: true` at 12,000 characters of a 17,125-character cell, so using it would splice a truncated prefix into the marker parse and report a whole generated Cell as `malformed-marker` — the one refusal that tells a person their source was edited. `getCells` returned that same cell's full 17,125 characters. It also reports the two things the divergence check needs *together* — `cellTypeProps.code` and `cellTypeProps.frontendLibraries` — where the code readers return source alone, and it distinguishes 'the Cell is blank' (absent from `cells`) from 'the Cell holds something that is not a ReactCellType' (present, with a `value` or another `cellType`). The *call* is unchanged by #115; what #115 adds is the name this read reports for a React Cell, which is one value (`ReactCellType`) and not the write alias, and therefore the input `readOneCell`'s recognition check must be built from.",
   },
   {
     id: "write-cell-source",
@@ -220,12 +234,12 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
   {
     id: "generate-page",
     summary: "Generate the target page and report the runtime locator a browser can open.",
-    evidenceSources: ["issue-5-designer-probe", "forguncy-library-guide"],
+    evidenceSources: ["issue-5-designer-probe", "forguncy-library-guide", "issue-115-designer-probe"],
     confirmation: "established",
-    method: "api.app.generatePageAsync",
+    method: "api.app.generateProject",
     portMethod: "generatePageAsync",
     usedByStepIds: ["generate-page"],
-    note: "#5 records the call and the resulting URL shape (`http://localhost:63982/Forguncy`, page route `.../Forguncy/<PageName>`) but not the response object, so the sync contract names its own field for the URL and leaves the mapping to the adapter. See `port.ts`'s `GeneratedPage`.",
+    note: "Generation is project-wide and answers with the runtime *base*; the adapter turns that base into a page locator (`runtimePageUrl`), which is the mapping `port.ts`'s `GeneratedPage` leaves to it. **The call name is version-sensitive, and this entry names the one that exists on both builds the repository knows of.** #5 measured `api.app.generatePageAsync` on 12.0.100.0 and #20 executed the flow on it; #115 executed `api.app.generateProject` on 12.0.101.0, where `generatePageAsync` is absent — same argument (`{}`, or `skipCheckProjectError`), same response shape, same base URL. `generateProject` is therefore the established name and the one the adapter asks for first, with `generatePageAsync` recognised as the older build's spelling of the same operation (`GENERATE_PROJECT_SCRIPT`). This is not a name that 'looks like' the right one: both were executed, both are documented by the product, and the two are distinguished by `typeof api.app.<name>` — a fact about the build — rather than by a version table. A build exposing *neither* is refused rather than guessed at; see the adapter.",
   },
   {
     id: "project-save-status",

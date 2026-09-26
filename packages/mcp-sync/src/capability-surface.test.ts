@@ -86,10 +86,20 @@ describe("what the evidence establishes", () => {
    * The exact call names, pinned.
    *
    * This is the test that makes a guessed call name fail a check instead of shipping: the
-   * names below are the ones #5's and #20's executed designer evidence and the product's
-   * own guide record, and there is no eighth. A change to any of them has to come with the
-   * evidence that established it, because inventing one is precisely the failure #19's
-   * "or the exact supported equivalent" hedge invites.
+   * names below are the ones #5's, #20's and #115's executed designer evidence and the
+   * product's own guide record, and there is no eighth. A change to any of them has to come
+   * with the evidence that established it, because inventing one is precisely the failure
+   * #19's "or the exact supported equivalent" hedge invites.
+   *
+   * `generate-page`'s name moved from `api.app.generatePageAsync` to
+   * `api.app.generateProject` under #115, and it is worth being precise about why that is not
+   * the thing this test exists to prevent: the rule is "an established capability quotes a
+   * call that was *executed*", not "a call name never changes". #115 executed
+   * `api.app.generateProject` on 12.0.101.0 (and the product documents it), while
+   * `generatePageAsync` is absent there — so the pinned name is the one that was established
+   * for the surface the adapter now drives. The older spelling is not deleted: it remains a
+   * recognised build difference in `GENERATE_PROJECT_SCRIPT`, with its own 12.0.100.0
+   * evidence, and the adapter picks by `typeof` rather than by version.
    */
   it("quotes the observed designer calls verbatim", () => {
     const established = SYNC_CAPABILITIES.filter(capability => capability.confirmation === "established").map(
@@ -97,7 +107,7 @@ describe("what the evidence establishes", () => {
     );
     expect(established.sort()).toEqual([
       "api.app.checkProjectErrors",
-      "api.app.generatePageAsync",
+      "api.app.generateProject",
       "api.app.getProjectSaveStatus",
       "api.app.listFrontendLibraries",
       "api.app.saveProject",
@@ -135,6 +145,26 @@ describe("what the evidence establishes", () => {
     expect(findSyncCapability("read-cell-source").method).not.toBe("api.page.readCellCode");
   });
 
+  // #115: the two shapes that turned out to be version-sensitive, and the version they were
+  // measured on. Asserted rather than left to the note's prose because the load-bearing part
+  // is the *boundary*: the source has to say which build it is evidence for, so a later
+  // reader cannot mistake it for a claim about the pinned one.
+  it("records which build the generation and read-back shapes were probed on", () => {
+    const generation = findSyncCapability("generate-page");
+    expect(generation.evidenceSources).toContain("issue-115-designer-probe");
+    expect(generation.method).toBe("api.app.generateProject");
+
+    const source = findSyncEvidenceSource("issue-115-designer-probe");
+    expect(source.channel).toBe("designer-api");
+    expect(source.scope).toContain("12.0.101.0");
+    expect(source.scope).toContain("ReactCellType");
+    expect(source.scope).toContain("generatePageAsync");
+    // The boundary that matters: this source is explicit that it did not re-measure the
+    // pinned build, so it cannot be read as discharging #20's 12.0.100.0 evidence.
+    expect(source.scope).toContain("not");
+    expect(source.scope).toContain("12.0.100.0");
+  });
+
   it("keeps the save status as the step's own reason for saving", () => {
     const status = findSyncCapability("project-save-status");
     expect(status.method).toBe("api.app.getProjectSaveStatus");
@@ -158,6 +188,28 @@ describe("what the evidence establishes", () => {
     expect(findSyncEvidenceSource("issue-5-designer-probe").channel).toBe("designer-api");
     expect(findSyncEvidenceSource("forguncy-library-guide").channel).toBe("product-documentation");
     expect(findSyncEvidenceSource("forguncy-library-guide").scope).toContain("documentation, not an execution");
+  });
+
+  // #115's evidence has to *reach* the capabilities it is evidence for.
+  //
+  // Without this, the two edits the change is made of can silently cancel: adding the source
+  // record on one line and the `evidenceSources` entry on another are separate edits, and either
+  // one alone still compiles, still passes every other test here, and still leaves the two
+  // capabilities quoting a name the new source is the only evidence for. The check is over the
+  // *registry*, so it fails on the half-edit in either direction.
+  it("cites the build the generation and read-back shapes were probed on, where it is evidence", () => {
+    const cited = SYNC_CAPABILITIES.filter(capability =>
+      capability.evidenceSources.includes("issue-115-designer-probe"),
+    ).map(capability => capability.id);
+
+    // Exactly the two shapes #115 measured, and no third: evidence spread by habit over
+    // capabilities it says nothing about is how a citation stops meaning anything.
+    expect(cited.sort()).toEqual(["generate-page", "read-cell-source"]);
+
+    // And the generation capability's name is the one that source *established* — asserting the
+    // pair, because citing #115 while keeping the call name it found absent would be a claim the
+    // source itself contradicts.
+    expect(findSyncCapability("generate-page").method).toBe("api.app.generateProject");
   });
 });
 
