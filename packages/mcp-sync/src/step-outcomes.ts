@@ -55,13 +55,26 @@ export const SYNC_STEP_SUCCEEDED: SyncStepOutcome = { kind: "succeeded" };
  * healthy project as `errorCount: 0`, and the comparison here is the exact one #19
  * states; an inverted test would additionally fail a negative count, which cannot
  * happen and whose handling would be a rule nobody decided.
+ *
+ * `wroteCell` changes only the sentence, never the threshold. #92 made this gate reachable
+ * on the `unchanged` path, where no write happened, and a message asserting one would
+ * misreport the run it is attached to — the same defect as returning a locator for a
+ * deployment that did not happen, applied to the text instead of the value. It is a required
+ * parameter rather than an optional one so a caller has to answer the question rather than
+ * inherit a default that is right half the time.
  */
-export function outcomeOfProjectErrorCheck(report: ProjectErrorReport, target: CellTarget): SyncStepOutcome {
+export function outcomeOfProjectErrorCheck(
+  report: ProjectErrorReport,
+  target: CellTarget,
+  wroteCell: boolean,
+): SyncStepOutcome {
   if (report.errorCount === 0) return SYNC_STEP_SUCCEEDED;
   return {
     kind: "failed",
     diagnostic: createSyncDiagnostic("project-errors-after-sync", cellTargetLabel(target), {
-      detail: `\`api.app.checkProjectErrors\` reported ${report.errorCount} error(s) after the Cell was written.`,
+      detail: `\`api.app.checkProjectErrors\` reported ${report.errorCount} error(s) ${
+        wroteCell ? "after the Cell was written" : "on a run that wrote nothing"
+      }.`,
     }),
   };
 }

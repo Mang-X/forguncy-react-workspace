@@ -36,6 +36,13 @@
  * 6. generate the page **after** the errors are known to be zero;
  * 7. return the runtime locator.
  *
+ * Steps 4–7 are also what an `unchanged` run performs, and that is deliberate rather than
+ * an exception to the order: steps 1–2 established there is nothing to write, and steps
+ * 5–6 are the *validation* half of the flow, which a skip does not make unnecessary. What
+ * an `unchanged` run does not do is step 3, and the save step is a read-only decision on
+ * that path — the project is not dirty from a write that did not happen, and the step says
+ * `skipped` rather than saving a clean project.
+ *
  * Steps 1–2 are the executor's own calls, and that placement is the design: it reads the
  * extension listing and the target's current state through the port *immediately* before
  * planning, so "before mutation" means *at this moment* rather than *per the caller*. The
@@ -52,17 +59,36 @@
  *
  * ## What it will not do
  *
- * - **It will not write when the plan held.** A refused, skipped or unassemblable
- *   plan produces a {@link CellSyncRun} whose `mutation` is `held`, and the run stops
- *   before the write. The read-only steps are *not* run either: with no write there is
- *   no new state to validate, and generating a page would report a locator for a
- *   deployment that did not happen.
+ * - **It will not write when the plan refused.** A refused or unassemblable plan produces
+ *   a {@link CellSyncRun} whose `status` is `refused`, and the run stops before the write.
+ *   The steps after it are `not-reached`: nothing about them is wrong, the flow simply did
+ *   not get there, and there is no deployment to verify.
+ * - **It will not read "nothing to write" as "nothing to verify".** A target that already
+ *   holds this artifact is the one hold that is not a refusal. The run reports `unchanged`,
+ *   issues no `setCells`, and *does* run the save-status read, the error check and the
+ *   generation — because the Cell already holding this artifact says nothing about whether
+ *   the project has errors or whether the page still generates. A caller that asked for a
+ *   deployment locator gets one whether or not the write was needed.
+ *
+ *   The locator an `unchanged` run returns is **this run's**, never a previous run's: the
+ *   step that produced it is on `steps`, and a generation that fails on this path fails the
+ *   run rather than falling back to a stale URL. That is why the locator is a required field
+ *   of the `unchanged` variant and of `written`, and absent from `refused` — its presence is
+ *   the verification result, so "unchanged, but nothing was verified" is not expressible.
+ * - **It will not hide a save it performed.** The save step is the one thing an `unchanged`
+ *   run can still do to the project, and it is the caller's to know about: `mutated` is on
+ *   the `unchanged` variant as well as on `failed`, because "nothing was written" is a claim
+ *   about the *Cell* and not about the project. A skip that persisted the project and
+ *   reported only `unchanged` would tell a caller nothing had changed while the project had
+ *   just been written to disk.
  * - **It will not save unconditionally.** #20 measured that a `setCells` write leaves
  *   `containsUnsavedChanges: true`, so the save is required after a write — but it is
  *   requested as "save if the project says it is dirty", not "always save", because
- *   the second would make a clean project's state depend on sync running.
+ *   the second would make a clean project's state depend on sync running. On the `unchanged`
+ *   path the same read is what keeps a clean project clean: the step reports `skipped` rather
+ *   than saving, because sync's own write is not what made anything dirty.
  * - **It will not report a failed run as a successful one.** A non-zero error count
- *   or a generation with no locator produces `outcome: "failed"` with the diagnostic
+ *   or a generation with no locator produces `status: "failed"` with the diagnostic
  *   that says why; the locator is only present when the flow reached generation *and*
  *   it succeeded.
  * - **It will not swallow a transport failure.** A rejected port call is a thrown
@@ -83,7 +109,7 @@ import { createSyncDiagnostic } from "./diagnostics.ts";
 import type { SyncDiagnostic } from "./diagnostics.ts";
 import type { CellDivergence, DeployedCellState } from "./divergence.ts";
 import { planCellSync, planSetCellsDispatch } from "./sync-plan.ts";
-import type { CellSyncDispatch, CellSyncPlan, PlanCellSyncOptions } from "./sync-plan.ts";
+import type { CellSyncPlan, CellSyncRefusalDispatch, PlanCellSyncOptions } from "./sync-plan.ts";
 import { outcomeOfPageGeneration, outcomeOfProjectErrorCheck } from "./step-outcomes.ts";
 import { cellTargetLabel } from "./target.ts";
 import { resolveCellSyncTargets } from "./registry-target.ts";
@@ -102,10 +128,11 @@ import type { CellTarget } from "./target.ts";
 /**
  * Whether a step ran.
  *
- * `skipped` is a *deliberate* non-run with a reason — a clean project needs no save —
- * and it is separate from `not-reached`, which is a step the flow never got to
- * because an earlier one stopped it. Reporting the two together would make "we chose
- * not to save" read as "the sync died before saving".
+ * `skipped` is a *deliberate* non-run with a reason — a clean project needs no save, and an
+ * unchanged target needs no write — and it is separate from `not-reached`, which is a step
+ * the flow never got to because an earlier one stopped it. Reporting the two together would
+ * make "we chose not to save" read as "the sync died before saving", and would describe an
+ * unchanged run as a truncated one.
  */
 export type SyncRunStepStatus = "ran" | "skipped" | "not-reached" | "blocked";
 
@@ -164,18 +191,32 @@ export function deployedStateOfRead(result: ReadCellSourceResult): DeployedCellS
 // What a run produced
 // ---------------------------------------------------------------------------
 
-export const CELL_SYNC_RUN_STATUSES = ["written", "held", "failed"] as const;
+export const CELL_SYNC_RUN_STATUSES = ["written", "unchanged", "refused", "failed"] as const;
 
 export type CellSyncRunStatus = (typeof CELL_SYNC_RUN_STATUSES)[number];
 
 /**
  * The result of executing one target's sync.
  *
+ * Four statuses, and the split between `unchanged` and `refused` is the point of this shape.
+ * The previous version reported both as `held`, which conflated "the write was not needed"
+ * with "the write was forbidden": they call for different next actions — a refusal has to be
+ * looked at by a person, an unchanged target is a finished sync — and a caller told the same
+ * status for a skip as for a conflict would go looking for a conflict that is not there. The
+ * plan's own vocabulary keeps both as *holds* (`CELL_SYNC_HOLD_REASONS`), because at that
+ * layer "the dispatch did not issue" is the one fact; the run's status is where the two
+ * consequences separate.
+ *
  * A discriminated union rather than a status plus optional fields, for the reason
- * `sync-plan.ts` gives about `CellSyncWrite`: "held" and "failed" carry different
- * things, and a shape that could hold both would let a caller read the wrong one. In
- * particular `runtime` is present **only** on `written`: a locator for a page that was
- * not written is exactly the value a browser-verification step would accept.
+ * `sync-plan.ts` gives about `CellSyncWrite`: the four carry different things, and a shape
+ * that could hold all of them would let a caller read the wrong one.
+ *
+ * `runtime` is present on `written` and on `unchanged` and **absent from `refused` and
+ * `failed`**. On `written` it means the deployment happened; on `unchanged` it means the
+ * deployment was already there and *this* run still checked the project and generated the
+ * page. It is a required field on both rather than an optional one, so neither "written with
+ * nothing to open" nor "unchanged with nothing verified" is representable — and it is
+ * deliberately not carried on `refused`, because there is no deployment to locate.
  */
 export type CellSyncRun =
   | {
@@ -194,17 +235,53 @@ export type CellSyncRun =
       readonly diagnostics: readonly SyncDiagnostic[];
     }
   | {
-      readonly status: "held";
+      /**
+       * The target already held this artifact, so nothing was written.
+       *
+       * A skip, not a refusal: the plan's dispatch held for `already-identical`, and the
+       * run still performed the validation half of the flow.
+       */
+      readonly status: "unchanged";
+      readonly target: CellTarget;
+      readonly plan: CellSyncPlan;
+      /**
+       * The locator **this** run's generation produced.
+       *
+       * Required rather than optional, and it is the run's own: a skip says the Cell is
+       * already correct, not that the project was checked or the page generated. Reusing a
+       * previous run's locator here would claim a verification this run did not perform,
+       * and the failure — an `unchanged` run reported as verified while generation failed —
+       * is exactly what a browser-verification step would then act on.
+       */
+      readonly runtime: GeneratedPage;
+      readonly steps: SyncRunSteps;
+      readonly divergence: CellDivergence;
+      /**
+       * This run changed project state even though it wrote no Cell.
+       *
+       * True exactly when the save step persisted a project the product reported dirty. It
+       * is the same question {@link CellSyncRun}'s `failed` variant asks, and it is here for
+       * the same reason: "nothing was written" is a claim about the Cell, not about the
+       * project, and a caller deciding whether it may discard a backup needs the project's
+       * answer rather than the Cell's.
+       */
+      readonly mutated: boolean;
+      readonly diagnostics: readonly SyncDiagnostic[];
+    }
+  | {
+      readonly status: "refused";
       readonly target: CellTarget;
       readonly plan: CellSyncPlan;
       /**
        * The plan's own answer for why nothing was sent.
        *
-       * Narrowed to the `hold` case rather than the full {@link CellSyncDispatch}: a run
-       * is `held` precisely because the dispatch did *not* issue, so a caller should not
-       * have to re-check what this type already knows.
+       * Narrowed to a *refusing* hold rather than the full {@link CellSyncDispatch}: a run
+       * is `refused` precisely because the dispatch held for a reason that stops the flow,
+       * so a caller should not have to re-check what this type already knows — and a
+       * `already-identical` dispatch is not assignable here, which is what keeps the skip
+       * from being reported as a refusal.
        */
-      readonly dispatch: Extract<CellSyncDispatch, { readonly kind: "hold" }>;
+      readonly dispatch: CellSyncRefusalDispatch;
       readonly steps: SyncRunSteps;
       readonly diagnostics: readonly SyncDiagnostic[];
     }
@@ -216,11 +293,13 @@ export type CellSyncRun =
       /** What failed, in the sync's own vocabulary. Never empty. */
       readonly diagnostics: readonly SyncDiagnostic[];
       /**
-       * The write landed, so the failure is *after* a mutation.
+       * This run changed project state before it failed.
        *
-       * Carried so a caller knows whether the project was changed before deciding what
-       * to do next: a run that failed at the error check left a Cell written, and one
-       * that failed to assemble left nothing.
+       * Two ways that happens, and both count: the Cell write landed, or the project
+       * reported unsaved changes and the save persisted them. Carried so a caller knows
+       * whether the project was changed before deciding what to do next — a run that failed
+       * at the error check left a Cell written, a run that failed after a save left the
+       * project persisted, and a run that failed to assemble left nothing.
        */
       readonly mutated: boolean;
     };
@@ -337,17 +416,61 @@ export async function executeCellSync(options: ExecuteCellSyncOptions): Promise<
 
   const dispatch = planSetCellsDispatch(plan);
   if (dispatch.kind === "hold") {
-    // No write, so nothing after it can run. The steps are marked `not-reached` rather
-    // than `blocked`: nothing is wrong with them, the flow simply did not get there.
+    // The skip is the one hold that does not stop the flow: the target already holds this
+    // artifact, so the write is unnecessary — which says nothing about whether the project
+    // is valid or whether the page still generates. So it runs the same validation half the
+    // written path does, and reports `unchanged` rather than `refused`, because a caller
+    // that conflated the two would go looking for a conflict that is not there.
+    if (dispatch.reason === "already-identical") {
+      // `skipped`, not `not-reached`: the flow did not die before the write, it chose not to
+      // make one. The two are different answers — `SyncRunStepStatus` exists to keep "we
+      // chose not to" from reading as "the sync stopped here" — and a step list that reported
+      // this as `not-reached` would describe an unchanged run as a truncated one.
+      performed.set("write-cell-source", "skipped");
+      details.set("write-cell-source", "The target already holds this artifact, so nothing was written.");
+
+      const completion = await completeSyncFlow({ port, target, performed, details, wroteCell: false });
+      if (completion.kind === "failed") {
+        return {
+          status: "failed",
+          target,
+          plan,
+          steps: runSteps(performed, details),
+          diagnostics: completion.diagnostics,
+          mutated: completion.mutated,
+        };
+      }
+
+      return {
+        status: "unchanged",
+        target,
+        plan,
+        // This run's own locator. A skip is not a licence to reuse an earlier run's URL:
+        // generation ran here, and its failure above would have failed the run.
+        runtime: completion.runtime,
+        steps: runSteps(performed, details),
+        divergence: plan.divergence,
+        // Whether the save step persisted the project. Not implied by the status: a run can
+        // be `unchanged` and still have written to disk.
+        mutated: completion.mutated,
+        diagnostics: plan.diagnostics,
+      };
+    }
+
+    // Every other hold stops the flow where it is, and there is no deployment to locate.
+    // The steps after the write are `not-reached` rather than `blocked`: nothing is wrong
+    // with them, the flow simply did not get there.
     performed.set("write-cell-source", "not-reached");
     performed.set("save-project-if-required", "not-reached");
     performed.set("check-project-errors", "not-reached");
     performed.set("generate-page", "not-reached");
     performed.set("return-runtime-locator", "not-reached");
     return {
-      status: "held",
+      status: "refused",
       target,
       plan,
+      // The dispatch is narrowed by its own type: `already-identical` is not assignable
+      // here, so this branch cannot report the skip as a refusal.
       dispatch,
       steps: runSteps(performed, details),
       diagnostics: plan.diagnostics,
@@ -360,56 +483,113 @@ export async function executeCellSync(options: ExecuteCellSyncOptions): Promise<
   await port.setCells(dispatch.request);
   performed.set("write-cell-source", "ran");
 
-  // Step 5: the save, conditional on the product's own answer. #20 measured that a
-  // `setCells` write leaves `containsUnsavedChanges: true`, so the check is what turns
-  // #19's conditional save into a decision rather than a guess.
-  const saveStatus = await port.getProjectSaveStatus({});
-  if (saveStatus.containsUnsavedChanges) {
-    const saved = await port.saveProject();
-    performed.set("save-project-if-required", "ran");
-    if (!saved.saved) {
-      // A save the product declined. Reported through the project-state owner because
-      // the project — not sync and not the extension — is what is left unpersisted.
-      details.set("save-project-if-required", "The product was asked to save and did not.");
-      performed.set("check-project-errors", "not-reached");
-      performed.set("generate-page", "not-reached");
-      performed.set("return-runtime-locator", "not-reached");
-      return {
-        status: "failed",
-        target,
-        plan,
-        steps: runSteps(performed, details),
-        diagnostics: [
-          createSyncDiagnostic("project-errors-after-sync", cellTargetLabel(target), {
-            detail:
-              "`api.app.saveProject` reported `saved: false` after the Cell was written, so the project was mutated but not persisted.",
-          }),
-        ],
-        mutated: true,
-      };
-    }
-  } else {
-    performed.set("save-project-if-required", "skipped");
-    details.set("save-project-if-required", "The project reported no unsaved changes after the write.");
-  }
-
-  // Step 6: the project's errors, and #19's gate — non-zero fails the sync. Checked
-  // *before* generation so a broken project is reported instead of being generated and
-  // handed to a browser step as if it were working.
-  const errors = await port.checkProjectErrors();
-  const errorOutcome = outcomeOfProjectErrorCheck(errors, target);
-  if (errorOutcome.kind === "failed") {
-    performed.set("check-project-errors", "ran");
-    performed.set("generate-page", "not-reached");
-    performed.set("return-runtime-locator", "not-reached");
+  const completion = await completeSyncFlow({ port, target, performed, details, wroteCell: true });
+  if (completion.kind === "failed") {
     return {
       status: "failed",
       target,
       plan,
       steps: runSteps(performed, details),
-      diagnostics: [errorOutcome.diagnostic],
-      mutated: true,
+      diagnostics: completion.diagnostics,
+      mutated: completion.mutated,
     };
+  }
+
+  return {
+    status: "written",
+    target,
+    plan,
+    runtime: completion.runtime,
+    steps: runSteps(performed, details),
+    divergence: plan.divergence,
+    // The plan's diagnostics only. The read-only steps' outcomes are on `steps`, and
+    // repeating them here would make a caller read two lists for one run.
+    diagnostics: plan.diagnostics,
+  };
+}
+
+/**
+ * The validation half of the flow: save if the project is dirty, check its errors, generate
+ * the page, and hand back the locator.
+ *
+ * Extracted so the written and the unchanged paths cannot disagree about it. They differ in
+ * exactly one input — whether this run wrote the Cell — and the point of the extraction is
+ * that the difference stays that small: a second copy of the error gate or of the generation
+ * call is where one path would quietly stop checking something.
+ *
+ * `wroteCell` decides one thing only, and it is the honest one: whether the run's own
+ * mutation is what the project is being asked to persist. A save the product declines is
+ * reported either way, because the safety rule is about the project being left unpersisted
+ * rather than about who made it dirty — and `mutated` answers the caller's actual question,
+ * "was anything changed before I decide what to do next?", so a run that persisted the
+ * project reports it even though it never touched a Cell.
+ */
+async function completeSyncFlow(options: {
+  readonly port: ForguncySyncPort;
+  readonly target: CellTarget;
+  readonly performed: Map<McpSyncStepId, SyncRunStepStatus>;
+  readonly details: Map<McpSyncStepId, string>;
+  readonly wroteCell: boolean;
+}): Promise<
+  | { readonly kind: "completed"; readonly runtime: GeneratedPage; readonly mutated: boolean }
+  | { readonly kind: "failed"; readonly diagnostics: readonly SyncDiagnostic[]; readonly mutated: boolean }
+> {
+  const { port, target, performed, details, wroteCell } = options;
+
+  // Step 5: the save, conditional on the product's own answer. #20 measured that a
+  // `setCells` write leaves `containsUnsavedChanges: true`, so the check is what turns
+  // #19's conditional save into a decision rather than a guess. On the unchanged path the
+  // same rule applies to the same read: the write did not happen, so this is the *project's*
+  // dirtiness rather than sync's, and "save when the project says it is dirty" is still the
+  // rule — an unconditional save would make a clean project's state depend on sync running.
+  const saveStatus = await port.getProjectSaveStatus({});
+  let persisted = false;
+  if (saveStatus.containsUnsavedChanges) {
+    const saved = await port.saveProject();
+    performed.set("save-project-if-required", "ran");
+    if (!saved.saved) {
+      // A save the product declined. Reported through the project-state owner because
+      // the project — not sync and not the extension — is what is left unpersisted. It
+      // fails the run on both paths: a skip is not a reason to let an unpersisted project
+      // through, and the gate is the same one.
+      details.set("save-project-if-required", "The product was asked to save and did not.");
+      performed.set("check-project-errors", "not-reached");
+      performed.set("generate-page", "not-reached");
+      performed.set("return-runtime-locator", "not-reached");
+      return {
+        kind: "failed",
+        diagnostics: [
+          createSyncDiagnostic("project-errors-after-sync", cellTargetLabel(target), {
+            detail: wroteCell
+              ? "`api.app.saveProject` reported `saved: false` after the Cell was written, so the project was mutated but not persisted."
+              : "`api.app.saveProject` reported `saved: false` while the project reported unsaved changes, so the project was left unpersisted.",
+          }),
+        ],
+        mutated: wroteCell,
+      };
+    }
+    persisted = true;
+  } else {
+    performed.set("save-project-if-required", "skipped");
+    details.set(
+      "save-project-if-required",
+      wroteCell
+        ? "The project reported no unsaved changes after the write."
+        : "The project reported no unsaved changes, so there was nothing for this run to persist.",
+    );
+  }
+
+  // Step 6: the project's errors, and #19's gate — non-zero fails the sync. Checked
+  // *before* generation so a broken project is reported instead of being generated and
+  // handed to a browser step as if it were working. On the unchanged path this is the whole
+  // point of continuing: the Cell being already correct does not mean the project builds.
+  const errors = await port.checkProjectErrors();
+  const errorOutcome = outcomeOfProjectErrorCheck(errors, target, wroteCell);
+  if (errorOutcome.kind === "failed") {
+    performed.set("check-project-errors", "ran");
+    performed.set("generate-page", "not-reached");
+    performed.set("return-runtime-locator", "not-reached");
+    return { kind: "failed", diagnostics: [errorOutcome.diagnostic], mutated: wroteCell || persisted };
   }
   performed.set("check-project-errors", "ran");
 
@@ -419,28 +599,13 @@ export async function executeCellSync(options: ExecuteCellSyncOptions): Promise<
   performed.set("generate-page", "ran");
   if (generationOutcome.kind === "failed") {
     performed.set("return-runtime-locator", "not-reached");
-    return {
-      status: "failed",
-      target,
-      plan,
-      steps: runSteps(performed, details),
-      diagnostics: [generationOutcome.diagnostic],
-      mutated: true,
-    };
+    return { kind: "failed", diagnostics: [generationOutcome.diagnostic], mutated: wroteCell || persisted };
   }
   performed.set("return-runtime-locator", "ran");
 
-  return {
-    status: "written",
-    target,
-    plan,
-    runtime,
-    steps: runSteps(performed, details),
-    divergence: plan.divergence,
-    // The plan's diagnostics only. The read-only steps' outcomes are on `steps`, and
-    // repeating them here would make a caller read two lists for one run.
-    diagnostics: plan.diagnostics,
-  };
+  // `wroteCell || persisted`: the write, or a save this run performed. The caller reports it
+  // either way, because both change project state.
+  return { kind: "completed", runtime, mutated: wroteCell || persisted };
 }
 
 // ---------------------------------------------------------------------------
@@ -556,8 +721,22 @@ export function formatCellSyncRun(run: CellSyncRun): string {
     ].join("\n");
   }
 
-  if (run.status === "held") {
-    return [...header, `Held: ${run.dispatch.reason} — ${run.dispatch.detail}`, ...run.diagnostics.map(diagnostic => `- ${diagnostic.code}: ${diagnostic.message}`)].join(
+  if (run.status === "unchanged") {
+    return [
+      ...header,
+      `Nothing written: ${run.plan.divergence.detail}`,
+      // Reported for the same reason `failed` reports it: a skip that persisted the project
+      // changed something, and a report that omitted it would tell a reader nothing had.
+      `Project persisted by this run: ${run.mutated}`,
+      `Runtime locator: ${run.runtime.pageUrl}`,
+      // A skip is not a weaker result than a write, and it is not a stronger one either:
+      // the same validation steps ran, so the same sentence applies and says why they matter.
+      "The target already held this artifact, so no write was issued. The project's errors were checked and the page generated by this run, which is what the locator above is.",
+    ].join("\n");
+  }
+
+  if (run.status === "refused") {
+    return [...header, `Refused: ${run.dispatch.reason} — ${run.dispatch.detail}`, ...run.diagnostics.map(diagnostic => `- ${diagnostic.code}: ${diagnostic.message}`)].join(
       "\n",
     );
   }
