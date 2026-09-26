@@ -58,6 +58,25 @@ const CELL_FINGERPRINT = "probe=inline-bundle;entry=src/cells/orders-table/App.t
 const CUSTOMERS_FINGERPRINT = "probe=inline-bundle;entry=src/cells/customers-card/App.tsx";
 const BUNDLER_FINGERPRINT = "probe=amd-detect;entry=src/cells/orders-table/App.tsx";
 
+/**
+ * The identity the committed example was measured under (#94), spelled once.
+ *
+ * Shared by the fixture lock's `probedWith` blocks and the environment below, because a record and
+ * an environment that spelled one identity two ways would report `install-graph-changed` on a case
+ * that means "these agree" — and every component is present, since an absent one is `unknown` and
+ * therefore stale by design.
+ */
+const FIXTURE_TOOLCHAIN = {
+  vitePlus: "0.3.2",
+  rolldown: "1.2.9",
+  node: "24.21.0",
+  installGraph: {
+    lockfile: "sha256:7c1e2a9b4d5f8e0a3c6b9d2f5a8e1b4c7d0a3f6e9b2c5d8a1f4e7b0c3d6a9f2e",
+    patches: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    configuration: "sha256:a4f8d2c6b0e4a8d2c6b0e4a8d2c6b0e4a8d2c6b0e4a8d2c6b0e4a8d2c6b0e4a8",
+  },
+} as const;
+
 /** The environment the committed example was validated in. */
 function fixtureEnvironment(overrides: Partial<LockEnvironment> = {}): LockEnvironment {
   return {
@@ -69,7 +88,7 @@ function fixtureEnvironment(overrides: Partial<LockEnvironment> = {}): LockEnvir
       "some-amd-package": "2.4.0",
     },
     target: RUNTIME_CONTRACT_TARGET,
-    toolchain: { vitePlus: "0.3.2" },
+    toolchain: FIXTURE_TOOLCHAIN,
     probeFingerprints: {
       "@tanstack/react-query": CELL_FINGERPRINT,
       dayjs: CUSTOMERS_FINGERPRINT,
@@ -98,7 +117,7 @@ const inlineRecord: LockedDependencyDecision = {
   resolvedVersion: "1.11.13",
   probe: { status: "passed", fingerprint: CELL_FINGERPRINT, versionIndependent: false },
   target: forguncyTargetIdentity(),
-  probedWith: { vitePlus: "0.3.2" },
+  probedWith: FIXTURE_TOOLCHAIN,
   extension: null,
   rejectedCandidate: null,
   rationale: null,

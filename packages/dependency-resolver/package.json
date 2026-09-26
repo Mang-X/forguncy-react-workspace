@@ -6,7 +6,8 @@
   "dependencies": {
     "@babel/parser": "7.29.8",
     "@forguncy-react-workspace/core": "workspace:*",
-    "rolldown": "1.2.9"
+    "rolldown": "1.2.9",
+    "yaml": "2.9.1"
   },
   "//dependencies": [
     "`rolldown` is the bundler the Cell compiler uses (#7), pinned to the version",
@@ -22,7 +23,15 @@
     "is not a solved problem, and the failure mode here was a package refused for a",
     "specifier that only ever appeared in a JSDoc `@example` block. Nothing it provides",
     "can reach a Cell artifact, so per AGENTS.md it is not a host/inline/extension/replace",
-    "decision; it is pinned rather than floated so a grammar change cannot arrive silently."
+    "decision; it is pinned rather than floated so a grammar change cannot arrive silently.",
+    "",
+    "`yaml` is the workspace-configuration parser `install-identity.ts` reads to find the",
+    "declared patch set and the resolution-affecting configuration (#94). Same parser and same",
+    "pin as `cell-compiler`'s `workspace-graph.ts`, and a build-time dependency for the same",
+    "reason: nothing it provides can appear in a generated Cell artifact, so AGENTS.md's",
+    "host | inline | extension | replace table does not apply to it. It is pinned rather than",
+    "floated because a change in what a workspace file *means* must not silently change what",
+    "identity a lock record is judged against."
   ],
   "exports": {
     ".": "./src/index.ts",

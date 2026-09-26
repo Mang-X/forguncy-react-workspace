@@ -7,6 +7,8 @@ import { createServer } from "vite";
 
 import type { ForguncyConfig } from "@forguncy-react-workspace/core";
 
+import { readToolchainIdentity } from "@forguncy-react-workspace/dependency-resolver/local";
+
 import { removeTempProject } from "./temp-project.ts";
 import { devHarness } from "./vite-plugin.ts";
 
@@ -34,9 +36,16 @@ import { devHarness } from "./vite-plugin.ts";
  * "the substitute is what loaded" a fact about the page rather than about the configuration.
  */
 /** A throwaway project with a Cell, a shim, and a substitute package the project's tree installs. */
-function projectWithShim(): { root: string; shimMarker: string; substitutePackageMarker: string } {
+async function projectWithShim(): Promise<{ root: string; shimMarker: string; substitutePackageMarker: string }> {
   const root = mkdtempSync(join(tmpdir(), "dev-harness-subst-"));
   onTestFinished(() => removeTempProject(root));
+
+  // A lockfile, so this throwaway project is one an install could have produced (#94): identity is
+  // read from the install graph, and a project with none has no identity this toolchain can
+  // confirm — every record would report `install-graph-unknown` and be withheld, so the substitute
+  // these cases load would never be asked for. Written before the lock below, because the identity
+  // the record carries has to be the one this project reports.
+  writeFileSync(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n", "utf8");
 
   const shimMarker = "PROJECT_SHIM_MARKER_7f3a";
   const substitutePackageMarker = "SUBSTITUTE_PACKAGE_MARKER_9c14";
@@ -135,7 +144,10 @@ function projectWithShim(): { root: string; shimMarker: string; substitutePackag
             productBuild: "12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623",
             hostReactVersion: "19.2.7",
           },
-          probedWith: { vitePlus: "0.3.2" },
+          // The project's own identity (#94), read after the lockfile above so the record and the
+          // environment the harness computes agree. A literal would report `install-graph-changed`
+          // for a project where nothing moved, and the decision would be withheld.
+          probedWith: await readToolchainIdentity(root),
           extension: { version: "5.102.8", identity: "sha256:aa" },
           rejectedCandidate: null,
           rationale: "fixture",
@@ -287,11 +299,11 @@ async function loadedForSubstitutedImport(root: string, choices: readonly unknow
  * (`packageName`, `resolvedVersion`, `rationale`, `probe`, `target`, `probedWith`). The overrides are
  * applied *after* the base, so a caller changes only the fields the case is about.
  */
-function writeLockWithCellScopedDecision(
+async function writeLockWithCellScopedDecision(
   root: string,
   cellTarget: string,
   overrides: Record<string, unknown>,
-): void {
+): Promise<void> {
   const base = {
     packageName: "@tanstack/react-query",
     resolvedVersion: "5.102.8",
@@ -302,7 +314,10 @@ function writeLockWithCellScopedDecision(
       productBuild: "12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623",
       hostReactVersion: "19.2.7",
     },
-    probedWith: { vitePlus: "0.3.2" },
+    // The project's own identity (#94), so the record agrees with the environment the harness
+    // computes at request time. A literal would report `install-graph-changed` and the decision
+    // would be withheld — which would make the *control* case pass for the wrong reason.
+    probedWith: await readToolchainIdentity(root),
     rejectedCandidate: null,
     rationale: "fixture",
     evidence: [{ kind: "runtime-observation", reference: "https://example.invalid/r.md" }],
@@ -356,9 +371,9 @@ describe("a cell-scoped decision governs the mounted Cell, not another Cell's re
    * the harness substituted or threw where the compiler inlined.
    */
   it("does not require a choice when the mounted Cell's own record is `inline`", async () => {
-    const { root } = projectWithShim();
+    const { root } = await projectWithShim();
 
-    writeLockWithCellScopedDecision(root, "probe", {
+    await writeLockWithCellScopedDecision(root, "probe", {
       strategy: "inline",
       // An `inline` record carries `extension: null`; the validator refuses one with a library.
       extension: null,
@@ -378,12 +393,12 @@ describe("a cell-scoped decision governs the mounted Cell, not another Cell's re
   }, 120_000);
 
   it("still refuses when the mounted Cell's own record is `extension`", async () => {
-    const { root } = projectWithShim();
+    const { root } = await projectWithShim();
 
     // The control, and it is what keeps the test above from passing for the wrong reason. Same
     // lock shape, but the cell-specific record *is* `extension` — so the projection must keep it,
     // and the blocking finding must still fire.
-    writeLockWithCellScopedDecision(root, "probe", {
+    await writeLockWithCellScopedDecision(root, "probe", {
       strategy: "extension",
       globalName: "TanStackQuery",
       libraryId: "tanstack-query",
@@ -396,7 +411,7 @@ describe("a cell-scoped decision governs the mounted Cell, not another Cell's re
   }, 120_000);
 
   it("ignores a record scoped to a different Cell", async () => {
-    const { root } = projectWithShim();
+    const { root } = await projectWithShim();
 
     // `extension` scoped to a Cell this server does not mount, and the target-independent record set
     // to `inline` so the fallback is unambiguous. The mounted Cell resolves to `inline`, so no choice
@@ -405,7 +420,7 @@ describe("a cell-scoped decision governs the mounted Cell, not another Cell's re
     // The helper builds this shape: it writes the base record as `extension` with `cellTarget: null`,
     // which the *second* call below overrides. Both records are needed in one file, so the lock is
     // rewritten here rather than composed from two helper calls.
-    writeLockWithCellScopedDecision(root, "another-cell", {
+    await writeLockWithCellScopedDecision(root, "another-cell", {
       strategy: "extension",
       globalName: "TanStackQuery",
       libraryId: "tanstack-query",
@@ -430,7 +445,7 @@ describe("a cell-scoped decision governs the mounted Cell, not another Cell's re
 
 describe("a stale choice is reported but never applied", () => {
   it("lets the ordinary module path win when the lock no longer says `extension`", async () => {
-    const { root } = projectWithShim();
+    const { root } = await projectWithShim();
 
     // The decision moved to `inline` — the case the contract's own remediation names ("when a
     // package moves to another strategy — `extension` to `inline`, say — its choice is left
@@ -461,7 +476,10 @@ describe("a stale choice is reported but never applied", () => {
               productBuild: "12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623",
               hostReactVersion: "19.2.7",
             },
-            probedWith: { vitePlus: "0.3.2" },
+            // The project's own identity (#94), read after the lockfile above so the record and the
+          // environment the harness computes agree. A literal would report `install-graph-changed`
+          // for a project where nothing moved, and the decision would be withheld.
+          probedWith: await readToolchainIdentity(root),
             // Required on every record, and `null` for a strategy that is not `extension` — the
             // validator says so, and this fixture was rejected without it.
             extension: null,
@@ -496,7 +514,7 @@ describe("a stale choice is reported but never applied", () => {
 
 describe("a declared substitute is the module the Cell loads", () => {
   it("loads the project's own shim, not the npm copy", async () => {
-    const { root, shimMarker } = projectWithShim();
+    const { root, shimMarker } = await projectWithShim();
 
     const { status, resolvedBody, resolvedStatus, exportedFrom } = await loadedForSubstitutedImport(root, [
       {
@@ -525,7 +543,7 @@ describe("a declared substitute is the module the Cell loads", () => {
   }, 120_000);
 
   it("loads a named substitute package when the declaration names one", async () => {
-    const { root, substitutePackageMarker } = projectWithShim();
+    const { root, substitutePackageMarker } = await projectWithShim();
 
     // `@probe/substitute` is installed in this temp project's own tree (see `projectWithShim`), so
     // this exercises the resolving branch rather than the failing one.
@@ -559,7 +577,7 @@ describe("a declared substitute is the module the Cell loads", () => {
 
 describe("`real-runtime-only` cannot silently take the npm path", () => {
   it("serves a module that throws the project's own acknowledgement", async () => {
-    const { root } = projectWithShim();
+    const { root } = await projectWithShim();
 
     const { status, body } = await loadedForSubstitutedImport(root, [
       {
@@ -587,7 +605,7 @@ describe("`real-runtime-only` cannot silently take the npm path", () => {
 
 describe("a declaration that cannot be honoured fails loudly rather than resolving elsewhere", () => {
   it("refuses a shim that is not there, instead of running the npm copy", async () => {
-    const { root } = projectWithShim();
+    const { root } = await projectWithShim();
 
     // The declaration names a file nobody wrote. Resolving the npm package instead is the tempting
     // fallback and the wrong one: the reason a project declares a shim is that the npm copy is the
@@ -612,7 +630,7 @@ describe("a declaration that cannot be honoured fails loudly rather than resolvi
   }, 120_000);
 
   it("drops a choice for a package the extension table cannot bind, and does not substitute it", async () => {
-    const { root } = projectWithShim();
+    const { root } = await projectWithShim();
 
     // A decision *does* name this package, so the choice is not unmatched for want of a decision — it
     // is dropped because the mapping table cannot bind the package at all. The compiler refuses this
@@ -644,7 +662,10 @@ describe("a declaration that cannot be honoured fails loudly rather than resolvi
               productBuild: "12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623",
               hostReactVersion: "19.2.7",
             },
-            probedWith: { vitePlus: "0.3.2" },
+            // The project's own identity (#94), read after the lockfile above so the record and the
+          // environment the harness computes agree. A literal would report `install-graph-changed`
+          // for a project where nothing moved, and the decision would be withheld.
+          probedWith: await readToolchainIdentity(root),
             extension: { version: "1.0.0", identity: "sha256:bb" },
             rejectedCandidate: null,
             rationale: "fixture: an `extension` decision the table cannot bind",

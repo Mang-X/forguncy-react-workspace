@@ -82,6 +82,7 @@ import { fileURLToPath } from "node:url";
 import {
   auditLockDecisionConformance,
   localCompilationDependencies,
+  readToolchainIdentity,
 } from "@forguncy-react-workspace/dependency-resolver/local";
 import type { ConformanceDiagnostic, ExtensionCatalog } from "@forguncy-react-workspace/dependency-resolver/local";
 import type { LockEnvironment } from "@forguncy-react-workspace/core";
@@ -303,25 +304,46 @@ export function projectLocalDecisions(input: {
 }
 
 /**
- * The toolchain the loop is running on, in the shape a lock record compares against.
+ * `vite-plus`'s own version, read through this package's resolution.
  *
- * `vite-plus`'s own version, read through this package's resolution so it is the tool that is
- * actually driving the loop rather than whatever a caller's tree has. `null` when it cannot be read,
- * which the freshness rule reports as `toolchain-unknown` — the honest answer, and the same
- * asymmetry as the other axes: absent means "this process cannot say", not "do not check".
- *
- * The field name is the record's (`probedWith.vitePlus`), not a second vocabulary invented here.
+ * Through this package's resolution so it is the tool that is actually *driving the loop* rather
+ * than whatever a caller's tree has. `null` when it cannot be read, which the freshness rule
+ * reports as `toolchain-unknown` — the honest answer, and the same asymmetry as the other axes:
+ * absent means "this process cannot say", not "do not check".
  */
-export function installedVitePlusToolchain(): LockEnvironment["toolchain"] {
+function installedVitePlusVersion(): string | null {
   const require = createRequire(join(packageRoot, "package.json"));
   try {
     const manifest = require("vite-plus/package.json") as { version?: unknown };
     return typeof manifest.version === "string" && manifest.version.trim().length > 0
-      ? { vitePlus: manifest.version }
+      ? manifest.version
       : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * The toolchain the loop is running on, in the shape a lock record compares against.
+ *
+ * **Deliberately a hybrid, and the split is the point.** Three of the four components come from
+ * `readToolchainIdentity(projectRoot)` — the same function the probe engine and the CLI's `status`
+ * use, so the three cannot each read a different version of the same fact (#94, plan item 5). The
+ * fourth, `vitePlus`, is read through *this package's* resolution instead, because the loop is
+ * driven by the Vite+ this package loads: a project that does not install Vite+ itself still has
+ * its Cells served by one, and reporting `toolchain-unknown` there would withhold decisions the
+ * compiler accepts — the placeholder defect `vite-plugin.ts` records one layer up.
+ *
+ * The install graph is the **project's**, because that is what the records describe: `registry.root`
+ * is the graph the Cell's dependencies resolve in, and the whole reason #94 exists is that this
+ * graph can move while every version a record names stays put.
+ *
+ * `null` only when the project cannot be read at all, which the projection reports as unknown
+ * rather than manufacturing staleness.
+ */
+export async function installedToolchain(projectRoot: string): Promise<LockEnvironment["toolchain"]> {
+  const identity = await readToolchainIdentity(projectRoot);
+  return { ...identity, vitePlus: installedVitePlusVersion() };
 }
 
 /**

@@ -16,12 +16,35 @@ import {
 
 import type { DependencyDecisionUpdate } from "./index.ts";
 import {
+
+/**
+ * The install/toolchain identity the fixtures in this file share (#94).
+ *
+ * Spelled once and used by both the records and the environment, because a record and an
+ * environment that spelled one identity two ways would report `install-graph-changed` on a case
+ * that means "these agree". Every component is present: an absent one is `unknown`, and unknown
+ * is stale by design, so a partial literal would make each case pass or fail for a reason it
+ * does not name.
+ */
+
   fgcLockPath,
   mergeDependencyDecisionUpdate,
   readFgcLock,
   recordDependencyDecision,
   recordDependencyDecisions,
 } from "./index.ts";
+
+const FIXTURE_TOOLCHAIN = {
+  vitePlus: "0.3.2",
+  rolldown: "1.2.9",
+  node: "24.21.0",
+  installGraph: {
+    lockfile: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    patches: "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    configuration: "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+  },
+} as const;
+
 
 const CELL_FINGERPRINT = "probe=inline-bundle;entry=src/cells/orders-table/App.tsx";
 
@@ -34,7 +57,7 @@ function inlineUpdate(packageName: string, overrides: Partial<DependencyDecision
     decision: { strategy: "inline", packageName },
     probe: { status: "passed", fingerprint: CELL_FINGERPRINT, versionIndependent: false },
     resolvedVersion: "1.11.13",
-    probedWith: { vitePlus: "0.3.2" },
+    probedWith: FIXTURE_TOOLCHAIN,
     target: forguncyTargetIdentity(),
     evidence: [{ kind: "probe", reference: "docs/probes/inline-dayjs.md" }],
     ...overrides,
@@ -51,7 +74,7 @@ function extensionUpdate(overrides: Partial<DependencyDecisionUpdate> = {}): Dep
     },
     probe: { status: "passed", fingerprint: CELL_FINGERPRINT, versionIndependent: false },
     resolvedVersion: "5.90.2",
-    probedWith: { vitePlus: "0.3.2" },
+    probedWith: FIXTURE_TOOLCHAIN,
     target: forguncyTargetIdentity(),
     extension: { version: "5.90.2", identity: null },
     rationale: "A bundled copy would give every cell its own query cache, so the shared global is required.",
@@ -64,7 +87,7 @@ function environment(overrides: Partial<LockEnvironment> = {}): LockEnvironment 
   return {
     resolvedVersions: { dayjs: "1.11.13", "@tanstack/react-query": "5.90.2" },
     target: RUNTIME_CONTRACT_TARGET,
-    toolchain: { vitePlus: "0.3.2" },
+    toolchain: FIXTURE_TOOLCHAIN,
     probeFingerprints: { dayjs: CELL_FINGERPRINT, "@tanstack/react-query": CELL_FINGERPRINT },
     extensionVersions: { "tanstack-query": "5.90.2" },
     extensionIdentities: {},

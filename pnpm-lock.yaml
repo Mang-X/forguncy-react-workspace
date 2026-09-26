@@ -133,6 +133,9 @@ importers:
       rolldown:
         specifier: 1.2.9
         version: 1.2.9
+      yaml:
+        specifier: 2.9.1
+        version: 2.9.1
 
   packages/dev-harness:
     dependencies:

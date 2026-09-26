@@ -132,6 +132,17 @@ export type {
   UnresolvedInstalledPackageReason,
 } from "./install-graph.ts";
 
+// The identity a probe ran under: the installed install graph and the tools that actually ran
+// (#94). Exported because it is the one answer to "what did this evidence measure against", and
+// the probe engine, the cache, the CLI's `status` and the dev harness all read it from here rather
+// than each reading a version of their own.
+export {
+  readInstallGraphIdentity,
+  readToolchainIdentity,
+  RECOGNIZED_LOCKFILE_NAMES,
+  WORKSPACE_CONFIG_FILE,
+} from "./install-identity.ts";
+
 // Where an installed package lives, asked of the host rather than of a private
 // `exports` walk (#89). Exported because it is the one answer to "which artifact
 // does this name name" that both the lock's version map and the probe's identity

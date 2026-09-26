@@ -74,6 +74,7 @@ import {
   conformanceErrors,
   localCompilationDependencies,
   readFgcLock,
+  readToolchainIdentity,
   recordedPackageNames,
   resolveInstalledVersions,
 } from "@forguncy-react-workspace/dependency-resolver";
@@ -129,7 +130,10 @@ async function environmentFor(overrides: Partial<LockEnvironment> = {}): Promise
   return {
     resolvedVersions: versions,
     target: RUNTIME_CONTRACT_TARGET,
-    toolchain: { vitePlus: "0.3.2" },
+    // The example's own identity, read the same way the probe and the CLI read it (#94). A literal
+    // would have to be kept in step with `examples/extension-query`'s committed lock by hand, and
+    // the case would fail for a reason it does not name the moment either moved.
+    toolchain: await readToolchainIdentity(exampleRoot),
     probeFingerprints,
     extensionVersions: { "tanstack-query": EXPECTED_VERSION },
     extensionIdentities: { "tanstack-query": EXPECTED_IDENTITY },

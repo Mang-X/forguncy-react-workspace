@@ -4,8 +4,10 @@ import { parseFgcLockDocument } from "./index.ts";
 import type {
   ArtifactBudgetEvidence,
   ArtifactCompileSnapshot,
+  InstallGraphIdentity,
   LockEnvironment,
   LockedDependencyDecision,
+  ToolchainIdentity,
 } from "./index.ts";
 import {
   assessLockDecision,
@@ -31,6 +33,53 @@ const SPEC_12 = "https://github.com/Mang-X/forguncy-react-workspace/issues/12";
 const CELL_FINGERPRINT = "probe=inline-bundle;entry=src/cells/orders-table/App.tsx";
 const BUNDLER_FINGERPRINT = "probe=amd-detect;entry=src/cells/orders-table/App.tsx";
 const EXTENSION_IDENTITY = "sha256:9f1c2b7d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091";
+
+/**
+ * The toolchain every fixture record and environment shares, so the axes compare *equal* and each
+ * case asserts the one input it is about.
+ *
+ * A shared constant rather than a literal at each site, and that is the point of it existing: a
+ * record and an environment that spelled the same identity two different ways would report
+ * `toolchain-changed`/`install-graph-changed` on a fixture that means "these agree", and the case
+ * under test would pass or fail for a reason it does not name. Every component #94 added is
+ * present, because an *absent* one is `unknown` and therefore stale by design.
+ */
+const FIXTURE_TOOLCHAIN = {
+  vitePlus: "0.3.2",
+  rolldown: "1.2.9",
+  node: "24.21.0",
+  installGraph: {
+    lockfile: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    patches: "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    configuration: "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+  },
+} as const;
+
+/**
+ * The same identity with one component replaced, for the cases that move it deliberately.
+ *
+ * Typed as `ToolchainIdentity` rather than inferred, because the returned object is what a
+ * `LockEnvironment` holds: an inferred type would let a caller pass a shape the production type
+ * rejects, which is the drift this fixture exists to avoid.
+ */
+function toolchainWith(overrides: {
+  readonly vitePlus?: string | null;
+  readonly rolldown?: string | null;
+  readonly node?: string | null;
+  readonly installGraph?: Partial<InstallGraphIdentity> | null;
+}): ToolchainIdentity {
+  // `installGraph` is destructured out of the spread rather than left in it: spreading the override
+  // object would widen the property to `Partial<…> | null`, which is not what a
+  // `ToolchainIdentity` holds, and the whole point of this helper is to hand back that type.
+  const { installGraph, ...rest } = overrides;
+  return {
+    ...FIXTURE_TOOLCHAIN,
+    ...rest,
+    ...(installGraph === undefined || installGraph === null
+      ? { installGraph: installGraph === null ? null : FIXTURE_TOOLCHAIN.installGraph }
+      : { installGraph: { ...FIXTURE_TOOLCHAIN.installGraph, ...installGraph } }),
+  };
+}
 
 /** The Cell a compile-observed rejection is about, and its compile identity. */
 const BENCH_CELL = "bench";
@@ -107,7 +156,7 @@ function lockEnvironment(overrides: Partial<LockEnvironment> = {}): LockEnvironm
       "some-amd-package": "2.4.0",
     },
     target: RUNTIME_CONTRACT_TARGET,
-    toolchain: { vitePlus: "0.3.2" },
+    toolchain: FIXTURE_TOOLCHAIN,
     probeFingerprints: { "@tanstack/react-query": CELL_FINGERPRINT, "date-fns": CELL_FINGERPRINT, "es-toolkit": CELL_FINGERPRINT, react: CELL_FINGERPRINT, "some-amd-package": BUNDLER_FINGERPRINT },
     // Keyed by *record* identity, not by Cell (#77 round 7): two artifact rejections in one
     // Cell may come from different compile states, so the identity must vary on the same key.
@@ -138,7 +187,7 @@ const inlineRecord: LockedDependencyDecision = {
   resolvedVersion: "1.39.8",
   probe: { status: "passed", fingerprint: CELL_FINGERPRINT, versionIndependent: false },
   target: RECORD_TARGET,
-  probedWith: { vitePlus: "0.3.2" },
+  probedWith: FIXTURE_TOOLCHAIN,
   extension: null,
   rejectedCandidate: null,
   rationale: null,
@@ -156,7 +205,7 @@ const hostRecord: LockedDependencyDecision = {
   resolvedVersion: "19.2.7",
   probe: { status: "passed", fingerprint: CELL_FINGERPRINT, versionIndependent: false },
   target: RECORD_TARGET,
-  probedWith: { vitePlus: "0.3.2" },
+  probedWith: FIXTURE_TOOLCHAIN,
   extension: null,
   rejectedCandidate: null,
   rationale: null,
@@ -175,7 +224,7 @@ const extensionRecord: LockedDependencyDecision = {
   resolvedVersion: "5.90.2",
   probe: { status: "passed", fingerprint: CELL_FINGERPRINT, versionIndependent: false },
   target: RECORD_TARGET,
-  probedWith: { vitePlus: "0.3.2" },
+  probedWith: FIXTURE_TOOLCHAIN,
   extension: { version: "5.90.2", identity: EXTENSION_IDENTITY },
   rejectedCandidate: null,
   rationale: "A bundled copy would give every cell its own query cache, so the shared extension global is required.",
@@ -220,7 +269,7 @@ const technicalRejection: LockedDependencyDecision = {
   resolvedVersion: null,
   probe: { status: "failed", fingerprint: BUNDLER_FINGERPRINT, versionIndependent: false },
   target: RECORD_TARGET,
-  probedWith: { vitePlus: "0.3.2" },
+  probedWith: FIXTURE_TOOLCHAIN,
   extension: null,
   rejectedCandidate: { version: "2.4.0" },
   rationale: "The failure is a property of this published artifact, so the candidate version is recorded to re-open the decision on upgrade.",
@@ -254,7 +303,7 @@ const artifactRejection: LockedDependencyDecision = {
   resolvedVersion: null,
   probe: { status: "passed", fingerprint: CELL_FINGERPRINT, versionIndependent: false },
   target: RECORD_TARGET,
-  probedWith: { vitePlus: "0.3.2" },
+  probedWith: FIXTURE_TOOLCHAIN,
   extension: null,
   rejectedCandidate: { version: "4.1.0" },
   rationale: "The package builds cleanly; the composed Cell is what exceeds the Cell's declared cap.",
@@ -358,7 +407,7 @@ describe("staleness: recorded inputs versus current inputs", () => {
     expect(reasonsFor(inlineRecord, lockEnvironment({ target: futureTarget() })).stalenessReasons).toEqual([
       "forguncy-target-changed",
     ]);
-    expect(reasonsFor(inlineRecord, lockEnvironment({ toolchain: { vitePlus: "0.4.0" } })).stalenessReasons).toEqual([
+    expect(reasonsFor(inlineRecord, lockEnvironment({ toolchain: toolchainWith({ vitePlus: "0.4.0" }) })).stalenessReasons).toEqual([
       "toolchain-changed",
     ]);
     expect(
@@ -421,24 +470,120 @@ describe("staleness: recorded inputs versus current inputs", () => {
   });
 
   it("invalidates evidence when the toolchain that produced it moves", () => {
-    expect(reasonsFor(inlineRecord, lockEnvironment({ toolchain: { vitePlus: "0.4.0" } })).stalenessReasons).toEqual([
+    expect(reasonsFor(inlineRecord, lockEnvironment({ toolchain: toolchainWith({ vitePlus: "0.4.0" }) })).stalenessReasons).toEqual([
       "toolchain-changed",
     ]);
     expect(reasonsFor(inlineRecord, lockEnvironment({ toolchain: null })).stalenessReasons).toEqual(["toolchain-unknown"]);
     // A bundling failure is a property of the bundler, so a technical rejection
     // is re-opened by a toolchain move as well.
     expect(
-      reasonsFor(technicalRejection, lockEnvironment({ toolchain: { vitePlus: "0.4.0" } })).stalenessReasons,
+      reasonsFor(technicalRejection, lockEnvironment({ toolchain: toolchainWith({ vitePlus: "0.4.0" }) })).stalenessReasons,
+    ).toEqual(["toolchain-changed"]);
+  });
+
+  // #94. The three cases below are the user-visible half of the defect the reproduction in
+  // `install-identity.ts` records: a record whose root package version has not moved, while the
+  // install graph under it has. Before this axis existed, every one of them reported `fresh`.
+  it("invalidates evidence when the install graph moves while every recorded version holds", () => {
+    // The lockfile digest is what a transitive bump, an `overrides` entry or a re-resolution moves.
+    // `inlineRecord`'s `resolvedVersion` is unchanged in this environment — which is the point: the
+    // version the record names cannot see this, so the axis has to.
+    expect(
+      reasonsFor(inlineRecord, lockEnvironment({ toolchain: toolchainWith({ installGraph: { lockfile: "sha256:9999" } }) }))
+        .stalenessReasons,
+    ).toEqual(["install-graph-changed"]);
+  });
+
+  it("invalidates evidence when the patch set moves under an unchanged lockfile", () => {
+    expect(
+      reasonsFor(inlineRecord, lockEnvironment({ toolchain: toolchainWith({ installGraph: { patches: "sha256:9999" } }) }))
+        .stalenessReasons,
+    ).toEqual(["install-graph-changed"]);
+  });
+
+  it("invalidates evidence when the configuration that affects resolution moves", () => {
+    expect(
+      reasonsFor(
+        inlineRecord,
+        lockEnvironment({ toolchain: toolchainWith({ installGraph: { configuration: "sha256:9999" } }) }),
+      ).stalenessReasons,
+    ).toEqual(["install-graph-changed"]);
+  });
+
+  it("cannot verify a record whose install graph is unknown, and never calls it changed", () => {
+    // The distinction #94's acceptance requires: "this process cannot say" is a different answer
+    // from "it moved", and rendering the first as the second would claim an observation nobody
+    // made. Both are stale, which is the property that matters.
+    const unknown = reasonsFor(inlineRecord, lockEnvironment({ toolchain: toolchainWith({ installGraph: null }) }));
+    expect(unknown.stalenessReasons).toEqual(["install-graph-unknown"]);
+    expect(unknown.freshness).toBe("stale");
+    expect(unknown.stalenessReasons).not.toContain("install-graph-changed");
+  });
+
+  it("reports a pre-#94 record as unknown rather than letting it pass", () => {
+    // A record written before this axis existed carries a `probedWith` with no `installGraph`. The
+    // tempting shortcut — treat "the record does not state one" as "this axis does not apply" —
+    // is exactly the hole: the lock most likely to need re-measuring would stay fresh forever.
+    const legacy: LockedDependencyDecision = { ...inlineRecord, probedWith: { vitePlus: "0.3.2" } };
+
+    const assessment = reasonsFor(legacy, lockEnvironment());
+
+    expect(assessment.stalenessReasons).toEqual(["install-graph-unknown"]);
+    expect(assessment.freshness).toBe("stale");
+  });
+
+  it("does not demand an install graph from a record that never probed", () => {
+    // `probedWith: null` means no probe ran, which `probe-never-run` already reports. Stating this
+    // axis too would name one absence twice and send the reader looking for a second problem.
+    const neverProbed: LockedDependencyDecision = {
+      ...inlineRecord,
+      probe: { status: "not-run", fingerprint: null, versionIndependent: false },
+      target: null,
+      probedWith: null,
+    };
+
+    expect(reasonsFor(neverProbed, lockEnvironment()).stalenessReasons).toEqual(["probe-never-run"]);
+  });
+
+  it("does not demand one from an architectural rejection, whose evidence is the ownership decision", () => {
+    // Read off the policy table rather than special-cased: `probeRequirement: "none"` is the profile
+    // whose evidence no version of anything in an install graph can move, which is the same reason
+    // `invalidatedByTargetChange` is false for it.
+    expect(reasonsFor(architecturalRejection, lockEnvironment()).stalenessReasons).toEqual([]);
+  });
+
+  it("calls a partly unobservable install graph unknown, never changed", () => {
+    // The case the component-wise loop exists for. A composed digest over `{lockfile, patches:
+    // null}` is a *value*, so comparing two of them would report `changed` for a component neither
+    // side could read — a staleness claim about an observation nobody made. `unknown` is the
+    // honest answer, and it is what makes this loop load-bearing rather than decorative.
+    const partly = reasonsFor(
+      inlineRecord,
+      lockEnvironment({ toolchain: toolchainWith({ installGraph: { patches: null } }) }),
+    );
+
+    expect(partly.stalenessReasons).toEqual(["install-graph-unknown"]);
+    expect(partly.stalenessReasons).not.toContain("install-graph-changed");
+  });
+
+  it("reports one toolchain move once, however many components moved with it", () => {
+    // `rolldown` and `node` moving together is one event with one fix, so it is one reason. A
+    // per-component push would report the same upgrade three times.
+    expect(
+      reasonsFor(
+        inlineRecord,
+        lockEnvironment({ toolchain: toolchainWith({ rolldown: "9.9.9", node: "26" }) }),
+      ).stalenessReasons,
     ).toEqual(["toolchain-changed"]);
   });
 
   it("keeps the toolchain comparison honest when its version is declared immaterial", () => {
     // #8 records the toolchain "when material": a null version says the upgrade
     // cannot matter for this probe, so there is nothing to compare against.
-    const immaterial: LockedDependencyDecision = { ...inlineRecord, probedWith: { vitePlus: null } };
+    const immaterial: LockedDependencyDecision = { ...inlineRecord, probedWith: { ...FIXTURE_TOOLCHAIN, vitePlus: null } };
 
     expect(reasonsFor(immaterial, lockEnvironment()).freshness).toBe("fresh");
-    expect(reasonsFor(immaterial, lockEnvironment({ toolchain: { vitePlus: "9.9.9" } })).freshness).toBe("fresh");
+    expect(reasonsFor(immaterial, lockEnvironment({ toolchain: toolchainWith({ vitePlus: "9.9.9" }) })).freshness).toBe("fresh");
   });
 
   it("re-checks an extension record that records only a content identity", () => {
@@ -493,7 +638,7 @@ describe("staleness: recorded inputs versus current inputs", () => {
   it("names every reason it found, not just the first", () => {
     const assessment = reasonsFor(
       inlineRecord,
-      lockEnvironment({ resolvedVersions: { "es-toolkit": "1.40.0" }, toolchain: { vitePlus: "0.4.0" } }),
+      lockEnvironment({ resolvedVersions: { "es-toolkit": "1.40.0" }, toolchain: toolchainWith({ vitePlus: "0.4.0" }) }),
     );
 
     expect(assessment.stalenessReasons).toEqual(["package-version-changed", "toolchain-changed"]);

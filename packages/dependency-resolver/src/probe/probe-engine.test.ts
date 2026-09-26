@@ -1074,6 +1074,86 @@ describe("runDependencyProbe: cache", () => {
     expect(second.report.environment.toolchain.vitePlus).toBe("9.9.9");
   });
 
+  // #94. The cache's own half of the defect: the fingerprint deliberately excludes the toolchain
+  // (the lock models it separately), so a hit under one fingerprint is trusted only when the stored
+  // report still describes *this* run. Comparing one component let a cached report answer a run
+  // that had installed a different transitive graph — the case that made a warm `.fgc/probe-cache/`
+  // serve evidence the install no longer supported.
+  it("re-probes when only the install graph differs from the cached report", async () => {
+    const projectRoot = fixture("pure-esm-utility");
+    await rm(join(projectRoot, ".fgc"), { recursive: true, force: true });
+
+    const base = {
+      vitePlus: null,
+      rolldown: "1.2.9",
+      node: "24",
+      installGraph: {
+        lockfile: "sha256:aaaa",
+        patches: "sha256:bbbb",
+        configuration: "sha256:cccc",
+      },
+    } as const;
+
+    const first = await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: base });
+    expect(first.fromCache).toBe(false);
+
+    // Same fingerprint — `vitePlus`, `rolldown` and `node` are all identical, so only the install
+    // graph moved. Before this case was covered, the cache answered `fromCache: true` here.
+    const moved = await runDependencyProbe({
+      projectRoot,
+      packageName: "tiny-math",
+      toolchain: { ...base, installGraph: { ...base.installGraph, patches: "sha256:dddd" } },
+    });
+
+    expect(moved.fingerprint).toBe(first.fingerprint);
+    expect(moved.fromCache).toBe(false);
+  });
+
+  it("re-probes when only the bundler version differs from the cached report", async () => {
+    const projectRoot = fixture("pure-esm-utility");
+    await rm(join(projectRoot, ".fgc"), { recursive: true, force: true });
+
+    const base = {
+      vitePlus: "0.3.2",
+      rolldown: "1.2.9",
+      node: "24",
+      installGraph: { lockfile: "sha256:aaaa", patches: "sha256:bbbb", configuration: "sha256:cccc" },
+    } as const;
+
+    await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: base });
+
+    // A real Rolldown upgrade changes emitted bytes, so a cached measurement of the old bundler's
+    // output must not answer a run under the new one.
+    const upgraded = await runDependencyProbe({
+      projectRoot,
+      packageName: "tiny-math",
+      toolchain: { ...base, rolldown: "9.9.9" },
+    });
+
+    expect(upgraded.fromCache).toBe(false);
+  });
+
+  it("still answers from cache when the whole identity agrees", async () => {
+    // The control. Without it, a `sameToolchainIdentity` that always returned false would pass the
+    // two cases above while making the cache useless — and `--no-cache` would be the only way to
+    // avoid a re-probe on every run.
+    const projectRoot = fixture("pure-esm-utility");
+    await rm(join(projectRoot, ".fgc"), { recursive: true, force: true });
+
+    const identity = {
+      vitePlus: "0.3.2",
+      rolldown: "1.2.9",
+      node: "24",
+      installGraph: { lockfile: "sha256:aaaa", patches: "sha256:bbbb", configuration: "sha256:cccc" },
+    } as const;
+
+    const first = await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: identity });
+    const second = await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: identity });
+
+    expect(first.fromCache).toBe(false);
+    expect(second.fromCache).toBe(true);
+  });
+
   it("re-probes when the target differs from the cached report", async () => {
     const projectRoot = fixture("pure-esm-utility");
     await rm(join(projectRoot, ".fgc"), { recursive: true, force: true });
@@ -1239,7 +1319,7 @@ describe("lock integration (#8)", () => {
             resolvedVersion: "1.0.0",
             probe: probeRunLockEvidence(result)!,
             target: forguncyTargetIdentity(RUNTIME_CONTRACT_TARGET),
-            probedWith: { vitePlus: null },
+            probedWith: result.report.environment.toolchain,
             extension: null,
             rejectedCandidate: null,
             rationale: null,
@@ -1270,7 +1350,7 @@ describe("lock integration (#8)", () => {
             resolvedVersion: "1.0.0",
             probe: probeRunLockEvidence(result)!,
             target: forguncyTargetIdentity(RUNTIME_CONTRACT_TARGET),
-            probedWith: { vitePlus: null },
+            probedWith: result.report.environment.toolchain,
             extension: null,
             rejectedCandidate: null,
             rationale: null,
@@ -1301,7 +1381,7 @@ describe("lock integration (#8)", () => {
             resolvedVersion: "1.0.0",
             probe: probeRunLockEvidence(result)!,
             target: forguncyTargetIdentity(RUNTIME_CONTRACT_TARGET),
-            probedWith: { vitePlus: null },
+            probedWith: result.report.environment.toolchain,
             extension: null,
             rejectedCandidate: null,
             rationale: null,
@@ -1331,7 +1411,7 @@ describe("lock integration (#8)", () => {
             resolvedVersion: "1.0.0",
             probe: probeRunLockEvidence(result)!,
             target: forguncyTargetIdentity(RUNTIME_CONTRACT_TARGET),
-            probedWith: { vitePlus: null },
+            probedWith: result.report.environment.toolchain,
             extension: null,
             rejectedCandidate: null,
             rationale: null,

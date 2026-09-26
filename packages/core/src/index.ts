@@ -393,6 +393,7 @@ export type {
   ExtensionEvidence,
   FgcLockDocument,
   ForguncyTargetIdentity,
+  InstallGraphIdentity,
   LockedDependencyDecision,
   LockEvidencePolicy,
   LockEvidenceProfile,
