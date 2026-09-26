@@ -135,6 +135,49 @@ export interface ExtensionCatalog {
   readonly mappings: readonly VerifiedExtensionMapping[];
 }
 
+/**
+ * The catalog a project's normalized mappings imply, for the audit above.
+ *
+ * This is #85's boundary between a *mapping set* and a *catalog*, and the two are not
+ * the same shape on purpose:
+ *
+ * - a mapping row is the compiler's record — it carries `metadataSource`,
+ *   `metadataReference`, `verifiedBy`, `verificationRule` and a `note`, because a row
+ *   the compiler compiles against has to say where its identity came from;
+ * - a catalog row is the audit's input — three fields, because the only question
+ *   `auditExtensionRecord` asks is "does this package resolve to this library and this
+ *   global".
+ *
+ * Widening the catalog to the mapping shape would give the audit fields it never reads
+ * and would make `--extension-catalog`'s mapping form (which is written by hand, and by
+ * an Agent) carry provenance the audit cannot check. Narrowing a mapping to the catalog
+ * shape loses provenance, so the projection goes one way only: a mapping set produces a
+ * catalog, and a catalog never produces a mapping set — the same direction #12's rule
+ * requires, because a catalog cannot say which npm package an extension provides.
+ *
+ * One row per module id, which is the shape `auditExtensionRecord` matches on: a
+ * decision names a package, and `@tanstack/query-core` is a package a decision may
+ * name even though it rides on another row's key. Expanding here rather than in the
+ * audit is what keeps the audit's lookup a plain filter.
+ *
+ * Takes the rows rather than a `NormalizedExtensionMappings`, so a caller that has a
+ * plain list — a test, the Skill's `--extension-catalog` reader — is not forced through
+ * the config shape to reach it. `normalizedMappingsOf` in `core` is the other half.
+ */
+export function extensionCatalogForMappings(
+  mappings: readonly { readonly packageName: string; readonly moduleIds?: readonly string[]; readonly libraryId: string; readonly globalName: string }[],
+): ExtensionCatalog {
+  return {
+    mappings: mappings.flatMap(mapping =>
+      [mapping.packageName, ...(mapping.moduleIds ?? [])].map(packageName => ({
+        packageName,
+        libraryId: mapping.libraryId,
+        globalName: mapping.globalName,
+      })),
+    ),
+  };
+}
+
 export interface ConformanceOptions {
   /** #9's mapping table. Defaults to {@link DEFAULT_HOST_BRIDGE_MANIFEST}. */
   readonly hostBridge?: HostBridgeManifest;

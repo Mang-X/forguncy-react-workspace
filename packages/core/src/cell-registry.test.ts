@@ -15,6 +15,8 @@ import {
   machineSpecificPathProblem,
 } from "./cell-registry.ts";
 import type { CellRegistry, ConfigDiagnosticCode, RegisteredCell } from "./cell-registry.ts";
+import { normalizeExtensionMappings } from "./extension-mappings-config.ts";
+import type { NormalizedExtensionMappings } from "./extension-mappings-config.ts";
 import { targetLocatorKey } from "./forguncy-config.ts";
 
 const fixturesRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "tests", "fixtures");
@@ -26,6 +28,20 @@ const missingEntryRoot = join(fixturesRoot, "missing-entry-file");
 interface RegistryOptions {
   readonly root?: string;
   readonly requireEntryFiles?: boolean;
+}
+
+/**
+ * The normalized extension mapping set for a config, taken from the real normalization.
+ *
+ * Used by the forged registries below, which skip `createCellRegistry` on purpose to
+ * exercise the mutation-boundary guard. Hand-writing the field would be a second copy of
+ * a shape the normalizer owns, and `isCellRegistry` would then be checked against a
+ * literal rather than against what a real registry carries.
+ */
+function normalizedMappingsOf(config: unknown): NormalizedExtensionMappings {
+  const result = normalizeExtensionMappings(config);
+  if (!result.ok) throw new Error("Expected this fixture config's extension mappings to normalize.");
+  return result.mappings;
 }
 
 function registryOf(config: unknown, options: RegistryOptions = {}): CellRegistry {
@@ -584,6 +600,10 @@ describe("mutation-boundary target guard", () => {
         dependencyLockPath: "fgc.lock.json",
         dependencyLockPathAbsolute: join(validMultiRoot, "fgc.lock.json"),
       },
+      // The real normalization's answer, not a hand-written literal: `isCellRegistry`
+      // requires this field, so a forged registry that omitted it would be re-normalized
+      // from the raw config and the mutation-boundary path under test would never run.
+      extensionMappings: normalizedMappingsOf({}),
       cells,
       cellIds: cells.map(cell => cell.id),
       get: id => cells.find(cell => cell.id === id),
