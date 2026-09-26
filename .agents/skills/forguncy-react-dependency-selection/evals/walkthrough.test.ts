@@ -482,6 +482,55 @@ describe("the Skill's documented walkthrough runs as written", () => {
     expect(commands.walkthrough!.indexOf("inline.json")).toBeLessThan(commands.walkthrough!.indexOf("oversize.json"));
   });
 
+  it("reports every test file the document names, so its summary cannot go stale", () => {
+    // PR #112 review round 2, P3 — and the third time this document drifted from reality in one
+    // PR. Round 1 found a command that could not run; round 2 found `how_to_use` still saying
+    // "the executable half is in selection-cases.test.ts" after `walkthrough.test.ts` had started
+    // executing this file's commands.
+    //
+    // A one-off text fix would leave the class open, so this is the invariant instead: **the
+    // files `executed_by` names must also appear in `how_to_use`**. Those two fields are written
+    // at different times by different edits, which is exactly why they drift, and the failure is
+    // invisible to every behavioural test — the JSON is valid, the commands run, and only a
+    // reader is misled about which parts are machine-checked.
+    //
+    // Verified as a rule rather than as a literal: it recomputes the set from `executed_by`
+    // instead of asserting the current sentence, so a future case pointing at a new test file
+    // must update `how_to_use` too.
+    const document = readExecutionCases();
+    const executedBy = document.cases.map(entry => entry.executed_by ?? "").join(" ");
+    const named = [...new Set(executedBy.match(/[\w.-]+\.test\.ts/g) ?? [])].sort();
+    // The recomputation is asserted non-empty first: an empty set would make every assertion
+    // below vacuously true, which is the dead-guard shape this repository has been bitten by.
+    expect(named.length, "no case names a test file, so this guard asserts nothing").toBeGreaterThanOrEqual(2);
+
+    const howToUse = document.how_to_use;
+    for (const file of named) {
+      expect(howToUse, `${EXECUTION_CASES} names ${file} in \`executed_by\` but not in \`how_to_use\``).toContain(file);
+    }
+    // And the sentence must not still claim the executable half is *only* `selection-cases`,
+    // which is the specific stale wording round 2 found. `toContain` above would be satisfied by
+    // a `how_to_use` that named both files while still asserting exclusivity.
+    expect(howToUse).not.toMatch(/可执行的那一半在 selection-cases\.test\.ts 里并由 CI 运行[^；]*；本文件记录无法由测试执行的那一半/);
+  });
+
+  it("lists the walkthrough test in the Skill's own asset list, which named the other suites", async () => {
+    // The same drift in the README's asset section: it enumerated the eval files and had not been
+    // updated for `walkthrough.test.ts`. Asserted here rather than left to review because it is
+    // the identical failure mode as the `how_to_use` one above — a list of files maintained by
+    // hand beside a directory that grows.
+    const readme = readFileSync(join(REPOSITORY_ROOT, `${SKILL_DIRECTORY}/README.md`), "utf8");
+    expect(readme).toContain("evals/walkthrough.test.ts");
+    // Every committed eval suite is accounted for, so a new one cannot be added silently.
+    const committed = (await readdir(join(REPOSITORY_ROOT, `${SKILL_DIRECTORY}/evals`)))
+      .filter(name => name.endsWith(".test.ts"))
+      .sort();
+    expect(committed.length, "expected the eval suites this assertion is about").toBeGreaterThanOrEqual(3);
+    for (const suite of committed) {
+      expect(readme, `${suite} exists under evals/ but the asset list does not mention it`).toContain(suite);
+    }
+  });
+
   it("refuses the oversize rejection on a Cell that declares no ceiling, as the prose says", async () => {
     // The walkthrough's prose claims this, so it is executed rather than trusted. It is also the
     // case that distinguishes "over the cap" from "no cap at all": with no declared ceiling the

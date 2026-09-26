@@ -49,8 +49,10 @@
 - `references/decision-recording.md`：决策文件字段、锁、新鲜度。
 - `references/report-and-handoff.md`：报告字段、本地/真机分开、移交给打包 skill。
 - `evals/selection-cases.test.ts`：六个必需评测用例的**可执行**一半，进 CI。
+- `evals/walkthrough.test.ts`：把 `SKILL.md` 的走查块与 `execution_cases.json` 的 `repeatable_commands.walkthrough` 当命令**执行**（不是重抄一遍），并守住"手填编译证据"那条被撤回的说明不再出现。
 - `evals/cli-contract.test.ts`：**CLI 级**回归测试，真正 spawn 脚本，覆盖证据可追溯、`--runtime-smoke` 可达性、conformance 门。
-- `evals/execution_cases.json`：Agent 侧（语义）用例，供人工/Agent 复核。
+- `evals/cap-e2e.test.ts`：`--cell` 声明的 code budget 端到端（probe / audit / record / status 都拿到同一个上限）。
+- `evals/execution_cases.json`：语义用例（不可执行的判断，人工/Agent 复核）**加上** `repeatable_commands`（可重复跑的命令，由上面两个测试执行）。每条 case 的 `executed_by` 指出谁执行它。
 - `evals/trigger_cases.json` + `evals/semantic_config.json`：路由评测（precision 1.0 / recall 1.0，阈值 0.30）。
 
 ## 关键选项

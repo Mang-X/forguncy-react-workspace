@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
   "capability": "为一个 Cell 需要的能力做依赖选型并记录决策",
-  "how_to_use": "这些是 Agent 侧（语义推理）的评测用例。可执行的那一半在 selection-cases.test.ts 里并由 CI 运行；本文件记录无法由测试执行的那一半——候选研究、排队、权衡与最终策略选择。审查时对照 actual 与 expected。",
+  "how_to_use": "这份文件同时记录两件事：(1) 语义期望——候选研究、排队、权衡与最终策略选择，这部分无法由测试执行，审查时对照 actual 与 expected；(2) repeatable_commands——可重复跑的命令。可执行的那一半由 CI 运行：selection-cases.test.ts 跑六个必需用例，walkthrough.test.ts 读 SKILL.md 的走查块并连同 repeatable_commands.walkthrough 一起执行，cli-contract.test.ts 与 cap-e2e.test.ts 覆盖 CLI 与预算边界。每条 case 的 executed_by 指出谁执行它；没有 executed_by 的是纯语义用例，只能人工/Agent 复核。",
   "repeatable_commands": {
     "policy": "node .agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs policy",
     "probe": "node .agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs probe --project examples/probe-proving-cases <package>",
