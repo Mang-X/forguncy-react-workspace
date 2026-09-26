@@ -20,10 +20,10 @@ import { createChart, renderChart } from "@example/chart-kit";
  *    node resolution ran. A missing interception is a loud `UNRESOLVED_ENTRY`-class
  *    failure rather than a quiet inline of an npm copy — the same reason
  *    `examples/host-antd` leaves `antd` uninstallable.
- * 3. **A default and a named import, from one module.** Both are shapes a consumer's
- *    namespace import exercises differently, and `@example/chart-kit` is one module id
- *    here: the generated module exports the page object itself, so neither import can
- *    read `undefined` merely because of how it was written.
+ * 3. **Two named imports from one module.** Named bindings are the shape a consumer's
+ *    namespace import exercises through the bundler's enumeration, and `@example/chart-kit`
+ *    is one module id here: the generated module exports the page object itself, so a
+ *    named import cannot read `undefined` merely because of how it was written.
  *
  * What this file does *not* establish: that the extension exists, that the page global is
  * present, or that anything renders. Locally there is no page — #88 is where a real

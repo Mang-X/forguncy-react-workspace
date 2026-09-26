@@ -119,6 +119,7 @@ describe("loading a project config", () => {
         "        metadataReference: 'some/other-catalog',",
         "        verificationRule: 'A second claim for a package the built-in table already maps.',",
         "        verifiedBy: ['product-documentation'],",
+        "        note: 'a hand-written row that collides with the built-in table',",
         "      },",
         "    ],",
         "  },",

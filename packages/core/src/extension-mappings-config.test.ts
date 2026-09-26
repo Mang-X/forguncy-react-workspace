@@ -75,6 +75,7 @@ function projectMappingConfig(overrides: Record<string, unknown> = {}): Record<s
     metadataReference: "MangMax/forguncy-react-library",
     verificationRule: "A catalog entry whose id and global the listing confirms.",
     verifiedBy: ["product-documentation"],
+    note: "synthetic project row",
     ...overrides,
   };
 }
@@ -106,6 +107,19 @@ function diagnosticsOf(config: unknown): readonly { readonly code: string; reado
 
 const tanStackQueryRow = EXTENSION_EXTERNAL_MAPPINGS.find(row => row.packageName === "@tanstack/react-query");
 
+/**
+ * Whether a normalized set contains a row for a package, by value.
+ *
+ * A helper rather than `toContain(row)`, and the difference is the point of the freeze
+ * work: the normalized rows are *copies* of the table's, so an identity comparison against
+ * a row read from `EXTENSION_EXTERNAL_MAPPINGS` would fail while the content is right.
+ * Comparing by value is also the stronger assertion — it pins what the row says rather
+ * than which object it is.
+ */
+function hasRowFor(mappings: NormalizedExtensionMappings, packageName: string): boolean {
+  return mappings.mappings.some(row => row.packageName === packageName);
+}
+
 // ---------------------------------------------------------------------------
 // The four states, and the TanStack Query default
 // ---------------------------------------------------------------------------
@@ -120,7 +134,7 @@ describe("the four states of the `extensions` block", () => {
     expect(normalized.projectMappings).toEqual([]);
     expect(normalized.mappings).toEqual(EXTENSION_EXTERNAL_MAPPINGS);
     expect(tanStackQueryRow).toBeDefined();
-    expect(normalized.mappings).toContain(tanStackQueryRow);
+    expect(hasRowFor(normalized, "@tanstack/react-query")).toBe(true);
   });
 
   it("adds a project's rows to the built-in table rather than replacing it", () => {
@@ -135,7 +149,7 @@ describe("the four states of the `extensions` block", () => {
     // half a row came from without comparing against two lists.
     expect(normalized.mappings.slice(0, EXTENSION_EXTERNAL_MAPPINGS.length)).toEqual(EXTENSION_EXTERNAL_MAPPINGS);
     expect(normalized.mappings.at(-1)?.packageName).toBe("some-package");
-    expect(normalized.mappings).toContain(tanStackQueryRow);
+    expect(hasRowFor(normalized, "@tanstack/react-query")).toBe(true);
   });
 
   it("treats an explicit opt-out as a stated empty set, not as an unstated one", () => {
@@ -425,6 +439,57 @@ describe("a project row that cannot be honoured", () => {
     expect(diagnostics.map(diagnostic => diagnostic.code)).toEqual(["invalid-extension-mapping"]);
     expect(diagnostics[0]?.message).toContain("no evidence channel");
   });
+
+  it("refuses a row that invents an evidence channel, which is what a raw config could do", () => {
+    // Review of #110, finding 1, through the path that produced it. A `.ts` config is
+    // type-checked, so `verifiedBy: ["assumption"]` would not compile — but the reader
+    // takes a *loaded module*, and a `.mjs`/JSON config never meets a type checker. The
+    // reader used to cast the array to `RuntimeEvidenceChannel[]` and let the contract
+    // guard see a list of length 1, so the forgery was accepted end to end.
+    //
+    // The guard now lives in the contract, so this is refused wherever a row comes from —
+    // and the message names the vocabulary rather than saying "unknown value".
+    for (const forged of [["assumption"], [""], ["likely"], ["designer-api", "expected"]]) {
+      const diagnostics = diagnosticsOf({
+        cells: {},
+        extensions: { mappings: [projectMappingConfig({ verifiedBy: forged })] },
+      });
+
+      expect(diagnostics.map(diagnostic => diagnostic.code), JSON.stringify(forged)).toEqual([
+        "invalid-extension-mapping",
+      ]);
+      expect(diagnostics[0]?.message).toContain("not one of the four the runtime contract observes through");
+    }
+  });
+
+  it("accepts the channels the runtime contract does name, so the check is not vacuous", () => {
+    // The bound on the refusal above: a check that refused everything would pass it. Read
+    // from the vocabulary rather than listed, so a channel added to
+    // `RUNTIME_EVIDENCE_CHANNELS` is accepted without an edit here.
+    const normalized = normalizeOrThrow({
+      cells: {},
+      extensions: { mappings: [projectMappingConfig({ verifiedBy: ["product-runtime-source", "generated-runtime-browser"] })] },
+    });
+
+    expect(normalized.projectMappings[0]?.verifiedBy).toEqual([
+      "product-runtime-source",
+      "generated-runtime-browser",
+    ]);
+  });
+
+  it("requires `note`, so a typed config and a raw one accept the same rows", () => {
+    // Review of #110, finding 3. `note` is required on `ExtensionExternalMapping`, so
+    // `defineForguncyConfig` rejected a row without one while the reader defaulted it to
+    // `""` — two schemas for one row. #85 asks the JSON/TS boundary to be consistent; the
+    // direction that leaves #12's contract alone is to require it in the reader.
+    const diagnostics = diagnosticsOf({
+      cells: {},
+      extensions: { mappings: [projectMappingConfig({ note: undefined })] },
+    });
+
+    expect(diagnostics.map(diagnostic => diagnostic.code)).toEqual(["invalid-extension-mapping"]);
+    expect(diagnostics[0]?.message).toContain("`note` must be a non-empty string");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -557,6 +622,74 @@ describe("the normalized mapping set", () => {
     }).toThrow();
   });
 
+  it("freezes each row and its nested arrays, not only the lists", () => {
+    // Review of #110, finding 2. Freezing the three containers left `row.libraryId = …`
+    // and `row.verifiedBy.push(…)` working, and `verifiedBy` is the field that decides
+    // whether a claim has an observation behind it — so editing it after normalization is
+    // exactly the forgery the contract's channel check exists to refuse.
+    const normalized = normalizeOrThrow({
+      cells: {},
+      extensions: { mappings: [projectMappingConfig({ moduleIds: ["some-package-core"] })] },
+    });
+    const row = normalized.projectMappings[0]!;
+
+    expect(Object.isFrozen(row)).toBe(true);
+    expect(Object.isFrozen(row.moduleIds)).toBe(true);
+    expect(Object.isFrozen(row.verifiedBy)).toBe(true);
+    expect(() => {
+      (row as { libraryId: string }).libraryId = "changed";
+    }).toThrow();
+    expect(() => {
+      (row.verifiedBy as string[]).push("assumption");
+    }).toThrow();
+    expect(() => {
+      (row.moduleIds as string[]).push("sneaky-package");
+    }).toThrow();
+  });
+
+  it("owns its rows, so editing the config afterwards cannot change the normalized result", () => {
+    // The other half of the same finding: a row that is not copied is shared with the
+    // caller's document, so the set every stage reads could be edited *through* it — and a
+    // config object is a live thing in a watch-mode host.
+    const config = { cells: {}, extensions: { mappings: [projectMappingConfig({ moduleIds: ["some-package-core"] })] } };
+    const normalized = normalizeOrThrow(config);
+
+    const rowBefore = JSON.stringify(normalized.projectMappings[0]);
+    (config.extensions.mappings[0] as { libraryId: string }).libraryId = "hijacked";
+    (config.extensions.mappings[0] as { moduleIds: string[] }).moduleIds.push("@hijacked/extra");
+    (config.extensions.mappings[0] as { verifiedBy: string[] }).verifiedBy.push("assumption");
+
+    expect(JSON.stringify(normalized.projectMappings[0])).toBe(rowBefore);
+  });
+
+  it("does not freeze a caller-supplied built-in table in place", () => {
+    // The side effect freezing instead of copying would have introduced: `builtinMappings`
+    // is the *caller's* array, and a function asked to read a config may not leave it
+    // frozen. Asserted on both the array and the row, because freezing only the array
+    // would still mutate the caller's row objects.
+    const callerOwned: readonly ExtensionExternalMapping[] = [projectMapping({ packageName: "pinned-package" })];
+    const callerRow = callerOwned[0]!;
+
+    normalizeOrThrow({ cells: {} }, { builtinMappings: callerOwned });
+
+    expect(Object.isFrozen(callerOwned)).toBe(false);
+    expect(Object.isFrozen(callerRow)).toBe(false);
+    // And the caller's row is still usable, which is what "not frozen" has to mean.
+    expect(() => {
+      (callerRow as { libraryId: string }).libraryId = "still-writable";
+    }).not.toThrow();
+  });
+
+  it("shares one clone between `mappings` and the subset a row belongs to", () => {
+    // Why the clone is memoized rather than applied twice: `extensionMappingOrigin` and the
+    // plan's activation predicate both compare rows by identity *within one result*, so two
+    // clones of one row would make those comparisons fail while every printed field matched.
+    const normalized = normalizeOrThrow({ cells: {}, extensions: { mappings: [projectMappingConfig()] } });
+
+    expect(normalized.mappings).toContain(normalized.projectMappings[0]);
+    expect(extensionMappingOrigin(normalized, normalized.projectMappings[0]!)).toBe("project");
+  });
+
   it("says which rows are the project's and which are the repository's", () => {
     const normalized = normalizeOrThrow({ cells: {}, extensions: { mappings: [projectMappingConfig()] } });
 
@@ -590,7 +723,7 @@ describe("the normalized mapping set", () => {
 
     expect(normalized.builtinMappings).toEqual(pinned);
     expect(normalized.mappings).toEqual(pinned);
-    expect(normalized.mappings).not.toContain(tanStackQueryRow);
+    expect(hasRowFor(normalized, "@tanstack/react-query")).toBe(false);
   });
 });
 
@@ -636,7 +769,7 @@ describe("the registry carries the normalized set", () => {
     );
 
     expect(registry.extensionMappings.source).toBe("project-extended");
-    expect(registry.extensionMappings.mappings).toContain(tanStackQueryRow);
+    expect(hasRowFor(registry.extensionMappings, "@tanstack/react-query")).toBe(true);
     expect(registry.extensionMappings.projectMappings.map(row => row.packageName)).toEqual(["some-package"]);
   });
 

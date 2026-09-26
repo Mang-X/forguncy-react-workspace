@@ -283,14 +283,18 @@ function readProjectMapping(
     }
   }
 
-  let note: string | undefined;
-  if (raw.note !== undefined) {
-    if (typeof raw.note !== "string") {
-      failures.push("`note` must be a string");
-    } else {
-      note = raw.note;
-    }
-  }
+  // Required here because it is required on `ExtensionExternalMapping`, and the first
+  // version defaulted it to `""` — which made the TypeScript config and a raw `.mjs`/JSON
+  // one describe two different schemas for one row: `defineForguncyConfig` rejected a row
+  // without a `note` while the runtime reader accepted it. #85 asks for the JSON/TS
+  // boundary to be consistent, and the direction that keeps #12's contract unchanged is
+  // to require it in the reader. The field is not decoration — it is what a reader of the
+  // table would otherwise have to reconstruct, and #87/#88 hand these rows to other
+  // stages — so it is required of a project row for the same reason it is required of a
+  // built-in one. (The alternative the review named — a distinct project-input type
+  // normalized into the full row — would model the two shapes honestly, and is the change
+  // to make if a project row's `note` ever genuinely needs to be optional.)
+  const note = required("note");
 
   if (failures.length > 0) {
     out.push(
@@ -318,7 +322,7 @@ function readProjectMapping(
     // admissibility guard is what reports it — one place states "a claim with no
     // observation behind it" rather than two that could word it differently.
     verifiedBy: (verifiedBy ?? []) as ExtensionExternalMapping["verifiedBy"],
-    note: note ?? "",
+    note: note!,
   };
 
   return mapping;
@@ -416,7 +420,17 @@ function readBuiltinMappings(raw: Record<string, unknown>, out: ExtensionMapping
  * `extension-mapping-conflict` diagnostic cannot say *where* in the config it came
  * from — the plan has no config. #85 requires the location before a compile or a
  * write, so the collision is detected here, against the same guard the compiler
- * runs, and reported with the `extensions.mappings[i]` path that produced it.
+ * runs, and reported at `extensions.mappings`.
+ *
+ * **The path is the block, not the row, and that is the honest answer rather than a
+ * coarser one.** The cross-row guard reports a *pair*: `assertExtensionExternalMappingsAreUnambiguous`
+ * says "module id X is claimed by both A and B", which is a fact about two rows and
+ * belongs to neither alone — so attributing it to one index would name whichever row the
+ * guard happened to reach second and send a reader to edit a row that may be the innocent
+ * one. The per-row guard *can* locate a row, and does: `invalid-extension-mapping` is
+ * reported at `extensions.mappings[i]`, because a row that is incomplete or inadmissible
+ * is wrong on its own. The message carries both packages, which is what makes the block
+ * path actionable.
  *
  * The two checks are deliberately both run rather than one replacing the other:
  * the per-row guard states what is wrong with a row on its own, and the cross-row
@@ -538,19 +552,71 @@ export function normalizeExtensionMappings(
 }
 
 /**
- * The result, with every array and row frozen.
+ * A row copied into objects this module owns, with its nested arrays copied and frozen.
  *
- * A deep freeze of the containers this module created, not of the rows themselves: a
- * built-in row is `core`'s own table entry, and freezing it here would mutate a
- * module-level constant's reachability from a function that was merely asked to read
- * a config. The rows are read-only by their own type, which is where that guarantee
- * belongs; what freezing adds is that a caller cannot *reorder or append to* the set
- * every other consumer is sharing.
+ * **Why a copy rather than a freeze in place.** The first version froze the three array
+ * containers and nothing else, which left three holes, all measured:
+ *
+ * | attempt | first version |
+ * | --- | --- |
+ * | `normalized.projectMappings[0].libraryId = "changed"` | succeeded |
+ * | `rawConfig.extensions.mappings[0].verifiedBy.push("assumption")` | visible in the normalized result |
+ * | `Object.isFrozen(callerOwnedBuiltinMappings)` | `true` — the caller's array, frozen in place |
+ *
+ * The first two are the same defect seen from two sides: a row that is not copied is
+ * shared with the caller's config, so the "read-only, reusable" set every stage reads
+ * could be edited *through* either reference — and `verifiedBy` is the field that decides
+ * whether a claim has an observation behind it, so editing it after the fact is precisely
+ * the forgery the contract's channel check exists to refuse. Freezing in place instead of
+ * copying would have fixed the first hole by breaking the third: `options.builtinMappings`
+ * and the config object are the caller's, and a function asked to *read* them may not
+ * leave them frozen.
+ *
+ * So the module copies, then freezes what it copied. `Object.freeze` is shallow, which is
+ * why the nested arrays are copied and frozen explicitly: freezing the row alone would
+ * leave `row.verifiedBy.push(...)` working.
+ */
+function cloneMapping(mapping: ExtensionExternalMapping): ExtensionExternalMapping {
+  return Object.freeze({
+    packageName: mapping.packageName,
+    ...(mapping.moduleIds === undefined ? {} : { moduleIds: Object.freeze([...mapping.moduleIds]) }),
+    libraryId: mapping.libraryId,
+    globalName: mapping.globalName,
+    metadataSource: mapping.metadataSource,
+    metadataReference: mapping.metadataReference,
+    verificationRule: mapping.verificationRule,
+    verifiedBy: Object.freeze([...mapping.verifiedBy]),
+    note: mapping.note,
+  });
+}
+
+/**
+ * The result, with every row and array the *result* owns frozen.
+ *
+ * Each logical row is cloned **once** and the same clone is shared between
+ * {@link NormalizedExtensionMappings.mappings} and whichever of the two subsets it belongs
+ * to. Cloning twice would break {@link extensionMappingOrigin} and the plan's
+ * activation predicate, both of which compare rows by identity within one result — a
+ * property worth stating because it is invisible: the two lists would still print the
+ * same, and only an identity comparison would fail.
  */
 function freezeMappings(result: NormalizedExtensionMappings): NormalizedExtensionMappings {
-  Object.freeze(result.projectMappings);
-  Object.freeze(result.builtinMappings);
-  return Object.freeze({ ...result, mappings: Object.freeze(result.mappings) });
+  const cloned = new Map<ExtensionExternalMapping, ExtensionExternalMapping>();
+  const clone = (mapping: ExtensionExternalMapping): ExtensionExternalMapping => {
+    const existing = cloned.get(mapping);
+    if (existing !== undefined) return existing;
+    const copy = cloneMapping(mapping);
+    cloned.set(mapping, copy);
+    return copy;
+  };
+
+  return Object.freeze({
+    mappings: Object.freeze(result.mappings.map(clone)),
+    projectMappings: Object.freeze(result.projectMappings.map(clone)),
+    source: result.source,
+    includesBuiltinMappings: result.includesBuiltinMappings,
+    builtinMappings: Object.freeze(result.builtinMappings.map(clone)),
+  });
 }
 
 /**

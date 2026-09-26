@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { loadForguncyConfig } from "./config-loader.ts";
-import { EXTENSION_EXTERNAL_MAPPINGS, findExtensionExternalMapping } from "./extension-externals.ts";
+import { findExtensionExternalMapping } from "./extension-externals.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = join(here, "..", "..", "..");
@@ -50,10 +50,10 @@ describe("examples/extension-custom is a loadable handoff for #86/#87/#88", () =
     expect(extensionMappings.projectMappings.map(row => row.packageName)).toEqual(["@example/chart-kit"]);
     // The row is the project's, and the built-in TanStack Query row is still present —
     // "a project row adds rather than replaces", asserted on the fixture rather than on a
-    // document written for the occasion.
-    expect(extensionMappings.mappings).toContain(
-      EXTENSION_EXTERNAL_MAPPINGS.find(row => row.packageName === "@tanstack/react-query"),
-    );
+    // document written for the occasion. Compared by value rather than by identity: the
+    // normalized rows are copies of the table's, which is what makes the result the
+    // module's own rather than a view onto a caller's config.
+    expect(extensionMappings.mappings.map(row => row.packageName)).toContain("@tanstack/react-query");
   });
 
   it("names a library and global the built-in table does not, and does not touch it", async () => {

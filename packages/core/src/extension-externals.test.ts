@@ -28,6 +28,7 @@ import {
   isExtensionGlobalName,
   isExtensionLibraryId,
 } from "./extension-externals.ts";
+import { RUNTIME_EVIDENCE_CHANNELS } from "./runtime-contract.ts";
 import type { ExtensionExternalMapping, ExtensionLibraryListing } from "./extension-externals.ts";
 import { hostBridgeGlobalMappings } from "./host-bridge.ts";
 
@@ -265,6 +266,38 @@ describe("an inadmissible extension mapping", () => {
     expect(refusal(() => assertExtensionExternalMappingIsAdmissible(mapping({ verifiedBy: [] })))).toContain(
       "no evidence channel",
     );
+  });
+
+  it("is refused when it records an evidence channel that cannot be observed through", () => {
+    // The guard the raw-config path needed (review of #110, finding 1). `RuntimeEvidenceChannel`
+    // deliberately has no "assumption" member, so a claim that was never observed cannot be
+    // written down without inventing a channel — and a check that only counted members let
+    // exactly that through, because a `.mjs`/JSON config's `verifiedBy` never met a type
+    // checker. Presence and membership are different repairs: "you recorded no evidence" and
+    // "you recorded evidence nobody can observe" are separate messages.
+    expect(refusal(() => assertExtensionExternalMappingIsAdmissible(mapping({ verifiedBy: ["assumption" as never] })))).toContain(
+      "not one of the four the runtime contract observes through",
+    );
+    // An empty string is the other shape a hand-written row produces, and it is not the
+    // same as an absent list: the list has one member and that member is not a channel.
+    expect(refusal(() => assertExtensionExternalMappingIsAdmissible(mapping({ verifiedBy: ["" as never] })))).toContain(
+      "not one of the four",
+    );
+    expect(
+      refusal(() => assertExtensionExternalMappingIsAdmissible(mapping({ verifiedBy: ["designer-api", "nonsense" as never] }))),
+    ).toContain("not one of the four");
+  });
+
+  it("accepts every channel the runtime contract actually names", () => {
+    // The bound on the check above, read from the vocabulary rather than listed here, so a
+    // channel added to `RUNTIME_EVIDENCE_CHANNELS` is accepted without an edit and a channel
+    // removed from it is refused without one.
+    for (const channel of RUNTIME_EVIDENCE_CHANNELS) {
+      expect(
+        () => assertExtensionExternalMappingIsAdmissible(mapping({ verifiedBy: [channel] })),
+        channel,
+      ).not.toThrow();
+    }
   });
 
   it("is refused when it states no verification rule", () => {
