@@ -869,10 +869,12 @@ describe("CLI contract: the declared cell code cap reaches probe, audit, record 
 
   it("carries the declared surface into the record, and `status` rebuilds it from there", async () => {
     // The whole P1-c plumbing in one case, because each half is useless without the other: the
-    // decision file's `imports` has to reach the probe (so the measurement is a lower bound), be
-    // written onto the record (so a reader can tell which bound the size evidence rests on), and
-    // be read back by `status` (so the rebuilt fingerprint is the one that was measured). Drop
-    // any one and the record either loses its verdict or reports a change nobody made.
+    // decision file's `imports` has to reach the probe (so the estimate carries the leaning its
+    // surface implies), be written onto the record (so a reader can tell which way that estimate
+    // leans), and be read back by `status` (so the rebuilt fingerprint is the one that was
+    // measured). Drop any one and the record either loses its leaning or reports a change nobody
+    // made. It is a fingerprint input and an interpretation aid, never a rejection basis — no
+    // surface makes a cap rejection sound (`size.ts`).
     await withCappedCell(CAP_MET, async root => {
       const file = await decisionFile({
         packageName: "es-toolkit",
