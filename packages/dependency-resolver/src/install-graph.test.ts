@@ -160,6 +160,68 @@ describe("resolving exact installed versions", () => {
     expect(unresolved).toEqual([{ packageName: "versionless", reason: "manifest-without-version" }]);
   });
 
+  it("reads the version of an import-only package rather than calling it not installed", async () => {
+    // #89's defect, at this module's level: `exports` publishing only an `import`
+    // branch fails both `require.resolve` attempts, so the package was reported as
+    // missing from the install graph while it is installed. The lock's staleness
+    // rule is this map's consumer, so a false "not installed" makes a recorded
+    // decision report `package-version-unknown` for a package that never moved.
+    const root = await project();
+    await install(root, "import-only-lib", {
+      name: "import-only-lib",
+      version: "3.2.1",
+      type: "module",
+      exports: { ".": { import: "./lib/index.js" } },
+    });
+    await writeFileAt(join(root, "node_modules", "import-only-lib", "lib", "index.js"), "export const a = 1;\n");
+
+    const { versions, unresolved } = await resolveInstalledVersions(root, ["import-only-lib"]);
+
+    expect(versions).toEqual({ "import-only-lib": "3.2.1" });
+    expect(unresolved).toEqual([]);
+  });
+
+  it("reads the version of a package whose exports publishes no root entry", async () => {
+    const root = await project();
+    await install(root, "subpath-only-lib", {
+      name: "subpath-only-lib",
+      version: "4.0.0",
+      type: "module",
+      exports: { "./only": { import: "./lib/only.js" } },
+    });
+    await writeFileAt(join(root, "node_modules", "subpath-only-lib", "lib", "only.js"), "export const a = 1;\n");
+
+    const { versions } = await resolveInstalledVersions(root, ["subpath-only-lib"]);
+
+    expect(versions).toEqual({ "subpath-only-lib": "4.0.0" });
+  });
+
+  it("reports an unreadable manifest as such, not as a missing package", async () => {
+    // Reachable for the first time (#89). The climb this module used to run swallowed
+    // a JSON parse failure and kept walking, so a corrupt package root came back as
+    // `not-installed` — telling the reader to run `install` when the file is present
+    // and broken.
+    const root = await project();
+    await writeFileAt(join(root, "node_modules", "corrupt", "package.json"), '{ "name": "corrupt", ');
+
+    const { versions, unresolved } = await resolveInstalledVersions(root, ["corrupt"]);
+
+    expect(versions).toEqual({});
+    expect(unresolved).toEqual([{ packageName: "corrupt", reason: "manifest-unreadable" }]);
+  });
+
+  it("reports a manifest that declares no name as a name mismatch, not as the request", async () => {
+    // A manifest that parses but names nothing cannot be recorded as the artifact the
+    // request names — that is the same defect as an alias from a caller's side.
+    const root = await project();
+    await install(root, "nameless", { version: "1.0.0" });
+
+    const { versions, unresolved } = await resolveInstalledVersions(root, ["nameless"]);
+
+    expect(versions).toEqual({});
+    expect(unresolved).toEqual([{ packageName: "nameless", reason: "manifest-name-mismatch" }]);
+  });
+
   it("does not answer for the project root when the package is absent", async () => {
     // An unguarded walk up from a failed lookup reaches the project's own manifest.
     // That would report every missing package as a name mismatch against the

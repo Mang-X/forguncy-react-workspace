@@ -15,11 +15,22 @@
  * `install-graph` deliberately never returns a path — only versions — because a
  * machine path reaching `fgc.lock.json` breaks the lock's portability rule. The
  * probe needs the opposite: the *files* of one package, to scan, build and
- * measure. So this module re-implements the same two-attempt manifest resolution
- * (`<name>/package.json`, then bare `<name>` walked up to a named manifest,
- * stopping at a `node_modules` boundary) while keeping its own promise: only
- * portable strings — name, version, license, normalized source — cross back into
- * the report; the resolved directory stays internal to the engine.
+ * measure. So this module resolves the same artifact `install-graph` resolves —
+ * now through the shared `package-locator` (#89) — while keeping its own promise:
+ * only portable strings — name, version, license, normalized source — cross back
+ * into the report; the resolved directory stays internal to the engine.
+ *
+ * **Locating is not resolving, and #89 split the two.** This step used to find a
+ * package with two `require.resolve` attempts, which answer under the CommonJS
+ * condition — so an `import`-only package failed both and was reported as
+ * *not installed* while `import()` and rolldown both loaded it. `locatePackage`
+ * answers the identity question from the host's own package-directory lookup,
+ * and the question of *whether a specifier is exported at all* is left where it
+ * can be answered under the conditions compilation actually uses: the `build`
+ * step, whose `RESOLVE_ERROR` is the evidence for a name the manifest does not
+ * publish. This step therefore never claims "forbidden export"; it claims which
+ * artifact is installed, and `manifest-name-mismatch` is still the one thing a
+ * name can be wrong about here.
  *
  * Identity failure is thrown, not reported. A probe of a package that is not
  * installed has no artifact to describe, so every later step would be fabricating
@@ -29,11 +40,13 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
-import { dirname, isAbsolute, join, parse as parsePath } from "node:path";
+import { join } from "node:path";
 
 import type { ProbeEnvironment, ToolchainIdentity } from "@forguncy-react-workspace/core";
 import { forguncyTargetIdentity, RUNTIME_CONTRACT_TARGET } from "@forguncy-react-workspace/core";
+
+import type { LocatedPackage } from "../package-locator.ts";
+import { locatePackage } from "../package-locator.ts";
 
 /** Why identity could not be established — the same reasons `install-graph` reports, re-stated for a throw. */
 export type ProbeIdentityReason =
@@ -71,7 +84,15 @@ function describeIdentityFailure(packageName: string, reason: ProbeIdentityReaso
   }
 }
 
-/** Where a manifest lives on disk, plus the fields every consumer reads from it. */
+/**
+ * The located package, in the shape this module's consumers read.
+ *
+ * `name` and `version` are `undefined` when the manifest declares none, which is
+ * the honest answer for a manifest that parsed: `resolvePackageIdentity` turns
+ * those into `manifest-name-mismatch` and `manifest-without-version`. A manifest
+ * that does *not* parse never reaches here — `locatePackage` reports it as its own
+ * failure reason.
+ */
 export interface LocatedManifest {
   readonly name: string;
   readonly version: string | undefined;
@@ -79,84 +100,37 @@ export interface LocatedManifest {
   readonly raw: Record<string, unknown>;
 }
 
-async function resolveManifest(require: NodeJS.Require, request: string): Promise<LocatedManifest | null> {
-  for (const candidate of [`${request}/package.json`, request]) {
-    let entry: string;
-    try {
-      entry = require.resolve(candidate);
-    } catch {
-      continue;
-    }
-    if (!isAbsolute(entry)) {
-      continue;
-    }
-    // The direct `<name>/package.json` attempt lands on the manifest itself;
-    // walking from its directory still finds it (it declares `name`) and keeps
-    // one code path for both attempts. The bare attempt normally returns an
-    // entry *file* under a strict `exports` map that does not export
-    // `./package.json`; climbing from that file to the owning named manifest is
-    // what keeps such packages in the graph instead of silently dropping them.
-    const manifest = await nearestNamedManifest(dirname(entry));
-    if (manifest !== null) {
-      return manifest;
-    }
-  }
-  return null;
-}
-
 /**
- * Resolve `request` the way Node would from `require`'s anchor, returning the
- * owning named manifest or null when nothing installed answers.
+ * Resolve `request` from `base`'s location, returning the owning manifest or null
+ * when nothing installed answers.
  *
- * Shared by `package-identity` and `node-builtin-scan` so both walk the same
- * two-attempt path (subpath manifest, then bare entry climbed to a named
- * manifest) and neither invents a private variant of resolution.
- */
-export async function locateManifest(require: NodeJS.Require, request: string): Promise<LocatedManifest | null> {
-  return resolveManifest(require, request);
-}
-
-/**
- * The named manifest owning `startDirectory`, walking up, stopping at a
- * `node_modules` boundary.
+ * Shared by `package-identity` and `node-builtin-scan` so both ask the host the
+ * same question and neither invents a private variant of resolution. A package
+ * whose manifest declares no `name` yields `null` here, because both callers need
+ * a *named* manifest: the transitive walk keys graph members by name, and an
+ * unnamed directory is not a graph node.
  *
- * Same climb as `install-graph`'s `nearestNamedManifest`: stop at the first
- * manifest that declares a `name` (an `{"type":"module"}` marker deeper in a
- * package tree declares none), and refuse to walk out of a package into the
- * project — which would report the project itself as a name mismatch.
+ * `base` is a filename inside the resolution scope — the project's own manifest
+ * for a top-level probe, a package's manifest for the transitive walk — and it is
+ * a parameter rather than a `NodeJS.Require` because the host primitive walks
+ * ancestor `node_modules` directories from a location, which is the same scope
+ * question `createRequire` answers without the `NODE_PATH` leak.
  */
-async function nearestNamedManifest(startDirectory: string): Promise<LocatedManifest | null> {
-  let directory = startDirectory;
-  for (;;) {
-    if (parsePath(directory).base === "node_modules") {
-      return null;
-    }
-    try {
-      const text = await readFile(join(directory, "package.json"), "utf8");
-      const parsed: unknown = JSON.parse(text);
-      if (parsed !== null && typeof parsed === "object") {
-        const record = parsed as Record<string, unknown>;
-        if (typeof record.name === "string") {
-          return {
-            name: record.name,
-            version:
-              typeof record.version === "string" && record.version.trim().length > 0 ? record.version : undefined,
-            directory,
-            raw: record,
-          };
-        }
-      }
-    } catch {
-      // Missing file, or one that is not JSON: this directory contributes nothing
-      // and the walk continues. An unreadable manifest at the package root is
-      // reported later only when it is the manifest that answered.
-    }
-    const parent = dirname(directory);
-    if (parent === directory) {
-      return null;
-    }
-    directory = parent;
+export async function locateManifest(base: string, request: string): Promise<LocatedManifest | null> {
+  const location = await locatePackage(base, request);
+  if (location.outcome === "failed") {
+    return null;
   }
+  const found: LocatedPackage = location.package;
+  if (found.name === undefined) {
+    return null;
+  }
+  return {
+    name: found.name,
+    version: found.version,
+    directory: found.directory,
+    raw: found.raw,
+  };
 }
 
 /**
@@ -246,29 +220,41 @@ export interface ResolvedPackageIdentity {
 
 /** The `package-identity` step's result. Throws `ProbeIdentityError` when no artifact answers. */
 export async function resolvePackageIdentity(projectRoot: string, packageName: string): Promise<ResolvedPackageIdentity> {
-  const require = createRequire(join(projectRoot, "package.json"));
-  const manifest = await resolveManifest(require, packageName);
+  const location = await locatePackage(join(projectRoot, "package.json"), packageName);
 
-  if (manifest === null) {
-    throw new ProbeIdentityError(packageName, "not-installed");
+  if (location.outcome === "failed") {
+    // `manifest-unreadable` is a distinct reason now that the locator reports it:
+    // the climb this replaced skipped every unreadable manifest and kept walking, so
+    // a corrupt package root was blamed on the install graph instead of on the file.
+    throw new ProbeIdentityError(packageName, location.reason);
   }
-  if (manifest.name !== packageName && !packageName.startsWith(`${manifest.name}/`)) {
-    throw new ProbeIdentityError(packageName, "manifest-name-mismatch", manifest.name);
+  const found = location.package;
+
+  if (found.name === undefined) {
+    // The manifest parsed but declares no `name`, so there is nothing to compare the
+    // request against and nothing to record as the artifact's identity. Reported as
+    // `manifest-name-mismatch` with no `manifestName`, because that is the same
+    // defect from a caller's side: the nearest manifest does not call itself what it
+    // was asked for.
+    throw new ProbeIdentityError(packageName, "manifest-name-mismatch");
   }
-  if (manifest.version === undefined) {
-    // Distinguishes "no version field" from "manifest is not readable JSON":
-    // an unreadable root manifest never produces a `Manifest` at all (the walk
-    // skips it), so reaching here means the JSON parsed and lacked `version`.
+  if (found.name !== packageName && !packageName.startsWith(`${found.name}/`)) {
+    throw new ProbeIdentityError(packageName, "manifest-name-mismatch", found.name);
+  }
+  if (found.version === undefined) {
+    // Distinguishes "no version field" from "manifest is not readable JSON": the
+    // locator reports the latter as `manifest-unreadable` before this point, so
+    // reaching here means the JSON parsed and lacked a usable `version`.
     throw new ProbeIdentityError(packageName, "manifest-without-version");
   }
 
   return {
-    packageName: manifest.name,
-    packageVersion: manifest.version,
-    license: licenseOf(manifest.raw),
-    source: sourceOf(manifest.raw),
-    directory: manifest.directory,
-    manifest: manifest.raw,
+    packageName: found.name,
+    packageVersion: found.version,
+    license: licenseOf(found.raw),
+    source: sourceOf(found.raw),
+    directory: found.directory,
+    manifest: found.raw,
   };
 }
 

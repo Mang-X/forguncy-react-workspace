@@ -830,9 +830,13 @@ async function runProbe(options, packageName, cellTarget, imports) {
     });
   } catch (error) {
     if (error instanceof resolver.ProbeIdentityError) {
+      // The error's own message names *which* identity failure this was — absence,
+      // an alias, an unversioned or an unreadable manifest — and those have different
+      // fixes. Reporting every one of them as "not installed" (as this did before #89)
+      // sent a reader to run `install` for a corrupt file that is already present.
       fail(
-        `Cannot probe "${packageName}": it is not installed in "${projectRoot}". Point --project at a directory that declares it — a probe describes an installed artifact, not a package name. ` +
-          `\`examples/probe-proving-cases\` declares es-toolkit and @embedpdf/pdfium.`,
+        `${error.message} (project "${projectRoot}") ` +
+          `A probe describes an installed artifact, not a package name; \`examples/probe-proving-cases\` declares es-toolkit and @embedpdf/pdfium.`,
       );
     }
     // A hook returning a finding shape the protocol refuses surfaces as a throw from

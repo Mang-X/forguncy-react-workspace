@@ -24,6 +24,13 @@
  * formats, and it is the answer that matters: the version a cell would actually
  * bundle is the version resolution reaches, not the one a manifest asked for.
  *
+ * **Identity, not entry resolution.** Which artifact a name names is asked of
+ * `package-locator` (#89), whose host primitive is condition-independent; the
+ * version recorded here is that artifact's, whatever `exports` branch a resolver
+ * would pick. A request whose manifest is unreadable is reported as
+ * `manifest-unreadable` rather than folded into `not-installed`, because blaming
+ * the install graph for a corrupt file names the wrong fix.
+ *
  * **Only versions cross this boundary.** No path this module discovers is ever
  * returned, so a machine-specific directory cannot leak from here into
  * `fgc.lock.json`, whose portability rule is enforced in `core`. What leaves is a
@@ -36,14 +43,16 @@
  * run install yet" into a crash in the middle of an Agent flow.
  */
 
-import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
-import { dirname, isAbsolute, join, parse as parsePath } from "node:path";
+import { dirname, join } from "node:path";
+
+import { locatePackage } from "./package-locator.ts";
 
 /** Why a package the lock records could not be resolved to a version. */
 export type UnresolvedInstalledPackageReason =
   /** Nothing in the install graph answers to that name, or nothing reached its manifest. */
   | "not-installed"
+  /** A manifest was found, but is not readable JSON. */
+  | "manifest-unreadable"
   /** A manifest was found, but declares no usable `version`. */
   | "manifest-without-version"
   /**
@@ -81,68 +90,28 @@ function isSamePackage(manifestName: string, request: string): boolean {
   return manifestName === request || request.startsWith(`${manifestName}/`);
 }
 
+/** The name and version a located manifest provides. Either may be absent. */
 interface Manifest {
-  readonly name: string;
+  readonly name: string | undefined;
   readonly version: string | undefined;
 }
 
 /**
- * The manifest of the package the resolved entry belongs to.
+ * What one request resolved to: a manifest, or the reason it did not.
  *
- * The walk climbs from the entry's directory and stops at the first manifest that
- * declares a `name`, because that is what distinguishes a package's own manifest
- * from the ones that are not: the `package.json` files inside a package's tree
- * carry no `name` — an `{"type":"module"}` marker in `dist/esm/` is the common one
- * — and stopping at the first manifest *found* would read one of those and
- * conclude the package has no version.
- *
- * Two boundaries keep the walk inside the package. A directory named
- * `node_modules` is where a package tree ends, so passing one means the id was
- * never installed and the answer is "nothing", not "the project's own manifest" —
- * which is exactly what an unguarded walk would return, and would report as a name
- * mismatch against the project rather than as a missing package.
+ * A discriminated result rather than `Manifest | null`, because "nothing answered"
+ * and "a manifest answered but could not be read" are different fixes and
+ * `LockEnvironment` reports them as different staleness reasons. Collapsing them
+ * into `null` is what the old climb did, and it blamed the install graph for a
+ * corrupt file.
  */
-async function nearestNamedManifest(startDirectory: string): Promise<Manifest | null> {
-  let directory = startDirectory;
-  for (;;) {
-    if (parsePath(directory).base === "node_modules") {
-      return null;
-    }
-
-    try {
-      const parsed: unknown = JSON.parse(await readFile(join(directory, "package.json"), "utf8"));
-      if (parsed !== null && typeof parsed === "object") {
-        const record = parsed as Record<string, unknown>;
-        if (typeof record.name === "string") {
-          return {
-            name: record.name,
-            version: typeof record.version === "string" && record.version.trim().length > 0 ? record.version : undefined,
-          };
-        }
-      }
-    } catch {
-      // No manifest here, or one that is not readable JSON. Either way this
-      // directory has nothing to contribute and the walk continues.
-    }
-
-    const parent = dirname(directory);
-    if (parent === directory) {
-      return null;
-    }
-    directory = parent;
-  }
-}
+type ManifestResolution =
+  | { readonly outcome: "resolved"; readonly manifest: Manifest }
+  | { readonly outcome: "unresolved"; readonly reason: UnresolvedInstalledPackageReason };
 
 /**
- * The `node_modules` directories a resolve from `projectRoot` is allowed to
+ * The `node_modules` directories a resolution from `projectRoot` is allowed to
  * answer out of — one per ancestor, the same walk Node performs.
- *
- * `require.resolve` cannot be trusted to keep that walk alone: `NODE_PATH` and
- * the other `Module.globalPaths` entries are appended to every resolution, and
- * the test runner injects `NODE_PATH` entries pointing into this workspace's
- * pnpm store. A package installed *here* would then be reported as installed in
- * the project that was asked about — which is the one answer this module must
- * never give, since it is the input to the lock's staleness rule.
  */
 function projectResolutionRoots(projectRoot: string): string[] {
   const roots: string[] = [];
@@ -158,66 +127,62 @@ function projectResolutionRoots(projectRoot: string): string[] {
 }
 
 /**
- * Whether a resolved entry belongs to the project's own install graph.
+ * Whether a located package directory belongs to the project's own install graph.
  *
- * Two allowances, both answers to "could this project actually bundle it": a
- * path under an ancestor's `node_modules` — the graph Node walked — or a path
- * under `projectRoot` itself, which is where a `workspace:` link's realpath
- * lands after Node resolves the symlink. Anything else (an entry reached through
- * `NODE_PATH`, which lands in some other tree entirely) fails, and case is
- * ignored on Windows because the entry and the walk can disagree about drive
- * letter case while pointing at the same file.
+ * Two allowances, both answers to "could this project actually bundle it": a path
+ * under an ancestor's `node_modules` — the graph Node walked — or a path under
+ * `projectRoot` itself, which is where a `workspace:` link's realpath lands after
+ * Node resolves the symlink. Case is ignored on Windows because the located
+ * directory and the walk can disagree about drive-letter case while pointing at
+ * the same file.
+ *
+ * This guard used to be what kept `NODE_PATH` out, because `require.resolve`
+ * appends every `Module.globalPaths` entry and the test runner injects
+ * `NODE_PATH` entries pointing into this workspace's pnpm store — measured, a
+ * temp project was told it installs `vitest@4.1.11`. `package-locator` asks a host
+ * primitive that never consults `NODE_PATH`, so that leak is now structurally
+ * impossible and this is left with the case its own comment names: a `workspace:`
+ * link whose realpath is outside `projectRoot` and outside every ancestor's
+ * `node_modules`.
  */
-function isInProjectGraph(entry: string, projectRoot: string, roots: readonly string[]): boolean {
+function isInProjectGraph(directory: string, projectRoot: string, roots: readonly string[]): boolean {
   const fold = (value: string): string => (process.platform === "win32" ? value.toLowerCase() : value);
-  const comparable = fold(entry);
+  const comparable = fold(directory);
   const hasPrefix = (prefix: string): boolean =>
     comparable === prefix || comparable.startsWith(`${prefix}/`) || comparable.startsWith(`${prefix}\\`);
   return hasPrefix(fold(projectRoot)) || roots.some(root => hasPrefix(fold(root)));
 }
 
 /**
- * Resolves one requested id to the manifest that provides it.
+ * Locates one requested id, filtered to this project's install graph.
  *
- * Two attempts, in this order, because they fail in opposite cases. The
- * `<name>/package.json` form names the package root exactly and is unaffected by
- * which entry-point condition the resolver picks, but a package with a strict
- * `exports` map may not expose `./package.json` at all. The bare `<name>` form
- * always resolves *something*, and its entry point is then walked up to the
- * manifest — which is the only route for a subpath id such as
- * `react/jsx-runtime`.
+ * One attempt, not two. The `<name>/package.json`-then-bare-`<name>` pair existed
+ * because `require.resolve` answers under the CommonJS condition and can fail for
+ * both spellings of a package that is installed — measured on an `import`-only
+ * `exports` map, where both answered `ERR_PACKAGE_PATH_NOT_EXPORTED` and the
+ * package was reported as not installed (#89). `locatePackage` asks the host's
+ * package-directory lookup, which is condition-independent, so the second attempt
+ * has nothing left to cover: there is no exports map under which the *identity*
+ * question goes unanswered.
  *
- * Every attempt is filtered through `isInProjectGraph`, because resolving
- * is not the same as scoping: a resolve that succeeds through a global path has
- * found *a* copy of the package, not this project's copy, and only the latter is
- * an answer to the question that was asked.
+ * A subpath id such as `react/jsx-runtime` still resolves to React's manifest, and
+ * that is now the locator's own behaviour rather than a climb this module performs
+ * — which is why the walk-up is gone rather than shared.
  */
 async function resolveManifest(
-  require: NodeJS.Require,
   request: string,
   projectRoot: string,
   roots: readonly string[],
-): Promise<Manifest | null> {
-  for (const candidate of [`${request}/package.json`, request]) {
-    let entry: string;
-    try {
-      entry = require.resolve(candidate);
-    } catch {
-      continue;
-    }
-    // A builtin resolves to its own name rather than to a path, and has no manifest.
-    if (!isAbsolute(entry)) {
-      continue;
-    }
-    if (!isInProjectGraph(entry, projectRoot, roots)) {
-      continue;
-    }
-    const manifest = await nearestNamedManifest(dirname(entry));
-    if (manifest !== null) {
-      return manifest;
-    }
+): Promise<ManifestResolution> {
+  const location = await locatePackage(join(projectRoot, "package.json"), request);
+  if (location.outcome === "failed") {
+    return { outcome: "unresolved", reason: location.reason };
   }
-  return null;
+  const found = location.package;
+  if (!isInProjectGraph(found.directory, projectRoot, roots)) {
+    return { outcome: "unresolved", reason: "not-installed" };
+  }
+  return { outcome: "resolved", manifest: { name: found.name, version: found.version } };
 }
 
 function compareStrings(a: string, b: string): number {
@@ -240,10 +205,9 @@ export async function resolveInstalledVersions(
   projectRoot: string,
   packageNames: readonly string[],
 ): Promise<InstalledVersions> {
-  // A filename, not a directory: `createRequire` takes the module whose
-  // resolution scope is wanted, and it does not have to exist for the scope to be
-  // correct. The manifest is what the walk up from here finds that matters.
-  const require = createRequire(join(projectRoot, "package.json"));
+  // A filename, not a directory: the locator takes the location whose resolution
+  // scope is wanted, and it does not have to exist for the scope to be correct —
+  // the ancestor `node_modules` walk from its directory is what answers.
   const roots = projectResolutionRoots(projectRoot);
   const requested = [...new Set(packageNames)].sort(compareStrings);
 
@@ -251,13 +215,18 @@ export async function resolveInstalledVersions(
   const unresolved: UnresolvedInstalledPackage[] = [];
 
   for (const packageName of requested) {
-    const manifest = await resolveManifest(require, packageName, projectRoot, roots);
+    const resolution = await resolveManifest(packageName, projectRoot, roots);
 
-    if (manifest === null) {
-      unresolved.push({ packageName, reason: "not-installed" });
+    if (resolution.outcome === "unresolved") {
+      unresolved.push({ packageName, reason: resolution.reason });
       continue;
     }
-    if (!isSamePackage(manifest.name, packageName)) {
+    const manifest = resolution.manifest;
+    if (manifest.name === undefined || !isSamePackage(manifest.name, packageName)) {
+      // An unnamed manifest is reported as a mismatch for the same reason a
+      // differently-named one is: the nearest manifest does not call itself what
+      // was asked for, so recording its version would tie the evidence to an
+      // artifact the request does not name.
       unresolved.push({ packageName, reason: "manifest-name-mismatch", manifestName: manifest.name });
       continue;
     }

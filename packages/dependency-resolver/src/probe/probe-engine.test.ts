@@ -239,6 +239,90 @@ describe("runDependencyProbe: worker and wasm risks are risks, not failures", ()
   });
 });
 
+/**
+ * Locating an import-only package, end to end (#89).
+ *
+ * The defect these cover was that a *normal* modern package was reported as not
+ * installed: an `exports` map publishing only an `import` branch fails both
+ * `require.resolve` spellings, so `package-identity` threw `not-installed` before
+ * any step ran. Every fixture the suite had published a `require`-visible entry, so
+ * nothing caught it — which is why the assertions here are about *reaching the later
+ * steps at all*, not about a new signal.
+ *
+ * Governing Spec: #16 — a probe result is evidence about an artifact, and
+ * "not installed" is a claim about the install graph that this shape does not
+ * support.
+ */
+describe("runDependencyProbe: import-only and hidden-manifest packages (#89)", () => {
+  it("probes an import-only package instead of reporting it as not installed", async () => {
+    const { report, assessment } = await probe("import-only-esm", "import-only-lib");
+
+    expect(report.environment.packageName).toBe("import-only-lib");
+    expect(report.environment.packageVersion).toBe("3.2.1");
+    expect(report.environment.source).toBe("https://github.com/example/import-only-lib");
+    expect(validationByStep(report).get("package-identity")).toBe("passed");
+    expect(rejectionSignals(report)).toEqual([]);
+    expect(assessment.status).toBe("supports-deployment");
+  });
+
+  it("probes a subpath-only package rather than treating its missing root entry as absence", async () => {
+    // `subpath-only-lib` publishes no `"."` at all. Its root specifier is genuinely
+    // unresolvable, so the *build* fails — which is the correct evidence, and the
+    // distinction #89 asks to preserve: identity succeeds, and the entry question is
+    // answered by the bundler rather than by the locator.
+    const { report } = await probe("import-only-esm", "subpath-only-lib");
+
+    expect(report.environment.packageName).toBe("subpath-only-lib");
+    expect(report.environment.packageVersion).toBe("4.0.0");
+    expect(validationByStep(report).get("package-identity")).toBe("passed");
+    expect(validationByStep(report).get("build")).toBe("failed");
+    // A failed build cascades honestly: no artifact means no artifact observations.
+    expect(validationByStep(report).get("artifact-scan")).toBe("skipped");
+    expect(validationByStep(report).get("size")).toBe("skipped");
+  });
+
+  it("probes a package whose exports hides its own package.json", async () => {
+    const { report } = await probe("import-only-esm", "sealed-root");
+
+    expect(report.environment.packageName).toBe("sealed-root");
+    expect(report.environment.packageVersion).toBe("5.1.0");
+    expect(validationByStep(report).get("package-identity")).toBe("passed");
+  });
+
+  it("walks a transitive import-only dependency into the scanned graph", async () => {
+    // The graph walk asks the same identity question one level out. Before #89 the
+    // dependency's bare specifier failed to resolve, so `import-only-lib` was absent
+    // from `graph.packages-scanned` — and a Node builtin inside it would have been
+    // invisible to the rejection.
+    const { report } = await probe("import-only-esm", "host-of-import-only");
+
+    const scanned = report.facts.find(fact => fact.name === "graph.packages-scanned")?.value ?? [];
+    expect(scanned).toContain("host-of-import-only@1.4.0");
+    expect(scanned).toContain("import-only-lib@3.2.1");
+    expect(report.environment.packageName).toBe("host-of-import-only");
+  });
+
+  it("names a package whose manifest is unreadable as such, not as missing", async () => {
+    // Two different fixes, and #89 requires they stay distinguishable. The identity
+    // step is a precondition failure either way, so this is a throw — but the
+    // `reason` is what a caller acts on.
+    await expect(probe("import-only-esm", "unreadable-manifest")).rejects.toMatchObject({
+      name: "ProbeIdentityError",
+      reason: "manifest-unreadable",
+      packageName: "unreadable-manifest",
+    });
+  });
+
+  it("still refuses an npm alias whose manifest names another package", async () => {
+    // The alias shape is not weakened by locating by identity: the directory is
+    // found, and the manifest's own `name` is what disagrees.
+    await expect(probe("import-only-esm", "aliased-name")).rejects.toMatchObject({
+      reason: "manifest-name-mismatch",
+      manifestName: "actually-something-else",
+    });
+  });
+});
+
 describe("runDependencyProbe: node-only package", () => {
   it("files the node-filesystem rejection and maps it to platform-api-unavailable", async () => {
     const { report, assessment, lockStatus } = await probe("node-only", "config-from-disk");
