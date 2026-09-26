@@ -51,8 +51,31 @@ import { locatePackage } from "./package-locator.ts";
 export type UnresolvedInstalledPackageReason =
   /** Nothing in the install graph answers to that name, or nothing reached its manifest. */
   | "not-installed"
-  /** A manifest was found, but is not readable JSON. */
+  /**
+   * A manifest was found, but could not be read or parsed.
+   *
+   * Distinct from `not-installed` because the fixes differ: this one is already
+   * present and broken, so "run install" is the wrong advice (#89).
+   */
   | "manifest-unreadable"
+  /**
+   * The request is not a package name — a relative path, a `node:`-prefixed
+   * specifier, a malformed scope.
+   *
+   * Reported rather than folded into `not-installed` so a caller can tell a bad
+   * input from a missing dependency; a lock record naming such a string is a lock
+   * defect, not an unrun install (#89).
+   */
+  | "invalid-specifier"
+  /**
+   * The project's own manifest cannot be read, so the install graph cannot be
+   * walked at all.
+   *
+   * A property of the consuming project rather than of any one request. Every
+   * request in the same call reports it, which is the honest signal: one broken
+   * project file, not N missing dependencies (#89).
+   */
+  | "base-unreadable"
   /** A manifest was found, but declares no usable `version`. */
   | "manifest-without-version"
   /**

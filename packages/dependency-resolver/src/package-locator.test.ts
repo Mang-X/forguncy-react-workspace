@@ -125,7 +125,11 @@ describe("locatePackage: failure stays a specific failure", () => {
     // broken. Those are different fixes and must not be one answer.
     const result = await located("import-only-esm", "unreadable-manifest");
 
-    expect(result).toEqual({ outcome: "failed", reason: "manifest-unreadable" });
+    expect(result).toMatchObject({
+      outcome: "failed",
+      reason: "manifest-unreadable",
+      detail: { operation: "parse" },
+    });
   });
 
   it("reports a directory that is not a package as not-installed, as Node does", async () => {
@@ -139,6 +143,81 @@ describe("locatePackage: failure stays a specific failure", () => {
     const result = await locatePackage(join(root, "package.json"), "not-a-package");
 
     expect(result).toEqual({ outcome: "failed", reason: "not-installed" });
+  });
+
+  it("does not blame a dependency for the project's own unreadable manifest", async () => {
+    // Measured on Node 24.21.0: `findPackageJSON` reads the resolution scope's own
+    // manifest **before** it looks for the requested package, so a corrupt project
+    // `package.json` throws `ERR_INVALID_PACKAGE_CONFIG` no matter what is asked for.
+    // The catch-all this replaces reported that as `not-installed`, so the CLI told the
+    // reader to install a dependency because their *project* file was broken — the same
+    // misdirection this ticket removes, one level up.
+    const root = await mkdtemp(join(tmpdir(), "fgc-locator-base-"));
+    await writeFile(join(root, "package.json"), '{ "name": "broken", ', "utf8");
+    await mkdir(join(root, "node_modules", "installed-pkg"), { recursive: true });
+    await writeFile(
+      join(root, "node_modules", "installed-pkg", "package.json"),
+      JSON.stringify({ name: "installed-pkg", version: "1.0.0" }),
+      "utf8",
+    );
+
+    const result = await locatePackage(join(root, "package.json"), "installed-pkg");
+
+    // The dependency *is* installed; what failed is the scope's own manifest. So this is
+    // a scope failure and not a missing package.
+    expect(result).toEqual({ outcome: "failed", reason: "base-unreadable" });
+  });
+
+  it("reports a manifest that is present but unreadable as manifest-unreadable", async () => {
+    // The reason is not `manifest-unreadable`-means-bad-JSON. `EISDIR` here, `EACCES`
+    // elsewhere: the manifest is *there* and the read failed, which is the same
+    // conclusion by a different route. `detail.operation` keeps them apart in the
+    // evidence rather than in the reason, because the reader's next step is the same.
+    const root = await mkdtemp(join(tmpdir(), "fgc-locator-read-"));
+    await writeFile(join(root, "package.json"), JSON.stringify({ name: "host", version: "0.0.0" }), "utf8");
+    await mkdir(join(root, "node_modules", "isdir-pkg", "package.json"), { recursive: true });
+
+    const result = await locatePackage(join(root, "package.json"), "isdir-pkg");
+
+    expect(result).toMatchObject({
+      outcome: "failed",
+      reason: "manifest-unreadable",
+      detail: { operation: "read", code: "EISDIR" },
+    });
+  });
+
+  it("reports a request that is not a package name as invalid-specifier", async () => {
+    // These used to arrive as `not-installed`, which is a fact about the install graph
+    // and therefore the wrong answer: no install can satisfy a relative path. The
+    // classification is a **shape** test, not an error-code test — measured, the host
+    // raises `ERR_MODULE_NOT_FOUND` for `./x`, the *same* code it raises for a genuinely
+    // absent package, so the two cannot be told apart by code.
+    for (const request of ["./x", "../x", "/x", "#private", "node:fs", "@scope", "@", ""]) {
+      const result = await located("import-only-esm", request);
+      expect(result, `request ${JSON.stringify(request)}`).toEqual({
+        outcome: "failed",
+        reason: "invalid-specifier",
+      });
+    }
+  });
+
+  it("still locates a scoped package name, which only looks malformed", async () => {
+    // The shape test must not over-reach: `@scope/name` is a package name, while a bare
+    // `@scope` is not.
+    const root = await mkdtemp(join(tmpdir(), "fgc-locator-scoped-"));
+    await writeFile(join(root, "package.json"), JSON.stringify({ name: "host", version: "0.0.0" }), "utf8");
+    await mkdir(join(root, "node_modules", "@scope", "thing"), { recursive: true });
+    await writeFile(
+      join(root, "node_modules", "@scope", "thing", "package.json"),
+      JSON.stringify({ name: "@scope/thing", version: "9.0.0" }),
+      "utf8",
+    );
+
+    const result = await locatePackage(join(root, "package.json"), "@scope/thing");
+
+    expect(result.outcome).toBe("located");
+    if (result.outcome !== "located") return;
+    expect(result.package.name).toBe("@scope/thing");
   });
 });
 

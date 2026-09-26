@@ -89,14 +89,56 @@ export type PackageLocationFailureReason =
    */
   | "not-installed"
   /**
-   * The manifest is there but is not parseable JSON, so name, version and source
-   * cannot be established.
+   * The manifest is there but could not be read or parsed, so name, version and
+   * source cannot be established.
    *
    * This is a *reachable* reason for the first time. The climb it replaces skipped
    * every unreadable manifest and kept walking, so an unreadable package root
-   * reported as `not-installed` — the install graph blamed for a corrupt file.
+   * reported as `not-installed` — the install graph blamed for a corrupt file, and
+   * the reader sent to run `install` for a file that is already present.
+   *
+   * The reason is **not** `invalid-manifest` (a name the ticket's own plan used),
+   * because the failure is not always the JSON: an unreadable file (`EACCES`,
+   * `EISDIR`, an I/O error) reaches the same conclusion without the text ever being
+   * parsed. One reason covers both because the reader's next step is the same —
+   * inspect the manifest — while the *diagnostic* keeps them apart.
    */
-  | "manifest-unreadable";
+  | "manifest-unreadable"
+  /**
+   * The specifier is not a package name at all: a relative or absolute path, a
+   * `node:`-prefixed request, or a malformed scope such as `@scope`.
+   *
+   * Reported separately from `not-installed` because it is a caller-input problem
+   * rather than a fact about the install graph. Folding it in made the CLI answer
+   * "install it first" for a request no install could ever satisfy.
+   */
+  | "invalid-specifier"
+  /**
+   * The *resolution scope's* own manifest cannot be read, so the walk from `base`
+   * cannot be performed.
+   *
+   * Measured on Node 24.21.0: a corrupt manifest at `base` makes the host throw
+   * `ERR_INVALID_PACKAGE_CONFIG` **before** any package is looked for, so this is a
+   * property of the consuming project rather than of the request. Folding it into
+   * `not-installed` blamed the dependency for a broken project file — the same
+   * misdirection this ticket exists to remove, one level up.
+   */
+  | "base-unreadable";
+
+/**
+ * How an unreadable manifest is described: which step failed and why.
+ *
+ * A `detail` rather than a reason of its own, because "cannot establish identity"
+ * is the answer in every case and only the *evidence* differs. It exists so a
+ * `manifest-unreadable` result does not have to claim the text was unparseable
+ * when the real fault was `EISDIR`.
+ */
+export interface ManifestUnreadableDetail {
+  /** Which operation failed: reading the file, or parsing what was read. */
+  readonly operation: "read" | "parse";
+  /** The `code` of the underlying error, when it has one (`EACCES`, `EISDIR`, …). */
+  readonly code: string | undefined;
+}
 
 /** One installed package, located. */
 export interface LocatedPackage {
@@ -113,10 +155,75 @@ export interface LocatedPackage {
 
 export type PackageLocation =
   | { readonly outcome: "located"; readonly package: LocatedPackage }
-  | { readonly outcome: "failed"; readonly reason: PackageLocationFailureReason };
+  | {
+      readonly outcome: "failed";
+      readonly reason: PackageLocationFailureReason;
+      /** Present for `manifest-unreadable`: what failed and why. */
+      readonly detail?: ManifestUnreadableDetail;
+    };
 
 function nonBlankString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+/** The `code` of a thrown value, when it is an `Error` carrying one. */
+function errorCode(error: unknown): string | undefined {
+  const code = (error as { readonly code?: unknown } | null)?.code;
+  return typeof code === "string" ? code : undefined;
+}
+
+/**
+ * Whether `request` is spelled as something other than a package name.
+ *
+ * A shape test rather than an error-code test, and deliberately so: the host's code
+ * for a relative path is `ERR_MODULE_NOT_FOUND` — measured — which is the *same* code
+ * it raises for a package that is genuinely absent. Classifying by code alone therefore
+ * cannot separate them, and which code a given bad specifier draws is a host detail
+ * that can move between Node versions. What a request *is* does not move.
+ *
+ * A package name is a bare specifier: not a path (`./x`, `../x`, `/x`, `C:\x`) and not
+ * a scheme (`node:fs`, `data:…`). A `#`-prefixed request is a package's private import
+ * and is not a name any install graph can answer either.
+ */
+function isNotAPackageName(request: string): boolean {
+  if (request.length === 0) {
+    return true;
+  }
+  if (request.startsWith("./") || request.startsWith("../") || request.startsWith("#")) {
+    return true;
+  }
+  // POSIX or Windows absolute, and any scheme-prefixed form (`node:fs`, `file:…`).
+  return request.startsWith("/") || request.startsWith("\\") || /^[A-Za-z]:[\\/]/.test(request) || /^[a-z][a-z0-9+.-]*:/i.test(request);
+}
+
+/**
+ * Whether a `findPackageJSON` failure means "no package by that name".
+ *
+ * The host throws for several different problems and they are not one answer:
+ *
+ * - `ERR_MODULE_NOT_FOUND` — nothing answered the name, which is the install-graph
+ *   question this reason is for.
+ * - `ERR_INVALID_PACKAGE_CONFIG` — measured on Node 24.21.0, this is thrown when the
+ *   **resolution scope's own** manifest is unreadable, *before* the requested package
+ *   is looked for. Reporting it as `not-installed` told the reader to install a
+ *   dependency because their project's `package.json` was corrupt.
+ * - `ERR_INVALID_MODULE_SPECIFIER` / `ERR_INVALID_URL_SCHEME` — the request is not a
+ *   package name (a malformed scope, a relative path, `node:fs`). No install can
+ *   satisfy it.
+ *
+ * The distinction is by `code`, and the default for an unrecognised code is
+ * **not** to swallow: a failure this function cannot classify is reported as a scope
+ * problem rather than silently restated as "the dependency is missing".
+ */
+function classifyResolutionFailure(error: unknown): PackageLocationFailureReason {
+  switch (errorCode(error)) {
+    case "ERR_MODULE_NOT_FOUND":
+      return "not-installed";
+    case "ERR_INVALID_PACKAGE_CONFIG":
+      return "base-unreadable";
+    default:
+      return "invalid-specifier";
+  }
 }
 
 /**
@@ -133,14 +240,15 @@ function nonBlankString(value: unknown): string | undefined {
  * because both consumers report it rather than crash on it.
  */
 export async function locatePackage(base: string, request: string): Promise<PackageLocation> {
+  if (isNotAPackageName(request)) {
+    return { outcome: "failed", reason: "invalid-specifier" };
+  }
+
   let found: string | undefined;
   try {
     found = findPackageJSON(request, base);
-  } catch {
-    // `ERR_MODULE_NOT_FOUND` for a name nothing answers, `ERR_INVALID_MODULE_SPECIFIER`
-    // for a malformed scope, `ERR_INVALID_URL_SCHEME` for a `node:`-prefixed request.
-    // All three mean the same thing to a caller: this request has no artifact here.
-    return { outcome: "failed", reason: "not-installed" };
+  } catch (error) {
+    return { outcome: "failed", reason: classifyResolutionFailure(error) };
   }
   if (found === undefined || found.length === 0) {
     return { outcome: "failed", reason: "not-installed" };
@@ -152,27 +260,36 @@ export async function locatePackage(base: string, request: string): Promise<Pack
     // has no `package.json`), so the realpath is taken on the directory, which does.
     directory = await realpath(dirname(found));
   } catch {
-    return { outcome: "failed", reason: "not-installed" };
+    // The directory the host named cannot be reached at all, which is a different
+    // fact from a manifest it reached and could not read.
+    return { outcome: "failed", reason: "manifest-unreadable", detail: { operation: "read", code: "ENOENT" } };
   }
   const resolvedManifestPath = join(directory, "package.json");
 
   let text: string;
   try {
     text = await readFile(resolvedManifestPath, "utf8");
-  } catch {
-    // A directory of that name that carries no manifest is not a package — the same
-    // answer Node gives it.
-    return { outcome: "failed", reason: "not-installed" };
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      // A directory of that name that carries no manifest is not a package — the same
+      // answer Node gives it.
+      return { outcome: "failed", reason: "not-installed" };
+    }
+    // The manifest is *there* and could not be read: `EACCES`, `EISDIR`, an I/O error.
+    // Reporting that as `not-installed` told the reader to install a package whose
+    // files are present and broken.
+    return { outcome: "failed", reason: "manifest-unreadable", detail: { operation: "read", code } };
   }
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    return { outcome: "failed", reason: "manifest-unreadable" };
+    return { outcome: "failed", reason: "manifest-unreadable", detail: { operation: "parse", code: undefined } };
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return { outcome: "failed", reason: "manifest-unreadable" };
+    return { outcome: "failed", reason: "manifest-unreadable", detail: { operation: "parse", code: undefined } };
   }
 
   const raw = parsed as Record<string, unknown>;

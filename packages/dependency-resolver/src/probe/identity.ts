@@ -45,7 +45,7 @@ import { join } from "node:path";
 import type { ProbeEnvironment, ToolchainIdentity } from "@forguncy-react-workspace/core";
 import { forguncyTargetIdentity, RUNTIME_CONTRACT_TARGET } from "@forguncy-react-workspace/core";
 
-import type { LocatedPackage } from "../package-locator.ts";
+import type { LocatedPackage, ManifestUnreadableDetail } from "../package-locator.ts";
 import { locatePackage } from "../package-locator.ts";
 
 /** Why identity could not be established — the same reasons `install-graph` reports, re-stated for a throw. */
@@ -53,25 +53,62 @@ export type ProbeIdentityReason =
   | "not-installed"
   | "manifest-without-version"
   | "manifest-name-mismatch"
-  | "manifest-unreadable";
+  | "manifest-unreadable"
+  /** The request is not a package name: a relative path, a `node:` specifier, a bad scope. */
+  | "invalid-specifier"
+  /** The project's own manifest cannot be read, so no package can be located in it. */
+  | "base-unreadable";
 
 export class ProbeIdentityError extends Error {
   readonly packageName: string;
   readonly reason: ProbeIdentityReason;
   readonly manifestName?: string;
+  /** For `manifest-unreadable`: which operation failed and why. */
+  readonly detail?: ManifestUnreadableDetail;
 
-  constructor(packageName: string, reason: ProbeIdentityReason, manifestName?: string) {
-    super(describeIdentityFailure(packageName, reason, manifestName));
+  constructor(
+    packageName: string,
+    reason: ProbeIdentityReason,
+    manifestName?: string,
+    detail?: ManifestUnreadableDetail,
+  ) {
+    super(describeIdentityFailure(packageName, reason, manifestName, detail));
     this.name = "ProbeIdentityError";
     this.packageName = packageName;
     this.reason = reason;
     if (manifestName !== undefined) {
       this.manifestName = manifestName;
     }
+    if (detail !== undefined) {
+      this.detail = detail;
+    }
   }
 }
 
-function describeIdentityFailure(packageName: string, reason: ProbeIdentityReason, manifestName?: string): string {
+/**
+ * The manifest failure as one clause, so the message does not claim the JSON was bad
+ * when the file could not be opened at all.
+ *
+ * A `manifest-unreadable` result carries `detail` from the locator, and without it the
+ * only honest wording would be the vaguest one. `EACCES` and `EISDIR` are what a reader
+ * acts on; "not readable JSON" would send them to check the syntax of a file they
+ * cannot open.
+ */
+function describeManifestFailure(detail: ManifestUnreadableDetail | undefined): string {
+  if (detail?.operation === "read") {
+    return detail.code === undefined
+      ? "its manifest could not be read"
+      : `its manifest could not be read (${detail.code})`;
+  }
+  return "its manifest is not readable JSON";
+}
+
+function describeIdentityFailure(
+  packageName: string,
+  reason: ProbeIdentityReason,
+  manifestName?: string,
+  detail?: ManifestUnreadableDetail,
+): string {
   switch (reason) {
     case "not-installed":
       return `Cannot probe "${packageName}": nothing in the install graph resolves to that name. Install it first — a probe describes an installed artifact, not a package name.`;
@@ -80,7 +117,11 @@ function describeIdentityFailure(packageName: string, reason: ProbeIdentityReaso
     case "manifest-name-mismatch":
       return `Cannot probe "${packageName}": the nearest manifest calls itself "${manifestName ?? "unknown"}", which is the shape an npm alias takes — recording the other package's identity would make the evidence about the wrong artifact.`;
     case "manifest-unreadable":
-      return `Cannot probe "${packageName}": its manifest is not readable JSON, so name, version and source cannot be established.`;
+      return `Cannot probe "${packageName}": ${describeManifestFailure(detail)}, so name, version and source cannot be established.`;
+    case "invalid-specifier":
+      return `Cannot probe "${packageName}": that is not a package name, so no install graph could answer it. A probe takes a package name or a subpath such as "react/jsx-runtime", not a relative path, a "node:"-prefixed specifier, or a malformed scope.`;
+    case "base-unreadable":
+      return `Cannot probe "${packageName}": the project's own manifest is not readable JSON, so no install graph could be walked from it. This is a property of the consuming project, not of "${packageName}".`;
   }
 }
 
@@ -223,10 +264,11 @@ export async function resolvePackageIdentity(projectRoot: string, packageName: s
   const location = await locatePackage(join(projectRoot, "package.json"), packageName);
 
   if (location.outcome === "failed") {
-    // `manifest-unreadable` is a distinct reason now that the locator reports it:
-    // the climb this replaced skipped every unreadable manifest and kept walking, so
-    // a corrupt package root was blamed on the install graph instead of on the file.
-    throw new ProbeIdentityError(packageName, location.reason);
+    // The locator's own reason is carried through rather than re-derived, so the four
+    // failures it distinguishes — absent, unreadable, invalid input, unreadable project
+    // — each keep their own fix. Collapsing any of them into `not-installed` sent the
+    // reader to run `install` for a problem install cannot fix (#89).
+    throw new ProbeIdentityError(packageName, location.reason, undefined, location.detail);
   }
   const found = location.package;
 

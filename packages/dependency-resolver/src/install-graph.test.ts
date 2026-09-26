@@ -210,6 +210,31 @@ describe("resolving exact installed versions", () => {
     expect(unresolved).toEqual([{ packageName: "corrupt", reason: "manifest-unreadable" }]);
   });
 
+  it("does not report a missing package when the project's own manifest is unreadable", async () => {
+    // The catch-all this replaces turned every resolver failure into `not-installed`, so a
+    // corrupt *project* manifest made every recorded package look uninstalled — and the
+    // lock's reader would be told to run `install` for a project file that is broken.
+    const root = await mkdtemp(join(tmpdir(), "fgc-install-graph-base-"));
+    await writeFile(join(root, "package.json"), '{ "name": "broken", ', "utf8");
+
+    const { versions, unresolved } = await resolveInstalledVersions(root, ["dayjs"]);
+
+    expect(versions).toEqual({});
+    expect(unresolved).toEqual([{ packageName: "dayjs", reason: "base-unreadable" }]);
+  });
+
+  it("reports a request that is not a package name as invalid-specifier", async () => {
+    // A lock record naming `node:fs` or `./x` is a lock defect, not an unrun install.
+    const root = await project();
+
+    const { unresolved } = await resolveInstalledVersions(root, ["node:fs", "./local.js"]);
+
+    expect(unresolved).toEqual([
+      { packageName: "./local.js", reason: "invalid-specifier" },
+      { packageName: "node:fs", reason: "invalid-specifier" },
+    ]);
+  });
+
   it("reports a manifest that declares no name as a name mismatch, not as the request", async () => {
     // A manifest that parses but names nothing cannot be recorded as the artifact the
     // request names — that is the same defect as an alias from a caller's side.
