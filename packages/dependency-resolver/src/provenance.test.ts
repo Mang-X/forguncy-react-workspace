@@ -78,6 +78,41 @@ function modulesUnder(directory: string): readonly string[] {
 
 const packageModules = [...modulesUnder(""), ...modulesUnder("probe")];
 
+/**
+ * Every corrected declaration in this repository, as `(file, retracted text)` pairs.
+ *
+ * ## Why this is a separate list from `packageModules`, and why it has to exist
+ *
+ * The traversal above filters `.test.ts` out — deliberately, because this guard file is itself a
+ * test and it *quotes* the retracted sentences as data, so including tests would make its own
+ * patterns match it. But the sweep touched test files and a markdown file too, and for those the
+ * traversal is structurally incapable of covering the site. A reviewer caught exactly that: two
+ * corrected declarations (`size.test.ts`'s old test title, `decision-recording.md`'s old 至少这么大
+ * / 至多这么大 gloss) were restored by hand and this file stayed green.
+ *
+ * So each corrected declaration is named here with the text it must not revert to, and the pair is
+ * falsified individually. A new site added to the sweep must add a row — the alternative is what
+ * happened twice already: a pattern that reads as coverage while matching nothing.
+ *
+ * The paths are repository-relative and forward-slashed for the same reason `packageModules` is.
+ */
+const correctedDeclarations: readonly { readonly path: string; readonly retracted: readonly RegExp[] }[] = [
+  {
+    path: "packages/dependency-resolver/src/probe/size.test.ts",
+    // The old title asserted the bound relation outright, and the old comment named a `bound`
+    // parameter `observeSize` has never had. Both were corrected in place; neither was covered by
+    // the `SizeBound` / `passes no \`bound\`` assertions, which is why the title is named here.
+    retracted: [/defaults to the upper bound/, /which is the direction that leans over/],
+  },
+  {
+    path: ".agents/skills/forguncy-react-dependency-selection/references/decision-recording.md",
+    // The Chinese gloss translated the lean into bounds — "至少这么大" ("at least this big") for
+    // 下 ("down") — which is the retracted relation in the file's own language. No regex in the
+    // Skill loop matched CJK, so it survived the first sweep's English-only patterns.
+    retracted: [/至少这么大/, /至多这么大/],
+  },
+];
+
 const SKILL_DIRECTORY = ".agents/skills/forguncy-react-dependency-selection";
 
 describe("the retracted size-bound claim does not reappear", () => {
@@ -182,6 +217,75 @@ describe("the retracted size-bound claim does not reappear", () => {
     // And the Skill's prose still carries the correction, in the language that file uses.
     const skillReadme = readRepositoryFile(`${SKILL_DIRECTORY}/README.md`);
     expect(skillReadme).toMatch(/probe 在任何情况下都\*\*不产生\*\* `cell-artifact-budget-exceeded`/);
+  });
+
+  it("rejects each corrected declaration by name, including the ones the traversal cannot reach", () => {
+    // The half the traversal cannot do. `size.test.ts` is a test file and `decision-recording.md`
+    // is not TypeScript, so `packageModules` excludes both by construction — a pattern list alone
+    // read as coverage for two sites it never touched.
+    //
+    // Each row is asserted to be **non-empty first**. Found by falsifying this test: emptying a
+    // row's `retracted` array left the suite green, because a `for` loop over zero patterns asserts
+    // nothing and a `toMatch` on a real file still passes. So the table could have been hollowed out
+    // one row at a time while this test reported coverage. The row count is checked too, so a row
+    // cannot be deleted either.
+    expect(correctedDeclarations.length).toBeGreaterThanOrEqual(2);
+    for (const { path, retracted } of correctedDeclarations) {
+      expect(retracted.length, `${path} is listed but asserts no retracted text, so it guards nothing`).toBeGreaterThan(0);
+      const source = readRepositoryFile(path);
+      for (const pattern of retracted) {
+        expect(source, `${path} must not assert the retracted relation: ${String(pattern)}`).not.toMatch(pattern);
+      }
+    }
+  });
+
+  it("states the corrected wording at those two sites, so deleting it cannot pass either", () => {
+    // The positive half, for the same reason the other positive assertions exist: a site could be
+    // emptied rather than corrected, and `not.toMatch` cannot tell the difference.
+    const sizeTests = readRepositoryFile("packages/dependency-resolver/src/probe/size.test.ts");
+    expect(sizeTests).toMatch(/defaults to leaning over, which is the less flattering direction/);
+    expect(sizeTests).toMatch(/passes no `bias`/);
+
+    const recording = readRepositoryFile(
+      ".agents/skills/forguncy-react-dependency-selection/references/decision-recording.md",
+    );
+    // The corrected gloss keeps the direction but says it is a direction, not a bound — the
+    // emphasised words are 偏小/偏大 ("leans small/large"), where the old text had 下/上 bracketed
+    // by bound claims.
+    expect(recording).toMatch(/\*\*偏小\*\*/);
+    expect(recording).toMatch(/\*\*偏大\*\*/);
+    // And the file still carries its own retraction, so this cannot be satisfied by deleting prose.
+    expect(recording).toMatch(/\*\*都不是上下界\*\*/);
+  });
+
+  it("covers every corrected site, so a new one cannot be added to the sweep uncovered", () => {
+    // The guard against a third round. The first sweep missed files because it was a list; the
+    // second missed two sites because the traversal excludes test files and markdown. Coverage is
+    // asserted as "this file carries corrected wording the guard asserts about", not as "this file
+    // is readable" — the latter is true of every file in the repository and would pass even if the
+    // file were added to no list at all.
+    const skillCorrected = [
+      {
+        path: `${SKILL_DIRECTORY}/scripts/select_dependency.mjs`,
+        // The corrected sentence, in the file's own words.
+        corrected: /No cap rejection is sound under \*any\* surface/,
+      },
+      {
+        path: `${SKILL_DIRECTORY}/evals/cap-e2e.test.ts`,
+        corrected: /never a rejection basis/,
+      },
+    ];
+    for (const { path, corrected } of skillCorrected) {
+      const source = readRepositoryFile(path);
+      expect(source, `${path} is corrected by this sweep but carries none of the replaced wording`).toMatch(corrected);
+    }
+
+    // The markdown site is in `correctedDeclarations`, and its positive half is asserted by the
+    // test above; asserting it again here would be the duplicate-guard defect, so this only checks
+    // the site is still listed rather than restating its content.
+    expect(correctedDeclarations.map(entry => entry.path)).toContain(
+      ".agents/skills/forguncy-react-dependency-selection/references/decision-recording.md",
+    );
   });
 
   it("names the surviving type and parameter, so the dangling references stay fixed", () => {
