@@ -322,6 +322,31 @@ describe("a project row that collides with the built-in table", () => {
     expect(normalized.mappings.filter(row => row.libraryId === "some-library")).toHaveLength(1);
   });
 
+  it("reports a malformed row and a collision together, rather than stopping at the first", () => {
+    // The repository's convention, from `cell-registry`: "a config with three mistakes
+    // should cost one round trip, not three". The first version gated the collision check
+    // on `diagnostics.length === 0`, which halved the report for exactly the configs that
+    // were most wrong — a row both incomplete *and* colliding reported only the first.
+    const diagnostics = diagnosticsOf({
+      cells: {},
+      extensions: {
+        mappings: [
+          { packageName: "@acme/widgets" },
+          projectMappingConfig({ packageName: "@tanstack/react-query" }),
+        ],
+      },
+    });
+
+    // The incomplete row is reported at its own index; the collision by the row that
+    // *did* read. Both are actionable, and neither depends on fixing the other first.
+    expect(diagnostics.map(diagnostic => diagnostic.code)).toEqual([
+      "invalid-extension-mapping",
+      "extension-mapping-conflict",
+    ]);
+    expect(diagnostics[0]?.path).toBe("extensions.mappings[0]");
+    expect(diagnostics[1]?.path).toBe("extensions.mappings");
+  });
+
   it("reports the same diagnostics on a second normalization of the same config", () => {
     // A config diagnostic is read by a person and pasted into a review comment, so it
     // has to be reproducible rather than merely present.

@@ -496,24 +496,29 @@ export function normalizeExtensionMappings(
     }
   }
 
-  if (diagnostics.length === 0) {
-    try {
-      assertExtensionExternalMappingsAreUnambiguous(mappings, options.contract);
-    } catch (error) {
-      // Located at the project's rows, because the built-in table is checked by its own
-      // test and a collision between the two is necessarily the project's addition: the
-      // shipped table cannot conflict with itself, so naming the project's rows is the
-      // actionable location rather than a guess.
-      diagnostics.push(
-        diag(
-          "extension-mapping-conflict",
-          project.mappings.length > 0
-            ? `${EXTENSION_MAPPINGS_CONFIG_FIELD}.mappings`
-            : "EXTENSION_EXTERNAL_MAPPINGS",
-          error instanceof ExtensionExternalContractError ? error.message : String(error),
-        ),
-      );
-    }
+  // Run unconditionally, beside the per-row loop rather than after it, so a project with
+  // both a malformed row and a collision reads both in one round trip — the convention
+  // `cell-registry` states as "a config with three mistakes should cost one round trip,
+  // not three". Gating this on `diagnostics.length === 0` was the first version, and it
+  // silently halved the report for exactly the configs that were most wrong. A row that
+  // failed to read is simply absent from `mappings`, which can only *miss* a collision
+  // and never invent one — so running over the rows that did read is sound.
+  try {
+    assertExtensionExternalMappingsAreUnambiguous(mappings, options.contract);
+  } catch (error) {
+    // Located at the project's rows, because the built-in table is checked by its own
+    // test and a collision between the two is necessarily the project's addition: the
+    // shipped table cannot conflict with itself, so naming the project's rows is the
+    // actionable location rather than a guess.
+    diagnostics.push(
+      diag(
+        "extension-mapping-conflict",
+        project.mappings.length > 0
+          ? `${EXTENSION_MAPPINGS_CONFIG_FIELD}.mappings`
+          : "EXTENSION_EXTERNAL_MAPPINGS",
+        error instanceof ExtensionExternalContractError ? error.message : String(error),
+      ),
+    );
   }
 
   if (diagnostics.length > 0) {
