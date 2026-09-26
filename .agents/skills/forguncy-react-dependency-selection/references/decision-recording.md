@@ -33,14 +33,48 @@
   "cellTarget": null,                  // 默认 null，即适用于每个 target
   "imports": ["debounce"],             // 可选：Cell 会具名导入的绑定，让尺寸估算偏向"小"（非下界）。
                                        // 省略或 null = 整个命名空间（估算偏向"大"）。详见下节。
-  "artifactEvidence": {                // rejection.code 为 cell-code-budget-exceeded 时**必填**：
-    "codeCharacters": 200000,          // 编译器对该 Cell 报出的实际测量值，逐字誊自它自己的
-    "budgetCharacters": 100000         // cell-code-budget-exceeded 诊断。详见下面「硬上限判定」。
-  },
   "validatedAgainstRuntime": false,    // 置 true 需 cite runtime-observation 且 smoke 步骤通过
   "evidence": [{ "kind": "spec-issue", "reference": "…" }]
 }
 ```
+
+### 决策文件里**没有** `artifactEvidence`
+
+这是 Agent 输入与脚本产出之间最容易搞错的一处，所以单列一节。
+
+`artifactEvidence` 是**锁记录的字段**，不是决策文件的字段。`rejection.code` 为
+`cell-code-budget-exceeded` 时，决策文件只**声明这条拒绝是哪一条**（code 加上
+`cellTarget` 指向的 Cell）；两个字符数是 `audit` / `record` **真的编译该 Cell** 之后，
+从编译器自己的诊断里取出、由脚本写进锁的。
+
+**手填会被当场拒绝，而不是被忽略**：`decisionFromFile` 对
+`document.artifactEvidence !== undefined` 直接 fail（"a compile measurement is not the
+caller's to state"）。忽略一个文件特意写上的字段，会让调用者以为自己填的数字被采纳了。
+
+这条拒绝是 #77 round 5 的结论：revision 14 曾接受文件里的两个数字，于是调用者可以挑任意
+`codeCharacters > budgetCharacters` 给自己背书——两个自证的数字，与 revision 13 移除的合成
+probe finding 一样不可信。
+
+锁记录长这样（**由脚本写入**，供核对，不要手改）：
+
+```jsonc
+{
+  "packageName": "es-toolkit",
+  "cellTarget": "capped",
+  "strategy": "replace",
+  "rejection": { "kind": "technical", "code": "cell-code-budget-exceeded", … },
+  "artifactEvidence": {                // 脚本编译该 Cell 后写入，逐字取自编译器诊断
+    "compileFingerprint": "cell=\"…\";budget=8000",
+    "subjectDecision": { "strategy": "inline" },   // 被拒前该包在该 Cell 里的策略
+    "subjectRenderedCharacters": 10597,             // 该包自己贡献的字符数（bundler 记账）
+    "codeCharacters": 15074,                        // 编译器对该 Cell 报出的实际测量值
+    "budgetCharacters": 8000                        // 那次编译实际用的上限
+  }
+}
+```
+
+字段的含义与校验见下面「硬上限判定」。`status` 会重新编译并核对其中每一项，被改过的数字
+报 `artifact-verdict-changed` / `artifact-attribution-changed`。
 
 架构拒绝（能力归 Forguncy）**不要**手写 `rejection`：`rejection` 就是归属评估自己给的那条，手写会被 `record` 拒绝（code 必须一致）。同理，架构拒绝不记 `alternatives`——替代的是能力的所有者（宿主），不是包。
 
@@ -64,11 +98,15 @@
 
 因此 `cell-artifact-budget-exceeded` 的**唯一**权威是编译器：`auditCodeBudget` 对**合成后的 Cell 源码**应用 `codeBudgetCharacters`，那里入口是 Cell 自己的、解析图是真的。probe 报告里的尺寸数字是**估算**，供 Agent 参考；它不是拒绝依据。`PROBE_STEPS_OBSERVING_SIGNAL` 里这个信号没有任何观测步骤，所以一份把该 finding 归到任何 probe 步骤的报告会被 `validateProbeReport` 判为**无效**，而不只是"不推荐"。
 
-**但这个真实的编译器判定是可记录的**，走 `artifactEvidence`：决策文件写 `rejection.code = "cell-code-budget-exceeded"` 时**必须**带上它，两个数字逐字誊自编译器自己的诊断。
+**但这个真实的编译器判定是可记录的**，而且**测量由脚本自己做**：决策文件写
+`rejection.code = "cell-code-budget-exceeded"`（外加它作用于哪个 Cell），`audit` / `record`
+就真的编译那个 Cell，把结果写进锁记录的 `artifactEvidence`。文件**不提供**任何数字——见
+上面「决策文件里没有 `artifactEvidence`」。
 
 - `codeCharacters` 是编译器对该 Cell 报出的实际测量值，`budgetCharacters` 是那次编译实际用的上限。两者都要记，是因为这样结论才**可核对**：只有 `codeCharacters > budgetCharacters` 才支持这条拒绝，校验会当场核对，对不上就拒绝记录。
-- `budgetCharacters` **必须等于**该 Cell 在 `forguncy.config` 里声明的 `output.codeBudgetCharacters`（`--cell` / 决策文件的 `cellTarget` 指向的那个）。写一个项目里根本不存在的上限会被拒绝——否则记录就会"针对一个没人设过的天花板"声称超限，这正是 #77 要在每个边界消除的漂移。
-- 反过来，`artifactEvidence` 挂在任何其它 code 上也会被拒：那些 code 是 probe 能观测的，带上编译数字等于绕过 probe 路径。
+- `budgetCharacters` **必然等于**该 Cell 在 `forguncy.config` 里声明的 `output.codeBudgetCharacters`（`--cell` / 决策文件的 `cellTarget` 指向的那个），因为它就是从那次编译的 plan 里读出来的。Cell 没有声明上限时编译根本不产生这个诊断，拒绝会以「declares no output.codeBudgetCharacters」被拒——所以"针对一个没人设过的天花板声称超限"这种记录在结构上无法产生。
+- `compileFingerprint` / `subjectDecision` / `subjectRenderedCharacters` 一并记录，是 `status` 能重新编译并核对这条记录的依据（被改过的数字报 `artifact-verdict-changed` / `artifact-attribution-changed`）。
+- 反过来，其它 code 的记录**不会**带 `artifactEvidence`：那些 code 是 probe 能观测的，脚本只在 `isArtifactObservedRejectionCode` 为真时编译取数，所以带上编译数字的 probe 拒绝在结构上产生不了。
 - 这条记录的 evidence profile 是 `artifact-rejection`（**不是** `technical-rejection`）：它要求 probe **通过**——包本身没问题，超限的是合成出来的 Cell。这正是"好包 + 过大 Cell"这个预期状态之所以能落盘的原因。
 - revision 14 之前写的 `cell-code-budget-exceeded` 记录**仍然可读**，只是 stale（`artifact-evidence-missing`），需要从新的证据路径重新记录。不升 schema、不静默删除或改判——见 `lock-migration.ts` 的契约。
 

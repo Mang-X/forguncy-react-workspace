@@ -1,0 +1,15 @@
+{
+  "packageName": "es-toolkit",
+  "role": "cell-local-ui",
+  "strategy": "replace",
+  "cellTarget": "capped",
+  "rationale": "The composed Cell exceeds the ceiling this Cell declares, so the package cannot be inlined here.",
+  "alternatives": ["a lighter date/number utility that keeps the Cell under the cap"],
+  "rejection": {
+    "kind": "technical",
+    "code": "cell-code-budget-exceeded",
+    "summary": "Compiling this Cell reports its code over the declared codeBudgetCharacters because of this package.",
+    "evidence": [],
+    "remediation": "Evaluate a lighter alternative, or raise this Cell's declared ceiling if the size is acceptable."
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "packageName": "es-toolkit",
+  "role": "cell-local-ui",
+  "strategy": "inline",
+  "cellTarget": "capped"
+}

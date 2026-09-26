@@ -1,13 +1,15 @@
 {
   "version": "1.0.0",
   "capability": "为一个 Cell 需要的能力做依赖选型并记录决策",
-  "how_to_use": "这些是 Agent 侧（语义推理）的评测用例。可执行的那一半在 selection-cases.test.ts 里并由 CI 运行；本文件记录无法由测试执行的那一半——候选研究、排队、权衡与最终策略选择。审查时对照 actual 与 expected。",
+  "how_to_use": "这份文件同时记录两件事：(1) cases——语义期望（候选研究、排队、权衡与最终策略选择），无法由测试执行，审查时对照 actual 与 expected；(2) repeatable_commands——可重复跑的命令。两者与 CI 的关系不同，不要混为一谈：cases 里的 executed_by 指出谁执行它——selection-cases.test.ts 跑六个必需用例，walkthrough.test.ts 跑超限用例（没有该字段的是纯语义用例，只能人工/Agent 复核）；repeatable_commands 分两类——**没有占位符的条目（policy）与 walkthrough 由 walkthrough.test.ts 原样执行**，其余（probe / audit / record / status）含占位符、本就是模板，没有任何测试读取它们，改这些字符串不会让任何测试失败。CLI 的**行为**另由 cli-contract.test.ts 与 cap-e2e.test.ts 覆盖，但这两个套件不读本文件。",
   "repeatable_commands": {
     "policy": "node .agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs policy",
     "probe": "node .agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs probe --project examples/probe-proving-cases <package>",
     "audit": "node .agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs audit --decision <file>",
     "record": "node .agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs record --project <root> --decision <file>",
-    "status": "node .agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs status --project <root>"
+    "status": "node .agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs status --project <root>",
+    "//walkthrough": "A sequence, not one command: the `cell-code-budget-exceeded` measurement has to be taken on a compile that included the package, so `decisions/inline.json` must be recorded before `decisions/oversize.json`. `<root>` must be a writable copy of examples/probe-proving-cases/walkthrough, not the committed directory — record writes fgc.lock.json and fgc-evidence/ into it. See SKILL.md 走一遍 for the copy step.",
+    "walkthrough": "node .agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs record --project <root> --decision <root>/decisions/inline.json && node .agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs record --project <root> --decision <root>/decisions/oversize.json && node .agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs status --project <root>"
   },
   "cases": [
     {
@@ -123,6 +125,22 @@
         "repair_allowed_when": "能力仍有价值 且 替代方案明显更差 且 修复可被验证——三者同时成立",
         "forbidden": "往按包名的全局 adapter 注册表里加条目"
       }
+    },
+    {
+      "id": "oversize-rejection",
+      "request": "Cell 里这个库装进去太大了，超了我们声明的上限，怎么记？",
+      "capability": "cell-local utility，编译产物超限",
+      "expected": {
+        "ownership": "React island (cell-local-ui)",
+        "branch": "react-island-owned",
+        "strategy": "replace，rejection.kind = technical，code = cell-code-budget-exceeded",
+        "decision_file": "只声明 code 与 cellTarget；**不写** artifactEvidence——那是脚本产出的锁字段，手填会被拒",
+        "measurement": "由 audit/record 真的编译该 Cell，从编译器自己的诊断取两个字符数写入锁的 artifactEvidence",
+        "precondition": "先记录该包在该 Cell 里的策略（如 inline）；否则拒绝会以 unattributable 被拒",
+        "no_cap": "Cell 未声明 output.codeBudgetCharacters 时编译不产生该诊断，拒绝被拒",
+        "forbidden": "把编译器诊断里的数字手工誊进决策文件；针对一个项目里没人设过的上限声称超限"
+      },
+      "executed_by": "walkthrough.test.ts（读 SKILL.md 的走查块并逐条执行）"
     }
   ]
 }
