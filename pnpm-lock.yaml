@@ -37,6 +37,12 @@ importers:
         specifier: 0.3.2
         version: 0.3.2(@types/node@24.13.5)(typescript@5.9.3)(yaml@2.9.1)
 
+  examples/extension-custom:
+    devDependencies:
+      '@forguncy-react-workspace/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+
   examples/extension-query:
     dependencies:
       '@tanstack/react-query':

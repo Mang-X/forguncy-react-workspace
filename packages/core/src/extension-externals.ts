@@ -62,7 +62,11 @@ import {
 } from "./governance.ts";
 import type { ArchitectureDecisionSource } from "./governance.ts";
 import { hostBridgeGlobalMappings, hostBridgeModuleIds } from "./host-bridge.ts";
-import { CELL_PRESET_LIBRARIES, FRONTEND_LIBRARY_REFERENCE_CONTRACT } from "./runtime-contract.ts";
+import {
+  CELL_PRESET_LIBRARIES,
+  FRONTEND_LIBRARY_REFERENCE_CONTRACT,
+  RUNTIME_EVIDENCE_CHANNELS,
+} from "./runtime-contract.ts";
 import type { RuntimeEvidenceChannel } from "./runtime-contract.ts";
 
 // ---------------------------------------------------------------------------
@@ -549,6 +553,26 @@ export interface ExtensionExternalMapping {
 }
 
 /**
+ * The fields a mapping row may carry, as a project config writes them.
+ *
+ * Beside {@link ExtensionExternalMapping} for the reason `CELL_ALLOWED_FIELDS` sits beside
+ * `CellConfig`: the list is used verbatim in an unknown-field diagnostic, and a list kept
+ * anywhere else would drift from the interface the first time a field was added. A test
+ * derives this list from a complete row rather than trusting the two to agree.
+ */
+export const EXTENSION_MAPPING_ALLOWED_FIELDS = [
+  "packageName",
+  "moduleIds",
+  "libraryId",
+  "globalName",
+  "metadataSource",
+  "metadataReference",
+  "verificationRule",
+  "verifiedBy",
+  "note",
+] as const;
+
+/**
  * #12's mapping table.
  *
  * One row, and that is the honest size of it: #12 names the existing TanStack Query
@@ -1030,13 +1054,19 @@ export class ExtensionExternalContractError extends Error {
  *    in which "not guessed from display name" stops being checkable;
  * 5. a mapping with no evidence channel, which is a claim with no observation behind
  *    it;
- * 6. no `verificationRule`, so nothing says what makes the claim true;
- * 7. its own package id repeated in `moduleIds`, which makes "what does this row
+ * 6. an evidence channel outside the four `RUNTIME_EVIDENCE_CHANNELS` names, which is a
+ *    claim whose observation cannot be named — the state the vocabulary's deliberate
+ *    lack of an "assumption" member exists to make unwritable;
+ * 7. no `verificationRule`, so nothing says what makes the claim true;
+ * 8. its own package id repeated in `moduleIds`, which makes "what does this row
  *    intercept" answerable twice with different intent.
  *
  * Checks 2 and 3 are separate on purpose: "`Foo.Bar` is not an identifier" and "`antd`
  * is reserved" are different repairs, and collapsing them would send a reader looking
- * for a reservation that is not the problem.
+ * for a reservation that is not the problem. Checks 5 and 6 are separate for the same
+ * reason: "you recorded no evidence" and "you recorded evidence that cannot be observed
+ * through" have different repairs, and the second is the one a raw config can produce
+ * because no type checker saw it.
  */
 export function assertExtensionExternalMappingIsAdmissible(
   mapping: ExtensionExternalMapping,
@@ -1082,6 +1112,19 @@ export function assertExtensionExternalMappingIsAdmissible(
   if (mapping.verifiedBy.length === 0) {
     throw new ExtensionExternalContractError(
       `Extension mapping "${mapping.packageName}" carries no evidence channel, so it records a claim no observation stands behind.`,
+    );
+  }
+
+  // Membership, not only presence, and the distinction is the whole point of the channel
+  // vocabulary. `RuntimeEvidenceChannel` deliberately has no "assumption"/"expected"/
+  // "likely" member, so a claim that was never observed cannot be recorded without
+  // inventing a channel — and a check that only counted members would let exactly that
+  // through, from a raw config whose `verifiedBy` no type checker ever saw. That is the
+  // one state `runtime-contract.ts` says the vocabulary exists to make unwritable.
+  for (const channel of mapping.verifiedBy) {
+    if ((RUNTIME_EVIDENCE_CHANNELS as readonly string[]).includes(channel)) continue;
+    throw new ExtensionExternalContractError(
+      `Extension mapping "${mapping.packageName}" records the evidence channel ${JSON.stringify(channel)}, which is not one of the four the runtime contract observes through (${RUNTIME_EVIDENCE_CHANNELS.join(", ")}). A claim no observation stands behind cannot be written down here — the vocabulary has no "assumption" member on purpose.`,
     );
   }
 

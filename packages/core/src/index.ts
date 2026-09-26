@@ -318,6 +318,7 @@ export {
   EXTENSION_GLOBAL_NAME_PATTERN,
   EXTENSION_GLOBAL_READ_TIMING,
   EXTENSION_LIBRARY_ID_PATTERN,
+  EXTENSION_MAPPING_ALLOWED_FIELDS,
   EXTENSION_LIBRARY_REFERENCE_FIELD_NAME,
   EXTENSION_LOAD_ORDER_RULES,
   EXTENSION_METADATA_SOURCES,
@@ -345,6 +346,23 @@ export type {
   ExtensionMetadataSource,
   ExtensionVerificationBasis,
 } from "./extension-externals.ts";
+
+export {
+  DEFAULT_BUILTIN_MAPPINGS,
+  EXTENSION_MAPPINGS_ALLOWED_FIELDS,
+  EXTENSION_MAPPINGS_CONFIG_FIELD,
+  extensionMappingOrigin,
+  formatExtensionMappingsConfig,
+  normalizeExtensionMappings,
+} from "./extension-mappings-config.ts";
+export type {
+  ExtensionMappingsDiagnostic,
+  ExtensionMappingsDiagnosticCode,
+  ExtensionMappingsSource,
+  NormalizeExtensionMappingsOptions,
+  NormalizeExtensionMappingsResult,
+  NormalizedExtensionMappings,
+} from "./extension-mappings-config.ts";
 
 export {
   assertFgcLockDocument,
@@ -611,6 +629,7 @@ export {
 export type {
   CellCodeBudgetOverrides,
   CellConfig,
+  ExtensionMappingsConfig,
   ForguncyConfig,
   ForguncyConfigSchemaVersion,
   ForguncyTargetLocator,

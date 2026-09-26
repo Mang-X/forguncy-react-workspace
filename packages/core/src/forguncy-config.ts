@@ -14,7 +14,16 @@
  * Portability rule: a committed config must be reviewable in a PR and must mean
  * the same thing on every machine. That is why nothing here accepts a secret, a
  * machine-specific absolute path, or a dependency-strategy decision.
+ *
+ * One exception to "no dependency-strategy decision", and it is a narrow one:
+ * `extensions.mappings` states which npm import a named extension provides
+ * (Issue #85). That is a *mapping*, not a strategy — a mapping says how an
+ * `extension` decision compiles, never that a package should be one — so the
+ * decision itself still lives in `fgc.lock.json` alone. `strategy`, `dependencies`
+ * and their synonyms stay refused by name at every level.
  */
+
+import type { ExtensionExternalMapping } from "./extension-externals.ts";
 
 /** Schema revision of the config document itself. */
 export const FORGUNCY_CONFIG_SCHEMA_VERSION = 1 as const;
@@ -176,6 +185,31 @@ export interface RuntimeTargetConfig {
 }
 
 /**
+ * Project-level extension mappings.
+ *
+ * `undefined` means the config did not mention the field, which keeps the built-in
+ * table; `{ builtinMappings: false }` is a *stated* opt-out. The distinction is the
+ * whole reason this is an object rather than an array: an array cannot express
+ * "declared, and empty".
+ *
+ * The shape is declared here and *validated* in `extension-mappings-config.ts`, for
+ * the same split the rest of this file follows — this module states shape and intent
+ * and normalizes nothing.
+ */
+export interface ExtensionMappingsConfig {
+  /**
+   * Whether the built-in mapping table contributes rows. Defaults to `true`.
+   *
+   * A project row adds to the built-in table rather than replacing it, so this field
+   * is the only way to opt out, and opting out is a written line in a diff rather
+   * than an inference from an empty array.
+   */
+  readonly builtinMappings?: boolean;
+  /** Rows this project declares. Merged after the built-ins, in declaration order. */
+  readonly mappings?: readonly ExtensionExternalMapping[];
+}
+
+/**
  * The whole config document.
  *
  * `cells` may be empty so a project can adopt the contract before its first
@@ -186,10 +220,12 @@ export interface ForguncyConfig {
   readonly schemaVersion?: ForguncyConfigSchemaVersion;
   readonly cells: Readonly<Record<string, CellConfig>>;
   readonly runtime?: RuntimeTargetConfig;
+  /** Project-level extension mappings, when the built-in table is not enough. */
+  readonly extensions?: ExtensionMappingsConfig;
 }
 
 /** Fields allowed at each level. Used verbatim in unknown-field diagnostics. */
-export const CONFIG_ALLOWED_FIELDS = ["schemaVersion", "cells", "runtime"] as const;
+export const CONFIG_ALLOWED_FIELDS = ["schemaVersion", "cells", "runtime", "extensions"] as const;
 export const CELL_ALLOWED_FIELDS = ["entry", "target", "fixture", "output"] as const;
 export const RUNTIME_ALLOWED_FIELDS = [
   "forguncyVersion",
