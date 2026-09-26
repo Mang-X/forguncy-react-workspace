@@ -59,24 +59,43 @@ function readRepositoryFile(relativePath: string): string {
  * Repository-relative and forward-slashed rather than built with `join`: these strings are both
  * read back off disk and asserted on, and `join` would make the assertions platform-dependent
  * (backslashes on Windows), so the test would pass locally and fail in CI or the reverse.
+ *
+ * **Both levels of `src/`, not `src/probe/` alone.** The first version of this list walked only
+ * the `probe` directory, and the retracted sentence in `src/decision-recording.ts` was one level up:
+ * the pattern written for that file was applied to fourteen files that did not include it, so the
+ * guard was dead — restoring the sentence there left this test's negative half green, and only the
+ * positive assertion below caught it. Widening to the package root is the same "traversed, not
+ * listed" argument this file's header makes, applied to the traversal itself.
  */
-const packageModules = readdirSync(join(packageSourceDirectory, "probe"))
-  .filter(name => name.endsWith(".ts") && !name.endsWith(".test.ts"))
-  .sort()
-  .map(name => `packages/dependency-resolver/src/probe/${name}`);
+const packageSourceRoot = join(packageSourceDirectory); // .../packages/dependency-resolver/src
+
+function modulesUnder(directory: string): readonly string[] {
+  return readdirSync(join(packageSourceRoot, directory))
+    .filter(name => name.endsWith(".ts") && !name.endsWith(".test.ts"))
+    .sort()
+    .map(name => (directory === "" ? `packages/dependency-resolver/src/${name}` : `packages/dependency-resolver/src/${directory}/${name}`));
+}
+
+const packageModules = [...modulesUnder(""), ...modulesUnder("probe")];
 
 const SKILL_DIRECTORY = ".agents/skills/forguncy-react-dependency-selection";
 
 describe("the retracted size-bound claim does not reappear", () => {
-  it("reads every module of the probe package, so a third copy cannot hide", () => {
+  it("reads every module of the package, so a third copy cannot hide", () => {
     // The traversal is the point: the first sweep missed files because it was a list someone
     // wrote down. `build.ts` and `probe-engine.ts` are the ones it missed.
     expect(packageModules).toContain("packages/dependency-resolver/src/probe/build.ts");
     expect(packageModules).toContain("packages/dependency-resolver/src/probe/probe-engine.ts");
     expect(packageModules).toContain("packages/dependency-resolver/src/probe/size.ts");
+    // The gap the second sweep closed: `decision-recording.ts` is one level up from the probe
+    // directory, so a traversal of `src/probe/` alone left the pattern written for it dead.
+    expect(packageModules).toContain("packages/dependency-resolver/src/decision-recording.ts");
     // And the modules that legitimately describe the retraction are in scope, which is what
     // makes the negative assertions below meaningful rather than trivially true.
-    expect(packageModules.length).toBeGreaterThan(10);
+    expect(packageModules).toContain("packages/dependency-resolver/src/probe/size.ts");
+    expect(packageModules.length).toBeGreaterThan(18);
+    // No duplicates: the two traversals must not overlap.
+    expect(new Set(packageModules).size).toBe(packageModules.length);
   });
 
   it("asserts no bound relation anywhere in the probe package, only reports its retraction", () => {
