@@ -210,7 +210,19 @@ describe("mapping a read", () => {
   // ReactCellType", and inferring that from the presence of a `code` property would claim it
   // from a weaker fact. These cases all have a `code` and are still not ours.
   it("reads a non-React cell type that carries a code as occupied, not as ours", async () => {
-    for (const cellType of ["UserControlPageCellType", "SomeOtherCellType", "TextCellType"]) {
+    // The last three are the near misses for #115's widened name set: strings one character
+    // away from the two recognised names. A prefix match, a case-insensitive comparison or a
+    // `/ReactCellType/i` containment test would accept every one of them, so they are what
+    // makes the *exactness* of the recognition check falsifiable rather than asserted.
+    for (const cellType of [
+      "UserControlPageCellType",
+      "SomeOtherCellType",
+      "TextCellType",
+      "ReactCellTyp",
+      "ReactCellTypeCell",
+      "reactcelltype",
+      "ReactCellTypeCellType2",
+    ]) {
       const result = await readWith([{ row: 0, col: 0, cellType, cellTypeProps: { code: "function App(){}" } }]);
 
       expect(result.kind, cellType).toBe("occupied");
@@ -230,18 +242,26 @@ describe("mapping a read", () => {
     expect(result).not.toEqual({ kind: "react-cell", code: "", frontendLibraries: [] });
   });
 
-  // The other direction, so the stricter check is not simply stricter: the exact type with a
-  // code is still read as ours.
-  it("reads the exact React Cell type as a managed React Cell", async () => {
-    const result = await readWith([
-      { row: 0, col: 0, cellType: "ReactCellTypeCellType", cellTypeProps: { code: "x" } },
-    ]);
+  // The other direction, so the name check is not simply stricter: a React Cell with a code is
+  // read as ours under *every* name the product reports for this cell type.
+  //
+  // This is the regression #115 is about, and it failed for the measured name: the check used to
+  // compare against the *write* alias (`ReactCellTypeCellType`), while the product writes that
+  // alias and reads back the type name (`ReactCellType`). Every Cell sync had just written was
+  // therefore classified `occupied`, so a second sync of the same artifact was refused instead of
+  // found `identical`. The measured name is first because it is the one the live designer reports
+  // and the one the old code got wrong.
+  it("reads a React Cell under each name the product reports for the type", async () => {
+    for (const cellType of ["ReactCellType", "ReactCellTypeCellType"]) {
+      const result = await readWith([{ row: 0, col: 0, cellType, cellTypeProps: { code: "x" } }]);
 
-    expect(result.kind).toBe("react-cell");
+      expect(result.kind, cellType).toBe("react-cell");
+      expect(result).toEqual({ kind: "react-cell", code: "x", frontendLibraries: [] });
+    }
   });
 
   it("says a React-typed Cell with no readable code is damage, not a designer edit", async () => {
-    const result = await readWith([{ row: 0, col: 0, cellType: "ReactCellTypeCellType", cellTypeProps: {} }]);
+    const result = await readWith([{ row: 0, col: 0, cellType: "ReactCellType", cellTypeProps: {} }]);
 
     expect(result).toEqual({ kind: "occupied", code: "a ReactCellType cell with no readable code" });
   });
@@ -260,7 +280,7 @@ describe("mapping a read", () => {
       {
         row: 0,
         col: 0,
-        cellType: "ReactCellTypeCellType",
+        cellType: "ReactCellType",
         cellTypeProps: { code: AWKWARD_CODE, frontendLibraries: [{ libraryId: "es-toolkit" }] },
       },
     ]);
@@ -275,9 +295,7 @@ describe("mapping a read", () => {
   // The product drops the field when the list is empty, so absence means empty here —
   // and the contract's "not stated" cannot be produced by this call, which read the Cell.
   it("reads a dropped reference list as an empty one", async () => {
-    const result = await readWith([
-      { row: 0, col: 0, cellType: "ReactCellTypeCellType", cellTypeProps: { code: "x" } },
-    ]);
+    const result = await readWith([{ row: 0, col: 0, cellType: "ReactCellType", cellTypeProps: { code: "x" } }]);
 
     expect(result).toEqual({ kind: "react-cell", code: "x", frontendLibraries: [] });
   });
@@ -420,6 +438,67 @@ describe("turning the generation answer into a page locator", () => {
     expect(runtimePageUrl("", "OrderPage")).toBe("");
     expect(runtimePageUrl(`${BASE}/`, "OrderPage")).toBe(`${BASE}/OrderPage`);
     expect(runtimePageUrl(`${BASE}/OrderPage`, "OrderPage")).toBe(`${BASE}/OrderPage`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Which generation call the adapter reaches for
+// ---------------------------------------------------------------------------
+
+/**
+ * The generation script asks the build which call it has, and this block is about *that*.
+ *
+ * The point is not that the script contains two names — it is that the choice is made from a
+ * fact about the build (`typeof api.app.<name>`) rather than from a version table the
+ * repository would have to maintain. So the assertions below are about the decision reaching
+ * the designer as a `typeof` test, and about the failure being *refused* rather than retried
+ * into whatever else looks close.
+ */
+describe("choosing the generation call the build actually has", () => {
+  it("sends one script that negotiates on `typeof`, naming both documented calls", async () => {
+    const { callTool, calls } = recorder(() => ok({ url: "http://localhost:63982/Forguncy" }));
+    const port = createDesignerSyncPort({ callTool });
+
+    await port.generatePageAsync({ pageName: "P" });
+
+    const script = calls[0].code;
+    // The newer build's call is tried first, then the pinned build's spelling, and both are
+    // reached through a `typeof` test — not through a `try`/`catch` on a call that would throw,
+    // which would also swallow a real generation failure.
+    expect(script).toContain('typeof api.app.generateProject === "function"');
+    expect(script).toContain('typeof api.app.generatePageAsync === "function"');
+    // Both names resolve to the *same* call site, so the two builds run one measured call
+    // rather than two branches that could drift apart.
+    expect(script).toContain("const answer = await call({});");
+    // A build with neither must be refused in the script rather than called hopefully.
+    expect(script).toContain("neither api.app.generateProject nor api.app.generatePageAsync");
+    // The executor gates on `checkProjectErrors` itself, so the product is never asked to skip
+    // its own check — the same rule the previous version of this method recorded.
+    expect(script).not.toContain("skipCheckProjectError");
+  });
+
+  it("relays only the url, so a heavy answer cannot fail the parse", async () => {
+    const { callTool, calls } = recorder(() => ok({ url: "http://localhost:63982/Forguncy", message: "ok" }));
+    const port = createDesignerSyncPort({ callTool });
+
+    const generated = await port.generatePageAsync({ pageName: "P" });
+
+    // The script hands back a fresh object with one string field, so the product's whole
+    // envelope — including anything a future build adds, and the cell code it might echo —
+    // never crosses the boundary as JSON this module has to parse.
+    expect(calls[0].code).toContain('typeof answer?.url === "string" ? { url: answer.url } : {}');
+    expect(generated.pageUrl).toBe("http://localhost:63982/Forguncy/P");
+  });
+
+  // The direction that must fail closed: a build that answers with something other than a
+  // string `url` — a renamed field, a null — must not become a locator the gate then accepts.
+  it("turns a non-string url into the empty locator the gate refuses", async () => {
+    for (const url of [undefined, null, 42, { href: "x" }]) {
+      const { callTool } = recorder(() => ok({ url }));
+      const port = createDesignerSyncPort({ callTool });
+
+      expect((await port.generatePageAsync({ pageName: "P" })).pageUrl, String(url)).toBe("");
+    }
   });
 });
 

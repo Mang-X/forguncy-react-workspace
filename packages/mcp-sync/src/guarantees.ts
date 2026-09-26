@@ -53,6 +53,35 @@ export const EXECUTED_AGAINST_DESIGNER =
   "Forguncy 12.0.100.0 (designer assembly 12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623), a live MCP designer session against a disposable page; re-run with packages/mcp-sync/scripts/validate-sync-against-designer.mjs, evidence on #20.";
 
 /**
+ * The environment #115's real-project validation ran in.
+ *
+ * The second of the two executions on record, and the first recorded against a *different*
+ * product version — which is the whole reason a version sits beside a route now. #115 re-probed
+ * the two shapes that turned out to be version-sensitive (the read-back cell-type name, and
+ * which generation call exists) and then drove both routes of the flow through the **shipped
+ * adapter** on this build.
+ *
+ * Both scripts were run: `validate-sync-against-designer.mjs` (the write route, #20's script)
+ * and `validate-unchanged-against-designer.mjs` (the unchanged route, #92's script), the latter
+ * with the two port corrections it used to carry now removed — see its header.
+ */
+export const EXECUTED_AGAINST_REPROBE =
+  "Forguncy 12.0.101.0 (designer assembly 12.0.101.0+92cefba44ce06dc75c2633bf5f6c6771e4ee41f0), a live MCP designer session against a disposable page, through the shipped adapter with no port corrections; re-run with packages/mcp-sync/scripts/validate-sync-against-designer.mjs and packages/mcp-sync/scripts/validate-unchanged-against-designer.mjs, evidence on #115.";
+
+/**
+ * The product versions the repository has *any* executed flow evidence on.
+ *
+ * Read this with {@link unexecutedRuntimeVersionCoverage}. It is the set a coverage gap is
+ * reported against, so it is deliberately the versions the repository actually claims support
+ * for rather than a wish list: `12.0.100.0` is the version #5 pinned and #20 executed, and
+ * `12.0.101.0` is the version #115 re-probed and executed. A third version is added here when
+ * someone runs the flow on it, not when it is released.
+ */
+export const SYNC_EXPLORED_VERSIONS = ["12.0.100.0", "12.0.101.0"] as const;
+
+export type SyncExploredVersion = (typeof SYNC_EXPLORED_VERSIONS)[number];
+
+/**
  * The routes a run can take through the flow's validation half.
  *
  * A *route* rather than a guarantee, because #92 showed the two are independent: the write
@@ -142,6 +171,21 @@ export interface SyncGuarantee {
    * a behaviour added later looks like until someone runs it.
    */
   readonly executedRoutes?: readonly SyncRuntimeRoute[];
+  /**
+   * Which product version the execution in `executedAt` ran on.
+   *
+   * Present exactly when `executedAt` is, for the same reason `executedRoutes` is: it is part
+   * of the execution *claim*, not decoration. The route axis and the version axis are
+   * independent and both are needed — #20's run covered the write route on `12.0.100.0`, #115's
+   * covered both routes on `12.0.101.0`, and "is the unchanged path validated?" has a different
+   * answer on each.
+   *
+   * One value, not a list: an `executedAt` string names one environment, and a second version
+   * is a second execution record rather than a wider array here. It is a member of
+   * {@link SYNC_EXPLORED_VERSIONS}, asserted, so a version cannot be claimed as run without
+   * being one the repository has decided to track.
+   */
+  readonly executedVersion?: SyncExploredVersion;
 }
 
 export const SYNC_GUARANTEES: readonly SyncGuarantee[] = [
@@ -160,8 +204,9 @@ export const SYNC_GUARANTEES: readonly SyncGuarantee[] = [
     // Write only, and that is not an omission: the promise is that a write lands, and it has
     // no meaning on a run that wrote nothing. #92's unchanged route does not touch it.
     runtimeRoutes: ["write"],
-    executedAt: EXECUTED_AGAINST_DESIGNER,
+    executedAt: EXECUTED_AGAINST_REPROBE,
     executedRoutes: ["write"],
+    executedVersion: "12.0.101.0",
   },
   {
     id: "extension-metadata-verified-before-mutation",
@@ -180,11 +225,13 @@ export const SYNC_GUARANTEES: readonly SyncGuarantee[] = [
       "Complete a sync against a real project and assert `api.app.checkProjectErrors` was called after the sync's own work — on either route, write or unchanged — and that a non-zero `errorCount` failed the operation instead of being reported as success.",
     caveat:
       "Locally, only the flow's shape is checkable: `assertMcpSyncFlowIsCoherent` proves the step exists, is a post-mutation step, and runs before the page is generated, and the executor's own tests assert the call order it performs against a stub port. Neither can prove a *real* project returned the count the run reports; only a real project can.",
-    // #92 made the gate reachable on a run that wrote nothing, so the promise now spans two
-    // routes and #20's run — which is the write route — covers one of them.
+    // #92 made the gate reachable on a run that wrote nothing, so the promise spans two routes.
+    // #20's run covered only the write route; #115's covered both, through the shipped adapter
+    // — which is what the extra `executedRoutes` entry now rests on.
     runtimeRoutes: ["write", "unchanged"],
-    executedAt: EXECUTED_AGAINST_DESIGNER,
-    executedRoutes: ["write"],
+    executedAt: EXECUTED_AGAINST_REPROBE,
+    executedRoutes: ["write", "unchanged"],
+    executedVersion: "12.0.101.0",
   },
   {
     id: "runtime-locator-returned",
@@ -195,10 +242,12 @@ export const SYNC_GUARANTEES: readonly SyncGuarantee[] = [
     caveat:
       "The locator's *field name* is this contract's, not the platform's — #5 records the URL the flow produced, not the response object it arrived in — so the correspondence is the adapter's to get right and only a real project can confirm it.",
     // Same split as the error gate: #92 returns a locator from a run that wrote nothing, and
-    // that route is a different moment in the flow from the write route #20 executed.
+    // that route is a different moment in the flow from the write route. #115's run returned a
+    // locator on both routes through the adapter, which is what the second entry rests on.
     runtimeRoutes: ["write", "unchanged"],
-    executedAt: EXECUTED_AGAINST_DESIGNER,
-    executedRoutes: ["write"],
+    executedAt: EXECUTED_AGAINST_REPROBE,
+    executedRoutes: ["write", "unchanged"],
+    executedVersion: "12.0.101.0",
   },
   {
     id: "sync-is-idempotent",
@@ -210,8 +259,9 @@ export const SYNC_GUARANTEES: readonly SyncGuarantee[] = [
     caveat:
       "Two halves are outside a local check, and #20 executed both: a second `setCells` with an identical payload left the Cell byte-identical, and a merged Cell kept its `rowSpan`/`colSpan` when the mutation omitted them. What a local check establishes is that sync asks for no change it does not need. #92 adds a third: on the `unchanged` route the run writes nothing but can still *persist the project* when the product reports it dirty, which is why that route reports `mutated` — a state #20's write-only execution never produced.",
     runtimeRoutes: ["write", "unchanged"],
-    executedAt: EXECUTED_AGAINST_DESIGNER,
-    executedRoutes: ["write"],
+    executedAt: EXECUTED_AGAINST_REPROBE,
+    executedRoutes: ["write", "unchanged"],
+    executedVersion: "12.0.101.0",
   },
   {
     id: "probable-designer-divergence-detected",
@@ -290,14 +340,16 @@ export interface UnexecutedRuntimeRoute {
  * The reason this exists beside {@link unexecutedRealRuntimeSyncGuarantees}: a promise can be
  * executed on one route and unexecuted on another, and the promise-level function cannot see
  * that. #92 is the case that produced it — the error gate and the locator gained an
- * `unchanged` route, #20's run covers only the write route, and
+ * `unchanged` route, #20's run covered only the write route, and
  * `unexecutedRealRuntimeSyncGuarantees()` stays empty either way.
  *
- * Empty is the honest state to aim for, and it is *not* reached by executing the canonical
- * script alone: as of #92 that script asserts the unchanged path through two corrected port
- * calls (the shipped adapter cannot reach it on the available designer build — see the script
- * header), so its run is executor-level evidence and does not close these entries. Closing
- * them needs a run through the shipped adapter on the pinned product version.
+ * **Empty as of #115, and it took an adapter fix to get there.** #92's run asserted the
+ * unchanged path through two *corrected* port calls, because the shipped adapter could not reach
+ * it on the designer build available (see that script's header). #115 fixed both corrections in
+ * `designer-transport.ts` — the read-back cell-type name and the generation call — and re-ran
+ * both scripts through the bare adapter, which is what closes the three entries this function
+ * used to report. An empty result here is therefore a claim about the *adapter*, not only about
+ * the executor, and only a run through the shipped adapter keeps it true.
  */
 export function unexecutedRuntimeRouteCoverage(): readonly UnexecutedRuntimeRoute[] {
   const gaps: UnexecutedRuntimeRoute[] = [];
@@ -314,4 +366,44 @@ export function unexecutedRuntimeRouteCoverage(): readonly UnexecutedRuntimeRout
     }
   }
   return gaps;
+}
+
+/** One product version the flow has not been executed against, and what that leaves open. */
+export interface UnexecutedVersionCoverage {
+  readonly version: SyncExploredVersion;
+  /** What running the flow on this version would establish, in the promises' own terms. */
+  readonly whatARunWouldEstablish: string;
+}
+
+/**
+ * The version coverage gaps: every product version the repository claims support for that no
+ * recorded execution ran on.
+ *
+ * A third axis, and the one #115 made necessary rather than invented. #92's route axis asked
+ * "*which* route was executed?"; that question only has an answer per version, because the two
+ * shapes #115 found to be version-sensitive — the read-back cell-type name and which generation
+ * call exists — are exactly what a run on one build cannot tell you about another. Before #115
+ * every execution on record was `12.0.100.0`, so a single `executedAt` string could carry the
+ * whole claim; it cannot any more, because the run that closed the `unchanged` route ran on
+ * `12.0.101.0`.
+ *
+ * **`12.0.100.0` is a gap on purpose, and it cannot be closed from here.** It is the version #5
+ * pinned and #20 executed, but that execution predates the recognition change (#115 fixed a
+ * check that was added after it) and this machine has only `12.0.101.0` installed — no second
+ * build, no installer. Reporting it is the honest state; inheriting #115's result would be the
+ * "a different version is a re-run rather than an inheritance" rule broken in the one direction
+ * that matters. Adding `12.0.101.0` to {@link SYNC_EXPLORED_VERSIONS} without executing on it
+ * would be the same error, which is why that list is only extended with a run.
+ */
+export function unexecutedRuntimeVersionCoverage(): readonly UnexecutedVersionCoverage[] {
+  const executed = new Set(
+    SYNC_GUARANTEES.filter(guarantee => guarantee.executedAt !== undefined).map(guarantee => guarantee.executedVersion),
+  );
+  return SYNC_EXPLORED_VERSIONS.filter(version => !executed.has(version)).map(version => ({
+    version,
+    whatARunWouldEstablish:
+      version === "12.0.100.0"
+        ? "That the read-back cell-type name and the generation call #115 corrected on 12.0.101.0 behave as the adapter now expects on the build this repository pins — i.e. that the fix did not trade one version's recognition for the other's. Re-run both validation scripts against a 12.0.100.0 designer."
+        : `That the flow completes on ${version} at all, and which of the two version-sensitive shapes it reports.`,
+  }));
 }

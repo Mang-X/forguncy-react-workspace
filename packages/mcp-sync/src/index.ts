@@ -59,7 +59,14 @@ export {
 export type { CellSyncTargetPlan, ResolvedCellSyncTarget } from "./registry-target.ts";
 
 // The designer surface the flow needs, and the operations it deliberately lacks
-export { FORGUNCY_SYNC_PORT_METHODS, REACT_CELL_TYPE_NAME } from "./port.ts";
+// `REACT_CELL_TYPE_READ_BACK_NAMES` is exported beside `REACT_CELL_TYPE_NAME` because the two
+// answer different questions — what sync *writes* versus what a read reports for the same cell
+// type — and #115 is what happens when one is used for the other.
+export {
+  FORGUNCY_SYNC_PORT_METHODS,
+  REACT_CELL_TYPE_NAME,
+  REACT_CELL_TYPE_READ_BACK_NAMES,
+} from "./port.ts";
 export type {
   ForguncySyncPort,
   ForguncySyncPortMethod,
@@ -150,22 +157,31 @@ export type {
 } from "./diagnostics.ts";
 
 // What a sync promises
+// Three coverage axes are exported together because they answer three different questions
+// about the same execution record: what has been promised (`*SyncGuarantees`), on which route
+// (`unexecutedRuntimeRouteCoverage`) and on which product version
+// (`unexecutedRuntimeVersionCoverage`). #115 is the change that made the third necessary.
 export {
   EXECUTED_AGAINST_DESIGNER,
+  EXECUTED_AGAINST_REPROBE,
   findSyncGuarantee,
   locallyCheckableSyncGuarantees,
   realRuntimeSyncGuarantees,
+  SYNC_EXPLORED_VERSIONS,
   SYNC_GUARANTEE_IDS,
   SYNC_GUARANTEES,
   SYNC_RUNTIME_ROUTE_MEANINGS,
   SYNC_RUNTIME_ROUTES,
   unexecutedRealRuntimeSyncGuarantees,
   unexecutedRuntimeRouteCoverage,
+  unexecutedRuntimeVersionCoverage,
 } from "./guarantees.ts";
 export type {
+  SyncExploredVersion,
   SyncGuarantee,
   SyncGuaranteeId,
   SyncRuntimeRoute,
+  UnexecutedVersionCoverage,
   UnexecutedRuntimeRoute,
 } from "./guarantees.ts";
 
