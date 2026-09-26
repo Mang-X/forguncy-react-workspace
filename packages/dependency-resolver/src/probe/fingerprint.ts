@@ -20,7 +20,7 @@
  * permits would still move a fingerprint containing the version, so the record
  * would go stale anyway. What remains is exactly what the lock's comment lists as
  * this fingerprint's job — the probe id, the entry, the probe configuration (with
- * the budget folded in as a declared input, since a budget change alters what the
+ * the cap folded in as a declared input, since a cap change alters what the
  * `size` step concludes), the bundler input no other field captures, and
  * {@link PROBE_ANALYSIS_REVISION}, which the three excluded dimensions do not cover
  * and which a change to the scanners makes load-bearing.
@@ -126,20 +126,65 @@ function stableScalar(value: string): string {
  * - `10` — a native indicator accumulates **every** contributor identity rather than the last one
  *   written, so two versions of a name that produce the same indicator are both named. Changes
  *   findings for that shape only; measured, the earlier map kept a single version.
+ * - `11` — the `size` step measures **characters of emitted code** and classifies #21's band,
+ *   and its cap input is characters (`cellArtifactBudgetCharacters`) rather than bytes. Changes
+ *   what the step reports for every artifact: the `size.band*` facts are new, `size.codeCharacters`
+ *   is new, and a cap that was previously compared against `totalBytes` is now compared against
+ *   the code's character count. It also changes what a cap *means* — a report cached under the
+ *   byte rule recorded a rejection the character rule may not make, or missed one it does — so a
+ *   cached report from revision 10 must not answer a probe run at 11.
+ * - `12` — the synthetic entry can declare a **named import surface** (`imports`), and the
+ *   `build` step records it as `build.import-surface`. Changes what the step reports for every
+ *   artifact — `build.import-surface` is a new fact.
+ * - `13` — the `size` step files **no** `cell-artifact-budget-exceeded` finding, under any
+ *   import surface. Revision 12 filed one when the surface was non-empty, on the theory that
+ *   named imports make the measurement a lower bound; that is false, because the probe's build
+ *   and the compiler's do not share a resolution graph — the compiler installs
+ *   `createInterceptionResolver`, so a `host`/`extension` dependency the probe inlined is a page
+ *   global in the Cell, and the probe's artifact can be **larger** than the Cell's. The
+ *   `react-library` fixture pins it: a *named* probe of `DatePicker` measures 279 characters with
+ *   the npm React implementation inlined, while the real Cell resolves `react` to the host. The
+ *   verdict belongs to the compiler's `auditCodeBudget` on the composed Cell source, and
+ *   `PROBE_STEPS_OBSERVING_SIGNAL` gives the signal no observing step so a report claiming it is
+ *   *invalid*. A report cached at 12 can carry exactly that finding, so it must not answer a run
+ *   at 13 — this is the invalidation #8 requires when a rejection's meaning changes.
+ * - `14` — the `size` step's `size.bound` fact is renamed `size.estimateBias`, and its values
+ *   `lower-bound`/`upper-bound` become `lower-leaning`/`upper-leaning`. The old spelling asserted
+ *   a relation between the probe's number and the Cell's that revision 13 **disproved for both
+ *   entry shapes**: a machine consumer reading `bound` would read a claim the structured fact no
+ *   longer supports, which is exactly the falsified claim in machine-readable form. A report
+ *   cached at 13 carries the old fact name and the old values, so it must not answer a run at 14.
  */
-export const PROBE_ANALYSIS_REVISION = 10;
+export const PROBE_ANALYSIS_REVISION = 14;
 
 export interface ComposeProbeFingerprintInput {
   /** Which probe ran, e.g. `inline-bundle`. */
   readonly probeId: string;
   /** The entry the synthetic build imports. */
   readonly entry: string;
-  /** Probe configuration; the cell budget is folded in as `budget` when present. */
+  /**
+   * Named bindings the synthetic build imports, sorted; empty means the whole namespace.
+   *
+   * A declared input rather than a detail of the build, because it decides *which document*
+   * the size step measured — the namespace bundle or a tree-shaken named-binding bundle — so
+   * two runs of one package with different surfaces measured different artifacts and must not
+   * share a fingerprint. It selects between two **estimates** and authorizes nothing: since
+   * revision 13 the step files no cap verdict under either surface (see `size.ts`).
+   */
+  readonly imports?: readonly string[];
+  /** Probe configuration; the cell cap is folded in as `budgetCharacters` when present. */
   readonly probeConfig?: Readonly<Record<string, unknown>>;
   /** Bundler input; defaults to the build module's declared configuration. */
   readonly bundlerInput?: Readonly<Record<string, string>>;
-  /** Cell artifact budget in bytes, when one applies to this run. */
-  readonly budget?: number | null;
+  /**
+   * Cell artifact cap in **characters**, when one applies to this run.
+   *
+   * The key it composes into is `budgetCharacters`, not `budget`, because the unit is
+   * now load-bearing for the fingerprint: the same number meant bytes before #77 and
+   * characters after it, so reusing the key would let a byte-era fingerprint collide
+   * with a character-era one holding the same integer.
+   */
+  readonly budgetCharacters?: number | null;
 }
 
 export interface ComposedProbeFingerprint {
@@ -158,10 +203,19 @@ export interface ComposedProbeFingerprint {
  */
 export function composeProbeFingerprint(input: ComposeProbeFingerprintInput): ComposedProbeFingerprint {
   const probeConfig: Record<string, unknown> = { ...input.probeConfig };
-  if (input.budget !== undefined && input.budget !== null) {
-    probeConfig["budget"] = input.budget;
+  if (input.budgetCharacters !== undefined && input.budgetCharacters !== null) {
+    probeConfig["budgetCharacters"] = input.budgetCharacters;
   }
   const bundlerInput = { ...(input.bundlerInput ?? BUILD_CONFIGURATION_FINGERPRINT) };
+  // Folded into `probeConfig` rather than given its own segment: the format is quoted in lock
+  // diffs and in `probe-fingerprint-changed` diagnostics, and a new segment would have to be
+  // read by every consumer of that format. `imports` is omitted entirely when the surface is
+  // the whole namespace, so a pre-surface record composes the same bytes it always did under a
+  // surface that has not changed — the same reason `budgetCharacters` is omitted when null.
+  const imports = [...(input.imports ?? [])].sort();
+  if (imports.length > 0) {
+    probeConfig["imports"] = imports;
+  }
 
   const fingerprint = [
     `probe=${stableScalar(input.probeId)}`,

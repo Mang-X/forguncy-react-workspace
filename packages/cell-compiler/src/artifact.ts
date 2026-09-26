@@ -33,6 +33,7 @@
 
 import {
   CELL_USER_SCOPE_BINDINGS,
+  assertCellCodeBudget,
   classifyCellCodeSize,
   validateDependencyDecisionShape,
 } from "@forguncy-react-workspace/core";
@@ -85,11 +86,42 @@ import { auditWorkspaceSource, formatWorkspaceSourceAudit } from "./workspace-so
  * or already known to the platform. It is also the reason `mcp-sync` can take the
  * artifact without a translation step — there is nothing to translate.
  */
+/**
+ * The artifact a compile produced, with whatever per-package attribution the bundler reported.
+ *
+ * One constructor for both outcomes, so the compiled and rejected paths cannot hand back documents
+ * that differ in anything but the diagnostics.
+ */
+function artifactOf(
+  code: string,
+  frontendLibraries: readonly FrontendLibraryReference[],
+  module: BundledCellModule,
+): CompileCellResult {
+  return {
+    code,
+    frontendLibraries,
+    ...(module.inlinedPackageSizes === undefined ? {} : { inlinedPackageSizes: module.inlinedPackageSizes }),
+  };
+}
+
 export interface CompileCellResult {
   /** The single logical Cell artifact: one script, no runtime chunk loading. */
   readonly code: string;
   /** The frontend libraries ReactCellType must resolve before this cell's entry runs. */
   readonly frontendLibraries: readonly FrontendLibraryReference[];
+  /**
+   * What each flattened package contributed to `code`, in rendered characters.
+   *
+   * Carried on the artifact because it is a fact *about* the artifact and nothing else can recover
+   * it: the composed string is flat, so which package accounts for which characters is only known
+   * while the module graph is. A size verdict needs it to say *why* the Cell is over its cap rather
+   * than only that it is, and recomputing it by recompiling without a package does not work — the
+   * bundler resolves the bare import from `node_modules` regardless of the decision set.
+   *
+   * Absent when the bundler reported no modules (a fixture port), which is not an error: a caller
+   * that needs attribution then has none, and says so rather than guessing.
+   */
+  readonly inlinedPackageSizes?: readonly InlinedPackageSize[];
 }
 
 /**
@@ -106,6 +138,21 @@ export interface CompileCellResult {
  * `CellBundlingRequest.componentBinding` is for, and the two are the same value by
  * construction.
  */
+/**
+ * One flattened package's rendered share of the artifact's characters.
+ *
+ * `exactSpecifier` is set when the modules were reached under a subpath (`pkg/subpath`), null when
+ * they are the package root's own files. The split exists because the compiler preserves
+ * exact-subpath precedence: `findDependencyDecision` checks the exact specifier before the package
+ * root, so crediting a subpath's bytes to the root decision would attribute them to a decision that
+ * did not govern them. A consumer deciding which record owns a share must prefer the exact entry.
+ */
+export interface InlinedPackageSize {
+  readonly packageName: string;
+  readonly exactSpecifier: string | null;
+  readonly renderedCharacters: number;
+}
+
 export interface BundledCellModule {
   /** The artifact body: one script, no runtime chunk loading. */
   readonly code: string;
@@ -113,6 +160,16 @@ export interface BundledCellModule {
   readonly externalImports?: readonly string[];
   /** Packages the bundler flattened into `code`. */
   readonly inlinedPackages?: readonly string[];
+  /**
+   * Rendered characters each flattened package contributed, as the bundler accounted them.
+   *
+   * The attribution basis for a size verdict: `auditCodeBudget` measures the whole composed Cell,
+   * which shows the Cell is over its cap but not *which* package put it there. Grouping the
+   * module-level `renderedLength` answers that from one compile, and is the only sound way to — a
+   * "compile it again without this package and subtract" differential measures nothing, because
+   * dropping a decision does not remove the code the bundler resolves from `node_modules`.
+   */
+  readonly inlinedPackageSizes?: readonly InlinedPackageSize[];
   /**
    * Bare specifiers the bundler actually inlined from installed packages.
    *
@@ -313,6 +370,19 @@ export type CompileCellOutcome =
       readonly status: "rejected";
       readonly diagnostics: readonly CellArtifactDiagnostic[];
       /**
+       * The composed artifact the rejection is about, when one was composed.
+       *
+       * A rejection means "this artifact does not qualify", so for the artifact audits the document
+       * exists — and a caller recording the verdict needs *it* rather than a re-derivation, since
+       * an identity over the bytes is only meaningful if it is an identity over these bytes. Absent
+       * on the paths #14 requires to fail **before** bundling (a workspace cycle), where no
+       * artifact was composed and there is nothing to hand back.
+       *
+       * Not a change to what a rejection *is*: the diagnostics remain the finding, and this is the
+       * evidence under it.
+       */
+      readonly artifact?: CompileCellResult;
+      /**
        * The workspace audit that caused the rejection, when one did.
        *
        * Set on the paths #14 requires to fail *before* bundling. Present so a caller
@@ -431,12 +501,22 @@ export function assembleCellArtifact(input: AssembleCellArtifactInput): CompileC
   // second half of this test is redundant at runtime and present for the type
   // system: it is what narrows `wrapper` to the emitted case below.
   if (diagnostics.length > 0 || wrapper.status !== "emitted") {
-    return { status: "rejected", diagnostics };
+    // The composed source travels with the rejection: the diagnostics are *about* this document, and
+    // a caller recording a size verdict has to identify the artifact the verdict measured rather
+    // than a re-derivation of it. A wrapper that could not be emitted leaves the code incomplete, so
+    // it is not handed back — there is no artifact, only a diagnostic saying why.
+    return {
+      status: "rejected",
+      diagnostics,
+      ...(wrapper.status === "emitted"
+        ? { artifact: artifactOf(code, collection.libraries, module) }
+        : {}),
+    };
   }
 
   return {
     status: "compiled",
-    artifact: { code, frontendLibraries: collection.libraries },
+    artifact: artifactOf(code, collection.libraries, module),
     entryKind: wrapper.kind,
   };
 }
@@ -807,17 +887,12 @@ function artifactOriginOf(bundledCode: string): (index: number) => string {
 function auditCodeBudget(code: string, budget: number | undefined): readonly CellArtifactDiagnostic[] {
   if (budget === undefined) return [];
 
-  // The budget is validated, not trusted. An unvalidated one fails in the most
-  // confusing direction available: `code.length <= Number.NaN` is `false`, so a
-  // NaN budget rejects *every* artifact with "against a configured budget of NaN",
-  // which reads like a size problem and is a caller's typo. Refusing it here puts
-  // the report on the field that is actually wrong. `classifyCellCodeSize` guards
-  // the size for the same reason; the two guards are deliberately symmetric.
-  if (!Number.isFinite(budget) || budget < 0) {
-    throw new Error(
-      `A cell code budget must be a non-negative finite number of characters, received ${String(budget)}.`,
-    );
-  }
+  // The budget is validated, not trusted, and the guard is `core`'s rather than a
+  // second copy here: the probe's `size` step compares a cap too, so one contract
+  // for "what may a programmatic cap be" is what keeps the two from disagreeing
+  // about a value the caller supplied once. See `assertCellCodeBudget` for why an
+  // unvalidated one fails in the most confusing direction available.
+  assertCellCodeBudget(budget);
 
   if (code.length <= budget) return [];
 
@@ -865,6 +940,18 @@ function auditCodeBudget(code: string, budget: number | undefined): readonly Cel
         `${String(write.ms)} ms at ${String(write.characters)} characters (${write.artifact}) and the ` +
         `browser's first cell entry took ${String(browserEntry.ms)} ms at ` +
         `${String(browserEntry.characters)} characters (${browserEntry.artifact}). ${guidance}`,
+      // The measurement travels with the diagnostic so it has exactly one producer (#77 round 5).
+      // A caller that wants to record this rejection has to take these numbers — it cannot type its
+      // own, which is what makes the recorded evidence compiler-origin rather than attested.
+      //
+      // Deliberately just the two figures: the *identity* of the compile is composed one level up,
+      // where the entry's source and the decision set are in hand (see
+      // `composeCellCompileFingerprint`). Composing it here would mean deriving the entry source
+      // from the composed artifact, which no longer exists as a separate input.
+      budgetEvidence: {
+        budgetCharacters: budget,
+        codeCharacters: code.length,
+      },
     }),
   ];
 }

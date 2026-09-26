@@ -126,12 +126,17 @@ describe("core/browser is a projection of core's surface, not a second one", () 
     const barrelModules = barrelModuleNames();
     const browserModules = browserModuleNames();
 
-    // The two node-side modules, and the reason they are named rather than derived: "reads the
+    // The node-side modules, and the reason they are named rather than derived: "reads the
     // project off disk" is not decidable from a module's source, so a predicate that tried
-    // would be a guess. Naming them here means adding a third node-side module has to come
-    // with a deliberate edit — which is the point, because a new node-side module left in the
+    // would be a guess. Naming them here means adding another node-side module has to come
+    // with a deliberate edit — which is the point, because a node-side module left in the
     // browser projection is exactly the defect this file guards.
-    const nodeSide = ["cell-registry", "config-loader"] as const;
+    //
+    // `cell-compile-fingerprint` joins them for a different reason than the other three: it reads
+    // nothing, but it hashes with `node:crypto`, and the projection's second assertion is about
+    // reachable builtins rather than about disk access. The second test's own wording says which
+    // rule applies — this is about the *primitive*, not about the project.
+    const nodeSide = ["cell-compile-fingerprint", "cell-registry", "config-loader"] as const;
 
     const expected = barrelModules.filter(name => !(nodeSide as readonly string[]).includes(name));
     expect(expected.length).toBeGreaterThan(10);

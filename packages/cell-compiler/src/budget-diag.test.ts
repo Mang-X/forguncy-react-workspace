@@ -164,4 +164,34 @@ describe("the budget itself is validated", () => {
     const diagnostic = await budgetDiagnostic(10, 0);
     expect(diagnostic.message).toMatch(/Measured band: inline/);
   });
+
+  // PR review of #77, P1 (round 5). The dependency-decision path records a size rejection, and the
+  // numbers it records have to be the compiler's — a caller that could type them could certify its
+  // own rejection, which is the defect the synthetic probe rejection was removed for. So the
+  // measurement travels on the diagnostic, which has exactly one producer.
+  it("carries the measurement it made, so a rejection cannot be certified by numbers the caller chose", async () => {
+    const diagnostic = await budgetDiagnostic(10, 4);
+
+    // The character count is the *composed* artifact's, not the bundle's: the banner, the entry
+    // wrapper and the separators are part of what is written into the cell. The measurement is
+    // compared against the figure the diagnostic's own message states, so the payload and the prose
+    // cannot drift into measuring different documents.
+    const stated = /is (\d+) characters against/.exec(diagnostic.message)?.[1];
+    expect(stated).toBeDefined();
+    expect(diagnostic.budgetEvidence?.budgetCharacters).toBe(4);
+    expect(diagnostic.budgetEvidence?.codeCharacters).toBe(Number(stated));
+    // The bundle is 10 characters and the composition only adds, so this cannot be the bundle.
+    expect(diagnostic.budgetEvidence?.codeCharacters).toBeGreaterThan(10);
+  });
+
+  it("carries no measurement on a diagnostic that measured nothing", async () => {
+    // The payload is about *this* check. A rejection for a source construct must not carry size
+    // figures, or a reader could cite a budget verdict that was never made.
+    const outcome = await compileCell(
+      { entry: "cells/bench/App.tsx", dependencies: [] },
+      { bundler: bundlerEmitting("const x = 1;"), codeBudgetCharacters: 1_000_000 },
+    );
+
+    expect(outcome.status).toBe("compiled");
+  });
 });

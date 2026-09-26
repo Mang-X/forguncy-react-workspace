@@ -4,10 +4,16 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import type { FgcLockDocument, ForguncyTargetIdentity, LockedDependencyDecision } from "./index.ts";
+import type {
+  ArtifactBudgetEvidence,
+  FgcLockDocument,
+  ForguncyTargetIdentity,
+  LockedDependencyDecision,
+} from "./index.ts";
 import {
   assertFgcLockDocument,
   canonicalizeFgcLock,
+  canonicalizeImports,
   citesDecision,
   createEmptyFgcLock,
   DECISION_EVIDENCE_KINDS,
@@ -169,6 +175,30 @@ function problemsFor(record: LockedDependencyDecision): string {
   return validateFgcLockDocument(withRecord(record)).join("\n");
 }
 
+/**
+ * Compile evidence for a rejection that the compiler confirmed.
+ *
+ * The shape #77 revision 17 settled: an identity over the composed artifact (the verdict, and the
+ * part that gets re-proven), the subject's pre-rejection decision (so the measured Cell can be
+ * replayed), and the subject's rendered share (advisory evidence a reviewer weighs — *not* a
+ * rejection rule; see the interface's header for the counterexample that retired that rule).
+ */
+function artifactEvidenceFixture(overrides: {
+  readonly subjectRenderedCharacters?: number;
+  readonly codeCharacters?: number;
+  readonly budgetCharacters?: number;
+} = {}): ArtifactBudgetEvidence {
+  return {
+    compileFingerprint: 'cell="x";budget=100000',
+    subjectDecision: { strategy: "inline" },
+    // Over cap with the subject's contribution counted, under it without: the state a rejection is
+    // allowed to rest on.
+    subjectRenderedCharacters: overrides.subjectRenderedCharacters ?? 190_000,
+    codeCharacters: overrides.codeCharacters ?? 200_000,
+    budgetCharacters: overrides.budgetCharacters ?? 100_000,
+  };
+}
+
 describe("lock provenance", () => {
   it("is governed by #4, #5 and #8, in that order", () => {
     expect(LOCK_GOVERNING_DECISIONS.map(source => source.issue)).toEqual([4, 5, 8]);
@@ -217,12 +247,31 @@ describe("fgc.lock.json model", () => {
       "resolved-dependency",
       "architectural-rejection",
       "technical-rejection",
+      "artifact-rejection",
     ]);
     expect(lockEvidenceProfileOf(inlineRecord)).toBe("resolved-dependency");
     expect(lockEvidenceProfileOf(hostRecord)).toBe("resolved-dependency");
     expect(lockEvidenceProfileOf(extensionRecord)).toBe("resolved-dependency");
     expect(lockEvidenceProfileOf(architecturalRejection)).toBe("architectural-rejection");
     expect(lockEvidenceProfileOf(technicalRejection)).toBe("technical-rejection");
+
+    // The split that revision 14 added, and the reason it is a *profile* rather than a validator
+    // special-case: a compile-observed rejection wants a **passing** probe (the package is fine,
+    // the Cell is over cap), which is the opposite of what `technical-rejection` requires. Routing
+    // it through the probe profile would make the expected state unrecordable.
+    const artifactRejection: LockedDependencyDecision = {
+      ...technicalRejection,
+      rejection: {
+        kind: "technical",
+        code: "cell-code-budget-exceeded",
+        summary: "The composed Cell is over the project's cap.",
+        remediation: "Evaluate a lighter alternative.",
+      },
+      artifactEvidence: artifactEvidenceFixture(),
+    };
+    expect(lockEvidenceProfileOf(artifactRejection)).toBe("artifact-rejection");
+    expect(LOCK_EVIDENCE_POLICY["artifact-rejection"].probeRequirement).toBe("passed");
+    expect(LOCK_EVIDENCE_POLICY["artifact-rejection"].participatesInCompilation).toBe(false);
   });
 
   it("owes a runtime check to every profile that produces a dependency", () => {
@@ -456,6 +505,51 @@ describe("determinism", () => {
 
     expect(canonicalizeFgcLock(lock).decisions.map(record => record.cellTarget)).toEqual([null, "orders-table"]);
   });
+
+  // PR review of #77, P2. `imports` is set-like — the probe fingerprint already sorts it into one
+  // input — so two spellings of one surface must not be two byte sequences in a committed lock,
+  // or #8's "deterministic and reviewable" guarantee is false for a document that is otherwise
+  // fully ordered.
+  it("produces identical bytes whatever order a declared import surface was discovered in", () => {
+    const forwards = withRecord({ ...inlineRecord, imports: ["add", "clamp"] });
+    const backwards = withRecord({ ...inlineRecord, imports: ["clamp", "add"] });
+
+    expect(serializeFgcLock(forwards)).toBe(serializeFgcLock(backwards));
+  });
+
+  it("rejects a non-canonical import surface rather than silently reordering it", () => {
+    // Refused, not canonicalized away: the lock treats decision and evidence order the same way,
+    // so the writer is told to serialize instead of the document being reordered under a reviewer.
+    const unsorted = withRecord({ ...inlineRecord, imports: ["clamp", "add"] });
+
+    expect(validateFgcLockDocument(unsorted).join("\n")).toMatch(/not the canonical spelling/);
+    expect(validateFgcLockDocument(withRecord({ ...inlineRecord, imports: ["add", "clamp"] }))).toEqual([]);
+  });
+
+  it("rejects a duplicated import surface, which is a second spelling of one set", () => {
+    const duplicated = withRecord({ ...inlineRecord, imports: ["add", "add"] });
+
+    expect(validateFgcLockDocument(duplicated).join("\n")).toMatch(/not the canonical spelling/);
+  });
+
+  it("folds an empty import surface to null, the spelling this field uses for the namespace", () => {
+    // The one form the field must never carry: an empty array would compose a fingerprint naming
+    // a surface no build ever used. `canonicalizeImports` returns null for it, so a writer cannot
+    // produce it by canonicalizing, and a hand-written one is still refused.
+    expect(canonicalizeImports([])).toBeNull();
+    expect(canonicalizeImports(["add"])).toEqual(["add"]);
+    expect(canonicalizeImports(null)).toBeNull();
+    expect(canonicalizeImports(undefined)).toBeNull();
+    expect(validateFgcLockDocument(withRecord({ ...inlineRecord, imports: [] })).join("\n")).toMatch(/empty/);
+  });
+
+  it("omits the key entirely for the namespace surface, so a pre-#77 lock is untouched", () => {
+    // A record written before this field existed has no key, and canonicalizing it must not add
+    // one — otherwise the lock's own bytes would change for a reason nothing measured.
+    const serialized = serializeFgcLock(withRecord(inlineRecord));
+
+    expect(serialized).not.toContain("imports");
+  });
 });
 
 describe("schema versioning", () => {
@@ -542,6 +636,235 @@ describe("lock metadata validation", () => {
     expect(problemsFor({ ...architecturalRejection, resolvedVersion: "7.1.0" })).toMatch(
       /keeps no dependency for the compiled cell/,
     );
+  });
+
+  // PR review of #77, P1 (round 4). Round 3's version of this test asserted the code was refused
+  // outright; that made a schema-v1 lock holding it *unreadable* rather than stale, which is the
+  // opposite of the migration contract. Revision 14 gives the code a real evidence shape instead,
+  // and the rules are now: evidence required where it belongs, refused where it does not, and a
+  // record without it stays readable (freshness reports `artifact-evidence-missing`).
+  it("refuses compile evidence attached to a code a probe observes", () => {
+    const misplaced: LockedDependencyDecision = {
+      ...technicalRejection,
+      artifactEvidence: artifactEvidenceFixture(),
+    };
+
+    expect(problemsFor(misplaced)).toMatch(/which is the evidence for a compile-observed code/);
+    // The sibling code that a probe *can* observe is untouched when it carries no artifact
+    // evidence, so this is a rule about the pairing rather than about `replace`.
+    expect(problemsFor(technicalRejection)).toBe("");
+  });
+
+  it("refuses compile evidence whose own numbers do not state the rejection", () => {
+    // The point of recording both figures is that the claim becomes checkable: an over-cap
+    // rejection whose measurement is under the cap is a contradiction.
+    const withinCap: LockedDependencyDecision = {
+      ...technicalRejection,
+      rejection: {
+        kind: "technical",
+        code: "cell-code-budget-exceeded",
+        summary: "The composed Cell is over the project's cap.",
+        remediation: "Evaluate a lighter alternative.",
+      },
+      artifactEvidence: artifactEvidenceFixture({ codeCharacters: 100 }),
+    };
+
+    expect(problemsFor(withinCap)).toMatch(/within the cap, so the evidence does not support/);
+  });
+
+  // PR review of #77, P1 (round 8). Revision 16 turned the subject's rendered share into a rejection
+  // rule — `codeCharacters - subjectRenderedCharacters <= budgetCharacters` — reading the difference
+  // as "the Cell without this package". **It is not that**, and the counterexample compiles: with
+  // `App -> A` and `App -> B -> A`, marking A as `replace` produces a byte-identical artifact,
+  // because B keeps A reachable. The subtraction removes a number, not a dependency.
+  //
+  // So the share does not reject. What is still checked is the one thing true of a share by
+  // definition: it cannot exceed the artifact it is a share of.
+  it("does not refuse on the subject's share, which is advisory evidence rather than proof", () => {
+    const shareLooksSmall: LockedDependencyDecision = {
+      ...technicalRejection,
+      cellTarget: "bench",
+      rejection: {
+        kind: "technical",
+        code: "cell-code-budget-exceeded",
+        summary: "The composed Cell is over the project's cap.",
+        remediation: "Evaluate a lighter alternative.",
+      },
+      // A sliver of the excess: a reviewer should weigh this as weak evidence, but the compiled
+      // verdict is what a `replace` rests on, so the record is accepted.
+      artifactEvidence: artifactEvidenceFixture({
+        subjectRenderedCharacters: 1_000,
+        codeCharacters: 200_000,
+        budgetCharacters: 100_000,
+      }),
+    };
+
+    expect(problemsFor(shareLooksSmall)).toBe("");
+  });
+
+  it("refuses a share larger than the artifact it is a share of", () => {
+    // The bound that *is* structural: a larger number makes the residual negative and satisfies any
+    // comparison trivially, which revision 16 accepted — so the shape check would have let a record
+    // carry an impossible attribution.
+    const impossible: LockedDependencyDecision = {
+      ...technicalRejection,
+      cellTarget: "bench",
+      rejection: {
+        kind: "technical",
+        code: "cell-code-budget-exceeded",
+        summary: "The composed Cell is over the project's cap.",
+        remediation: "Evaluate a lighter alternative.",
+      },
+      artifactEvidence: artifactEvidenceFixture({ subjectRenderedCharacters: 999_999, codeCharacters: 200_000 }),
+    };
+
+    expect(problemsFor(impossible)).toMatch(/cannot be larger than the artifact/);
+  });
+
+  // PR review of #77, P1 (round 5). A size verdict is about **one** composed Cell and that Cell's
+  // cap, but `cellTarget: null` is the lock's fallback record for *every* Cell — so accepting it
+  // here would turn one Cell's measurement into "replace this package everywhere".
+  it("refuses compile evidence that names no Cell", () => {
+    const everywhere: LockedDependencyDecision = {
+      ...technicalRejection,
+      rejection: {
+        kind: "technical",
+        code: "cell-code-budget-exceeded",
+        summary: "The composed Cell is over the project's cap.",
+        remediation: "Evaluate a lighter alternative.",
+      },
+      artifactEvidence: artifactEvidenceFixture(),
+      cellTarget: null,
+    };
+
+    expect(problemsFor(everywhere)).toMatch(/without naming the Cell it measured/);
+    // A record with no compile evidence is untouched, so a pre-revision-15 lock stays readable.
+    expect(problemsFor(technicalRejection)).toBe("");
+  });
+
+  // PR review of #77, P2 (round 5). `inspectLockRecord` runs over untrusted JSON, so a malformed
+  // value has to become a validation finding rather than a native throw.
+  it("reports a malformed compile-evidence value instead of throwing on it", () => {
+    // Reproduced through the *parser*, not the typed validator: the defect was that an explicit
+    // `null` passed the structural phase and then blew up when the semantic pass destructured it.
+    const text = JSON.stringify(
+      {
+        schemaVersion: 1,
+        decisions: [
+          {
+            ...technicalRejection,
+            rejection: {
+              kind: "technical",
+              code: "cell-code-budget-exceeded",
+              summary: "The composed Cell is over the project's cap.",
+              remediation: "Evaluate a lighter alternative.",
+            },
+            cellTarget: "bench",
+            artifactEvidence: null,
+          },
+        ],
+      },
+      null,
+      2,
+    );
+
+    expect(() => parseFgcLockDocument(text)).toThrow(FgcLockValidationError);
+    // …and the message says what was wrong rather than surfacing a `TypeError`.
+    expect(() => parseFgcLockDocument(text)).toThrow(/artifactEvidence/);
+  });
+
+  it("keeps a pre-revision-14 budget rejection readable, so it can go stale instead of unreadable", () => {
+    // The migration contract in `lock-migration.ts`: a lock written by a previous toolchain must
+    // stay readable, and a migration must not silently delete or re-decide a record it cannot
+    // interpret. Round 3 refused this outright, which made such a lock fail to *parse* — the
+    // record never reached freshness, so the invalidation the revision bump exists to produce
+    // never ran. It is accepted here; `lock-freshness.test.ts` asserts it reports stale.
+    const legacy: LockedDependencyDecision = {
+      ...technicalRejection,
+      rejection: {
+        kind: "technical",
+        code: "cell-code-budget-exceeded",
+        summary: "The candidate's artifact is over the cell code cap.",
+        remediation: "Evaluate a lighter alternative.",
+      },
+    };
+
+    expect(problemsFor(legacy)).toBe("");
+  });
+
+  // PR review of #77, P1 (round 8). The *writer* refused `replace` as a subject decision, but the
+  // parser accepted any string for `strategy` — so a hand-edited lock could persist the one state
+  // the writer considers unreachable. It is not merely malformed: a `replace` subject replays to a
+  // Cell the package is not part of, and if the artifact bytes happen to match (the fall-through
+  // measured in round 6), freshness would keep that impossible state fresh.
+  it("refuses an illegal subject decision at the read boundary, except the one a prior toolchain wrote", () => {
+    // Asserted on the **structural** pass, which is public API (`inspectFgcLockDocument`) and what
+    // `lock-migration.ts` runs on a document from an older toolchain.
+    const inspect = (subjectDecision: unknown): string =>
+      inspectFgcLockDocument({
+        schemaVersion: 1,
+        decisions: [
+          {
+            ...technicalRejection,
+            cellTarget: "bench",
+            rejection: {
+              kind: "technical",
+              code: "cell-code-budget-exceeded",
+              summary: "The composed Cell is over the project's cap.",
+              remediation: "Evaluate a lighter alternative.",
+            },
+            artifactEvidence: { ...artifactEvidenceFixture(), subjectDecision },
+          },
+        ],
+      }).join(" ");
+
+    // Each of these is a state no writer could produce, and each is refused.
+    expect(inspect({ strategy: "host" })).toMatch(/subjectDecision/);
+    expect(inspect({ strategy: "extension", globalName: "X" })).toMatch(/subjectDecision/);
+    expect(inspect({ strategy: "nonsense" })).toMatch(/subjectDecision/);
+    expect(inspect("inline")).toMatch(/subjectDecision/);
+    // A field the strategy does not take is refused too, rather than ignored: a `host` subject
+    // carrying a `libraryId` is not a `host` decision.
+    expect(inspect({ strategy: "host", globalName: "R", libraryId: "x" })).toMatch(/subjectDecision/);
+    // The three legal shapes pass, so the union is not refusing everything.
+    expect(inspect({ strategy: "inline" })).toBe("");
+    expect(inspect({ strategy: "host", globalName: "R" })).toBe("");
+    expect(inspect({ strategy: "extension", globalName: "X", libraryId: "y" })).toBe("");
+
+    // `replace` is the exception, and the reason is a migration one (#77 revision 18): revision
+    // 16's own `record` persisted it through its normal writer — a second `record` read the
+    // `replace` the first write had stored and saved it as the subject's decision — so a schema-v1
+    // lock carrying it must stay loadable. Freshness reports it unreplayable
+    // (`lock-freshness.test.ts`), and `auditSelectionDecision` refuses to *write* it.
+    expect(inspect({ strategy: "replace" })).toBe("");
+  });
+
+  it("keeps a lock written by the previous toolchain readable through the whole document path", () => {
+    // The end-to-end half: a reader loads through `parseFgcLockDocument`, so the legacy shape has
+    // to survive both passes. Failing here would mean the record never reaches freshness — the
+    // migration failure `lock-migration.ts` exists to prevent.
+    const text = JSON.stringify(
+      {
+        schemaVersion: 1,
+        decisions: [
+          {
+            ...technicalRejection,
+            cellTarget: "bench",
+            rejection: {
+              kind: "technical",
+              code: "cell-code-budget-exceeded",
+              summary: "The composed Cell is over the project's cap.",
+              remediation: "Evaluate a lighter alternative.",
+            },
+            artifactEvidence: { ...artifactEvidenceFixture(), subjectDecision: { strategy: "replace" } },
+          },
+        ],
+      },
+      null,
+      2,
+    );
+
+    expect(() => parseFgcLockDocument(text)).not.toThrow();
   });
 
   it("ties a runtime-compatibility claim to a probe that actually passed", () => {

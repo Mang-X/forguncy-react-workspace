@@ -7,22 +7,39 @@
  * (https://github.com/Mang-X/forguncy-react-workspace/issues/21), downstream of
  * #3 (the v0.1 epic). The target itself is #5's verified contract.
  *
- * ## Which half of #21's acceptance this module actually delivers
+ * ## Both halves of #21's acceptance are wired
  *
  * #21's result is required to "feed #8/#16 decision policy and compiler
- * diagnostics". Only the **compiler** half is wired here: `cell-compiler`'s
- * `auditCodeBudget` classifies a composed artifact through
- * `classifyCellCodeSize` and reports the band. The **selection-policy** half is
- * not: #16's `size` probe (`packages/dependency-resolver/src/probe/size.ts`)
- * still compares UTF-8 **bytes** against a configured hard cap and files
- * `cell-artifact-budget-exceeded`, and nothing in `probe-engine.ts`,
- * `output.codeBudgetBytes` or `selection-signals.ts` reads these bands.
+ * diagnostics", and both consumers now read these bands in this unit:
  *
- * So the two paths can disagree about one artifact — the compiler can call it
- * `inline` while the probe rejects it as over budget. That is a real
- * inconsistency, tracked as issue #77, and it is recorded here rather than
- * implied away by this module's presence: being a *governing* decision for #8/#16
- * (below) is not the same as being *consumed* by them.
+ * - **Compiler** — `cell-compiler`'s `auditCodeBudget` classifies a composed
+ *   artifact through `classifyCellCodeSize` and reports the band.
+ * - **Selection policy** — #16's `size` probe
+ *   (`packages/dependency-resolver/src/probe/size.ts`) classifies the artifact
+ *   through `classifyCellCodeSize` too, records the band and its provenance as the
+ *   probe facts `size.band`, `size.band.decision` and `size.band.basis`, and compares
+ *   the project's own cap (`cellArtifactBudgetCharacters`) in **characters**. The
+ *   config field is `codeBudgetCharacters`.
+ *
+ * Issue #77 did that wiring. Before it the probe compared UTF-8 **bytes** against a
+ * hard cap, so the two paths could disagree about one artifact — the compiler calling
+ * it `inline` while the probe rejected it as over budget. The unit is the whole reason
+ * it could not be a rename: 100,095 characters of CJK source is 300,095 bytes, so a
+ * byte comparison misclassifies a Chinese-language Cell by roughly a band.
+ *
+ * The two paths now share the **unit**, not the document. The compiler caps the
+ * composed Cell source (banner + the Cell's bundled entry + entry wrapper); the probe
+ * measures the candidate package's own bundle. Those counts differ by construction —
+ * see `size.ts`'s "Whose characters these are" — so a probe pass is evidence about the
+ * package, not a prediction that the compile will fit. What the shared unit buys is
+ * that a CJK artifact is classified and compared the same way on both paths; what it
+ * does not buy is one number describing both artifacts.
+ *
+ * The bands are still **advisory** on both paths. What a rejection turns on is a
+ * project's configured cap, never a band: #21 measured cost, it did not decide policy,
+ * and the two concepts are kept separate here (`CELL_CODE_INLINE_CEILING_CHARACTERS`
+ * and `CELL_CODE_REVIEW_CEILING_CHARACTERS` are not recommended caps) and in the probe
+ * (`observeSize`'s cap is the only rejection input).
  *
  * ## What was actually measured, and where
  *
@@ -100,13 +117,14 @@ export const CELL_CODE_BUDGET_DECISION: ArchitectureDecisionSource = {
  * "feeds #8/#16 decision policy and compiler diagnostics". Composed from the
  * records `core` owns rather than restated, so the lists cannot drift.
  *
- * **Citing a Spec is not the same as being consumed by it.** #8 and #16 are listed
- * because a change to these bands invalidates decisions they own — a lock
- * fingerprint, a selection verdict — so the change has to answer to them. It does
- * *not* mean #16's selection path reads these bands today; it does not, which is
- * what issue #77 exists to fix. Reading this list as evidence that #21's
- * "feeds #8/#16 decision policy" criterion is met would be the exact
- * overclaim the header above warns against.
+ * **Citing a Spec is not the same as being consumed by it**, and the list is not
+ * offered as evidence that either is. #8 and #16 appear because a change to these
+ * bands invalidates decisions they own — a lock fingerprint, a selection verdict —
+ * so the change has to answer to them. Whether a given consumer actually reads the
+ * bands is a separate question, answered by that consumer's own tests: #77's wiring
+ * is asserted in `dependency-resolver`'s `size` step, and the compiler's in
+ * `cell-compiler`'s budget diagnostic. A reader who wants to know whether the bands
+ * are consumed should read those, not this array.
  */
 export const CELL_CODE_BUDGET_GOVERNING_DECISIONS: readonly ArchitectureDecisionSource[] = [
   ...GOVERNING_ARCHITECTURE_DECISIONS,
@@ -416,6 +434,41 @@ export function classifyCellCodeSize(characters: number): CellCodeBudgetVerdict 
     definition,
     withinInlineBand: definition.band === "inline",
   };
+}
+
+/**
+ * Refuses a cell code budget that is not a non-negative finite number of characters.
+ *
+ * The **one** guard for a programmatic cap, shared by the two callers that compare a
+ * number rather than parse a document: `cell-compiler`'s `auditCodeBudget` and the
+ * probe's `size` step. It is a function rather than a rule each caller restates
+ * because an unvalidated budget fails in the most confusing direction available:
+ * `code.length <= Number.NaN` is `false`, so a NaN budget rejects *every* artifact
+ * with "against a configured budget of NaN" — which reads like a size problem and is
+ * a caller's typo. The same guard `classifyCellCodeSize` applies to the size, applied
+ * to the ceiling it is compared against; the two are deliberately symmetric.
+ *
+ * ## Why this is not the config's rule
+ *
+ * `cell-registry.ts` validates the same quantity *stricter* — a positive **whole**
+ * number — because it is reading a committed document an author typed, where `0`,
+ * `1.5` and `NaN` are all mistakes worth naming. A programmatic cap is different:
+ * zero is legitimate (a caller may want every non-empty artifact reported), and the
+ * compiler's tests pin that. So the shared contract is the weaker one the two
+ * numeric callers agree on, and the config layers its own diagnostic on top. The
+ * two cannot disagree about what a cap *means*, only about which values a document
+ * may carry.
+ *
+ * Throws rather than returning a diagnostic: the compiler and the probe both treat a
+ * malformed cap as a caller error rather than a finding about the artifact, and a
+ * caller that could ignore a return value is a caller that will.
+ */
+export function assertCellCodeBudget(budget: number): void {
+  if (!Number.isFinite(budget) || budget < 0) {
+    throw new Error(
+      `A cell code budget must be a non-negative finite number of characters, received ${String(budget)}.`,
+    );
+  }
 }
 
 /** The band definitions in order, lowest first — the shape a report table wants. */

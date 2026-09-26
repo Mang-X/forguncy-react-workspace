@@ -52,11 +52,15 @@ import type { PlatformConflictAssessment } from "./platform-conflicts.ts";
 import { isPlatformConflict } from "./platform-conflicts.ts";
 import type { ProbeAssessment, ProbeReport } from "./probe-protocol.ts";
 import { assessProbeReport, PROBE_DEPLOYMENT_REQUIRED_STEPS, validateProbeReport } from "./probe-protocol.ts";
-import { DEPENDENCY_REJECTION_RESPONSE } from "./rejection.ts";
+import { DEPENDENCY_REJECTION_RESPONSE, isArtifactObservedRejectionCode } from "./rejection.ts";
 import type { SelectionSignalId } from "./selection-signals.ts";
 import { findReplacementSignalRejection } from "./selection-signals.ts";
 import type { DependencyDecision, DependencyStrategy } from "./strategy.ts";
-import { strategySemantics, validateDependencyDecisionShape } from "./strategy.ts";
+import {
+  isSubjectCompileDecision,
+  strategySemantics,
+  validateDependencyDecisionShape,
+} from "./strategy.ts";
 
 // ---------------------------------------------------------------------------
 // Provenance
@@ -870,19 +874,48 @@ export function auditSelectionDecision(input: SelectionAuditInput): readonly str
       // and an unrelated build error must not be able to certify a size or asset
       // rejection. `REPLACEMENT_SIGNAL_REJECTIONS` already maps a finding to a code, so
       // the check is a comparison rather than a judgement.
+      //
+      // A compile-observed code is exempt from that comparison and gets a different one
+      // (#77 revision 14). It has no probe finding by construction, so the code cannot be
+      // observed here — what has to be observed is the evidence: the rejection must carry
+      // `artifactEvidence` whose own numbers state the over-cap claim. Without this branch the
+      // one rejection the compile can prove would be the one rejection an agent could not
+      // record, which is the dead end revision 13 created.
       if (decision.strategy === "replace" && decision.rejection.kind === "technical") {
-        const observedCodes = support.assessment.rejectionFindings
-          .map(finding => findReplacementSignalRejection(finding.signal)?.code)
-          .filter((code): code is NonNullable<typeof code> => code !== undefined);
+        if (isArtifactObservedRejectionCode(decision.rejection.code)) {
+          if (decision.artifactEvidence === undefined) {
+            // State the invariant rather than instruct the writer: the evidence is not the
+            // decision-file author's to supply (#77 round 5), so a caller missing it has either
+            // bypassed the CLI's compile step or written a record by hand. Telling them to "record
+            // the measurement" would point at the field that is now refused.
+            problems.push(
+              `The recorded technical rejection is "${decision.rejection.code}", whose evidence is a composed Cell compile rather than a probe — and this decision carries none. That code's evidence is produced by compiling the Cell (\`record\`/\`audit\` do it, and the decision file may not supply the numbers), so a record holding it without evidence reached this audit without that step.`,
+            );
+          } else if (!isSubjectCompileDecision(decision.artifactEvidence.subjectDecision)) {
+            // The **write gate**, and the reason this rule is not in the lock's semantic validator:
+            // that validator runs on the read path too, and a `replace` subject is a shape revision
+            // 16's own writer could persist — so it has to stay loadable (#77 revision 18). What it
+            // must not be is *writable*: it keeps the package out of the compiled Cell (rule 4 of
+            // #8), so it cannot describe the Cell the evidence was measured from, and a re-record
+            // would replay it to an artifact that never contained the subject.
+            problems.push(
+              `The rejection for "${decision.packageName}" records \`artifactEvidence.subjectDecision\` as ${JSON.stringify(decision.artifactEvidence.subjectDecision)}, which cannot describe the Cell the evidence was measured from: a \`replace\` keeps the package out of the compiled graph, and \`host\`/\`extension\` have to name the global they resolve to. Record the decision the package actually resolved to, or leave the field out and let \`record\` supply it from the compile.`,
+            );
+          }
+        } else {
+          const observedCodes = support.assessment.rejectionFindings
+            .map(finding => findReplacementSignalRejection(finding.signal)?.code)
+            .filter((code): code is NonNullable<typeof code> => code !== undefined);
 
-        if (!observedCodes.includes(decision.rejection.code)) {
-          const observed =
-            observedCodes.length > 0
-              ? observedCodes.join(", ")
-              : "none (the report contains no rejection finding)";
-          problems.push(
-            `The recorded technical rejection is "${decision.rejection.code}", but the machine-observed rejection codes are: ${observed}. A failed step shows the candidate cannot be accepted; it does not prove this reason. Record the code the finding maps to, or produce the finding that supports this one.`,
-          );
+          if (!observedCodes.includes(decision.rejection.code)) {
+            const observed =
+              observedCodes.length > 0
+                ? observedCodes.join(", ")
+                : "none (the report contains no rejection finding)";
+            problems.push(
+              `The recorded technical rejection is "${decision.rejection.code}", but the machine-observed rejection codes are: ${observed}. A failed step shows the candidate cannot be accepted; it does not prove this reason. Record the code the finding maps to, or produce the finding that supports this one.`,
+            );
+          }
         }
       }
     }

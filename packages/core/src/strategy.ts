@@ -12,7 +12,7 @@
  */
 
 import type { DependencyRejection } from "./rejection.ts";
-import { DEPENDENCY_REJECTION_RESPONSE } from "./rejection.ts";
+import { DEPENDENCY_REJECTION_RESPONSE, isArtifactObservedRejectionCode } from "./rejection.ts";
 
 export const DEPENDENCY_STRATEGIES = ["host", "inline", "extension", "replace"] as const;
 export type DependencyStrategy = (typeof DEPENDENCY_STRATEGIES)[number];
@@ -192,6 +192,161 @@ export interface ExtensionDependencyDecision {
   readonly globalName: string;
 }
 
+/**
+ * The composed Cell's measured size, the cap it was compiled under, and the subject's share of it.
+ *
+ * The evidence for a `cell-code-budget-exceeded` rejection (#77 revisions 14-17). Revision 13
+ * established that no probe can file that rejection; the authority is `compileCell`'s
+ * `auditCodeBudget` over the composed Cell, and this is what that call reported.
+ *
+ * ## What is *proven* here, and what is only reported
+ *
+ * Two questions a size verdict raises, answered to different strengths — and conflating them is
+ * what revision 17 corrects:
+ *
+ * 1. **Is the Cell over its cap?** — `codeCharacters > budgetCharacters`. This is the verdict, and
+ *    `compileFingerprint` makes it reproducible: a reader recompiles and compares the artifact's
+ *    bytes, so an edited source or a moved decision cannot leave a stale record reporting `fresh`.
+ * 2. **Is *this package* why?** — `subjectRenderedCharacters`, the characters the subject's own
+ *    modules contributed. **Advisory evidence, never a proof.**
+ *
+ * ## Why attribution is advisory rather than a rejection rule
+ *
+ * Revision 16 required `codeCharacters - subjectRenderedCharacters <= budgetCharacters`, reading
+ * the difference as "the Cell without this package". **It is not that**, and the counterexample
+ * compiles: with `App -> chain-a` and `App -> chain-b -> chain-a`, marking `chain-a` as `replace`
+ * produces a **byte-identical artifact** (measured: 4335 characters either way) because `chain-b`
+ * keeps it reachable. The subtraction removes a number, not a dependency.
+ *
+ * Nor can "the amount that disappears" be derived from the module graph as cheaply as the share:
+ * `renderedLength` answers *how much code belongs to this package*, while the removable amount is
+ * a question about exclusive reachability, which needs importer information and a second
+ * traversal — with its own edge cases (dynamic imports, cycles). Rather than dress a share up as a
+ * proof, this field says what it is.
+ *
+ * So a `replace` rests on the compiled verdict, and this number is what a reviewer weighs: a
+ * subject contributing most of the excess is a far better reason than one contributing a sliver. It
+ * is reported, reproducible, and explicitly not the thing that authorizes the rejection.
+ */
+export interface ArtifactBudgetEvidence {
+  /**
+   * The identity of the compile these numbers came from — `composeCellCompileFingerprint` over the
+   * composed artifact and the cap.
+   *
+   * This is what makes the verdict **checkable** rather than self-attested, and it is what `status`
+   * invalidates on. It hashes the *artifact bytes*, so an edit to any module the entry reaches, a
+   * dependency's resolved version, or a decision moving between strategies all move it.
+   */
+  readonly compileFingerprint: string;
+  /**
+   * The subject package's decision **as it was when the Cell was measured**.
+   *
+   * Recording it is what makes the measurement replayable. Recording the rejection overwrites the
+   * subject's decision with `replace`, so a later reader looking at the lock sees a Cell the subject
+   * is *not* part of — and re-recording would then renew the rejection from a compile that never
+   * contained the package. With this, the pre-rejection compile can be reproduced from the record.
+   *
+   * A strategy name and its parameters, not a full decision: it is an input to a compile, not a
+   * second copy of the lock's record. See {@link SubjectCompileDecision}.
+   */
+  readonly subjectDecision: SubjectCompileDecision;
+  /**
+   * Characters the subject's own modules contributed to the composed artifact, as the bundler
+   * accounted them.
+   *
+   * Advisory, and reproducible: `status` recomputes it from its own compile and reports
+   * `artifact-attribution-changed` if it has moved, so a hand-edited number cannot survive a
+   * freshness check the way revision 16 allowed. It is still not a proof of causation — see the
+   * interface's header — and nothing rejects on it.
+   *
+   * Zero for a subject the bundler did not flatten into this Cell, which is the honest reading: a
+   * package whose code is not in the artifact did not make it too large.
+   */
+  readonly subjectRenderedCharacters: number;
+  /** Characters in the composed Cell, as `compileCell` measured it. */
+  readonly codeCharacters: number;
+  /** The `codeBudgetCharacters` that compile was given, from the Cell's own config. */
+  readonly budgetCharacters: number;
+}
+
+/**
+ * The subject package's compile-facing decision, as the measurement saw it.
+ *
+ * Deliberately the compiler's vocabulary (`DependencyStrategy` plus the strategy's own fields)
+ * rather than a lock record: this is an input to a recompile, and carrying lock metadata here
+ * would make the evidence a second, divergent copy of the record it belongs to.
+ */
+export type SubjectCompileDecision =
+  | { readonly strategy: "inline" }
+  | { readonly strategy: "host"; readonly globalName: string }
+  | { readonly strategy: "extension"; readonly globalName: string; readonly libraryId: string };
+
+/**
+ * Whether a value is one of the strategies a subject can have been compiled under.
+ *
+ * This is the **write-side** rule: `replace` is refused because it keeps the package out of the
+ * compiled Cell (rule 4 of #8), so a Cell can never have been measured with the subject in it under
+ * `replace`, and replaying one would not reproduce the measured artifact.
+ *
+ * It is deliberately *not* the read-side rule, and the distinction matters (#77 revision 18).
+ * Revision 16's own `record` produced exactly this shape through its normal writer — a second
+ * `record` of the same rejection read the `replace` the first write had persisted and saved it as
+ * the subject's decision. That is a reproducible output of the immediately preceding toolchain under
+ * the same schema version, so a schema-v1 lock carrying it has to stay **readable** and go stale
+ * rather than fail to parse. `isReadableSubjectCompileDecision` is that weaker read-side test; see
+ * `assessArtifactEvidenceFreshness` for the staleness reason it produces.
+ */
+export function isSubjectCompileDecision(value: unknown): value is SubjectCompileDecision {
+  if (value === null || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  switch (candidate.strategy) {
+    case "inline":
+      return Object.keys(candidate).every(key => key === "strategy");
+    case "host":
+      return (
+        typeof candidate.globalName === "string" &&
+        candidate.globalName.trim().length > 0 &&
+        Object.keys(candidate).every(key => key === "strategy" || key === "globalName")
+      );
+    case "extension":
+      return (
+        typeof candidate.globalName === "string" &&
+        candidate.globalName.trim().length > 0 &&
+        typeof candidate.libraryId === "string" &&
+        candidate.libraryId.trim().length > 0 &&
+        Object.keys(candidate).every(key => key === "strategy" || key === "globalName" || key === "libraryId")
+      );
+    default:
+      // `replace` is deliberately absent, not an oversight: it keeps the package out of the compiled
+      // graph (rule 4 of #8), so a Cell can never have been measured with the subject in it under
+      // `replace`. The writer refuses to produce one; this refuses to accept one.
+      return false;
+  }
+}
+
+/**
+ * Whether a persisted subject decision is *readable*, which is weaker than whether it is legal.
+ *
+ * The difference is one value, and it exists because a schema-v1 lock can carry it legitimately:
+ * revision 16's `record` persisted `{"strategy":"replace"}` through its normal writer, so a lock
+ * written by that toolchain must still load. Such a record cannot be replayed — the package is not
+ * in the Cell it names — so freshness reports it stale rather than pretending otherwise; what it
+ * must not do is make the whole document unreadable, which is the migration contract in
+ * `lock-migration.ts`.
+ *
+ * Every *other* illegal shape is still refused at the read boundary: `replace` is the one value the
+ * previous toolchain could actually emit, so it is the only one a reader has to tolerate.
+ */
+export function isReadableSubjectCompileDecision(value: unknown): boolean {
+  if (isSubjectCompileDecision(value)) return true;
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    (value as Record<string, unknown>).strategy === "replace" &&
+    Object.keys(value as Record<string, unknown>).length === 1
+  );
+}
+
 export interface ReplaceDependencyDecision {
   readonly strategy: "replace";
   readonly packageName: string;
@@ -200,6 +355,14 @@ export interface ReplaceDependencyDecision {
    * different answers. See `rejection.ts`.
    */
   readonly rejection: DependencyRejection;
+  /**
+   * Required exactly when the rejection code is `cell-code-budget-exceeded`, refused otherwise.
+   *
+   * The pairing is the point: that code's answer comes from a compile, so a record citing it
+   * without compile evidence would be claiming the one thing a probe cannot show. See
+   * {@link ArtifactBudgetEvidence}.
+   */
+  readonly artifactEvidence?: ArtifactBudgetEvidence;
   /** Alternatives that were evaluated, not merely proposed. */
   readonly alternatives?: readonly string[];
   /** The strategy that actually replaces it, when one exists. */
@@ -245,6 +408,79 @@ export function validateDependencyDecisionShape(decision: DependencyDecision): r
     }
     if (rejection.remediation.trim().length === 0) {
       problems.push(`Rejection of "${decision.packageName}" must state a remediation; a rejection is never a dead end.`);
+    }
+
+    // The compile-evidence pairing (#77 revision 14), stated as the two things a *shape* check can
+    // settle. The requirement that a compile-observed code **carry** the evidence is deliberately
+    // not here: this validator runs on the parse path too, and a lock written before revision 14
+    // holds such a rejection with no `artifactEvidence`. Refusing it here would make an existing
+    // lock unreadable instead of stale — the opposite of the migration contract in
+    // `lock-migration.ts`. So the requirement lives on the two paths that can act on it:
+    // `auditSelectionDecision` refuses to *record* such a rejection without evidence, and freshness
+    // reports an existing one as `artifact-evidence-missing`. Both directions below are safe here
+    // because they can only fire on a record that *has* the field.
+    const { artifactEvidence } = decision;
+    const observedByCompile = rejection.kind === "technical" && isArtifactObservedRejectionCode(rejection.code);
+    if (artifactEvidence !== undefined) {
+      if (!observedByCompile) {
+        problems.push(
+          `Rejection of "${decision.packageName}" records \`artifactEvidence\`, which is the evidence for a compile-observed code; "${rejection.kind === "technical" ? rejection.code : rejection.kind}" is not one. A probe observes that code, so compile numbers there would let a writer bypass the probe path.`,
+        );
+      } else {
+        // The identity, then each measurement's own consistency (#77 revisions 15-16). The shape is
+        // the parser's job (see `inspectLockRecord`); what is checked here is that the numbers
+        // *say* what they are cited for.
+        const { compileFingerprint, subjectDecision, subjectRenderedCharacters, codeCharacters, budgetCharacters } =
+          artifactEvidence;
+        if (typeof compileFingerprint !== "string" || compileFingerprint.trim().length === 0) {
+          problems.push(
+            `Rejection of "${decision.packageName}" records \`artifactEvidence\` without a usable \`compileFingerprint\`. The identity of the compile is what ties these numbers to an artifact a reader can reproduce; record it from \`composeCellCompileFingerprint\`.`,
+          );
+        }
+        // The **readable** shape, not the legal one (#77 revision 18). This validator runs on both
+        // the read path and the write gate, and revision 16's own `record` persisted
+        // `{"strategy":"replace"}` through its normal writer — so refusing it here would make a
+        // schema-v1 lock written by the previous toolchain fail to parse. `replace` is accepted as
+        // *readable*; `auditSelectionDecision` refuses it as *writable*, and freshness reports the
+        // record `artifact-subject-decision-unreplayable`. Every other illegal shape is still
+        // refused here, because `replace` is the only one the previous toolchain could emit.
+        if (!isReadableSubjectCompileDecision(subjectDecision)) {
+          problems.push(
+            `Rejection of "${decision.packageName}" records \`artifactEvidence.subjectDecision\` as ${JSON.stringify(subjectDecision)}, which is not a decision the subject can have been compiled under. It must be \`{"strategy":"inline"}\`, or \`host\`/\`extension\` with the global (and library) those strategies resolve the package to.`,
+          );
+        }
+        for (const [name, value] of [
+          ["subjectRenderedCharacters", subjectRenderedCharacters],
+          ["codeCharacters", codeCharacters],
+          ["budgetCharacters", budgetCharacters],
+        ] as const) {
+          if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+            problems.push(
+              `Rejection of "${decision.packageName}" records \`artifactEvidence.${name}\` as ${String(value)}; it must be a non-negative finite character count.`,
+            );
+          }
+        }
+        if (Number.isFinite(codeCharacters) && Number.isFinite(budgetCharacters)) {
+          if (codeCharacters <= budgetCharacters) {
+            problems.push(
+              `Rejection of "${decision.packageName}" cites "${rejection.code}" but its \`artifactEvidence\` measures ${String(codeCharacters)} characters against a cap of ${String(budgetCharacters)} — within the cap, so the evidence does not support the rejection.`,
+            );
+          }
+          // A local bound, and the only thing checked about the attribution (#77 revision 17).
+          // The share cannot exceed the artifact it is a share *of*: a larger number would make the
+          // residual negative and satisfy any comparison trivially, which revision 16 accepted.
+          //
+          // The share is deliberately **not** a rejection rule — `codeCharacters -
+          // subjectRenderedCharacters` is not "the Cell without this package" (see
+          // `ArtifactBudgetEvidence` for the counterexample that compiles) — so nothing here refuses
+          // on it. A reviewer weighs it; `status` recomputes it.
+          if (Number.isFinite(subjectRenderedCharacters) && subjectRenderedCharacters > codeCharacters) {
+            problems.push(
+              `Rejection of "${decision.packageName}" records \`artifactEvidence.subjectRenderedCharacters: ${String(subjectRenderedCharacters)}\`, which exceeds the whole artifact's ${String(codeCharacters)} characters. A share of the artifact cannot be larger than the artifact.`,
+            );
+          }
+        }
+      }
     }
   }
 

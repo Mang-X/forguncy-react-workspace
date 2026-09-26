@@ -50,6 +50,7 @@
 import { normalize } from "node:path";
 
 import type {
+  ArtifactCompileSnapshot,
   FgcLockDocument,
   ForguncyTargetIdentity,
   LockEnvironment,
@@ -67,6 +68,7 @@ import type {
 } from "@forguncy-react-workspace/core";
 import {
   assessProbeReport,
+  assertCellCodeBudget,
   assertProbeReport,
   canonicalizeProbeReport,
   lockProbeStatusForAssessment,
@@ -153,10 +155,30 @@ export interface RunDependencyProbeOptions {
   readonly probeId?: string;
   /** Entry specifier the synthetic build imports; defaults to the package name. Part of the fingerprint. */
   readonly entry?: string;
+  /**
+   * Named bindings the synthetic build imports; empty (the default) keeps the whole namespace.
+   * Part of the fingerprint.
+   *
+   * This is what makes a size cap verdict *provable*, and it is the caller's declaration
+   * rather than something the engine infers: only the Agent knows which bindings the Cell
+   * will import, and the engine may not guess a Cell's import surface (that would be choosing
+   * what the Cell does, which is not the probe's decision). See `build.ts` and `size.ts`.
+   */
+  readonly imports?: readonly string[];
   readonly probeConfig?: Readonly<Record<string, unknown>>;
   readonly bundlerInput?: Readonly<Record<string, string>>;
-  /** Cell code budget in bytes; null (default) means no budget applies to this run. Part of the fingerprint. */
-  readonly cellArtifactBudgetBytes?: number | null;
+  /**
+   * The project's cell code cap in **characters** of emitted code; `null` (default)
+   * means no cap applies to this run. Part of the fingerprint.
+   *
+   * Characters, not bytes (#77): the same quantity `compileCell`'s
+   * `codeBudgetCharacters` caps and the quantity #21's bands classify. This was
+   * `cellArtifactBudgetBytes` before #77 and the rename is deliberate — the unit
+   * decides which artifact the cap rejects, so a caller that kept the old name and
+   * passed a byte count would be refused at the type level rather than silently
+   * comparing two different quantities.
+   */
+  readonly cellArtifactBudgetCharacters?: number | null;
   /** Defaults to the verified runtime contract (#5). Null records a run with no target named. */
   readonly target?: ForguncyTargetIdentity | null;
   /** Defaults to reading `vite-plus` from the workspace manifest. */
@@ -306,7 +328,15 @@ function cacheHitAnswersThisRun(
 export async function runDependencyProbe(options: RunDependencyProbeOptions): Promise<DependencyProbeResult> {
   const probeId = options.probeId ?? "inline-bundle";
   const entry = options.entry ?? options.packageName;
-  const budget = options.cellArtifactBudgetBytes ?? null;
+  const budgetCharacters = options.cellArtifactBudgetCharacters ?? null;
+  // Validated before the fingerprint is composed, not only before the comparison. A
+  // non-finite cap would compose a `null` config segment, so `NaN`, `Infinity` and
+  // `-Infinity` would share one fingerprint while producing different rejections — and
+  // a cache keyed by that fingerprint would then answer a run it does not describe. The
+  // guard is `core`'s, the same one `observeSize` and the compiler apply.
+  if (budgetCharacters !== null) {
+    assertCellCodeBudget(budgetCharacters);
+  }
   const target = options.target === undefined ? defaultProbeTarget() : options.target;
   const toolchain = options.toolchain ?? (await readToolchainIdentity(options.projectRoot));
 
@@ -314,12 +344,14 @@ export async function runDependencyProbe(options: RunDependencyProbeOptions): Pr
   const identity = await resolvePackageIdentity(options.projectRoot, options.packageName);
   const environment: ProbeEnvironment = buildProbeEnvironment(identity, toolchain, target);
 
+  const imports = options.imports ?? [];
   const composed = composeProbeFingerprint({
     probeId,
     entry,
+    imports,
     probeConfig: options.probeConfig,
     bundlerInput: options.bundlerInput,
-    budget,
+    budgetCharacters,
   });
   const fingerprint = composed.fingerprint;
   const cache = options.cache === false ? null : (options.cache ?? createFileProbeCache(options.projectRoot));
@@ -374,6 +406,7 @@ export async function runDependencyProbe(options: RunDependencyProbeOptions): Pr
     projectRoot: options.projectRoot,
     packageName: identity.packageName,
     entry,
+    imports,
   });
 
   const buildFailed = build.outcome === "failed";
@@ -418,7 +451,10 @@ export async function runDependencyProbe(options: RunDependencyProbeOptions): Pr
   steps.addRejections(runtimePatterns.rejectionFindings);
   steps.record(runtimePatterns.validation);
 
-  const size = observeSize(build.output, budget);
+  // A named import surface makes the measured artifact a lower bound on what the Cell
+  // carries, which is the only shape a cap rejection is sound on; a namespace build measures
+  // an upper bound. Derived from the surface the caller declared, never guessed here.
+  const size = observeSize(build.output, budgetCharacters, imports.length > 0 ? "lower-leaning" : "upper-leaning");
   steps.addFacts(size.facts);
   steps.addRisks(size.risks);
   steps.addRejections(size.rejectionFindings);
@@ -572,6 +608,16 @@ export interface ProbeLockEnvironmentOptions {
    * #8's answer when the environment cannot say what the probe would produce now.
    */
   readonly probeFingerprints?: Readonly<Record<string, string>>;
+  /**
+   * Current compile identities by **record identity** (`packageName\u0000cellTarget`), for
+   * `artifact-rejection` records. Defaults to `{}` for the same fail-closed reason as
+   * `probeFingerprints`: a missing entry reports `artifact-compile-unknown` (stale) rather than
+   * passing.
+   *
+   * Keyed by record rather than by Cell, because which Cell state a rejection was measured from is
+   * a property of the record — two rejections in one Cell can come from different states.
+   */
+  readonly artifactFingerprints?: Readonly<Record<string, ArtifactCompileSnapshot>>;
   readonly extensionVersions?: Readonly<Record<string, string>>;
   readonly extensionIdentities?: Readonly<Record<string, string>>;
   readonly lock?: FgcLockDocument;
@@ -606,6 +652,10 @@ export async function probeLockEnvironment(
     target,
     toolchain,
     probeFingerprints,
+    // Carried through rather than defaulted away: an environment built here is how a caller hands
+    // the freshness axis the compile identity it just measured, so dropping it would make every
+    // `artifact-rejection` report `artifact-compile-unknown` no matter what the caller knew.
+    artifactFingerprints: options.artifactFingerprints ?? {},
     extensionVersions: options.extensionVersions ?? {},
     extensionIdentities: options.extensionIdentities ?? {},
   };

@@ -37,10 +37,19 @@ import {
 } from "./governance.ts";
 import type { RuntimeContractTarget } from "./runtime-contract.ts";
 import { RUNTIME_CONTRACT_TARGET } from "./runtime-contract.ts";
-import { ARCHITECTURAL_REJECTION_CODES, TECHNICAL_REJECTION_CODES } from "./rejection.ts";
+import {
+  ARCHITECTURAL_REJECTION_CODES,
+  TECHNICAL_REJECTION_CODES,
+  isArtifactObservedRejectionCode,
+} from "./rejection.ts";
 import type { TechnicalRejectionCode } from "./rejection.ts";
 import type { DependencyDecision, DependencyStrategy } from "./strategy.ts";
-import { requiresRealRuntimeValidation, strategySemantics, validateDependencyDecisionShape } from "./strategy.ts";
+import {
+  isReadableSubjectCompileDecision,
+  requiresRealRuntimeValidation,
+  strategySemantics,
+  validateDependencyDecisionShape,
+} from "./strategy.ts";
 
 // ---------------------------------------------------------------------------
 // Provenance
@@ -240,6 +249,34 @@ export interface LockRecordMetadata {
    */
   readonly cellTarget: string | null;
   /**
+   * The named bindings the probe's synthetic entry imported, in canonical (sorted, deduplicated)
+   * order; null when it kept the whole namespace.
+   *
+   * Recorded for two reasons, and **neither of them authorizes a rejection** (#77 revision 13:
+   * no probe run files the cap verdict, because the probe's build and the compiler's do not share
+   * a resolution graph and the surface is a caller's declaration anyway):
+   *
+   * - It is one of the fingerprint's declared inputs, so `status` has to read it back to rebuild
+   *   the fingerprint the record was measured under. Without it a named-surface record would be
+   *   rebuilt as a namespace run and report `probe-fingerprint-changed` for a measurement that
+   *   had not moved.
+   * - It makes the record's own size evidence interpretable: a namespace probe's number leans
+   *   over what a Cell carries, a named one leans under. A reader weighing the estimate needs to
+   *   know which it is; the estimate itself is never disqualifying.
+   *
+   * Optional, not required, and the read path is why: `inspectLockRecord` accepts an **absent**
+   * key as the namespace surface, and `parseFgcLockDocument` casts the parsed JSON without
+   * normalizing it. A required field would therefore be a type claiming a key that a lock
+   * written before #77 does not have — the annotation would assert more than the read path
+   * guarantees, and every consumer would be reading `undefined` where the type promised
+   * `string[] | null`. Stating it as optional keeps the two in agreement, and the three spellings
+   * of "the whole namespace" (absent, `undefined`, `null`) all mean one thing.
+   *
+   * The fingerprint composition omits the key entirely for that state, so such a record still
+   * recomposes to the bytes it was written with.
+   */
+  readonly imports?: readonly string[] | null;
+  /**
    * Exact resolved version of the package in this workspace.
    *
    * Null for every `replace` record, which by rule 4 of #8 keeps no dependency:
@@ -319,14 +356,15 @@ export const LOCK_EVIDENCE_PROFILES = [
   "resolved-dependency",
   "architectural-rejection",
   "technical-rejection",
+  "artifact-rejection",
 ] as const;
 export type LockEvidenceProfile = (typeof LOCK_EVIDENCE_PROFILES)[number];
 
 /**
  * Which probe outcome a profile's evidence is.
  *
- * Named for the outcome rather than for "how much evidence", because the three
- * profiles want three different outcomes and the difference is semantic:
+ * Named for the outcome rather than for "how much evidence", because the profiles
+ * want different outcomes and the difference is semantic:
  *
  * - `none` — no probe belongs to this record at all.
  * - `passed` — the record is usable once a probe passes. A failed or missing
@@ -338,6 +376,12 @@ export type LockEvidenceProfile = (typeof LOCK_EVIDENCE_PROFILES)[number];
  *   package's requirements rather than from a bundle attempt, and freshness
  *   reports it as unverified. `passed` is refused: a record cannot both reject a
  *   candidate and hold a probe that accepted it.
+ *
+ * `passed` covers two profiles with opposite conclusions, and that is the point rather than a
+ * conflation: a `resolved-dependency` record *adopts* the package a passing probe describes,
+ * while an `artifact-rejection` record rejects a different document — the composed Cell — that
+ * the probe never builds. In both cases the package itself passed, so requiring anything else
+ * would make the expected state (a good package that produces a too-large Cell) unrecordable.
  */
 export const LOCK_PROBE_REQUIREMENTS = ["none", "passed", "not-passed"] as const;
 export type LockProbeRequirement = (typeof LOCK_PROBE_REQUIREMENTS)[number];
@@ -373,6 +417,21 @@ export const LOCK_EVIDENCE_POLICY: Readonly<Record<LockEvidenceProfile, LockEvid
     // the target it was observed under.
     invalidatedByTargetChange: true,
     probeRequirement: "not-passed",
+    participatesInCompilation: false,
+  },
+  "artifact-rejection": {
+    profile: "artifact-rejection",
+    // The package's own probe **passed** — the rejection is about the composed Cell, which no
+    // probe builds (#77 revision 14). Its evidence is `artifactEvidence`: the measured
+    // `codeCharacters` against the cap the compile used.
+    //
+    // Tied to the target because the Cell is compiled for one: a different host React, or a
+    // different product build, composes a different artifact.
+    invalidatedByTargetChange: true,
+    probeRequirement: "passed",
+    // False for the same reason as the other rejections: a `replace` keeps no dependency for the
+    // compiled cell, so this package does not appear in its graph. What *is* compiled is the
+    // replacement, under its own record.
     participatesInCompilation: false,
   },
 };
@@ -452,7 +511,14 @@ export function lockEvidenceProfileForDecision(decision: DependencyDecision): Lo
   if (decision.strategy !== "replace") {
     return "resolved-dependency";
   }
-  return decision.rejection.kind === "architectural" ? "architectural-rejection" : "technical-rejection";
+  if (decision.rejection.kind === "architectural") {
+    return "architectural-rejection";
+  }
+  // A technical rejection splits by *what observed it*: a probe reports the package's own
+  // failure, while a compose reports the Cell's size. The two want different probe outcomes —
+  // `not-passed` and `passed` respectively — so the split has to happen here, where the code is
+  // known, rather than in a validator that would have to special-case the policy back.
+  return isArtifactObservedRejectionCode(decision.rejection.code) ? "artifact-rejection" : "technical-rejection";
 }
 
 export function lockEvidenceProfileOf(record: LockedDependencyDecision): LockEvidenceProfile {
@@ -756,17 +822,45 @@ export function isCanonicallyOrdered(decisions: readonly LockedDependencyDecisio
 }
 
 /**
- * The canonical document: decisions in canonical order, evidence links sorted.
+ * The canonical spelling of a declared import surface: sorted, deduplicated, or `null`.
  *
- * Sorting the links matters for the same reason as sorting the decisions — an
- * Agent that discovers evidence in a different order must not produce a diff.
+ * The field is a **set** — `imports: ["add", "clamp"]` and `["clamp", "add"]` name one surface,
+ * and the probe fingerprint already sorts them into one input — so the lock has to store one
+ * byte sequence for it or #8's "deterministic and reviewable" guarantee is false for a document
+ * that is otherwise fully ordered. `canonicalizeFgcLock` applies this, `inspectLockRecord`
+ * rejects a document that has not, and the recording API writes it, so all three agree by
+ * construction rather than by three copies of a sort.
+ *
+ * An empty array is the namespace surface, which this format spells as `null`: returning `null`
+ * here means a caller cannot write the one spelling the lock's own validator refuses.
+ */
+export function canonicalizeImports(imports: readonly string[] | null | undefined): readonly string[] | null {
+  if (imports === null || imports === undefined) {
+    return null;
+  }
+  const unique = [...new Set(imports)].sort();
+  return unique.length === 0 ? null : unique;
+}
+
+/**
+ * The canonical document: decisions in canonical order, evidence links sorted, and each
+ * declared import surface in set spelling.
+ *
+ * Sorting matters for the same reason each time — an Agent that lists the same things in a
+ * different order must not produce a diff.
  */
 export function canonicalizeFgcLock(lock: FgcLockDocument): FgcLockDocument {
   return {
     schemaVersion: lock.schemaVersion,
     decisions: [...lock.decisions]
       .sort(compareLockDecisions)
-      .map(record => ({ ...record, evidence: [...record.evidence].sort(compareEvidenceLinks) })),
+      .map(record => ({
+        ...record,
+        evidence: [...record.evidence].sort(compareEvidenceLinks),
+        // Omitted entirely for the namespace surface, so a record written before this field
+        // existed still serializes without the key — the same reason the fingerprint omits it.
+        ...(record.imports == null ? {} : { imports: canonicalizeImports(record.imports) }),
+      })),
   };
 }
 
@@ -898,6 +992,80 @@ function inspectLockRecord(record: unknown, where: string): readonly string[] {
   inspectNullableString(problems, record, "cellTarget", where);
   if (typeof record.cellTarget === "string" && record.cellTarget.trim().length === 0) {
     problems.push(`${where} must either name a cell target or record null for "applies to every target".`);
+  }
+
+  // `imports` is inspected on its own rather than through `inspectStringArrayOrAbsent`, because
+  // null is a *meaning* here — the namespace surface — and that helper rejects it. The two
+  // spellings of "no named surface" are an absent key (a lock written before #77) and an explicit
+  // null (what the merge writes); both are valid, and the rejected forms are an empty array, which
+  // would compose a fingerprint carrying a surface no build ever used, a blank name, and — since
+  // revision 13 — a non-canonical spelling (unsorted, or with duplicates).
+  if (record.imports !== undefined && record.imports !== null) {
+    if (!Array.isArray(record.imports) || record.imports.some(item => typeof item !== "string")) {
+      problems.push(`${where} must declare \`imports\` as an array of strings, or null for the whole namespace.`);
+    } else if (record.imports.length === 0) {
+      problems.push(
+        `${where} records an empty \`imports\` array. An empty surface is the namespace probe, which this field spells as null — an empty array would compose a fingerprint carrying a surface no build ever used.`,
+      );
+    } else if (record.imports.some(name => name.trim().length === 0)) {
+      problems.push(`${where} records a blank binding name in \`imports\`; every entry must name an imported binding.`);
+    } else {
+      // The surface is set-like — the fingerprint sorts it — so two spellings of one surface must
+      // not be two byte sequences in a committed lock. This is a *validation* rather than a
+      // silent canonicalization, matching how the lock treats decision and evidence order: the
+      // reader is told to serialize, instead of the document being quietly reordered under a
+      // reviewer. `canonicalizeImports` is the one definition both this and the serializer use,
+      // so the accepted spelling cannot drift from the produced one.
+      // `?? []` cannot fire here — the branch above already returned for an empty array — but the
+      // helper is total by design, so its `null` return has to be narrowed for the caller rather
+      // than asserted away.
+      const canonical = canonicalizeImports(record.imports) ?? [];
+      if (canonical.join("\u0000") !== record.imports.join("\u0000")) {
+        problems.push(
+          `${where} records \`imports\` as [${record.imports.join(", ")}], which is not the canonical spelling [${canonical.join(", ")}]. The surface is a set: serialize through \`serializeFgcLock\` (or record through \`recordDependencyDecision\`) so two spellings of one surface cannot be two lock bytes.`,
+        );
+      }
+    }
+  }
+
+  // The compile evidence, shape-checked here rather than only in the typed semantic pass (#77
+  // round 5, P2). `inspectLockRecord` runs over *untrusted* JSON, so a malformed value has to
+  // become an `FgcLockValidationError` finding rather than a native throw: an explicit
+  // `"artifactEvidence": null` would otherwise pass the structural phase and then blow up when the
+  // semantic pass destructures it. Only the shape is checked here; whether the evidence belongs to
+  // the cited code, and whether its numbers state the rejection, is the semantic pass's job.
+  if (record.artifactEvidence !== undefined) {
+    const evidence: unknown = record.artifactEvidence;
+    if (!isPlainObject(evidence)) {
+      problems.push(
+        `${where} must declare \`artifactEvidence\` as an object describing the compiles it rests on, or omit it.`,
+      );
+    } else {
+      if (typeof evidence.compileFingerprint !== "string") {
+        problems.push(`${where} must declare \`artifactEvidence.compileFingerprint\` as a string, or omit \`artifactEvidence\`.`);
+      }
+      for (const field of ["subjectRenderedCharacters", "codeCharacters", "budgetCharacters"]) {
+        const value = evidence[field];
+        if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+          problems.push(`${where} must declare \`artifactEvidence.${field}\` as a non-negative finite character count.`);
+        }
+      }
+      // The subject's own decision is validated as the discriminated union it is (#77 revision 17),
+      // not merely for the presence of a `strategy` string. This is the untrusted-JSON pass, so a
+      // hand-edited `replace` — the one state the writer refuses to produce because the package is
+      // not in that Cell — has to be refused here rather than reaching the semantic pass and
+      // replaying to an artifact that never contained the subject.
+      // The **read-side** rule, deliberately weaker than the writer's (#77 revision 18). Revision
+      // 16's own `record` persisted `{"strategy":"replace"}` through its normal writer, so a
+      // schema-v1 lock carrying that value has to stay loadable — refusing it here would fail the
+      // parse and the record would never reach freshness, which is the migration failure
+      // `lock-migration.ts` exists to prevent. Freshness reports it unreplayable instead.
+      if (!isReadableSubjectCompileDecision(evidence.subjectDecision)) {
+        problems.push(
+          `${where} must declare \`artifactEvidence.subjectDecision\` as \`{"strategy":"inline"}\` or a \`host\`/\`extension\` object with its \`globalName\` (and \`libraryId\`), or omit \`artifactEvidence\`.`,
+        );
+      }
+    }
   }
 
   inspectNullableString(problems, record, "resolvedVersion", where);
@@ -1271,6 +1439,19 @@ function validateRejectedCandidate(where: string, record: LockedDependencyDecisi
       : [
           `${where} is an architectural rejection: the capability belongs to Forguncy whatever version the package is, so recording a rejected candidate version would tie an ownership conflict to a release.`,
         ];
+  }
+
+  // A compile-observed rejection is about **one** composed Cell and that Cell's configured cap
+  // (#77 round 5, P1). `cellTarget: null` is not "unspecified" in this lock — it is the fallback
+  // record for every Cell — so accepting it here would let one Cell's size observation become
+  // "replace this package everywhere". Required only when the record carries the compile evidence
+  // revision 15 introduced: a pre-revision-15 record has none, and refusing it would make an
+  // existing lock unreadable instead of stale (`assessArtifactEvidenceFreshness` reports
+  // `artifact-compile-unknown` for exactly that shape).
+  if (record.artifactEvidence !== undefined && record.cellTarget === null) {
+    return [
+      `${where} records compile evidence for a "${record.rejection.kind === "technical" ? record.rejection.code : ""}" rejection without naming the Cell it measured. A composed Cell and its cap belong to one Cell target, and a null target is the record that applies to every Cell — so this would turn one Cell's size verdict into a rejection of the package everywhere. Name the Cell, or drop the compile evidence.`,
+    ];
   }
 
   if (rejectedCandidate === null || rejectedCandidate.version.trim().length === 0) {

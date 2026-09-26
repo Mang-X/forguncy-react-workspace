@@ -190,7 +190,7 @@ export type { ComposedProbeFingerprint, ComposeProbeFingerprintInput } from "./p
 export { createFileProbeCache, PROBE_CACHE_DIRECTORY, probeCacheRelativePath } from "./probe/cache.ts";
 export type { ProbeCache } from "./probe/cache.ts";
 
-export { BUILD_CONFIGURATION_FINGERPRINT, probeEntryPath, runCandidateBuild } from "./probe/build.ts";
+export { BUILD_CONFIGURATION_FINGERPRINT, entrySource, probeEntryPath, runCandidateBuild } from "./probe/build.ts";
 export type { CandidateBuildOptions, CandidateBuildResult } from "./probe/build.ts";
 
 export { findNodeOnlySpecifiers, observeNodeBuiltins } from "./probe/node-scan.ts";
@@ -239,7 +239,7 @@ export { observeRuntimePatterns } from "./probe/runtime-pattern-scan.ts";
 export type { RuntimePatternObservation } from "./probe/runtime-pattern-scan.ts";
 
 export { measureArtifactSize, observeSize } from "./probe/size.ts";
-export type { ArtifactSize, SizeObservation } from "./probe/size.ts";
+export type { ArtifactSize, SizeEstimateBias, SizeObservation } from "./probe/size.ts";
 
 export {
   buildProbeEnvironment,

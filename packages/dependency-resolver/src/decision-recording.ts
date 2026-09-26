@@ -57,7 +57,7 @@ import type {
   RejectedCandidateEvidence,
   ToolchainIdentity,
 } from "@forguncy-react-workspace/core";
-import { compareEvidenceLinks } from "@forguncy-react-workspace/core";
+import { canonicalizeImports, compareEvidenceLinks } from "@forguncy-react-workspace/core";
 
 import { findExactLockDecision, readFgcLock, upsertLockDecision, writeFgcLock } from "./lock-store.ts";
 
@@ -79,6 +79,16 @@ export interface DependencyDecisionUpdate {
   readonly decision: DependencyDecision;
   /** The cell target the decision applies to; defaults to null, i.e. every target. */
   readonly cellTarget?: string | null;
+  /**
+   * The named bindings the probe's synthetic entry imported, sorted; omit or null for the
+   * whole-namespace probe.
+   *
+   * Stated rather than derived from the fingerprint: the fingerprint is one opaque string and
+   * a reader asking "does this record's cap rejection rest on a lower bound" must not have to
+   * parse it. It also has to survive into the record for `status` to recompose the same
+   * fingerprint at all.
+   */
+  readonly imports?: readonly string[] | null;
   /** The measurement being recorded. */
   readonly probe: LockProbeEvidence;
   readonly resolvedVersion?: string | null;
@@ -130,6 +140,13 @@ export function mergeDependencyDecisionUpdate(
     // #4's fields, including `packageName` and every strategy-specific one.
     ...update.decision,
     cellTarget: update.cellTarget ?? existing?.cellTarget ?? null,
+    // Canonicalized through `core`'s helper, which is the same definition the serializer and the
+    // lock's validator use. Doing it here rather than leaving it to the serializer is what makes
+    // the *written* file canonical: `["clamp","add"]` and `["add","clamp"]` name one surface (the
+    // fingerprint already sorts them), so recording either must produce one byte sequence. The
+    // helper also folds an empty array to null — the spelling this field uses for the whole
+    // namespace, and the one the lock's validator refuses as an array.
+    imports: update.imports === undefined ? canonicalizeImports(existing?.imports) : canonicalizeImports(update.imports),
     resolvedVersion: update.resolvedVersion ?? null,
     probe: update.probe,
     target: update.target ?? null,

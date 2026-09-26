@@ -66,13 +66,20 @@ interface FrozenReport {
  *
  * A frozen value must move only when a **scanner** changes, or the tripwire fires on unrelated
  * churn and the reader learns to update it without reading. A chunk name is a hash of the whole
- * artifact (so it moves with the bundler or the toolchain, not with a scan) and a byte count
- * moves with any bundler release, so both are reported by their own step's tests instead.
+ * artifact (so it moves with the bundler or the toolchain, not with a scan) and a size count
+ * moves with any bundler release, so all of them are reported by their own step's tests instead.
+ *
+ * `size.codeCharacters` belongs on this list for exactly the reason the byte counts do, even
+ * though it is a *character* count: it is a measurement of a bundler's output, so it moves when
+ * Rolldown's codegen does. The band facts below deliberately do **not** — a band is a policy
+ * classification rather than a measurement, and freezing which band a fixture lands in is the
+ * point: if a scanner change moved a fixture across a band boundary, a reader should see it here.
  */
 const VOLATILE_FACT_NAMES: ReadonlySet<string> = new Set([
   "artifact.chunks",
   "size.codeBytes",
   "size.totalBytes",
+  "size.codeCharacters",
 ]);
 
 function freeze(report: ProbeReport): FrozenReport {
@@ -130,6 +137,7 @@ const GOLDEN: readonly GoldenCase[] = [
         "node-builtin-scan:graph.reachable-file-count=1",
         "node-builtin-scan:signal.no-node-builtins=true",
         "build:build.entry-specifier=\"tiny-math\"",
+        "build:build.import-surface=[]",
         "build:build.warning-codes=[]",
         "artifact-scan:artifact.assets=[]",
         "artifact-scan:artifact.chunk-count=1",
@@ -144,6 +152,10 @@ const GOLDEN: readonly GoldenCase[] = [
         "runtime-pattern-scan:runtime.patterns=[]",
         "runtime-pattern-scan:runtime.wasm-source-markers=[]",
         "size:size.assetBytes=0",
+        "size:size.band=\"inline\"",
+        "size:size.band.basis=\"characters of emitted code\"",
+        "size:size.band.decision=\"https://github.com/Mang-X/forguncy-react-workspace/issues/21\"",
+        "size:size.estimateBias=\"upper-leaning\"",
       ],
       risks: [],
       rejections: [],
@@ -178,6 +190,7 @@ const GOLDEN: readonly GoldenCase[] = [
         "node-builtin-scan:graph.reachable-file-count=1",
         "node-builtin-scan:signal.no-node-builtins=true",
         "build:build.entry-specifier=\"heavy-parser\"",
+        "build:build.import-surface=[]",
         "build:build.warning-codes=[\"EMPTY_IMPORT_META\"]",
         "artifact-scan:artifact.assets=[]",
         "artifact-scan:artifact.chunk-count=1",
@@ -192,6 +205,10 @@ const GOLDEN: readonly GoldenCase[] = [
         "runtime-pattern-scan:runtime.patterns=[\"import-meta-url-asset\",\"worker\"]",
         "runtime-pattern-scan:runtime.wasm-source-markers=[\"index.js\"]",
         "size:size.assetBytes=0",
+        "size:size.band=\"inline\"",
+        "size:size.band.basis=\"characters of emitted code\"",
+        "size:size.band.decision=\"https://github.com/Mang-X/forguncy-react-workspace/issues/21\"",
+        "size:size.estimateBias=\"upper-leaning\"",
       ],
       risks: [
         "import-meta-url-asset@runtime-pattern-scan:index.js",
@@ -271,6 +288,7 @@ const GOLDEN: readonly GoldenCase[] = [
         "node-builtin-scan:graph.reachable-file-count=2",
         "node-builtin-scan:signal.no-node-builtins=true",
         "build:build.entry-specifier=\"shaken-native\"",
+        "build:build.import-surface=[]",
         "build:build.warning-codes=[]",
         "artifact-scan:artifact.assets=[]",
         "artifact-scan:artifact.chunk-count=1",
@@ -285,6 +303,10 @@ const GOLDEN: readonly GoldenCase[] = [
         "runtime-pattern-scan:runtime.patterns=[]",
         "runtime-pattern-scan:runtime.wasm-source-markers=[]",
         "size:size.assetBytes=0",
+        "size:size.band=\"inline\"",
+        "size:size.band.basis=\"characters of emitted code\"",
+        "size:size.band.decision=\"https://github.com/Mang-X/forguncy-react-workspace/issues/21\"",
+        "size:size.estimateBias=\"upper-leaning\"",
       ],
       risks: [],
       rejections: [],

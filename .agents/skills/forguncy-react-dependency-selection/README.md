@@ -62,6 +62,12 @@
 | `--runtime-smoke <module>` | 执行该本地模块作为 `runtime-smoke` hook；`validatedAgainstRuntime` 需要它 |
 | `--runtime-smoke-export <name>` | 指定 hook 的导出名（默认 `default`） |
 | `--extension-catalog <file>` | 用真实清单/已验证目录校验 `extension` 的 `libraryId`（两种输入 shape 不同，见 `references/decision-recording.md`） |
+| `--cell <id>` | 把这次运行限定到配置里声明的某个 Cell，并按该 Cell `output` 里声明的 `codeBudgetCharacters` 做**估算**比较（进指纹；决策文件里写了 `cellTarget` 就不必再传，两者不一致会被拒绝） |
+| `--imports <a,b>` | 声明 Cell 会具名导入的绑定，让 probe 的合成入口从整包命名空间变为具名导入，从而使尺寸估算偏向"下"（进指纹；同样可由决策文件的 `imports` 提供） |
+
+`--cell` 声明的上限只用于**估算**：probe 在任何情况下都**不产生** `cell-artifact-budget-exceeded`。原因与 #77 的演进有关——probe 用原始 Rolldown 构建一个合成候选，而编译器的 Cell 构建会装 `createInterceptionResolver` 把 `host`/`extension` 依赖换成虚拟模块或页面全局，两个构建的解析图不同，合成候选可能比真实 Cell **更大**；`--imports` 也不能修复这一点（它是调用方声明，不是从 Cell 读出来的事实）。仓库里的 `react-library` fixture 就是反例：`DatePicker` 的具名 probe 会把 npm `react` 内联进去，真实编译却把它解析到宿主 React。硬上限判定的唯一权威是编译器对**合成后 Cell 源码**的 `codeBudgetCharacters` 诊断，probe 的数字只作参考。
+
+**但这个真实判定是可记录的**：决策文件写 `rejection.code = "cell-code-budget-exceeded"` 时**必须**带 `artifactEvidence: { codeCharacters, budgetCharacters }`，两个数字逐字誊自编译器自己的诊断；`budgetCharacters` 还要等于该 Cell 声明的 `output.codeBudgetCharacters`，否则会被拒绝（详见 `references/decision-recording.md`）。revision 14 之前写的同类记录仍然**可读**、只是 stale（`artifact-evidence-missing`），不升 schema。
 
 未知选项、以及需要值的选项缺值，都会直接 usage error——不会静默退回默认值。对验证型 CLI 这很关键：拼错 `--extension-catalog` 与漏写它落在同一个地方（使用默认目录），只报错才能让二者可分辨。
 

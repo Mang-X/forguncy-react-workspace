@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import type { LockEnvironment, LockedDependencyDecision } from "./index.ts";
+import { parseFgcLockDocument } from "./index.ts";
+import type {
+  ArtifactBudgetEvidence,
+  ArtifactCompileSnapshot,
+  LockEnvironment,
+  LockedDependencyDecision,
+} from "./index.ts";
 import {
   assessLockDecision,
   findLockDecision,
@@ -26,6 +32,58 @@ const CELL_FINGERPRINT = "probe=inline-bundle;entry=src/cells/orders-table/App.t
 const BUNDLER_FINGERPRINT = "probe=amd-detect;entry=src/cells/orders-table/App.tsx";
 const EXTENSION_IDENTITY = "sha256:9f1c2b7d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091";
 
+/** The Cell a compile-observed rejection is about, and its compile identity. */
+const BENCH_CELL = "bench";
+const ARTIFACT_FINGERPRINT = 'cell="abc";budget=100000';
+
+/**
+ * Compile evidence for a rejection the compiler confirmed.
+ *
+ * The shape #77 revision 16 settled: an identity over the composed artifact, the subject's
+ * pre-rejection decision, and the two compiles a size verdict has to justify. Defaults describe the
+ * state a rejection is allowed to rest on — over cap with the subject, under it without.
+ */
+/**
+ * What the environment knows about one record's compile: the artifact identity and the subject's
+ * rendered share. One value, because they describe one compile (#77 revision 17).
+ */
+function artifactCompile(
+  fingerprint: string,
+  subjectRenderedCharacters: number,
+  overrides: { readonly codeCharacters?: number; readonly budgetCharacters?: number } = {},
+): ArtifactCompileSnapshot {
+  return {
+    fingerprint,
+    // The fixture's evidence defaults, so a case that only cares about the identity or the share
+    // does not have to restate the verdict numbers.
+    codeCharacters: overrides.codeCharacters ?? 200_000,
+    budgetCharacters: overrides.budgetCharacters ?? 100_000,
+    subjectRenderedCharacters,
+  };
+}
+
+/** The artifact-axis staleness reasons for a record: what this file's cases assert on. */
+function artifactReasons(record: LockedDependencyDecision, environment: LockEnvironment): readonly string[] {
+  return reasonsFor(record, environment).stalenessReasons.filter((reason: string) => reason.startsWith("artifact-"));
+}
+
+function artifactEvidenceFixture(overrides: {
+  readonly subjectRenderedCharacters?: number;
+  readonly codeCharacters?: number;
+  readonly budgetCharacters?: number;
+  readonly compileFingerprint?: string;
+} = {}): ArtifactBudgetEvidence {
+  return {
+    compileFingerprint: overrides.compileFingerprint ?? ARTIFACT_FINGERPRINT,
+    subjectDecision: { strategy: "inline" },
+    // Over cap with the subject's contribution counted, under it without: the state a rejection is
+    // allowed to rest on.
+    subjectRenderedCharacters: overrides.subjectRenderedCharacters ?? 190_000,
+    codeCharacters: overrides.codeCharacters ?? 200_000,
+    budgetCharacters: overrides.budgetCharacters ?? 100_000,
+  };
+}
+
 /** What a record stores: the identity derived from the verified contract. */
 const RECORD_TARGET = forguncyTargetIdentity();
 
@@ -43,13 +101,17 @@ function lockEnvironment(overrides: Partial<LockEnvironment> = {}): LockEnvironm
   return {
     resolvedVersions: {
       "@tanstack/react-query": "5.90.2",
+      "date-fns": "4.1.0",
       "es-toolkit": "1.39.8",
       react: "19.2.7",
       "some-amd-package": "2.4.0",
     },
     target: RUNTIME_CONTRACT_TARGET,
     toolchain: { vitePlus: "0.3.2" },
-    probeFingerprints: { "@tanstack/react-query": CELL_FINGERPRINT, "es-toolkit": CELL_FINGERPRINT, react: CELL_FINGERPRINT, "some-amd-package": BUNDLER_FINGERPRINT },
+    probeFingerprints: { "@tanstack/react-query": CELL_FINGERPRINT, "date-fns": CELL_FINGERPRINT, "es-toolkit": CELL_FINGERPRINT, react: CELL_FINGERPRINT, "some-amd-package": BUNDLER_FINGERPRINT },
+    // Keyed by *record* identity, not by Cell (#77 round 7): two artifact rejections in one
+    // Cell may come from different compile states, so the identity must vary on the same key.
+    artifactFingerprints: { ["date-fns\u0000" + BENCH_CELL]: artifactCompile(ARTIFACT_FINGERPRINT, 190_000) },
     extensionVersions: { "tanstack-query": "5.90.2" },
     extensionIdentities: { "tanstack-query": EXTENSION_IDENTITY },
     ...overrides,
@@ -168,9 +230,50 @@ const technicalRejection: LockedDependencyDecision = {
   ],
 };
 
+/**
+ * A compile-observed rejection: the package's own probe **passed**, and what failed is the
+ * composed Cell (#77 revision 14). Its `artifactEvidence` is the measurement that makes the
+ * rejection checkable, and its profile is `artifact-rejection` — the one technical rejection whose
+ * evidence is a *passing* probe.
+ */
+const artifactRejection: LockedDependencyDecision = {
+  strategy: "replace",
+  packageName: "date-fns",
+  rejection: {
+    kind: "technical",
+    code: "cell-code-budget-exceeded",
+    summary: "The composed Cell is 200,000 characters against this Cell's cap of 100,000.",
+    remediation: "Evaluate a lighter alternative or raise the Cell's declared cap.",
+  },
+  artifactEvidence: artifactEvidenceFixture(),
+  alternatives: ["a lighter date utility"],
+  supersededBy: "host",
+  // A concrete Cell: a size verdict belongs to one composed Cell and one Cell's cap, which is why
+  // revision 15 requires the target for any record carrying compile evidence.
+  cellTarget: BENCH_CELL,
+  resolvedVersion: null,
+  probe: { status: "passed", fingerprint: CELL_FINGERPRINT, versionIndependent: false },
+  target: RECORD_TARGET,
+  probedWith: { vitePlus: "0.3.2" },
+  extension: null,
+  rejectedCandidate: { version: "4.1.0" },
+  rationale: "The package builds cleanly; the composed Cell is what exceeds the Cell's declared cap.",
+  evidence: [
+    { kind: "probe", reference: "docs/probes/inline-es-toolkit.md" },
+    { kind: "spec-issue", reference: SPEC_8 },
+  ],
+};
+
 const lock = {
   schemaVersion: 1,
-  decisions: [extensionRecord, inlineRecord, hostRecord, architecturalRejection, technicalRejection],
+  decisions: [
+    extensionRecord,
+    inlineRecord,
+    hostRecord,
+    architecturalRejection,
+    technicalRejection,
+    artifactRejection,
+  ],
 };
 
 function reasonsFor(record: LockedDependencyDecision, environment: LockEnvironment) {
@@ -436,6 +539,193 @@ describe("replace decisions expire differently by rejection kind", () => {
       "forguncy-target-unknown",
       "toolchain-unknown",
     ]);
+  });
+
+  // PR review of #77, P1 (round 4). Round 3 refused a `cell-code-budget-exceeded` record outright
+  // in the *shape* validator, which runs on the parse path — so a schema-v1 lock holding one failed
+  // to parse and never reached freshness at all. The record now stays readable and goes **stale**
+  // here, which is what the migration contract in `lock-migration.ts` requires and what the
+  // revision bump exists to produce.
+  it("reports a pre-revision-14 budget rejection as missing its compile evidence, not as invalid", () => {
+    // Built by removing the field rather than setting it to `undefined`: an explicit `undefined`
+    // would still be *present* to the type checker's spread, and the point of the case is a record
+    // that predates the field entirely.
+    const { artifactEvidence: _dropped, ...rest } = artifactRejection;
+    const legacy: LockedDependencyDecision = rest;
+
+    const assessment = reasonsFor(legacy, lockEnvironment());
+
+    expect(assessment.stalenessReasons).toEqual(["artifact-evidence-missing"]);
+    expect(assessment.freshness).toBe("stale");
+  });
+
+  // PR review of #77, P1 (round 5). Round 4's evidence was two self-attested numbers, so nothing
+  // tied the rejection to the compile it described: the Cell source could change, or another
+  // dependency's decision could move, and the record kept reporting fresh. The identity in
+  // `artifactEvidence.compileFingerprint` is what closes that.
+  it("goes stale when the Cell's compile identity moves, so a size verdict cannot outlive its Cell", () => {
+    const moved = lockEnvironment({
+      artifactFingerprints: { ["date-fns\u0000" + BENCH_CELL]: artifactCompile('cell="moved";budget=100000', 190_000) },
+    });
+
+    const assessment = reasonsFor(artifactRejection, moved);
+
+    expect(assessment.stalenessReasons).toEqual(["artifact-compile-changed"]);
+    expect(assessment.freshness).toBe("stale");
+  });
+
+  it("cannot verify a budget rejection against an environment that compiled nothing", () => {
+    // Fail-closed, like an unknown probe fingerprint: an absent compile is not agreement, and a
+    // record whose Cell nobody recompiled has not been shown to still hold.
+    const assessment = reasonsFor(artifactRejection, lockEnvironment({ artifactFingerprints: {} }));
+
+    expect(assessment.stalenessReasons).toEqual(["artifact-compile-unknown"]);
+  });
+
+  // PR review of #77, P1 (round 7). A compile identity describes one composed Cell, but *which*
+  // Cell state a rejection was measured from is a property of the record: package A may be measured
+  // from one state, the source change, package B be measured from another, and both records stay in
+  // the lock. Keyed by Cell, one fingerprint had to answer for both — and could only be right for
+  // one of them.
+  // PR review of #77, P1 (round 8). Revision 16's `status` compared only the artifact fingerprint,
+  // so it discarded the freshly-produced attribution. A record could keep a real fingerprint beside
+  // an invented `subjectRenderedCharacters` — even one larger than the artifact — and stay fresh.
+  // Reproduced before this was fixed: inflating only that field left `status` reporting `fresh`.
+  // PR review of #77, P1 (round 9). The two fields that state the *hard rejection* were still
+  // trusted: revision 17 compared the fingerprint and the attribution but not `codeCharacters` or
+  // `budgetCharacters`. Reproduced before this was fixed — a record could keep the real fingerprint
+  // (the artifact genuinely is the one it names) beside a forged pair saying "over cap" and stay
+  // fresh, reporting a rejection the current compiler does not emit. `codeCharacters` is not inside
+  // the fingerprint (a fingerprint is a hash, not a size), so nothing else caught it.
+  it("goes stale when the recorded verdict numbers no longer match the current compile", () => {
+    const recomputed = lockEnvironment({
+      artifactFingerprints: {
+        ["date-fns\u0000" + BENCH_CELL]: artifactCompile(ARTIFACT_FINGERPRINT, 190_000, {
+          // The Cell fits: the current compiler files no budget diagnostic.
+          codeCharacters: 5_000,
+          budgetCharacters: 100_000,
+        }),
+      },
+    });
+
+    const assessment = reasonsFor(artifactRejection, recomputed);
+
+    expect(assessment.stalenessReasons).toContain("artifact-verdict-changed");
+    expect(assessment.freshness).toBe("stale");
+  });
+
+  // PR review of #77, P1 (round 9). Revision 16's own `record` persisted
+  // `subjectDecision: { strategy: "replace" }` through its normal writer (a second `record` read the
+  // `replace` the first write had stored). Refusing it at the read boundary made a schema-v1 lock the
+  // previous toolchain could write fail to *parse*, so the record never reached freshness — the
+  // migration failure `lock-migration.ts` exists to prevent. It is readable now, and reports why it
+  // cannot be replayed rather than pretending otherwise.
+  it("reports a legacy subject decision as unreplayable rather than refusing to read the lock", () => {
+    // Built through the parser rather than as a typed object, and that is more than convenience:
+    // the type forbids this shape (correctly — no *new* record may carry it), so a legacy record can
+    // only arrive as parsed JSON, which is exactly how a real reader meets it.
+    const [legacy] = parseFgcLockDocument(
+      JSON.stringify(
+        {
+          schemaVersion: 1,
+          decisions: [
+            {
+              ...artifactRejection,
+              artifactEvidence: { ...artifactEvidenceFixture(), subjectDecision: { strategy: "replace" } },
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+    ).decisions;
+
+    const assessment = reasonsFor(legacy!, lockEnvironment());
+
+    expect(assessment.stalenessReasons).toEqual(["artifact-subject-decision-unreplayable"]);
+    expect(assessment.freshness).toBe("stale");
+  });
+
+  it("goes stale when the recorded subject share no longer matches the recomputed one", () => {
+    // The identity is unchanged, so the artifact is the same compile; only the attribution moved.
+    const recomputed = lockEnvironment({
+      artifactFingerprints: {
+        ["date-fns\u0000" + BENCH_CELL]: artifactCompile(ARTIFACT_FINGERPRINT, 12_345),
+      },
+    });
+
+    const assessment = reasonsFor(artifactRejection, recomputed);
+
+    expect(assessment.stalenessReasons).toEqual(["artifact-attribution-changed"]);
+    expect(assessment.freshness).toBe("stale");
+  });
+
+  it("reports a moved identity and a moved share together, rather than one masking the other", () => {
+    // Both halves live in one environment entry, so a reader sees every reason the record moved.
+    const both = lockEnvironment({
+      artifactFingerprints: {
+        ["date-fns\u0000" + BENCH_CELL]: artifactCompile('cell="moved";budget=100000', 12_345),
+      },
+    });
+
+    const reasons = reasonsFor(artifactRejection, both).stalenessReasons;
+
+    expect(reasons).toContain("artifact-compile-changed");
+    expect(reasons).toContain("artifact-attribution-changed");
+  });
+
+  it("assesses two records in one Cell against their own compile identities", () => {
+    const second: LockedDependencyDecision = {
+      ...artifactRejection,
+      packageName: "es-toolkit",
+      cellTarget: BENCH_CELL,
+      artifactEvidence: artifactEvidenceFixture({ compileFingerprint: 'cell="second";budget=100000' }),
+    };
+    // Both records are in one Cell; their identities differ. An environment answering for one
+    // fingerprint would leave the other reporting `artifact-compile-changed` for a compile that is
+    // in fact its own.
+    const environment = lockEnvironment({
+      artifactFingerprints: {
+        ["date-fns\u0000" + BENCH_CELL]: artifactCompile(ARTIFACT_FINGERPRINT, 190_000),
+        ["es-toolkit\u0000" + BENCH_CELL]: artifactCompile('cell="second";budget=100000', 190_000),
+      },
+    });
+
+    // Asserted on the artifact axis: the fixture's recorded candidate version does not match this
+    // environment, which is an unrelated staleness reason and not what this case is about.
+    expect(artifactReasons(artifactRejection, environment)).toEqual([]);
+    expect(artifactReasons(second, environment)).toEqual([]);
+    // And a moved identity still moves exactly one of them, so the keying is not answering "fresh"
+    // for everything.
+    const moved = lockEnvironment({
+      artifactFingerprints: {
+        ["date-fns\u0000" + BENCH_CELL]: artifactCompile(ARTIFACT_FINGERPRINT, 190_000),
+        ["es-toolkit\u0000" + BENCH_CELL]: artifactCompile('cell="moved";budget=100000', 190_000),
+      },
+    });
+    expect(artifactReasons(artifactRejection, moved)).toEqual([]);
+    expect(artifactReasons(second, moved)).toEqual(["artifact-compile-changed"]);
+  });
+
+  it("re-checks an unrejected candidate's own version, which an artifact rejection also records", () => {
+    // The round-5 hole: `assessPackageVersionFreshness` gated on the `technical-rejection` profile,
+    // so an `artifact-rejection` skipped it even though it records `rejectedCandidate.version` —
+    // and a candidate upgrade is exactly what can make the Cell small enough to fit.
+    const upgraded = lockEnvironment({ resolvedVersions: { "date-fns": "5.0.0", "es-toolkit": "1.39.8", "some-amd-package": "2.4.0", react: "19.2.7" } });
+
+    const assessment = reasonsFor(artifactRejection, upgraded);
+
+    expect(assessment.stalenessReasons).toContain("rejected-candidate-version-changed");
+  });
+
+  it("verifies a budget rejection once it carries the compile evidence", () => {
+    // The other half: with the evidence, the record is fresh, and its profile is the one whose
+    // probe requirement is *passed* — the package is fine, the composed Cell is not.
+    const resolution = resolveLockDecision(lock, { packageName: "date-fns", cellTarget: BENCH_CELL }, lockEnvironment());
+
+    expect(resolution.state).toBe("verified");
+    expect(resolution.assessment?.profile).toBe("artifact-rejection");
+    expect(resolution.assessment?.stalenessReasons).toEqual([]);
   });
 });
 

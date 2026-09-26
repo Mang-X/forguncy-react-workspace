@@ -402,7 +402,12 @@ export const SELECTION_SIGNALS: readonly SelectionSignal[] = [
     id: "cell-artifact-budget-exceeded",
     family: "replacement",
     label: "Generated cell artifact exceeds the code budget",
-    summary: "The artifact the chosen deployment path produces is larger than the measured cell budget allows.",
+    // "the project's own configured cap", not "the measured cell budget": #21 found no
+    // hard product limit, so the measured bands are advisory tolerances and cannot be
+    // exceeded — only a cap a project chose can be. The old wording described a limit the
+    // measurement did not find, which is exactly the claim #77 exists to retire.
+    summary:
+      "The artifact the chosen deployment path produces is longer than the project's own configured cell code cap allows.",
     observedFrom: "build-output",
   },
   {
@@ -567,11 +572,23 @@ export const REPLACEMENT_SIGNAL_REJECTIONS: readonly ReplacementSignalRejection[
     // than a runtime fact. It is the only signal that becomes false when a
     // candidate gets smaller, which is why the lock's technical-rejection
     // profile re-evaluates it on a version or toolchain change.
+    //
+    // What it becomes false *against* is a project's cap, not the measurement
+    // (#77): the measured band is advisory and a band alone never files this, so
+    // the remediation names the cap and the two ways to get under one.
+    //
+    // Observed by no probe step (#77 revision 13). The probe measures a synthetic
+    // candidate through a build that does not install the compiler's
+    // `createInterceptionResolver`, so its artifact can be *larger* than the Cell's —
+    // a named import surface does not fix that, and the surface is a caller's
+    // declaration besides. The verdict is the compiler's `auditCodeBudget` on the
+    // composed Cell source; `PROBE_STEPS_OBSERVING_SIGNAL` records the empty list so a
+    // report claiming this finding from any step is invalid.
     signal: "cell-artifact-budget-exceeded",
     kind: "technical",
     code: "cell-code-budget-exceeded",
     remediation:
-      "Prefer a lighter alternative, a host-provided capability, or a verified extension; keep the package only if a validated build brings it inside the measured budget.",
+      "Prefer a lighter alternative, a host-provided capability, or a verified extension; keep the package only if a compiled Cell comes in under the project's configured cell code cap, or if the cap itself was set tighter than this cell needs.",
   },
   {
     signal: "runtime-assets-not-embeddable",

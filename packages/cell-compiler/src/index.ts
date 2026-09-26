@@ -86,6 +86,7 @@ export {
   REQUIRED_CELL_ARTIFACT_DIAGNOSTIC_CODES,
 } from "./diagnostics.ts";
 export type {
+  ArtifactMeasurements,
   CellArtifactDiagnostic,
   CellArtifactDiagnosticCode,
   CellArtifactDiagnosticOrigin,

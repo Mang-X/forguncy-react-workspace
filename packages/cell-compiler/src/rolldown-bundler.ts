@@ -63,7 +63,13 @@ import { rolldown, type OutputAsset, type OutputChunk } from "rolldown";
 // {@link resolveEntrySpecifiersWithRolldown}.
 import { scan } from "rolldown/experimental";
 
-import type { BundledCellModule, CellBundlerPort, CellBundlingRequest, CellResolveRequest } from "./artifact.ts";
+import type {
+  BundledCellModule,
+  CellBundlerPort,
+  CellBundlingRequest,
+  CellResolveRequest,
+  InlinedPackageSize,
+} from "./artifact.ts";
 import { findDependencyDecision, packageNameOfSpecifier } from "./specifier.ts";
 import type { CellArtifactDiagnostic } from "./diagnostics.ts";
 import { createCellArtifactDiagnostic, dedupeCellArtifactDiagnostics } from "./diagnostics.ts";
@@ -467,6 +473,69 @@ function inlinedPackageNames(moduleIds: readonly string[]): string[] {
 }
 
 /**
+ * Rendered characters contributed by each installed package that landed in this chunk.
+ *
+ * The bundler already accounts per module (`renderedLength`), so this is a grouping of what it
+ * reported rather than a second measurement — and it is the only sound basis for attribution. #77
+ * round 6 initially tried to obtain it by recompiling the Cell *without* the subject's decision and
+ * subtracting, which is **degenerate**: dropping a decision does not remove the package's code,
+ * because the bundler still resolves the bare import from `node_modules` (measured: 14971
+ * characters either way). Measuring what a package actually contributes requires asking the module
+ * graph, which is exactly this.
+ *
+ * Sorted by name so the report is byte-stable, like the code and `inlinedPackages`.
+ */
+function inlinedPackageSizesOf(modules: Record<string, { readonly renderedLength: number }>): readonly InlinedPackageSize[] {
+  const sizes = new Map<string, { packageName: string; exactSpecifier: string | null; renderedCharacters: number }>();
+  for (const [moduleId, module] of Object.entries(modules)) {
+    const packageName = packageNameOfModuleId(moduleId);
+    if (packageName === undefined) continue;
+    // Attributed by the specifier that *resolved* to this module, not only by its package root.
+    // The compiler preserves exact-subpath precedence everywhere else — `findDependencyDecision`
+    // checks the exact specifier before the package root, and `inlinedSpecifiers` exists so
+    // `pkg/subpath` is not folded into `pkg` — so reporting a subpath's bytes under the root would
+    // credit a decision that did not govern them (#77 round 7).
+    const exactSpecifier = exactSubpathOf(moduleId, packageName);
+    const key = `${packageName}\u0000${exactSpecifier ?? ""}`;
+    const entry = sizes.get(key) ?? { packageName, exactSpecifier, renderedCharacters: 0 };
+    entry.renderedCharacters += module.renderedLength;
+    sizes.set(key, entry);
+  }
+  return [...sizes.values()].sort((a, b) =>
+    a.packageName !== b.packageName
+      ? (a.packageName < b.packageName ? -1 : 1)
+      : ((a.exactSpecifier ?? "") < (b.exactSpecifier ?? "") ? -1 : (a.exactSpecifier ?? "") > (b.exactSpecifier ?? "") ? 1 : 0),
+  );
+}
+
+/**
+ * The subpath a module under `node_modules/<packageName>` came from, or null for the package root.
+ *
+ * Derived from the module's own path rather than from the specifier that imported it, because the
+ * specifier is not available at this level: the module graph reports resolved ids, and two
+ * different specifiers can resolve into one package. So this answers "which subpath does this file
+ * belong to", which is enough for the *subpath* half of the split and deliberately not offered as
+ * a claim about which import reached it.
+ */
+function exactSubpathOf(moduleId: string, packageName: string): string | null {
+  const normalized = moduleId.replace(/\\/g, "/");
+  const marker = `${NODE_MODULES_MARKER}${packageName}/`;
+  const at = normalized.lastIndexOf(marker);
+  if (at < 0) return null;
+  const rest = normalized.slice(at + marker.length);
+  const segments = rest.split("/").filter(segment => segment.length > 0);
+  // A file directly inside the package directory is the package root; anything under a
+  // subdirectory is a subpath. `dist/index.js` is the root's build output, not an imported
+  // `dist` subpath, which is why the entry file's own directory is not treated as a subpath.
+  if (segments.length === 0) return null;
+  const [first] = segments;
+  if (first === "dist" || first === "lib" || first === "src" || first === "esm" || first === "cjs") {
+    return null;
+  }
+  return segments.length > 1 ? first! : null;
+}
+
+/**
  * Whether a module id resolves, after following symlinks, to a real path under
  * `node_modules`.
  *
@@ -735,6 +804,7 @@ async function bundleWithRolldown(dir: string, request: CellBundlingRequest): Pr
   const externalImports = [...entryChunk.imports].sort();
   const moduleIds = Object.keys(entryChunk.modules);
   const inlinedPackages = inlinedPackageNames(moduleIds);
+  const inlinedPackageSizes = inlinedPackageSizesOf(entryChunk.modules);
   // Bare specifiers whose resolved module actually landed in the entry chunk
   // and whose id sits under `node_modules` after symlink resolution. Sorted for
   // byte-stable reports; the decision loop and `auditInlinedPackages` both read
@@ -781,6 +851,7 @@ async function bundleWithRolldown(dir: string, request: CellBundlingRequest): Pr
     code: entryChunk.code,
     externalImports,
     inlinedPackages,
+    inlinedPackageSizes,
     inlinedSpecifiers,
     emittedAssets,
     // Sorted for a byte-stable report, like every other list here: #7's determinism

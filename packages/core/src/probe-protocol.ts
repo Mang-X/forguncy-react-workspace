@@ -107,7 +107,14 @@ export const PROBE_STEPS: readonly ProbeStep[] = [
   {
     id: "size",
     label: "Measure output size",
-    records: "The generated artifact size, to be compared against the measured cell code budget.",
+    // Two quantities, and the split is #77's point: bytes are what the artifact weighs
+    // as served (code **and** assets), characters of emitted code are what the product
+    // prices and what #21's bands classify. The band is measured evidence and this step
+    // files no rejection at all (#77 revision 13): it measures a synthetic candidate
+    // through a build the compiler does not use, so its number is an estimate of the
+    // Cell rather than a verdict on it. The cap comparison is recorded as a fact.
+    records:
+      "The generated artifact's size as served (bytes) and as generated source (characters), the measured cell-code band that size falls in, and — when the project configured one — how the size compares to that cap, as an estimate rather than a verdict.",
   },
   {
     id: "runtime-smoke",
@@ -198,8 +205,19 @@ export const PROBE_STEPS_OBSERVING_SIGNAL: Readonly<Record<SelectionSignalId, re
   // Whether a browser entry exists is a fact about the published entries.
   "ssr-or-server-only-without-browser-build": ["export-metadata"],
   "service-worker-or-special-header-requirement": ["runtime-smoke"],
-  // Only the size measurement can measure a budget.
-  "cell-artifact-budget-exceeded": ["size"],
+  // No probe step observes this signal, and that is the decision rather than an omission
+  // (#77 revision 13). The probe builds a *synthetic candidate* through raw Rolldown, while
+  // the compiler builds the Cell through `createInterceptionResolver`, which replaces `host`
+  // and `extension` dependencies with virtual modules/page globals — so the probe's artifact
+  // can be larger than the Cell's. The `react-library` fixture pins it: a *named* probe of
+  // `DatePicker` measures 279 characters and inlines the npm `react` implementation, while
+  // the real Cell resolves `react` to the host React. The import surface is also a caller's
+  // declaration, not a fact about the Cell. So no probe shape can prove this rejection, and
+  // an unprovable one would hand a `replace` decision a refusal the artifact does not
+  // support. The authority is the compiler's `auditCodeBudget` on the composed source; an
+  // empty list here is what makes a report attributing the finding to any step *invalid*
+  // (`validateProbeReport` refuses it) rather than merely discouraged.
+  "cell-artifact-budget-exceeded": [],
   "runtime-assets-not-embeddable": ["artifact-scan", "asset-inventory"],
   // A load that survived bundling is seen in the output, not in whether the build ran.
   "dynamic-module-loading-cannot-be-eliminated": ["artifact-scan"],

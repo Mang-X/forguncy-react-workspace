@@ -42,7 +42,20 @@ import type { CellCodeBudgetOverrides, ForguncyTargetLocator, TargetLocatorModel
 /** Fields allowed inside a `target`. */
 export const TARGET_ALLOWED_FIELDS = ["pageName", "cell"] as const;
 /** Fields allowed inside an `output` override. */
-export const OUTPUT_ALLOWED_FIELDS = ["codeBudgetBytes", "justification"] as const;
+export const OUTPUT_ALLOWED_FIELDS = ["codeBudgetCharacters", "justification"] as const;
+
+/**
+ * The retired spelling of {@link OUTPUT_ALLOWED_FIELDS}'s budget field, and the unit it
+ * meant.
+ *
+ * #77 settled the unit as **characters** and renamed the field to say so. This name is
+ * kept only to *refuse* it: the old field held a byte count that the probe compared
+ * against bytes, and it is not convertible to the new unit (a CJK artifact's character
+ * count is roughly a third of its byte count), so a config still declaring it is a
+ * migration the toolchain cannot perform silently. Recognising the name turns an
+ * otherwise-confusing `unknown-output-field` into a diagnostic that says what to do.
+ */
+export const RETIRED_OUTPUT_BUDGET_FIELD = "codeBudgetBytes" as const;
 
 /** Logical Cell id: stable across file moves, so it is an identifier, not a path. */
 export const CELL_ID_PATTERN = /^[A-Za-z][A-Za-z0-9_-]*$/;
@@ -84,6 +97,7 @@ export type ConfigDiagnosticCode =
   // Output overrides.
   | "invalid-output-override"
   | "unknown-output-field"
+  | "renamed-output-field"
   | "unjustified-output-override"
   // Runtime block.
   | "invalid-runtime-target"
@@ -615,12 +629,42 @@ function validateOutputOverride(
     return undefined;
   }
 
-  collectUnknownFieldDiagnostics(raw, OUTPUT_ALLOWED_FIELDS, path, "unknown-output-field", "output override", out);
+  // The retired name is reported as its own diagnostic rather than left to the
+  // generic unknown-field check, and the unknown-field pass skips it so one mistake
+  // yields one diagnostic. A byte count is not a character count, so the toolchain
+  // refuses to reinterpret the old number: see `RETIRED_OUTPUT_BUDGET_FIELD`.
+  //
+  // A config carrying only the old name returns here. Reporting the missing new field
+  // as well would be true and useless — the rename diagnostic already says what to do,
+  // and a second "must be a positive whole number" sends the reader looking for a value
+  // problem that does not exist.
+  const renamed = RETIRED_OUTPUT_BUDGET_FIELD in raw;
+  if (renamed) {
+    out.push(
+      diag(
+        "renamed-output-field",
+        `${path}.${RETIRED_OUTPUT_BUDGET_FIELD}`,
+        `"${RETIRED_OUTPUT_BUDGET_FIELD}" was renamed to "codeBudgetCharacters" (#77): the budget is measured in characters of generated cell source, the unit the product reports and #21's bands use. The old value was a byte count and is not convertible — a CJK artifact's character count is roughly a third of its byte count — so set "codeBudgetCharacters" to the ceiling you mean rather than copying the old number across.`,
+      ),
+    );
+  }
 
-  const budget = raw.codeBudgetBytes;
+  collectUnknownFieldDiagnostics(raw, OUTPUT_ALLOWED_FIELDS, path, "unknown-output-field", "output override", out, [
+    RETIRED_OUTPUT_BUDGET_FIELD,
+  ]);
+
+  if (renamed && !("codeBudgetCharacters" in raw)) {
+    return undefined;
+  }
+
+  const budget = raw.codeBudgetCharacters;
   if (typeof budget !== "number" || !Number.isInteger(budget) || budget <= 0) {
     out.push(
-      diag("invalid-output-override", `${path}.codeBudgetBytes`, `Code budget must be a positive whole number of bytes.`),
+      diag(
+        "invalid-output-override",
+        `${path}.codeBudgetCharacters`,
+        `Code budget must be a positive whole number of characters.`,
+      ),
     );
     return undefined;
   }
@@ -636,7 +680,7 @@ function validateOutputOverride(
     return undefined;
   }
 
-  return { codeBudgetBytes: budget, justification: raw.justification.trim() };
+  return { codeBudgetCharacters: budget, justification: raw.justification.trim() };
 }
 
 interface ResolvedRuntime {

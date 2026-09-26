@@ -191,6 +191,36 @@ export const TECHNICAL_REJECTION_CODES: readonly TechnicalRejectionCode[] = [
 ];
 
 /**
+ * Technical rejections whose evidence is a **compile**, not a probe.
+ *
+ * Every other technical code is observed by the dependency probe: it builds a synthetic
+ * candidate and reports what it sees. This one cannot be, and the reason is a difference in
+ * *what was built* rather than in how hard anyone looked — #77 revision 13. The probe's build is
+ * a raw Rolldown build of a synthetic entry; the compiler's build installs
+ * `createInterceptionResolver`, which replaces `host`/`extension` dependencies with generated
+ * virtual modules or page globals. So the probe's artifact can be **larger** than the Cell's
+ * (pinned by `react-library`'s `DatePicker`, whose *named* probe inlines npm React while the real
+ * compile resolves it to the host) or smaller, and no import surface or revision of the probe
+ * changes that. `PROBE_STEPS_OBSERVING_SIGNAL` consequently gives its signal no observing step at
+ * all, so a probe report claiming the finding is invalid.
+ *
+ * The authority is `compileCell`'s `auditCodeBudget` on the composed Cell source, and the
+ * evidence it produces is `ArtifactBudgetEvidence`. This list is what makes that pairing
+ * enforceable: a record citing one of these codes must carry compile evidence, and a record
+ * carrying compile evidence must cite one of these codes. It is named data rather than a condition
+ * inside a validator for the same reason as the sibling lists — a rule a reader can check, and a
+ * test can recompute from the protocol table.
+ */
+export const ARTIFACT_OBSERVED_TECHNICAL_REJECTION_CODES: readonly TechnicalRejectionCode[] = [
+  "cell-code-budget-exceeded",
+];
+
+/** True when the code's evidence is a compile rather than a probe. See {@link ARTIFACT_OBSERVED_TECHNICAL_REJECTION_CODES}. */
+export function isArtifactObservedRejectionCode(code: TechnicalRejectionCode): boolean {
+  return (ARTIFACT_OBSERVED_TECHNICAL_REJECTION_CODES as readonly string[]).includes(code);
+}
+
+/**
  * Splits a rejection list so a report can say "3 dependencies were rejected for
  * architectural reasons, 2 for bundling reasons" instead of printing five
  * indistinguishable reasons. The two buckets keep their narrow types, so a

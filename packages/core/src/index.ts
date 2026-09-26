@@ -52,6 +52,8 @@ export {
   isTechnicalRejection,
   isTechnicalRejectionCode,
   TECHNICAL_REJECTION_CODES,
+  ARTIFACT_OBSERVED_TECHNICAL_REJECTION_CODES,
+  isArtifactObservedRejectionCode,
 } from "./rejection.ts";
 export type {
   ArchitecturalDependencyRejection,
@@ -92,6 +94,8 @@ export {
   DEPENDENCY_STRATEGIES,
   DEPENDENCY_STRATEGY_SEMANTICS,
   isDependencyStrategy,
+  isSubjectCompileDecision,
+  isReadableSubjectCompileDecision,
   requiresRealRuntimeValidation,
   strategySemantics,
   validateDependencyDecision,
@@ -99,6 +103,7 @@ export {
   validateDependencyVerification,
 } from "./strategy.ts";
 export type {
+  ArtifactBudgetEvidence,
   DependencyCheck,
   DependencyCheckLevel,
   DependencyDecision,
@@ -344,6 +349,7 @@ export {
   assertFgcLockDocumentShape,
   assertSupportedFgcLockSchemaVersion,
   canonicalizeFgcLock,
+  canonicalizeImports,
   compareEvidenceLinks,
   compareLockDecisions,
   createEmptyFgcLock,
@@ -416,9 +422,11 @@ export {
   LOCK_REAL_RUNTIME_VALIDATIONS,
   LOCK_STALENESS_REASONS,
   lockDecisionBlockers,
+  lockRecordIdentity,
   resolveLockDecision,
 } from "./lock-freshness.ts";
 export type {
+  ArtifactCompileSnapshot,
   LockDecisionAssessment,
   LockDecisionQuery,
   LockDecisionResolution,
@@ -616,6 +624,7 @@ export {
   CELL_CODE_INLINE_CEILING_CHARACTERS,
   CELL_CODE_PROJECT_VOLUME_OBSERVATION,
   CELL_CODE_REVIEW_CEILING_CHARACTERS,
+  assertCellCodeBudget,
   cellCodeBudgetBands,
   classifyCellCodeSize,
   findCellCodeBudgetBand,
@@ -637,6 +646,7 @@ export {
   isSecretLikeKey,
   machineSpecificPathProblem,
   OUTPUT_ALLOWED_FIELDS,
+  RETIRED_OUTPUT_BUDGET_FIELD,
   TARGET_ALLOWED_FIELDS,
 } from "./cell-registry.ts";
 export type {
@@ -660,3 +670,6 @@ export type {
   ForguncyConfigModuleLoader,
   LoadForguncyConfigOptions,
 } from "./config-loader.ts";
+
+export { composeCellCompileFingerprint } from "./cell-compile-fingerprint.ts";
+export type { ComposeCellCompileFingerprintInput } from "./cell-compile-fingerprint.ts";
