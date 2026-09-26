@@ -1071,6 +1071,114 @@ export const FRONTEND_LIBRARY_RUNTIME_SEMANTICS = {
 };
 
 // ---------------------------------------------------------------------------
+// The generated runtime binding
+// ---------------------------------------------------------------------------
+
+/**
+ * What a generated artifact must do so that a Cell calling the runtime façade works.
+ *
+ * Decision source: GitHub Issue #82 — "修复 Runtime：在生产 Cell 入口自动安装 Host
+ * Provider"
+ * (https://github.com/Mang-X/forguncy-react-workspace/issues/82), which is where the
+ * requirement's two halves meet: `#27/#29`'s façade states the *shape* a generated
+ * binding has to satisfy (`host-provider.ts`), and
+ * `RUNTIME_FACADE_PACKAGING_POLICY.compilerOwnsImportLowering` leaves emitting it to the
+ * artifact/compiler boundary.
+ *
+ * ## Why the contract is here rather than in the compiler
+ *
+ * Every field below is a *name* that two independently-written modules have to agree on:
+ * the package specifier an authored `import` uses, and the two members the generated
+ * binding calls on it. That is the same kind of fact `HOST_BRIDGE_MAPPINGS` carries —
+ * "which import is bound to which identity" — and this module is where that kind of fact
+ * lives. Hard-coding them in `cell-compiler` would work until the façade renamed a
+ * member, at which point the binding would silently stop installing and the Cell would
+ * fail at its first façade call with the very error #82 exists to remove.
+ *
+ * ## What each name is, and what makes it the right one
+ *
+ * - `facadeSpecifier` is the specifier authored source writes. It is a *workspace* source
+ *   dependency (#14), not a published one: the compiler flattens it into each Cell like
+ *   any other source file, which is what makes the façade's single per-Cell provider slot
+ *   correct (`RUNTIME_FACADE_PACKAGING_POLICY.perCellDuplicateAllowed`).
+ * - `installMember` and `createProviderMember` are the two members the binding calls.
+ *   Both are exported from the façade's public barrel — the binding re-exports that barrel
+ *   wholesale, so a name the barrel does not carry would break authored source that
+ *   imports it.
+ * - `hostNames` are the *free identifiers* the binding's source references. They are not
+ *   imports: `props` and `useDataSource` are wrapper-locals the platform's own arrow IIFE
+ *   declares before placing the cell source
+ *   ({@link CELL_SOURCE_EXECUTION_MODEL}`.userCodeNesting`), so they are in scope where
+ *   the binding module's body runs and are unreachable from anywhere else — which is
+ *   precisely why the binding has to be generated inside the Cell rather than shipped in
+ *   the package (`host-provider.ts`'s argument).
+ *
+ * ## The timing, and what it does not decide
+ *
+ * `installTiming` states the one ordering requirement the artifact can satisfy: the
+ * binding module's body runs when the artifact is evaluated, which is before the
+ * platform's `App` binding is ever called and therefore before any façade call. Whether
+ * the platform *re-evaluates* the artifact when a property changes — and so whether a
+ * re-render reads fresh `props` — is not decidable from this repository; it is recorded
+ * as an open question below and belongs to #83/#84.
+ *
+ * ## What the contract deliberately does not require
+ *
+ * There is no teardown member. The binding installs and never uninstalls, and that is
+ * recorded here rather than left to be inferred from an absent field: a requirement
+ * stated in prose that no generated code meets is worse than no requirement, because a
+ * reader takes it as a description of what ships. Whether a teardown is needed is a
+ * lifecycle question, and the evidence for it does not exist yet — so the contract states
+ * the ordering it can guarantee and leaves the rest to #83, which owns the multi-Cell and
+ * unmount behaviour.
+ */
+export const CELL_RUNTIME_BINDING_CONTRACT = {
+  /**
+   * The specifier authored source imports the façade by.
+   *
+   * The *only* specifier the compiler may intercept for this purpose, and the same one
+   * `RUNTIME_FACADE_DECISION` documents: one package, one address.
+   */
+  facadeSpecifier: "@forguncy-react-workspace/runtime",
+  /** The member the binding calls to install the provider. */
+  installMember: "installRuntimeFacadeProvider",
+  /** The member the binding calls to build a provider from the Cell's own values. */
+  createProviderMember: "createHostRuntimeFacadeProvider",
+  /**
+   * The `createHostRuntimeFacadeProvider` input fields, as the binding fills them.
+   *
+   * `cellProps` and `useDataSource` under the port's own member names
+   * (`RUNTIME_FACADE_PORT_CHANNEL_MEMBERS`), so a channel the port renames cannot leave
+   * the generated binding addressing the old one.
+   */
+  providerInput: { cellProps: "cellProps", useDataSource: "useDataSource" },
+  /**
+   * The free identifiers the binding's generated source references.
+   *
+   * Both are `wrapper-local` names `CELL_USER_SCOPE_BINDINGS` verifies as available in
+   * cell source (`props` and `useDataSource`), which is what makes it legal for generated
+   * code to name them without importing anything. A generator that emitted a third name
+   * would be inventing an address — `RUNTIME_FACADE_FORBIDDEN_PATTERNS`'
+   * `second-address-for-a-cell-binding`.
+   */
+  hostNames: ["props", "useDataSource"] as const,
+  /**
+   * When the binding installs, stated as the ordering guarantee a generator can meet.
+   *
+   * "The artifact's own module evaluation" rather than "per render": the binding is a
+   * module in the artifact's graph, so its body runs once when the artifact is evaluated,
+   * and the platform calls the `App` binding afterwards. Installing later would leave the
+   * first façade call unserved, which is the defect.
+   */
+  installTiming: "when the generated artifact is evaluated, before the platform calls its App binding",
+  note: "The provider is built from the Cell's own `props` and `useDataSource` and is never read from a page global: #5 records both as values the runtime injects, and `props` is not a window property at all.",
+  evidence: ["product-runtime-source", "generated-runtime-browser"] as readonly RuntimeEvidenceChannel[],
+};
+
+/** Derived from {@link CELL_RUNTIME_BINDING_CONTRACT}. */
+export const CELL_RUNTIME_BINDING_HOST_NAMES = CELL_RUNTIME_BINDING_CONTRACT.hostNames;
+
+// ---------------------------------------------------------------------------
 // Cell code budget
 // ---------------------------------------------------------------------------
 
@@ -1124,6 +1232,14 @@ export const RUNTIME_CONTRACT_UNKNOWNS: readonly RuntimeContractUnknown[] = [
     question: "Does a property change re-execute the cell entry, or re-render the existing tree?",
     whyOpen: "The runtime re-creates the element factory when a property value changes; not exercised with state to observe whether component state survives.",
     ownedBy: "#6",
+  },
+  {
+    id: "artifact-re-evaluated-per-render",
+    question:
+      "Does the platform re-evaluate a Cell artifact's modules when a property changes, or evaluate them once and re-render the existing tree?",
+    whyOpen:
+      "The generated runtime binding installs the host provider from the Cell's `props` when the artifact is evaluated (#82). If the platform evaluates the artifact once and then re-invokes the `App` binding with new props, the installed provider holds the first render's props and a re-render reads stale values — silently, with every check in the façade passing. The recorded execution model gives the nesting but not the invocation count, so this is not decidable from the repository.",
+    ownedBy: "#83",
   },
   {
     id: "absolute-source-ceiling",

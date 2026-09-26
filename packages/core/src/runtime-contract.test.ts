@@ -12,6 +12,8 @@ import {
   CELL_PRESET_LIBRARY_DEFAULT,
   CELL_PROPS_BASE_KEYS,
   CELL_PROPS_KEY_ORDER,
+  CELL_RUNTIME_BINDING_CONTRACT,
+  CELL_RUNTIME_BINDING_HOST_NAMES,
   CELL_RUNTIME_RENDER_FAILURE_BEHAVIOR,
   CELL_SERVER_COMMANDS_CONTRACT,
   CELL_SERVER_COMMAND_RESULT_KEYS,
@@ -122,6 +124,7 @@ const DERIVED_EXPORTS: readonly DerivedExportRule[] = [
   },
   { name: "CELL_PROPS_BASE_KEYS", source: "CELL_PROPS_KEY_ORDER", path: ["baseKeys"] },
   { name: "CELL_FORGUNCY_PROP_KEYS", source: "CELL_FORGUNCY_FACADE", path: ["keys"] },
+  { name: "CELL_RUNTIME_BINDING_HOST_NAMES", source: "CELL_RUNTIME_BINDING_CONTRACT", path: ["hostNames"] },
   { name: "CELL_SERVER_COMMAND_RESULT_KEYS", source: "CELL_SERVER_COMMANDS_CONTRACT", path: ["resultKeys"] },
   {
     name: "FRONTEND_LIBRARY_REFERENCE_EXAMPLE",
@@ -634,6 +637,65 @@ describe("names visible inside a cell", () => {
     for (const binding of CELL_USER_SCOPE_BINDINGS) {
       expect(cellUserScopeBinding(binding.name), binding.name).toBe(binding);
     }
+  });
+
+  // The generated runtime binding (#82) names two of these from code the compiler emits,
+  // so the contract's list is the authority for whether that generated source may name
+  // them at all. Asserted here rather than only in the compiler, because the compiler's
+  // check is a *use* of this list and a change here is what would invalidate it.
+  it("supplies every name the generated runtime binding references", () => {
+    expect(CELL_RUNTIME_BINDING_HOST_NAMES.length).toBeGreaterThan(0);
+    for (const name of CELL_RUNTIME_BINDING_HOST_NAMES) {
+      const binding = cellUserScopeBinding(name);
+      expect(binding, name).toBeDefined();
+      // `wrapper-local` and not `injected-parameter`: the binding is generated *inside*
+      // the arrow IIFE that declares them, so it sees them as locals. A name that was
+      // only a `new Function` parameter would be in scope too, but the distinction is
+      // what says the generated code is nested where the platform nests cell source.
+      expect(binding?.kind, name).toBe("wrapper-local");
+      expect(binding?.availableInCellSource, name).toBe("always");
+    }
+  });
+});
+
+describe("the generated runtime binding contract", () => {
+  it("addresses one package and names the members it calls", () => {
+    // The three fields a generated module and the façade's own barrel have to agree on.
+    // A rename on either side is silent otherwise: the binding would call a member that
+    // no longer exists, and the failure would appear at a Cell's first façade call as
+    // `TypeError: ... is not a function` rather than as anything naming the binding.
+    expect(CELL_RUNTIME_BINDING_CONTRACT.facadeSpecifier).toBe("@forguncy-react-workspace/runtime");
+    expect(CELL_RUNTIME_BINDING_CONTRACT.installMember).toBe("installRuntimeFacadeProvider");
+    expect(CELL_RUNTIME_BINDING_CONTRACT.createProviderMember).toBe("createHostRuntimeFacadeProvider");
+  });
+
+  it("fills the provider input under the port's own member names", () => {
+    // `RUNTIME_FACADE_PORT_CHANNEL_MEMBERS` is the port's authority for how a channel is
+    // spelled, and it lives in another package. The contract here cannot import it — that
+    // would make `core` depend on `runtime` — so the correspondence is asserted as a
+    // literal, which is the one place the two spellings are allowed to meet.
+    expect(CELL_RUNTIME_BINDING_CONTRACT.providerInput).toEqual({
+      cellProps: "cellProps",
+      useDataSource: "useDataSource",
+    });
+  });
+
+  it("states an install timing that precedes the first façade call", () => {
+    // The ordering is the whole point of #82: installing later leaves the first call
+    // unserved, and the failure it produces is the `provider-not-installed` error this
+    // contract exists to remove.
+    expect(CELL_RUNTIME_BINDING_CONTRACT.installTiming).toContain("evaluated");
+    expect(CELL_RUNTIME_BINDING_CONTRACT.installTiming).toContain("App");
+  });
+
+  it("leaves the re-render question open rather than claiming it is settled", () => {
+    // Whether the platform re-evaluates the artifact per render decides whether a
+    // re-render reads fresh props, and the repository cannot answer it. Recording it as an
+    // open question is what stops a later reader treating the module-scope install as
+    // proof that it does.
+    const open = RUNTIME_CONTRACT_UNKNOWNS.find(unknown => unknown.id === "artifact-re-evaluated-per-render");
+    expect(open).toBeDefined();
+    expect(open?.ownedBy).toBe("#83");
   });
 });
 
