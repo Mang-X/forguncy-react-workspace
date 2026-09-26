@@ -159,10 +159,15 @@ export interface RunDependencyProbeOptions {
    * Named bindings the synthetic build imports; empty (the default) keeps the whole namespace.
    * Part of the fingerprint.
    *
-   * This is what makes a size cap verdict *provable*, and it is the caller's declaration
-   * rather than something the engine infers: only the Agent knows which bindings the Cell
-   * will import, and the engine may not guess a Cell's import surface (that would be choosing
-   * what the Cell does, which is not the probe's decision). See `build.ts` and `size.ts`.
+   * It selects which way the size estimate leans (`size.estimateBias`); it does not make a
+   * cap verdict provable, and no cap verdict is filed from this engine's `size` step under
+   * any surface. That was the shape of an earlier revision and `size.ts` retracts it with
+   * the counterexample.
+   *
+   * It is the caller's declaration rather than something the engine infers: only the Agent
+   * knows which bindings the Cell will import, and the engine may not guess a Cell's import
+   * surface (that would be choosing what the Cell does, which is not the probe's decision).
+   * See `build.ts` and `size.ts`.
    */
   readonly imports?: readonly string[];
   readonly probeConfig?: Readonly<Record<string, unknown>>;
@@ -451,9 +456,13 @@ export async function runDependencyProbe(options: RunDependencyProbeOptions): Pr
   steps.addRejections(runtimePatterns.rejectionFindings);
   steps.record(runtimePatterns.validation);
 
-  // A named import surface makes the measured artifact a lower bound on what the Cell
-  // carries, which is the only shape a cap rejection is sound on; a namespace build measures
-  // an upper bound. Derived from the surface the caller declared, never guessed here.
+  // The declared surface picks which way the estimate leans, and nothing more: a named build
+  // pulls in only those bindings so the number probably understates, a namespace build keeps
+  // everything reachable so it probably overstates. Neither is a bound — the probe's build and
+  // the compiler's resolve `host`/`extension` dependencies differently, so the artifact can be
+  // larger than the Cell (`size.ts` has the counterexample) — and `observeSize` files no
+  // rejection, so the leaning selects between two estimates and never authorizes a verdict.
+  // Derived from the surface the caller declared, never guessed here.
   const size = observeSize(build.output, budgetCharacters, imports.length > 0 ? "lower-leaning" : "upper-leaning");
   steps.addFacts(size.facts);
   steps.addRisks(size.risks);

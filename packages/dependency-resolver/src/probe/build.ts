@@ -67,20 +67,31 @@ export interface CandidateBuildOptions {
   /** Specifier the synthetic entry imports; defaults to the package name. */
   readonly entry?: string;
   /**
-   * Named bindings the synthetic entry imports, which is what makes the measured
-   * artifact a **lower bound** rather than an upper one.
+   * Named bindings the synthetic entry imports. It selects **which way the size
+   * estimate leans** (`size.estimateBias`), and it authorizes nothing.
    *
    * Empty (the default) means `import * as candidate from "<entry>"`, which keeps the
-   * whole module namespace observable. That is an **upper** bound on the code the Cell
-   * will carry: a Cell importing one small binding can tree-shake the rest away, so a
-   * namespace bundle over a cap does *not* show the Cell is over it. Measured on
-   * `es-toolkit`: the namespace bundles to 249,750 characters while the single named
-   * binding `debounce` bundles to 2,865 — an 87x gap, and the reason the cap verdict is
-   * gated on this list being non-empty (see `size.ts`).
+   * whole module namespace observable, so the number leans over — the Cell may carry
+   * less. Non-empty means `import { a, b } from "<entry>"`, which measures only what
+   * those bindings pull in, so the number leans under.
    *
-   * Non-empty means `import { a, b } from "<entry>"`, which measures only what those
-   * bindings pull in. A Cell that imports them carries at least that much, so the
-   * measurement bounds the Cell from below and a cap rejection on it is sound.
+   * **Neither is a bound on the Cell**, and an earlier revision of this file said
+   * otherwise. The measurement is not a lower bound even in the named case: the probe's
+   * build is a raw Rolldown build, while the compiler installs
+   * `createInterceptionResolver`, so a `host`/`extension` dependency the probe inlined is
+   * a page global in the Cell and the probe's artifact can be **larger**. `size.ts`'s
+   * module header carries the `react-library` counterexample and the retraction; the
+   * verdict belongs to the compiler's `auditCodeBudget` on the composed source, and the
+   * `size` step files no rejection under any input.
+   *
+   * What this option is load-bearing for is the *other* two things: it is a fingerprint
+   * input (#8), and it is a caller's **declaration** about what the Cell will import —
+   * never a fact read from the Cell, which is why the engine may not guess it.
+   *
+   * The gap between the two shapes is the reason the surface has to travel with the
+   * number: measured on `es-toolkit`, the namespace bundles to 249,750 characters while
+   * the single named binding `debounce` bundles to 2,865 — an 87x difference, so a size
+   * means little without the surface that produced it.
    *
    * Sorted before use, so a caller's declaration order cannot compose a different
    * fingerprint or a different entry file for the same surface.
@@ -105,9 +116,10 @@ interface CapturedLog {
 /**
  * The synthetic entry's source for one import surface.
  *
- * The two shapes are not interchangeable and the difference is the whole of the
- * lower/upper bound distinction: a namespace import keeps every export reachable, while
- * named imports let the bundler drop what the Cell will never call. See
+ * The two shapes are not interchangeable: a namespace import keeps every export
+ * reachable, while named imports let the bundler drop what the Cell will never call, so
+ * they produce different numbers for the same package and the estimate leans a different
+ * way in each. Neither shape bounds the Cell — see
  * {@link CandidateBuildOptions.imports}.
  */
 export function entrySource(specifier: string, imports: readonly string[] = []): string {
@@ -258,11 +270,13 @@ export async function runCandidateBuild(options: CandidateBuildOptions): Promise
       name: "build.entry-specifier",
       value: specifier,
     },
-    // The import surface the artifact was built from, so a reader can tell which bound the
-    // measurement is: an empty list means the whole namespace was kept and the size is an
-    // upper bound, a non-empty one means only those bindings were reachable and the size
-    // bounds the Cell from below. `size.ts` reads this fact's meaning when it decides
-    // whether a cap verdict is provable, so it is recorded rather than implied by the entry.
+    // The import surface the artifact was built from, so a reader can tell which way the
+    // measurement leans: an empty list means the whole namespace was kept (the number leans
+    // over), a non-empty one means only those bindings were reachable (it leans under). It is
+    // *not* a bound in either direction, and no consumer reads it to decide a cap verdict —
+    // `size.ts` never sees this fact, it is handed the leaning as an enum and files no
+    // rejection at all. Recorded because the number is uninterpretable without it, and
+    // because it is one of the fingerprint's declared inputs.
     {
       step: "build",
       name: "build.import-surface",
