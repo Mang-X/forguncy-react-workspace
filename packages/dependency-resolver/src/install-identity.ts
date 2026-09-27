@@ -65,7 +65,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir, realpath } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -310,7 +310,131 @@ async function findInstallLockfile(projectRoot: string): Promise<InstallLockfile
     // a complete one.
     return { kind: "unknown" };
   }
-  return { kind: "found", claim: claims[0]! };
+
+  const claim = claims[0]!;
+  // A single ancestor claim is not proof that it owns the install *this* project resolves in.
+  // Review round 4: a project with its own `node_modules` and no lockfile of its own — the parent
+  // holding the only lockfile — still resolves through its own tree first, so the parent's lock
+  // describes an install that is not the one being measured. Measured: keeping the parent lock and
+  // the root package fixed while moving the child's own installed transitive dependency left all
+  // three digests unchanged.
+  if (!(await nearerInstallIsAttributableTo(resolve(projectRoot), claim.directory))) {
+    return { kind: "unknown" };
+  }
+  return { kind: "found", claim };
+}
+
+/**
+ * Whether every `node_modules` between `projectRoot` and `installRoot` belongs to `installRoot`'s
+ * install, rather than to a closer one that no lockfile in the walk describes.
+ *
+ * **Why this is needed.** The walk finds the nearest ancestor *holding a lockfile*, but resolution
+ * finds the nearest `node_modules` holding a *name* — and those are different questions. A
+ * subproject with its own `node_modules` and no lockfile of its own resolves out of its own tree
+ * first, while the only claim the walk sees is the parent's lock; the parent's lock then describes
+ * an install that is not the one being measured, and its digest cannot move when the measured tree
+ * does.
+ *
+ * **How it is decided.** A manager's install is *shared* by the members of its workspace through
+ * symlinks: in this repository a member's `node_modules/@tanstack/react-query` is a link whose
+ * realpath lands inside the root's `node_modules/.pnpm/…` (measured). An entry that already resolves
+ * inside `installRoot` is therefore attributable to it, and a nearer tree made only of such entries
+ * is the same install. An entry that resolves *outside* — a real directory, or a link elsewhere —
+ * is a different install this walk cannot describe.
+ *
+ * Deliberately conservative in both directions: `true` only when every entry that can be resolved
+ * lands inside `installRoot`. An unreadable or unresolvable entry makes the answer `false`, which
+ * is `unknown` rather than a claim about a tree this process could not read.
+ */
+async function nearerInstallIsAttributableTo(projectRoot: string, installRoot: string): Promise<boolean> {
+  // The directories strictly between the project and the install root, plus the project itself. The
+  // install root's own `node_modules` is by definition its install, so it is not examined.
+  const directories: string[] = [];
+  let directory = projectRoot;
+  for (;;) {
+    if (directory === installRoot) {
+      break;
+    }
+    directories.push(directory);
+    const parent = dirname(directory);
+    if (parent === directory) {
+      // The project is not under the install root at all (a sibling tree resolved by some other
+      // route); nothing here can attribute it, so the honest answer is "cannot say".
+      return false;
+    }
+    directory = parent;
+  }
+
+  for (const candidate of directories) {
+    const nodeModules = join(candidate, "node_modules");
+    let entries: string[];
+    try {
+      entries = await readdir(nodeModules);
+    } catch (error) {
+      const code = (error as { readonly code?: unknown } | null)?.code;
+      // Absent is the normal case for the directories in between: nothing to attribute.
+      if (code === "ENOENT" || code === "ENOTDIR") {
+        continue;
+      }
+      // Present and unreadable is "cannot say", not "no install here".
+      return false;
+    }
+
+    // Every package directory at this level, with scopes expanded one level so `@scope/name` entries
+    // are examined as the packages they are rather than skipped as a name that starts with `@`.
+    const packagePaths: string[] = [];
+    for (const entry of entries) {
+      // Dot entries (`.bin`, `.package-lock.json`, and the install root's own `.pnpm`) are not
+      // packages, so they say nothing about which install a name resolves to.
+      if (entry.startsWith(".")) {
+        continue;
+      }
+      const path = join(nodeModules, entry);
+      if (entry.startsWith("@")) {
+        let scoped: string[];
+        try {
+          scoped = await readdir(path);
+        } catch {
+          return false;
+        }
+        for (const name of scoped) {
+          if (!name.startsWith(".")) {
+            packagePaths.push(join(path, name));
+          }
+        }
+        continue;
+      }
+      packagePaths.push(path);
+    }
+
+    for (const packagePath of packagePaths) {
+      let resolved: string;
+      try {
+        // `realpath` follows a workspace link to the store path it points at, which is what makes
+        // "is this the same install" answerable at all.
+        resolved = await realpath(packagePath);
+      } catch {
+        return false;
+      }
+      // The install a lockfile describes is the one under **its own `node_modules`** — that is where
+      // its tree lives (and, for pnpm, where `.pnpm/` is). Checking "under the install root
+      // directory" instead would accept a subproject's tree, because a subproject is *inside* the
+      // root's directory while having nothing to do with the root's install.
+      if (!isInside(join(installRoot, "node_modules"), resolved)) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+/** Whether `candidate` is `directory` itself or lies beneath it, compared on normalized paths. */
+function isInside(directory: string, candidate: string): boolean {
+  const fold = (value: string): string => (process.platform === "win32" ? value.toLowerCase() : value);
+  const parent = fold(resolve(directory));
+  const child = fold(resolve(candidate));
+  return child === parent || child.startsWith(`${parent}${process.platform === "win32" ? "\\" : "/"}`);
 }
 
 /**
@@ -550,17 +674,35 @@ async function patchesDigest(projectRoot: string, workspace: ParsedConfig, manif
 }
 
 /**
+ * Manager configuration files that can change the installed tree without changing a lockfile.
+ *
+ * Named so the set is inspectable rather than scattered through the digest:
+ *
+ * - `.npmrc` — npm. `omit=optional` is the measured case: omitted dependencies stay in
+ *   `package-lock.json` and are only skipped on disk.
+ * - `.yarnrc.yml` — Yarn. `nodeLinker` selects `node-modules` versus PnP, which decides whether a
+ *   `node_modules` tree exists at all.
+ * - `bunfig.toml` — Bun, whose `[install].linker` is the same choice.
+ *
+ * A file that does not apply to the project's manager is simply absent, which contributes a known
+ * `null`.
+ */
+const MANAGER_CONFIG_FILES: readonly string[] = [".npmrc", ".yarnrc.yml", "bunfig.toml"];
+
+/**
  * The configuration that affects resolution, minus the patch declarations.
  *
  * Patch declarations are excluded on purpose: they are {@link patchesDigest}'s subject, and
  * hashing them here too would report one edit as two moved components. What remains is what this
- * component owns — workspace globs, catalogs, overrides, and the package-manager field — so the
- * freshness diagnostic can say *which* half moved.
+ * component owns — workspace globs, catalogs, overrides, the package-manager field, and the manager
+ * configuration files that change the installed tree — so the freshness diagnostic can say *which*
+ * half moved.
  *
- * `null` when either config file is present and unreadable. An absent `pnpm-workspace.yaml` is
+ * `null` when any config file is present and unreadable. An absent `pnpm-workspace.yaml` is
  * normal for a non-pnpm project and is not an unknown.
  */
 async function configurationDigest(
+  installRoot: string,
   workspace: ParsedConfig,
   manifest: ParsedConfig,
 ): Promise<string | null> {
@@ -583,7 +725,30 @@ async function configurationDigest(
         }
       : null;
 
-  return digestOf(canonicalJson({ workspace: workspaceFields, manifest: manifestFields }));
+  // Manager configuration files that change the **installed tree without changing the lockfile**.
+  // Review round 4: this module treats npm/yarn/bun lockfiles as verifiable identities, but only
+  // pnpm's configuration was covered — so a non-pnpm project could change what is on disk while all
+  // three digests held. Measured with npm's `omit=optional`: npm documents that omitted
+  // dependencies are "still resolved and added to the package-lock.json", only "not physically
+  // installed on disk", so the same lockfile describes two different trees and the record would stay
+  // `fresh` across the switch.
+  //
+  // These are digested as **whole file contents** rather than by parsing each manager's schema: the
+  // set of settings each one has that can change an install is not something this module can
+  // enumerate reliably, and a parser per manager would be a second implementation to keep in step.
+  // Content is the conservative answer — any edit invalidates, including one this module does not
+  // understand, and a file that is absent contributes a known `null` rather than a guess.
+  const managerConfigs: Record<string, string | null> = {};
+  for (const name of MANAGER_CONFIG_FILES) {
+    const state = await readTextFile(join(installRoot, name));
+    if (state.kind === "unreadable") {
+      // Present and unreadable is "cannot say", not "no config".
+      return null;
+    }
+    managerConfigs[name] = state.kind === "read" ? digestOf(state.text) : null;
+  }
+
+  return digestOf(canonicalJson({ workspace: workspaceFields, manifest: manifestFields, managerConfigs }));
 }
 
 /**
@@ -641,7 +806,7 @@ export async function readInstallGraphIdentity(projectRoot: string): Promise<Ins
 
   const [patches, configuration] = await Promise.all([
     patchesDigest(installRoot, workspace, manifest),
-    configurationDigest(workspace, manifest),
+    configurationDigest(installRoot, workspace, manifest),
   ]);
 
   return { lockfile: lockfile.claim.digest, patches, configuration };

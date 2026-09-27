@@ -20,7 +20,7 @@ import { rm } from "node:fs/promises";
 
 import { describe, expect, it } from "vitest";
 
-import type { ProbeReport } from "@forguncy-react-workspace/core";
+import type { ProbeReport, ToolchainIdentity } from "@forguncy-react-workspace/core";
 import {
   assessDependencyRole,
   assessLockDecision,
@@ -52,6 +52,28 @@ const FIXTURES_ROOT = fileURLToPath(new URL("../__fixtures__/probe", import.meta
 
 function fixture(name: string): string {
   return join(FIXTURES_ROOT, name);
+}
+
+/**
+ * A known toolchain identity for the cases that must not depend on the fixture's install graph.
+ *
+ * A probe fixture is a **committed mini-install** — its own real `node_modules` whose packages the
+ * ancestor lock does not describe — so `readToolchainIdentity` reports the install graph as
+ * `unknown`, and an unknown strict component is a cache miss by design (#94). Cases about the cache
+ * or about lock freshness therefore supply an identity rather than deriving one, and the install
+ * graph axis keeps its own coverage in `install-identity.test.ts`.
+ */
+function fixtureIdentity(): ToolchainIdentity {
+  return {
+    vitePlus: null,
+    rolldown: "1.2.9",
+    node: "24",
+    installGraph: {
+      lockfile: "sha256:fixture-lockfile",
+      patches: "sha256:fixture-patches",
+      configuration: "sha256:fixture-configuration",
+    },
+  };
 }
 
 async function probe(
@@ -929,10 +951,19 @@ describe("runDependencyProbe: cache", () => {
     const projectRoot = fixture("pure-esm-utility");
     await rm(join(projectRoot, ".fgc"), { recursive: true, force: true });
 
-    const first = await runDependencyProbe({ projectRoot, packageName: "tiny-math" });
+    // The identity is supplied rather than derived, and the reason is the same one
+    // `selection-proving-cases.test.ts` records for its two roots: a probe fixture is a *committed*
+    // mini-install whose packages the ancestor lock does not describe, so `readToolchainIdentity`
+    // reports the install graph as `unknown` for it — and an unknown strict component is a cache
+    // miss by design (#94), which would make `fromCache: true` below unreachable. Supplying a known
+    // identity keeps this an assertion about the *cache*, which is what the case is named for; the
+    // identity axis has its own coverage in `install-identity.test.ts`.
+    const identity = fixtureIdentity();
+
+    const first = await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: identity });
     expect(first.fromCache).toBe(false);
 
-    const second = await runDependencyProbe({ projectRoot, packageName: "tiny-math" });
+    const second = await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: identity });
     expect(second.fromCache).toBe(true);
     expect(second.fingerprint).toBe(first.fingerprint);
     expect(serializeProbeReport(second.report)).toBe(serializeProbeReport(first.report));
@@ -1361,8 +1392,14 @@ describe("lock integration (#8)", () => {
   });
 
   it("builds a LockEnvironment whose probeFingerprints drive freshness", async () => {
-    const result = await probe("pure-esm-utility", "tiny-math");
+    // A supplied identity, as `fixtureIdentity()` documents: the fixture is a committed
+    // mini-install its ancestor lock does not describe, so a derived install graph is `unknown`
+    // and freshness would correctly report `stale`. This case is about the environment's
+    // fingerprint driving freshness, so both the record and the environment carry this identity.
+    const identity = fixtureIdentity();
+    const result = await probe("pure-esm-utility", "tiny-math", { toolchain: identity });
     const environment = await probeLockEnvironment(fixture("pure-esm-utility"), {
+      toolchain: identity,
       lock: {
         schemaVersion: 1,
         decisions: [
@@ -1424,6 +1461,7 @@ describe("lock integration (#8)", () => {
     expect(assessLockDecision(record!, environment).stalenessReasons).toEqual([]);
 
     const moved = await probeLockEnvironment(fixture("pure-esm-utility"), {
+      toolchain: identity,
       probeFingerprints: { "tiny-math": "probe=inline-bundle;entry=other" },
       lock: {
         schemaVersion: 1,
@@ -1454,6 +1492,7 @@ describe("lock integration (#8)", () => {
     expect(changed.stalenessReasons).toContain("probe-fingerprint-changed");
 
     const unknown = await probeLockEnvironment(fixture("pure-esm-utility"), {
+      toolchain: identity,
       probeFingerprints: {},
       lock: {
         schemaVersion: 1,

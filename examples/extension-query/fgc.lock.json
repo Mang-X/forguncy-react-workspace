@@ -26,7 +26,7 @@
         "installGraph": {
           "lockfile": "sha256:76ee5ff018eb3b529882c86a80fb9213ff0c0fb2ec093d004934e06d8435cdf2",
           "patches": "sha256:a771d26ace30f31fffb826a3d192a292e9b4850485e671abf84cf3af95c713a8",
-          "configuration": "sha256:0a222e1ab9808e51a198525c19d9261d62d93702947ac02c47f7ee0207b10926"
+          "configuration": "sha256:37aa2b39da9427a8629b68238ea0fa6bd1dc19017afbf7b7fa8d9cc7b9974c46"
         }
       },
       "extension": {

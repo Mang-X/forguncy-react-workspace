@@ -315,6 +315,54 @@ describe("#94: identity comes from the install graph, not from a declaration", (
     expect(after.configuration).not.toBe(before.configuration);
   });
 
+  it("covers manager config that changes the installed tree without changing the lockfile", async () => {
+    // PR #114 review round 4, P1. This module treats npm/yarn/bun lockfiles as verifiable
+    // identities, but only pnpm's configuration was digested — so a non-pnpm project could change
+    // what is on disk while all three digests held. Measured with npm's `omit=optional`: npm
+    // documents that omitted dependencies are "still resolved and added to the package-lock.json",
+    // only "not physically installed on disk", so one lockfile describes two different trees.
+    const withNpmrc = async (npmrc: string | null): Promise<string | null> =>
+      withProject(async root => {
+        // Built directly rather than through `project()`, whose helper always installs a real
+        // `node_modules` tree the npm lock does not describe — which the attribution check would
+        // (correctly) report as `unknown`, hiding the digest this case is about.
+        await writeFileAt(
+          join(root, "package.json"),
+          JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "npm@11.0.0" }),
+        );
+        await writeFileAt(
+          join(root, "package-lock.json"),
+          JSON.stringify({ name: "consumer", dependencies: { b: "1.0.0" } }),
+        );
+        if (npmrc !== null) {
+          await writeFileAt(join(root, ".npmrc"), npmrc);
+        }
+        return (await readInstallGraphIdentity(root)).configuration;
+      });
+
+    const before = await withNpmrc(null);
+    const after = await withNpmrc("omit=optional\n");
+
+    expect(before).not.toBeNull();
+    // The lockfile is byte-identical across these two runs — only `.npmrc` moved — so this digest is
+    // the only thing that can carry the change.
+    expect(after).not.toBe(before);
+
+    // The Yarn and Bun equivalents are covered by the same mechanism: `nodeLinker` decides whether a
+    // `node_modules` tree exists at all, and `[install].linker` is the same choice.
+    const withYarnRc = async (text: string): Promise<string | null> =>
+      withProject(async root => {
+        await writeFileAt(
+          join(root, "package.json"),
+          JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "yarn@4.0.0" }),
+        );
+        await writeFileAt(join(root, "yarn.lock"), "yarn lock\n");
+        await writeFileAt(join(root, ".yarnrc.yml"), text);
+        return (await readInstallGraphIdentity(root)).configuration;
+      });
+    expect(await withYarnRc("nodeLinker: node-modules\n")).not.toBe(await withYarnRc("nodeLinker: pnp\n"));
+  });
+
   it("reads the patch set and the configuration at the install root, not at a nested project", async () => {
     // A workspace member has no lockfile of its own and inherits its root's install, which is the
     // shape `examples/probe-proving-cases` has. Reading the member's own directory would report
@@ -529,6 +577,46 @@ describe("#94: an install state that cannot be established is explicitly unknown
       return (await readInstallGraphIdentity(root)).lockfile;
     });
     expect(onlyShrinkwrap).not.toBeNull();
+  });
+
+  it("is unknown when a nested project has its own install the ancestor lock does not describe", async () => {
+    // PR #114 review round 4, P1. Counting ancestors' *lockfiles* answers "who wrote a lock", not
+    // "whose install does this project resolve in" — and resolution takes the nearest `node_modules`
+    // holding a name. Measured: a project with its own real `node_modules` and no lockfile of its
+    // own, whose only ancestor claim was the parent's `pnpm-lock.yaml`; keeping the parent lock and
+    // the root package fixed while moving the child's own installed transitive dependency left all
+    // three digests unchanged, so a warm cache could answer a report about a tree that had moved.
+    //
+    // Contrast the *workspace-member* shape a few cases above, where the member's entries are
+    // symlinks into the root's `node_modules` and the root's lock genuinely does describe the
+    // install: that one still resolves, pinned as a control below.
+    const nested = async (childDep: string): Promise<string | null> =>
+      withProject(async root => {
+        await project(root, { packageManager: "pnpm@11.18.0", lockfile: null });
+        await writeFileAt(join(root, "pnpm-lock.yaml"), "parent lock\n");
+        const child = join(root, "child");
+        await writeFileAt(join(child, "package.json"), JSON.stringify({ name: "child", version: "0.0.0" }));
+        // A REAL directory, not a link into the parent's install: this tree belongs to the child.
+        await writeFileAt(
+          join(child, "node_modules", "a", "node_modules", "b", "package.json"),
+          JSON.stringify({ name: "b", version: childDep }),
+        );
+        return (await readInstallGraphIdentity(child)).lockfile;
+      });
+
+    expect(await nested("1.0.0")).toBeNull();
+    expect(await nested("2.0.0")).toBeNull();
+
+    // The control: a project with no `node_modules` of its own still resolves to the ancestor's
+    // lock — this is the shape the ancestor walk exists for, and the fix must not disable it.
+    const plain = await withProject(async root => {
+      await project(root, { packageManager: "pnpm@11.18.0", lockfile: null });
+      await writeFileAt(join(root, "pnpm-lock.yaml"), "parent lock\n");
+      const child = join(root, "child");
+      await writeFileAt(join(child, "package.json"), JSON.stringify({ name: "child", version: "0.0.0" }));
+      return (await readInstallGraphIdentity(child)).lockfile;
+    });
+    expect(plain).not.toBeNull();
   });
 
   it("is unknown when a nested project carries a leftover lock the workspace root also has", async () => {
