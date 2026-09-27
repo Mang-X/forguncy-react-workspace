@@ -919,13 +919,16 @@ function probePayload({ projectRoot, result, evidencePath }) {
  *                                    // omitted or null for the whole namespace
  *     "rejection": { … },            // replace; omitted for an architectural
  *                                    // rejection, which uses the assessment's own
- *     "artifactEvidence": {         // required exactly when the rejection code is
- *       "codeCharacters": 200000,   // `cell-code-budget-exceeded`: the composed Cell
- *       "budgetCharacters": 100000  // exceeded its cap. Reproduced from the compile's
- *     }                             // own `cell-code-budget-exceeded` diagnostic, and
- *                                    // `budgetCharacters` must equal the Cell's declared
- *                                    // `output.codeBudgetCharacters`.
  *   }
+ *
+ * `artifactEvidence` is deliberately **absent** from that shape, and supplying it is refused
+ * rather than ignored. A rejection whose evidence is a composed Cell compile names *which*
+ * rejection it is (`rejection.code: "cell-code-budget-exceeded"` plus a `cellTarget`); this
+ * script compiles that Cell and takes the two character counts from the compiler's own
+ * `cell-code-budget-exceeded` diagnostic. The numbers are the script's to produce, not the
+ * file's to state — a rejection certified by numbers the deciding file chose is exactly the
+ * evidence #77 removed. `artifactEvidence` is therefore a **lock** field, written after the
+ * compile, and never a decision-file field.
  */
 function decisionFromFile(document) {
   const { packageName, role, strategy } = document;
