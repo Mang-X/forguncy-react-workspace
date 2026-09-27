@@ -466,3 +466,66 @@ describe("the project input is an exclusive union", () => {
     expect(withRegistry.registry).toBeDefined();
   });
 });
+
+/**
+ * The callback contract the per-Cell form rests on.
+ *
+ * A callback is only correct if it is consulted **once per Cell, with that Cell's own id** — and
+ * that is not observable from the artifacts alone, because a build that called it once and reused
+ * the answer would still produce a plausible result for a single-strategy project. So the ids are
+ * recorded and asserted, which also pins the shape a caller composes with the resolver:
+ * `cellId => compilationDependencies(lock, environment, { cellTarget: cellId })`.
+ */
+describe("the per-Cell dependency callback", () => {
+  it("is consulted once per Cell, with that Cell's own id", async () => {
+    const asked: string[] = [];
+
+    await buildCellProject({
+      registry: createCellRegistry(
+        {
+          cells: {
+            alpha: { entry: "./cells/alpha/src/index.ts", target: { pageName: "探针", cell: "A1" } },
+            beta: { entry: "./cells/beta/src/index.ts", target: { pageName: "探针", cell: "B2" } },
+          },
+        },
+        { root: join(here, "..", "tests", "fixtures", "per-cell-strategy") },
+      ),
+      dependencies: cellId => {
+        asked.push(cellId);
+        return [{ strategy: "inline", packageName: "@tanstack/query-core" }];
+      },
+      workspace: false,
+    });
+
+    // Every Cell, and only real ids — a build that asked for `undefined` or reused one answer would
+    // fail both halves of this.
+    expect(asked.sort()).toEqual(["alpha", "beta"]);
+  });
+
+  it("treats an absent projection as no non-source dependencies", async () => {
+    // A Cell with no decisions is normal (a Cell whose imports are all workspace source, #14), so
+    // the callback is not required to cover every id. The fixture's Cells import an installed
+    // package, so this is asserted through the *rejection*: with no decision the compiler reports
+    // `unresolved-dependency-decision` rather than silently inlining, which is the behaviour that
+    // makes an omitted projection loud instead of permissive.
+    const build = await buildCellProject({
+      registry: createCellRegistry(
+        {
+          cells: {
+            alpha: { entry: "./cells/alpha/src/index.ts", target: { pageName: "探针", cell: "A1" } },
+          },
+        },
+        { root: join(here, "..", "tests", "fixtures", "per-cell-strategy") },
+      ),
+      dependencies: () => [],
+      workspace: false,
+    });
+
+    const [cell] = build.cells;
+    expect(cell?.outcome.status).toBe("rejected");
+    if (cell?.outcome.status !== "rejected") return;
+    expect(cell.outcome.diagnostics.map(diagnostic => diagnostic.code)).toContain(
+      "unresolved-dependency-decision",
+    );
+  });
+});
