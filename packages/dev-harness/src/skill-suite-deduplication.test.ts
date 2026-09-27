@@ -334,35 +334,46 @@ describe("the Skill eval suite is collected once per physical file (#100)", () =
     }
 
     // The pairing that makes the assertion above non-vacuous, and the reason it does not need a
-    // second linter run to be meaningful: enumerate the lintable files under the alias *from the
+    // second linter run to be meaningful: enumerate the lintable files under each alias *from the
     // filesystem*, then require that each one appears on the linter's list under its **canonical**
     // spelling and **not** under its alias spelling. That is a statement about this walk, not
     // about whether the walk would otherwise have included the alias — a reading the tool does not
     // offer, since `--ignore-pattern` adds exclusions and cannot withdraw one.
-    const aliasFiles = lintableFilesUnder(join(repositoryRoot, AGENT_DISCOVERY_LINKS[0]));
-    expect(
-      aliasFiles.length,
-      "no lintable file was found under the `.claude` alias, so this assertion would be vacuous",
-    ).toBeGreaterThan(0);
-
+    //
+    // **Every** link, not the first one. A review of this PR found the first draft iterated only
+    // `AGENT_DISCOVERY_LINKS[0]`, and the finding was right: the two links hold 29 and 5 lintable
+    // files respectively, so a future over-broad ignore that swallowed the *second* link's
+    // canonical `.agents` path would leave both the `no .claude entries` assertion above and the
+    // pairing here green — 5 files silently unlinted, no test failing. Reproduced before fixing:
+    // adding `.agents/skills/forguncy-react-dependency-selection/**` to `lint.ignorePatterns` with
+    // the alias still excluded left all four tests passing while that link's canonical entries
+    // went from 5 to 0. The per-link loop below is what makes the "uniqueness is not reduced" half
+    // of #100's acceptance true of **both** symlinks this PR is about, and naming the link in each
+    // message is what tells a future reader which one regressed.
     const canonicalWithoutAlias: string[] = [];
     const aliasStillListed: string[] = [];
-    for (const file of aliasFiles) {
-      const canonicalSpelling = relativeToRoot(realpathSync(file));
-      const aliasSpelling = relativeToRoot(file);
-      if (lintedSet.has(aliasSpelling)) {
-        aliasStillListed.push(aliasSpelling);
-      } else if (!lintedSet.has(canonicalSpelling)) {
-        canonicalWithoutAlias.push(canonicalSpelling);
+    for (const link of AGENT_DISCOVERY_LINKS) {
+      const aliasFiles = lintableFilesUnder(join(repositoryRoot, link));
+      expect(aliasFiles.length, `no lintable file was found under \`${link}\`, so its pairing would be vacuous`).toBeGreaterThan(0);
+
+      for (const file of aliasFiles) {
+        const canonicalSpelling = relativeToRoot(realpathSync(file));
+        const aliasSpelling = relativeToRoot(file);
+        if (lintedSet.has(aliasSpelling)) {
+          aliasStillListed.push(aliasSpelling);
+        } else if (!lintedSet.has(canonicalSpelling)) {
+          canonicalWithoutAlias.push(canonicalSpelling);
+        }
       }
     }
 
-    // Nothing was dropped by excluding the alias: every file it holds is still linted once, under
-    // the `.agents` path. This is the "uniqueness is not reduced" half of #100's acceptance,
-    // asserted by pairing the two spellings rather than by counting them.
+    // Nothing was dropped by excluding the aliases: every file either link holds is still linted
+    // once, under its `.agents` path. Asserted by pairing the two spellings rather than by counting
+    // names, so an ignore that removed a canonical source fails here even though the file count
+    // would merely have gone down.
     expect(
       canonicalWithoutAlias,
-      "a file under the `.claude` alias is neither linted by its alias spelling nor by its " +
+      "a file under a `.claude` alias is neither linted by its alias spelling nor by its " +
         "canonical one, so the alias exclusion dropped it instead of deduplicating it",
     ).toEqual([]);
     expect(
