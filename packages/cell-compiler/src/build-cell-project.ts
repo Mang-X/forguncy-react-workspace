@@ -66,7 +66,7 @@ import { dirname, join, resolve } from "node:path";
 import { compileCell } from "./artifact.ts";
 import type { CompileCellOutcome } from "./artifact.ts";
 import type { CellEntryKind } from "@forguncy-react-workspace/core";
-import { planCellCompiles } from "./registry-plan.ts";
+import { planCellCompile } from "./registry-plan.ts";
 import type { CellCompileTarget } from "./registry-plan.ts";
 import { createRolldownCellBundler } from "./rolldown-bundler.ts";
 import { loadPnpmWorkspaceGraph, PNPM_WORKSPACE_FILE } from "./workspace-graph.ts";
@@ -125,11 +125,28 @@ export interface CellProjectBuild {
  *   root. The loader options live here because they are inputs to *loading*, and a caller that
  *   already holds a registry has already made those choices.
  *
- * Both are absolute-rooted: a registry carries its own `root`, so there is no second root to
- * reconcile.
+ * ## The exclusion is `never`-typed rather than assumed
+ *
+ * A structural union does **not** make the two branches exclusive: an object carrying both
+ * `registry` and `root` satisfies either branch, so a "union" would silently accept the ambiguous
+ * input and `resolveProjectRegistry`'s `"registry" in project` check would quietly pick one and
+ * ignore the other. That is precisely the "two project sources, one consumed" ambiguity this
+ * section exists to remove, so each branch forbids the other's fields by type — which is what makes
+ * the compiler reject `{ root, registry }` instead of a runtime check having to.
+ *
+ * `never` rather than `undefined` on the optional fields: `?: never` still admits an explicit
+ * `undefined`, which is harmless (it chooses nothing), while the required `registry` on the first
+ * branch forbids the second branch's `root` outright.
  */
 export type CellProjectSource =
-  | { readonly registry: CellRegistry }
+  | {
+      /** The registry to build. Used as handed over, never re-normalized. */
+      readonly registry: CellRegistry;
+      readonly root?: never;
+      readonly configFile?: never;
+      readonly loadModule?: never;
+      readonly requireEntryFiles?: never;
+    }
   | {
       /** Absolute project root. */
       readonly root: string;
@@ -145,6 +162,7 @@ export type CellProjectSource =
       readonly loadModule?: ForguncyConfigModuleLoader;
       /** Verify declared entries exist on disk while normalizing. Defaults to `true`. */
       readonly requireEntryFiles?: boolean;
+      readonly registry?: never;
     };
 
 /**
@@ -189,6 +207,44 @@ function findWorkspaceRoot(from: string): string | undefined {
 }
 
 /**
+ * The decisions a build compiles against, either per Cell or shared by every Cell.
+ *
+ * ## Why the per-Cell form is not optional
+ *
+ * #4 defines a strategy at the `(packageName, cellTarget)` level, so "Cell A inlines this package
+ * while Cell B externalizes it" is a legitimate project. A single project-wide array **cannot
+ * express it**, and that was a real defect in the first version of this entry. Measured:
+ *
+ * - the projection that produces `DependencyDecision[]` has already applied the target —
+ *   `compilationDependencies(lock, environment, { cellTarget })` selects by target and then
+ *   `dependencyDecisionOf()` drops the `cellTarget` field, so the array carries no Cell identity
+ *   for a later stage to narrow by;
+ * - handing A's array to B makes B compile with A's strategy, and vice versa;
+ * - concatenating both arrays gives one id two decisions, which `auditDependencyDecisions` refuses
+ *   as `unresolved-dependency-decision`.
+ *
+ * So the per-Cell form is the one that can be *correct* for such a project, and the flat array is
+ * the degenerate case where every Cell shares a projection — kept because that is the common case
+ * and it is what a single-strategy project actually has.
+ *
+ * ## Why a function rather than a map
+ *
+ * A callback composes directly with the resolver's own projection — a caller writes
+ * `cellId => compilationDependencies(lock, environment, { cellTarget: cellId }).dependencies` and
+ * the two stages agree by construction, with this layer still reading no lock. A `Map` would make
+ * the caller materialize every Cell's decisions up front, including Cells the build may not reach,
+ * and would need its own answer for a Cell the map forgot.
+ */
+export type CellDependencies =
+  | readonly DependencyDecision[]
+  | ((cellId: string) => readonly DependencyDecision[]);
+
+/** The decisions one Cell compiles against, from either form of {@link CellDependencies}. */
+function dependenciesForCell(dependencies: CellDependencies, cellId: string): readonly DependencyDecision[] {
+  return typeof dependencies === "function" ? dependencies(cellId) : dependencies;
+}
+
+/**
  * Everything a build needs: the project (as a registry or a root), the decisions, and the knobs.
  *
  * An intersection with {@link CellProjectSource} rather than a nested `project` field, so a caller
@@ -198,15 +254,13 @@ function findWorkspaceRoot(from: string): string | undefined {
  */
 export type BuildCellProjectOptions = CellProjectSource & {
   /**
-   * One resolved decision per non-source dependency, for every Cell in the project.
+   * The resolved decisions each Cell compiles against — one list, or a list per Cell.
    *
-   * Per project rather than per Cell, matching `planCellCompiles`, because a decision is keyed by
-   * `(packageName, cellTarget)` and the *projection* is what narrows it to one Cell —
-   * `compilationDependencies(lock, environment, { cellTarget })`. Passing the whole lock's
-   * projection and letting each Cell pick its own records is the resolver's rule; re-deriving it
-   * here would be a second implementation.
+   * Per Cell when the project's strategies differ by target, which #4 permits; see
+   * {@link CellDependencies}. Either way this layer only *consumes* decisions: it does not read
+   * `fgc.lock.json`, and projecting a lock onto a Cell stays `dependency-resolver`'s job.
    */
-  readonly dependencies: readonly DependencyDecision[];
+  readonly dependencies: CellDependencies;
   /** Which #5 entry shape to expose. Defaults to a function `App` binding. */
   readonly entryKind?: CellEntryKind;
   /**
@@ -224,9 +278,14 @@ export type BuildCellProjectOptions = CellProjectSource & {
  * The `{ registry }` branch returns the object unchanged — deliberately, because "the same object"
  * is the property being bought: a caller asserting that the build used its registry can compare
  * identity, not deep equality.
+ *
+ * Tested by **value** rather than with `"registry" in project`, and the difference is what makes
+ * the XOR type narrowing work: the `{ root }` branch declares `registry?: never`, so the property
+ * is *present* on both branches and an `in` check cannot separate them — `undefined` is the only
+ * value the second branch can hold, so that is what is tested.
  */
 async function resolveProjectRegistry(project: CellProjectSource): Promise<CellRegistry> {
-  if ("registry" in project) {
+  if (project.registry !== undefined) {
     return project.registry;
   }
 
@@ -276,8 +335,15 @@ async function readWorkspaceGraph(
 /**
  * Compiles every Cell a project declares, from the project's own configuration.
  *
- * The order is the config's declaration order, because `planCellCompiles` is what orders it and
- * two callers reporting "the Cells of this project" should not disagree about the sequence.
+ * The order is the config's declaration order, because the registry is declaration-ordered and two
+ * callers reporting "the Cells of this project" should not disagree about the sequence.
+ *
+ * Each Cell is planned **individually** — `planCellCompile` per Cell rather than one
+ * `planCellCompiles` batch — because that is what lets the decisions differ per Cell
+ * ({@link CellDependencies}). The registry's order is what the batch call would have given, so
+ * iterating `registry.cells` and planning each keeps the same sequence while allowing a per-Cell
+ * projection. A batch with one projection could not express #4's `(packageName, cellTarget)`
+ * rule at all.
  *
  * Determinism is #97's criterion and it is a property of the inputs rather than of this function:
  * the registry is declaration-ordered, every artifact is a pure function of its entry and
@@ -300,7 +366,13 @@ export async function buildCellProject(options: BuildCellProjectOptions): Promis
     ...(Object.keys(registry.resolve.alias).length === 0 ? {} : { alias: registry.resolve.alias }),
   });
 
-  const plans = planCellCompiles({ registry, dependencies: options.dependencies });
+  const plans = registry.cells.map(cell =>
+    planCellCompile({
+      registry,
+      cellId: cell.id,
+      dependencies: dependenciesForCell(options.dependencies, cell.id),
+    }),
+  );
 
   const cells: BuiltCell[] = [];
   for (const plan of plans) {

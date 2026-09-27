@@ -167,7 +167,7 @@ export default defineForguncyConfig({
 | 写法 | 结果 |
 | --- | --- |
 | `"@/ui": "./src/ui"` | ✅ 本地与构建解析同一文件 |
-| `"react/": "./patched/"`（两侧都带斜杠） | ✅ 归一化后同上 |
+| `"echarts/": "./vendor/echarts/"`（两侧都带斜杠） | ✅ 归一化后同上。**注意不能拿 `react` 之类被宿主桥接的 id 举例**：那种键会被下一节最后一行拒绝 |
 | 数组形式 `[{ find, replacement }]`（字符串 `find`） | ✅ 同上，方便从 `vite.config.ts` 拷过来 |
 | `RegExp`，或 `"/正则/"` / `"^x$"` 之类键 | ❌ 明确报错。Rolldown 的 `resolve.alias` 是字符串 map，没有 pattern 能力；对象键在 Vite 里也**按字面**匹配，所以这种写法在两条路径上都不会别名到任何东西 |
 | 目标是裸包名（`{ "old": "new" }`） | ❌ 明确报错。Vite 从项目根解析、Rolldown 从引用文件解析，同一个声明会解析到不同位置 |

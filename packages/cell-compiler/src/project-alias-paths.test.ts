@@ -2,10 +2,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { loadForguncyConfig } from "@forguncy-react-workspace/core";
+import { createCellRegistry, loadForguncyConfig } from "@forguncy-react-workspace/core";
+import type { DependencyDecision } from "@forguncy-react-workspace/core";
 import { describe, expect, it } from "vitest";
 
 import { buildCellProject, requireCompiledCells } from "./build-cell-project.ts";
+import type { BuildCellProjectOptions } from "./build-cell-project.ts";
 import { createRolldownCellBundler } from "./rolldown-bundler.ts";
 
 /**
@@ -279,5 +281,188 @@ describe("the public build entry consumes the project it is handed", () => {
     const build = await buildCellProject({ registry, dependencies: [] });
 
     expect(build.cells[0]?.target.locatorKey).toBe("探针#A1");
+  });
+});
+
+/**
+ * #4's `(packageName, cellTarget)` rule against the public build entry.
+ *
+ * ## The defect review found
+ *
+ * The first version took one project-wide `dependencies` array. That **cannot express** a
+ * legitimate project, and the reason is structural rather than a missing convenience: the
+ * projection that produces `DependencyDecision[]` has already applied the target —
+ * `compilationDependencies(lock, environment, { cellTarget })` selects by target and
+ * `dependencyDecisionOf()` then drops the `cellTarget` field — so the array carries no Cell
+ * identity a later stage could narrow by. Measured on the two Cells below:
+ *
+ * | passed to the build | Alpha compiles | Beta compiles |
+ * | --- | --- | --- |
+ * | Alpha's projection | correct | **wrong** (Alpha's strategy) |
+ * | Beta's projection | **wrong** | correct |
+ * | both concatenated | `unresolved-dependency-decision` (one id, two decisions) |
+ *
+ * So there was no correct input at all. The entry now takes either one array or a per-Cell
+ * callback, and this block exercises the case a single array cannot represent.
+ *
+ * ## Why `@tanstack/query-core` is the subject
+ *
+ * It is the one id in this workspace where **both** strategies are compilable: it is installed, so
+ * `inline` has an artifact to flatten, and it carries a verified row in the built-in extension
+ * table, so `extension` has a global to reference. A package with only one of those could not
+ * support a two-strategy test — and several obvious candidates fail for exactly that reason
+ * (measured: `es-toolkit` has no mapping row, `react`/`antd` are host-bridged and refuse `inline`).
+ *
+ * The two Cells import it with identical text, so the only thing that can make their artifacts
+ * differ is the strategy each was decided under. The observable difference is stark and is what the
+ * assertions use: `inline` flattens ~52,000 characters of implementation into the artifact with no
+ * `frontendLibraries` entry, while `extension` emits ~1,900 characters referencing the page global
+ * and declares the library.
+ */
+describe("a build compiles each Cell under its own dependency projection", () => {
+  const perCellRoot = join(here, "..", "tests", "fixtures", "per-cell-strategy");
+  const PACKAGE = "@tanstack/query-core";
+
+  /** One projection per Cell — the input a single array structurally cannot be. */
+  const perCell: Readonly<Record<string, readonly DependencyDecision[]>> = {
+    alpha: [{ strategy: "inline", packageName: PACKAGE }],
+    beta: [{ strategy: "extension", packageName: PACKAGE, libraryId: "tanstack-query", globalName: "TanStackQuery" }],
+  };
+
+  /** The fixture's registry, normalized once and handed to the build as `{ registry }`. */
+  function fixtureRegistry() {
+    return createCellRegistry(
+      {
+        cells: {
+          alpha: { entry: "./cells/alpha/src/index.ts", target: { pageName: "探针", cell: "A1" } },
+          beta: { entry: "./cells/beta/src/index.ts", target: { pageName: "探针", cell: "B2" } },
+        },
+      },
+      { root: perCellRoot },
+    );
+  }
+
+  /** One built Cell, or a failure naming which Cell did not compile. */
+  function cellOf(build: Awaited<ReturnType<typeof buildCellProject>>, id: string) {
+    const cell = build.cells.find(candidate => candidate.cellId === id);
+    if (cell?.outcome.status !== "compiled") {
+      throw new Error(`Cell "${id}" must compile; it was: ${JSON.stringify(cell?.outcome)}`);
+    }
+    return cell.outcome.artifact;
+  }
+
+  it("compiles two Cells of one package under their own strategies", async () => {
+    const build = await buildCellProject({
+      registry: fixtureRegistry(),
+      dependencies: cellId => perCell[cellId] ?? [],
+      workspace: false,
+    });
+
+    const alpha = cellOf(build, "alpha");
+    const beta = cellOf(build, "beta");
+
+    // Alpha inlined the package: the implementation is present and no library is declared.
+    expect(alpha.code.length).toBeGreaterThan(10_000);
+    expect(alpha.frontendLibraries).toEqual([]);
+
+    // Beta externalized the same package: the implementation is absent, the artifact is small, and
+    // the metadata declares the library it now depends on.
+    expect(beta.code.length).toBeLessThan(5_000);
+    expect(beta.frontendLibraries.map(library => library.libraryId)).toEqual(["tanstack-query"]);
+    expect(beta.code).toContain("TanStackQuery");
+  });
+
+  it("does not give either Cell the other's strategy", async () => {
+    // The cross-check that makes the test above specific: a build that applied `alpha`'s projection
+    // to both Cells would produce two inlined artifacts, and one that applied `beta`'s would produce
+    // two externalized ones. Both are excluded by asserting the two differ in the direction each was
+    // decided, rather than only that each compiled.
+    const build = await buildCellProject({
+      registry: fixtureRegistry(),
+      dependencies: cellId => perCell[cellId] ?? [],
+      workspace: false,
+    });
+
+    const alpha = cellOf(build, "alpha");
+    const beta = cellOf(build, "beta");
+
+    // `alpha` must NOT be externalized (that would be Beta's strategy leaking into Alpha)...
+    expect(alpha.frontendLibraries).toEqual([]);
+    expect(alpha.code).toContain("QueryClient");
+    // ...and `beta` must NOT be inlined (that would be Alpha's leaking into Beta).
+    expect(beta.frontendLibraries).toHaveLength(1);
+    expect(beta.code.length).toBeLessThan(alpha.code.length);
+  });
+
+  it("still accepts one array for every Cell, the single-strategy case", async () => {
+    // The flat array remains the common case rather than being replaced: a project whose Cells share
+    // a projection should not have to write a callback. Asserted so the per-Cell form did not make
+    // the simple form unreachable.
+    const build = await buildCellProject({
+      registry: fixtureRegistry(),
+      dependencies: [{ strategy: "inline", packageName: PACKAGE }],
+      workspace: false,
+    });
+
+    for (const cellId of ["alpha", "beta"]) {
+      expect(cellOf(build, cellId).frontendLibraries, cellId).toEqual([]);
+    }
+  });
+
+  it("plans every Cell in the registry's declaration order", async () => {
+    // The batch call was replaced by a per-Cell loop, so the ordering that used to come from
+    // `planCellCompiles` is now this build's responsibility and is asserted rather than assumed.
+    const build = await buildCellProject({
+      registry: fixtureRegistry(),
+      dependencies: cellId => perCell[cellId] ?? [],
+      workspace: false,
+    });
+
+    expect(build.cells.map(cell => cell.cellId)).toEqual(["alpha", "beta"]);
+  });
+});
+
+/**
+ * The `{ registry }` / `{ root }` exclusion, asserted at the type level.
+ *
+ * Review found the first version's docstring claimed the compiler enforced mutual exclusion while a
+ * plain structural union did not: an object carrying **both** `registry` and `root` satisfied either
+ * branch, so the ambiguous input compiled and `resolveProjectRegistry`'s runtime check silently
+ * picked the registry and ignored the root and loader options. That is the "two project sources, one
+ * consumed" ambiguity the input exists to remove, and a comment cannot enforce it.
+ *
+ * Each branch now forbids the other's fields with `never`, so the compiler rejects the combination
+ * rather than the runtime having to notice. These are `@ts-expect-error` assertions: if a future edit
+ * loosens the type, the *directive* becomes the error, so the guard fails loudly instead of silently
+ * ceasing to test anything.
+ */
+describe("the project input is an exclusive union", () => {
+  it("refuses a registry together with a root", () => {
+    const registry = createCellRegistry({ cells: {} }, { root: join(here, ".."), requireEntryFiles: false });
+
+    // @ts-expect-error a registry and a root are two project sources; exactly one may be given
+    const both: BuildCellProjectOptions = { registry, root: join(here, ".."), dependencies: [] };
+    expect(both).toBeDefined();
+  });
+
+  it("refuses a registry together with the loader options", () => {
+    const registry = createCellRegistry({ cells: {} }, { root: join(here, ".."), requireEntryFiles: false });
+
+    // @ts-expect-error the loader options are inputs to *loading*, which a registry has already done
+    const both: BuildCellProjectOptions = { registry, configFile: "./forguncy.config.ts", dependencies: [] };
+    expect(both).toBeDefined();
+  });
+
+  it("accepts each branch on its own", () => {
+    // The control: the exclusions above must not have made the two valid shapes unusable, or the
+    // type would be enforcing something narrower than "exactly one source".
+    const withRoot: BuildCellProjectOptions = { root: join(here, ".."), dependencies: [] };
+    const withRegistry: BuildCellProjectOptions = {
+      registry: createCellRegistry({ cells: {} }, { root: join(here, ".."), requireEntryFiles: false }),
+      dependencies: [],
+    };
+
+    expect(withRoot.root).toBeDefined();
+    expect(withRegistry.registry).toBeDefined();
   });
 });

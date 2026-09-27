@@ -311,6 +311,7 @@ export { buildCellProject, requireCompiledCells } from "./build-cell-project.ts"
 export type {
   BuildCellProjectOptions,
   BuiltCell,
+  CellDependencies,
   CellProjectBuild,
   CellProjectSource,
   CellProjectWorkspace,
