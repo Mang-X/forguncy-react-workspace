@@ -205,17 +205,27 @@ export interface SyncGuarantee {
    * promise, because the second overwrites the first, and (b) made "which runs happened?" a
    * per-promise question whose answers could disagree with each other.
    *
-   * Present exactly when the promise has been executed at least once. `level` deliberately does
-   * not change when this is set: a real-runtime guarantee does not become locally checkable
-   * because someone checked it once — the level says who *can* establish the promise, and this
-   * says whether anyone has.
+   * **A non-empty tuple, not an array, and that is load-bearing.** `readonly []` would mean "this
+   * promise has been executed zero times", which is spelled *absent* — so an array type would let
+   * a record read as executed while claiming nothing, and `executions: []` would then satisfy
+   * both the report that asks "has this been run?" and the one that asks "which cells are open?".
+   * That is a double false negative in the direction that matters, and #116's third review
+   * reproduced it. Typing the field non-empty makes `executions: []` a compile error rather than
+   * a state the reports have to be careful about; the reports *also* treat it as unexecuted,
+   * because a cast can still produce one and a guard that only holds for well-typed input is a
+   * guard that fails open on exactly the input that is wrong.
+   *
+   * Absent until the promise has been executed at least once. `level` deliberately does not change
+   * when this is set: a real-runtime guarantee does not become locally checkable because someone
+   * checked it once — the level says who *can* establish the promise, and this says whether anyone
+   * has.
    *
    * AGENTS.md rule 7 is why this exists at all. A green `vp test` is not runtime compatibility,
    * and a completed runtime validation is not a permanent property of the code: each entry names
    * the environment and version it ran in, and a different Forguncy version is a re-run rather
    * than an inheritance.
    */
-  readonly executions?: readonly SyncExecution[];
+  readonly executions?: readonly [SyncExecution, ...SyncExecution[]];
 }
 
 export const SYNC_GUARANTEES: readonly SyncGuarantee[] = [
@@ -351,10 +361,15 @@ export interface SyncCoverageCell {
  * same answer the reports use. Empty of claims is the honest state for a promise nothing has
  * run: it is reported by {@link unexecutedRealRuntimeSyncGuarantees}, not as a coverage cell.
  */
-export function syncCoverageCells(): readonly SyncCoverageCell[] {
+export function syncCoverageCells(
+  guarantees: readonly SyncGuarantee[] = SYNC_GUARANTEES,
+): readonly SyncCoverageCell[] {
   const cells: SyncCoverageCell[] = [];
-  for (const guarantee of SYNC_GUARANTEES) {
-    if (guarantee.executions === undefined) continue;
+  for (const guarantee of guarantees) {
+    // The same non-empty test as `unexecutedRealRuntimeSyncGuarantees`, and the same reason: a
+    // promise with an empty execution list has been executed zero times, so it owes cells rather
+    // than being skipped into looking covered.
+    if (!guarantee.executions?.length) continue;
     for (const route of guarantee.runtimeRoutes ?? []) {
       cells.push({ guaranteeId: guarantee.id, route });
     }
@@ -370,8 +385,10 @@ export function syncCoverageCells(): readonly SyncCoverageCell[] {
  * on?", and the two are independent: `sync-is-idempotent` is locally checkable *and* has been
  * run against real projects.
  */
-export function locallyCheckableSyncGuarantees(): readonly SyncGuarantee[] {
-  return SYNC_GUARANTEES.filter(guarantee => guarantee.level === "local");
+export function locallyCheckableSyncGuarantees(
+  guarantees: readonly SyncGuarantee[] = SYNC_GUARANTEES,
+): readonly SyncGuarantee[] {
+  return guarantees.filter(guarantee => guarantee.level === "local");
 }
 
 /**
@@ -380,8 +397,10 @@ export function locallyCheckableSyncGuarantees(): readonly SyncGuarantee[] {
  * Read this list before reporting a sync as working: every entry here is a promise a
  * green `vp test` says nothing about.
  */
-export function realRuntimeSyncGuarantees(): readonly SyncGuarantee[] {
-  return SYNC_GUARANTEES.filter(guarantee => guarantee.level === "real-runtime");
+export function realRuntimeSyncGuarantees(
+  guarantees: readonly SyncGuarantee[] = SYNC_GUARANTEES,
+): readonly SyncGuarantee[] {
+  return guarantees.filter(guarantee => guarantee.level === "real-runtime");
 }
 
 /**
@@ -398,8 +417,17 @@ export function realRuntimeSyncGuarantees(): readonly SyncGuarantee[] {
  * real one. This function returns nothing for such a promise — correctly, since *a* run did
  * discharge it — which is exactly why the finer gaps cannot be seen from here.
  */
-export function unexecutedRealRuntimeSyncGuarantees(): readonly SyncGuarantee[] {
-  return realRuntimeSyncGuarantees().filter(guarantee => guarantee.executions === undefined);
+export function unexecutedRealRuntimeSyncGuarantees(
+  guarantees: readonly SyncGuarantee[] = SYNC_GUARANTEES,
+): readonly SyncGuarantee[] {
+  // `?.length` rather than `!== undefined`: an *empty* execution list is "executed zero times", and
+  // that is spelled absent. Treating `[]` as a claim would let a promise read as executed while
+  // naming no run — #116's third review reproduced exactly that, where `executions: []` vanished
+  // from this report and from `unexecutedRuntimeCoverage` at the same time. The field is typed
+  // non-empty so the state is a compile error; this is the runtime half, because a cast can still
+  // produce one and a guard that holds only for well-typed input fails open on the input that is
+  // wrong.
+  return realRuntimeSyncGuarantees(guarantees).filter(guarantee => !guarantee.executions?.length);
 }
 
 /** One (promise, route, version) triple the flow owes and no recorded execution covers. */
@@ -463,13 +491,18 @@ export function unexecutedRuntimeCoverage(
 ): readonly UnexecutedCoverage[] {
   const gaps: UnexecutedCoverage[] = [];
   for (const guarantee of guarantees) {
-    // Every guarantee with a claim, not `realRuntimeSyncGuarantees()`. The axis is the *execution
-    // claim*, not the level: a locally checkable promise can have a real-project execution
-    // recorded against it — `sync-is-idempotent` does, and its "does not materially change
-    // project state" wording is what the `unchanged` route's save bears on. Filtering by level
-    // would silently drop exactly that entry.
+    // No `length === 0` skip, and that is the fix #116's third review asked for. A promise whose
+    // `runtimeRoutes` are known owes those cells on every tracked version *unless* an execution
+    // covers them — so an empty (or cast) execution list must produce the full set of gaps, not
+    // none. Skipping it was the second half of the double false negative: the promise vanished
+    // from this report and from `unexecutedRealRuntimeSyncGuarantees` at the same time.
+    //
+    // Every guarantee, not `realRuntimeSyncGuarantees()`. The axis is the *execution claim*, not
+    // the level: a locally checkable promise can have a real-project execution recorded against
+    // it — `sync-is-idempotent` does, and its "does not materially change project state" wording is
+    // what the `unchanged` route's save bears on. Filtering by level would silently drop exactly
+    // that entry.
     const claim = guarantee.executions ?? [];
-    if (claim.length === 0) continue;
     for (const route of guarantee.runtimeRoutes ?? []) {
       for (const version of versions) {
         const covered = claim.some(execution => execution.version === version && execution.routes.includes(route));

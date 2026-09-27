@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -35,8 +37,13 @@ import type { SyncGuarantee, SyncGuaranteeId, SyncRuntimeRoute } from "./guarant
  *
  * #115 added a third: a promise can be executed on one *product version* and not another, and
  * the two shapes #115 found to be version-sensitive are exactly what a run on one build says
- * nothing about on another. So `executedVersion` is part of the execution claim, and the
- * version axis is held apart from the route axis here for the same reason.
+ * nothing about on another. So the version of a run is part of the execution claim too.
+ *
+ * The three axes are one record, not three: executions are rows (`SYNC_EXECUTIONS`) and a promise
+ * lists the rows that discharged it, so route and version cannot disagree because they are read
+ * off the same row. #116's three review rounds arrived at that shape — the first two found two
+ * per-promise fields being asked questions they could not answer, and the third found an empty
+ * execution list slipping both reports at once.
  */
 
 describe("the one-way sync's promises", () => {
@@ -487,6 +494,73 @@ describe("what has been executed on each product version", () => {
 
     expect(onReprobe?.whatARunWouldEstablish).toContain("Nothing has run on 12.0.101.0");
     expect(onReprobe?.whatARunWouldEstablish).not.toContain("partial");
+  });
+});
+
+// #116's third review: an *empty* execution list is "executed zero times", which is spelled
+// absent. Treated as a claim, it made the same promise vanish from both reports at once — a
+// double false negative that reads as full coverage. These tests pin both halves: the field
+// cannot be written empty, and if one is produced anyway the reports treat it as unexecuted.
+describe("an empty execution list is not a coverage claim", () => {
+  // The type half. `readonly [SyncExecution, ...SyncExecution[]]` is what makes this a compile
+  // error rather than a state the runtime has to be careful about, so the assertion is on the
+  // *source*, because a type-level rejection cannot be observed at runtime.
+  it("declares the field non-empty, so `executions: []` does not compile", () => {
+    const source = readFileSync(new URL("./guarantees.ts", import.meta.url), "utf8");
+    const declaration = source.match(/readonly executions\?:\s*([^;]+);/);
+
+    expect(declaration?.[1]).toContain("[SyncExecution, ...SyncExecution[]]");
+    // And there is a negative assertion for the shape it replaced, since `readonly SyncExecution[]`
+    // also *contains* the tuple's text as a substring — a bare `toContain` would pass on the old
+    // type if the new one were dropped. See the review note on negative assertions.
+    expect(declaration?.[1]).not.toBe("readonly SyncExecution[]");
+  });
+
+  // The runtime half. A cast can still produce an empty list (a JSON round trip, a `.map` that
+  // filtered everything out), so both reports have to fail closed on it rather than trusting the
+  // type to have prevented it.
+  it("reports a cast empty list as unexecuted in both reports", () => {
+    const versions = ["12.0.100.0", "12.0.101.0"] as const;
+    const emptied = [
+      {
+        id: "written-without-manual-copy",
+        level: "real-runtime",
+        runtimeRoutes: ["write"],
+        executions: [],
+      },
+    ] as unknown as readonly SyncGuarantee[];
+
+    // The promise-level report: it is unexecuted, not executed-with-nothing.
+    expect(unexecutedRealRuntimeSyncGuarantees(emptied).map(guarantee => guarantee.id)).toEqual([
+      "written-without-manual-copy",
+    ]);
+    // The cell-level report: every route it spans is open on every tracked version, because no
+    // execution covers any of them. Skipping the empty claim would report nothing here, which is
+    // the second half of the false negative.
+    expect(
+      unexecutedRuntimeCoverage(emptied, versions).map(gap => `${gap.guaranteeId}:${gap.route}:${gap.version}`),
+    ).toEqual([
+      "written-without-manual-copy:write:12.0.100.0",
+      "written-without-manual-copy:write:12.0.101.0",
+    ]);
+    // And it is not counted as a covered cell either, so the "what is there to cover" view agrees.
+    expect(syncCoverageCells(emptied)).toEqual([]);
+  });
+
+  // The distinction the three checks above rest on: absent and empty must behave identically, so
+  // the pair is asserted rather than each separately — an implementation that special-cased one
+  // of them would pass either test alone.
+  it("treats absent and empty identically", () => {
+    const versions = ["12.0.100.0"] as const;
+    const build = (executions: unknown) =>
+      [{ id: "written-without-manual-copy", level: "real-runtime", runtimeRoutes: ["write"], executions }] as unknown as readonly SyncGuarantee[];
+
+    expect(unexecutedRealRuntimeSyncGuarantees(build(undefined)).length).toBe(
+      unexecutedRealRuntimeSyncGuarantees(build([])).length,
+    );
+    expect(unexecutedRuntimeCoverage(build(undefined), versions)).toEqual(
+      unexecutedRuntimeCoverage(build([]), versions),
+    );
   });
 });
 
