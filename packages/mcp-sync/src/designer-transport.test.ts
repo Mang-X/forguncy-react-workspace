@@ -462,13 +462,16 @@ describe("choosing the generation call the build actually has", () => {
     await port.generatePageAsync({ pageName: "P" });
 
     const script = calls[0].code;
-    // The newer build's call is tried first, then the pinned build's spelling, and both are
-    // reached through a `typeof` test — not through a `try`/`catch` on a call that would throw,
-    // which would also swallow a real generation failure.
-    expect(script).toContain('typeof api.app.generateProject === "function"');
-    expect(script).toContain('typeof api.app.generatePageAsync === "function"');
+    // The two methods are probed once each into locals, then the branches read those locals — so
+    // the "both present" check below cannot be reached by a second `typeof` that disagreed with
+    // the first. Both names are still reached through a `typeof` test, not through a `try`/`catch`
+    // on a call that would throw, which would also swallow a real generation failure.
+    expect(script).toContain('const hasGenerateProject = typeof api.app.generateProject === "function";');
+    expect(script).toContain('const hasGeneratePageAsync = typeof api.app.generatePageAsync === "function";');
     // A build with neither must be refused in the script rather than called hopefully.
     expect(script).toContain("neither api.app.generateProject nor api.app.generatePageAsync");
+    // And so must a build with *both* — the unmeasured shape. See the behavioural test below.
+    expect(script).toContain("exposes both api.app.generateProject and api.app.generatePageAsync");
     // The executor gates on `checkProjectErrors` itself, so the product is never asked to skip
     // its own check — the same rule the previous version of this method recorded.
     expect(script).not.toContain("skipCheckProjectError");
@@ -498,6 +501,47 @@ describe("choosing the generation call the build actually has", () => {
     // The answer mapping is shared by both branches, so the two cannot drift in what they relay.
     expect(script).toContain("const relay = ");
     expect(script.match(/relay\(await/g)?.length).toBe(2);
+  });
+
+  // #116's second review finding, and the reason the negotiation is not simply "newer name first".
+  // The evidence establishes one call per build — `generatePageAsync` on 12.0.100.0,
+  // `generateProject` on 12.0.101.0 — so a build exposing *both* is a shape nothing has measured.
+  // Picking `generateProject` there would run an unverified call on a build whose verified call is
+  // the other one, which is the versioned-evidence boundary bypassed at the last step.
+  it("refuses a build exposing both generation calls rather than picking one", async () => {
+    const { callTool, calls } = recorder(() => ok({ url: "http://localhost:63982/Forguncy" }));
+    const port = createDesignerSyncPort({ callTool });
+
+    await port.generatePageAsync({ pageName: "P" });
+    const script = calls[0].code;
+
+    // Run the script the way the designer does: a body with `api` in scope. The check is on
+    // *behaviour*, not on the script text, because the property that matters is which call runs.
+    const run = (api: unknown) => new Function("api", `return (async () => { ${script} })()`)(api);
+    const invoked: string[] = [];
+    const method = (name: string) => async () => {
+      invoked.push(name);
+      return { url: "http://localhost:63982/Forguncy" };
+    };
+
+    // Both present: refused, and neither called.
+    await expect(
+      run({ app: { generateProject: method("generateProject"), generatePageAsync: method("generatePageAsync") } }),
+    ).rejects.toThrow(/both api\.app\.generateProject and api\.app\.generatePageAsync/);
+    expect(invoked).toEqual([]);
+
+    // The two measured shapes still work, each calling its own name.
+    invoked.length = 0;
+    await expect(run({ app: { generatePageAsync: method("generatePageAsync") } })).resolves.toEqual({
+      url: "http://localhost:63982/Forguncy",
+    });
+    expect(invoked).toEqual(["generatePageAsync"]);
+
+    invoked.length = 0;
+    await expect(run({ app: { generateProject: method("generateProject") } })).resolves.toEqual({
+      url: "http://localhost:63982/Forguncy",
+    });
+    expect(invoked).toEqual(["generateProject"]);
   });
 
   it("relays only the url, so a heavy answer cannot fail the parse", async () => {

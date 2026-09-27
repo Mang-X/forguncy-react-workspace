@@ -121,7 +121,7 @@ export const SYNC_EXECUTIONS: Readonly<Record<SyncExecutionId, SyncExecution>> =
     version: "12.0.100.0",
     routes: ["write"],
     evidence:
-      "Executed 2026-09-24 for #20. The script asserted the second run stopped before the write (`write-cell-source=not-reached`), so it never reached the validation half on the unchanged route — the run is write-route evidence even though the artifact was synced twice.",
+      "Executed 2026-09-24 for #20. The script asserted the second run stopped before the write (`write-cell-source=not-reached`), so it never reached the validation half on the unchanged route — the run is write-route evidence even though the artifact was synced twice. **Caveat, recorded here rather than glossed:** the run predates the read-back recognition #115 corrected (that check was added during #74's review, after this run) and never recorded which `cellType` name this build *reported*. So this row covers the build's write-route cells — the mutation payload landing, the error count, byte-identity on a repeat — and does **not** speak to the recognition fix or to that build's read-back spelling, which remains unmeasured.",
   },
   "issue-115-both-routes": {
     id: "issue-115-both-routes",
@@ -433,13 +433,29 @@ export interface UnexecutedCoverage {
  * three independent booleans cannot express, and stating it as one lookup is what makes a
  * half-covered version visible instead of rounded up.
  *
+ * ## What is open, and what the historical evidence still covers
+ *
+ * Three cells on `12.0.100.0` are open as of #115: the **unchanged** route for the three promises
+ * that span it. That route's work was executed only on `12.0.101.0`, so the pinned build owes it.
+ *
+ * `12.0.100.0`'s **write**-route cells are counted as covered by #20's run, and that is a
+ * deliberate position rather than an oversight — an earlier version of this comment claimed the
+ * opposite while the report and tests counted them covered, which #116's second review caught.
+ * The reasoning: #115 changed the read path and the generation negotiation, and #20's write-route
+ * cells are about neither — they are the mutation payload landing, the error count being read, and
+ * the write being byte-identical on a repeat, all measured on the write path whose calls this
+ * change did not touch.
+ *
+ * The one place that deserves a caveat is recorded on the execution itself rather than glossed
+ * here — see `SYNC_EXECUTIONS["issue-20-write-route"].evidence`. What #20's run does **not**
+ * establish is the recognition fix: it predates the read-back check this change corrected and
+ * never recorded which name that build reported, which is why the adapter recognises both
+ * spellings and why the pinned build's read-back name is still listed as unmeasured.
+ *
  * ## Empty is the honest target, and empty does not mean "validated everywhere"
  *
- * Empty as of #115 for the cells it *can* reach. The one it cannot is `12.0.100.0`, and it is
- * reported rather than inherited: #20's execution predates the recognition change #115 fixed, so
- * its write-route cells on that version are **not** covered by a run through the current adapter.
- * Only a re-run against a `12.0.100.0` designer closes them — see the version's own note in
- * {@link unexecutedCoverageNote}.
+ * The per-cell report is the one to read before reporting a version as supported; this function
+ * only groups it. A version with no entry is covered on every cell it is owed.
  */
 export function unexecutedRuntimeCoverage(
   guarantees: readonly SyncGuarantee[] = SYNC_GUARANTEES,
@@ -502,24 +518,72 @@ export function unexecutedRuntimeVersionCoverage(
   versions: readonly SyncExploredVersion[] = SYNC_EXPLORED_VERSIONS,
 ): readonly UnexecutedVersionCoverage[] {
   const gaps = unexecutedRuntimeCoverage(guarantees, versions);
-  return versions.map(version => ({
-    version,
-    cells: gaps.filter(gap => gap.version === version),
-  }))
+  // The runs on each version are taken from the *same* guarantees the gaps came from, rather than
+  // from the global table. They have to be: the note says "N executions have run here", and a
+  // report computed over supplied records must not describe them with facts from the shipped
+  // table. Deriving one from the other is also what makes the two impossible to disagree.
+  const runsByVersion = new Map<SyncExploredVersion, SyncExecution[]>();
+  for (const guarantee of guarantees) {
+    for (const execution of guarantee.executions ?? []) {
+      const runs = runsByVersion.get(execution.version) ?? [];
+      if (!runs.some(run => run.id === execution.id)) runs.push(execution);
+      runsByVersion.set(execution.version, runs);
+    }
+  }
+  return versions
+    .map(version => ({
+      version,
+      cells: gaps.filter(gap => gap.version === version),
+    }))
     .filter(entry => entry.cells.length > 0)
-    .map(entry => ({ ...entry, whatARunWouldEstablish: unexecutedCoverageNote(entry.version, entry.cells) }));
+    .map(entry => ({
+      ...entry,
+      whatARunWouldEstablish: unexecutedCoverageNote(
+        entry.version,
+        entry.cells,
+        runsByVersion.get(entry.version) ?? [],
+      ),
+    }));
 }
+
+/**
+ * Per-version context for a coverage note: the facts that are *about a version* rather than
+ * derivable from the executions table.
+ *
+ * A `Record` keyed by the version union rather than a chain of `if (version === …)` inside the
+ * note, for two reasons: adding a version to {@link SYNC_EXPLORED_VERSIONS} then fails to compile
+ * until someone says what is known about it, and the note function stays a composition of derived
+ * facts and stated context instead of a place where a version-specific claim can hide.
+ *
+ * The wording here is deliberately *additional* to the derived part, never a replacement for it.
+ * An earlier version of this note hardcoded "Nothing has run on <version>" for every version but
+ * the pinned one, which is false the moment a version has a partial gap — the exact state
+ * (promise, route, version) coverage exists to express. #116's second review caught that.
+ */
+export const SYNC_EXPLORED_VERSION_CONTEXT: Readonly<Record<SyncExploredVersion, string>> = {
+  "12.0.100.0":
+    "This is the version the repository pins; #20's run on it predates the read-back recognition #115 corrected, and that build's read-back cell-type name is still unmeasured — which is why the adapter recognises both spellings.",
+  "12.0.101.0": "This is the build #115 probed and drove both routes through, with the shipped adapter.",
+};
 
 /** Why the given version's cells are open, and what would close them. */
 function unexecutedCoverageNote(
   version: SyncExploredVersion,
   cells: readonly UnexecutedCoverage[],
+  executionsOnVersion: readonly SyncExecution[],
 ): string {
-  const routes = [...new Set(cells.map(cell => cell.route))];
-  if (version === "12.0.100.0") {
-    // This build is pinned *and* was executed, so the note has to say why those cells are open
-    // anyway — otherwise "12.0.100.0 has unexecuted cells" reads as a contradiction.
-    return `The version this repository pins, and the one #20 executed — but #20's run predates the read-back recognition #115 corrected, and it never reached the ${routes.join("/")} route on the validation half. So the ${cells.length} cell(s) above are not covered by a run through the current adapter. Re-run both validation scripts against a 12.0.100.0 designer; the read-back cell-type name on that build is also still unmeasured, which is why the adapter recognises both spellings.`;
-  }
-  return `Nothing has run on ${version}. A run would establish whether the flow completes there at all, and which of the two version-sensitive shapes (the read-back cell-type name, the generation call) it reports.`;
+  const openRoutes = [...new Set(cells.map(cell => cell.route))];
+  const coveredRoutes = [...new Set(executionsOnVersion.flatMap(execution => execution.routes))];
+  const scenarios = [...new Set(cells.map(cell => cell.guaranteeId))];
+
+  // The derived part: what *has* run on this version, and therefore which cells are open. The
+  // two branches are the two states the model distinguishes — an unexecuted build and a
+  // partially covered one — and both are stated from the rows rather than assumed from the
+  // version, so a partial gap can never be described as "nothing has run".
+  const state =
+    executionsOnVersion.length === 0
+      ? `Nothing has run on ${version}, so every cell the flow owes there is open.`
+      : `${executionsOnVersion.length} execution(s) have run on ${version}, covering the ${coveredRoutes.join("/")} route(s), so ${cells.length} cell(s) there are a *partial* gap rather than an unvalidated build.`;
+
+  return `${state} Open: ${openRoutes.join("/")} route(s) for ${scenarios.length} promise(s) (${scenarios.join(", ")}). Re-run both validation scripts against a ${version} designer to close them. ${SYNC_EXPLORED_VERSION_CONTEXT[version]}`;
 }

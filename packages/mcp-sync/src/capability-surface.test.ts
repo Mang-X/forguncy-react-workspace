@@ -164,6 +164,13 @@ describe("what the evidence establishes", () => {
       { method: "api.app.generateProject", version: "12.0.101.0" },
     ]);
 
+    // The note and the adapter have to describe the same fail-closed set, or a reader learns the
+    // wrong contract from the registry. #116's second review is why `both present` is named here:
+    // the versioned record says one call per build, so the adapter refuses the unmeasured shape
+    // rather than picking a winner, and the note has to say so.
+    expect(generation.note).toContain("neither");
+    expect(generation.note).toContain("both");
+
     const source = findSyncEvidenceSource("issue-115-designer-probe");
     expect(source.channel).toBe("designer-api");
     expect(source.scope).toContain("12.0.101.0");

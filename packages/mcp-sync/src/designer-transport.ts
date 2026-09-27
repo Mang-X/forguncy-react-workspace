@@ -226,17 +226,25 @@ function stringField(record: Record<string, unknown>, field: string, operation: 
 /**
  * The generation call, as one script that works on both builds the repository knows of.
  *
- * Three things happen in here, and all three are deliberate.
+ * Four things happen in here, and all four are deliberate.
  *
  * **The call is negotiated by existence, not by version.** #5 measured `api.app.generatePageAsync`
  * on Forguncy 12.0.100.0 and #20's execution ran the flow on it; #115 found that 12.0.101.0 has
  * no `generatePageAsync` at all and exposes `api.app.generateProject` instead, documented at
  * `/apis/app/generateProject.md` with the *same* response shape (an `url` that is the runtime
  * base). Which of the two a build has is a fact `typeof` answers, so the adapter asks instead of
- * keeping a version table — and asking is what makes this the same measured call on each build
- * rather than a guess that happens to work. Neither branch is a fallback from the other's failure:
- * both are documented generation calls, and a build with *neither* is refused, which is the one
- * direction this must not smooth over.
+ * keeping a version table. Neither branch is a fallback from the other's failure: both are
+ * documented generation calls, and a build with *neither* is refused, which is the one direction
+ * this must not smooth over.
+ *
+ * **A build exposing *both* is refused too, and that is not caution for its own sake.** The
+ * evidence establishes `generatePageAsync` on 12.0.100.0 and `generateProject` on 12.0.101.0 —
+ * one call per build, never two. So "both are present" is a shape nothing has measured, and a
+ * precedence rule for it would be a guess: picking `generateProject` because its name is newer
+ * would run an unverified call on a build whose old call is the one that *was* verified, which is
+ * the versioned-evidence boundary in `capability-surface.ts` being bypassed at the last step. It
+ * therefore fails closed, and the message says which two calls collided so the fix is a probe
+ * rather than a re-read of this script.
  *
  * **Each branch keeps its receiver.** The call is written `api.app.<name>({})` inside its own
  * branch rather than hoisting the function to a local and calling that. #116's review is why:
@@ -259,13 +267,21 @@ function stringField(record: Record<string, unknown>, field: string, operation: 
  * proceed past a project the sync already failed on.
  */
 const GENERATE_PROJECT_SCRIPT = [
-  // One mapping, applied from each branch, so the two call sites cannot drift apart in what they
+  // One mapping, applied from each branch, so the call sites cannot drift apart in what they
   // relay even though each names its own method.
   "const relay = (answer) => typeof answer?.url === \"string\" ? { url: answer.url } : {};",
+  "const hasGenerateProject = typeof api.app.generateProject === \"function\";",
+  "const hasGeneratePageAsync = typeof api.app.generatePageAsync === \"function\";",
+  // The unknown shape. Checked before either branch so it cannot be reached by pick-one logic,
+  // and it is a throw rather than a preference because a preference is exactly what has no
+  // evidence behind it.
+  "if (hasGenerateProject && hasGeneratePageAsync) {",
+  "  throw new Error(\"This Forguncy build exposes both api.app.generateProject and api.app.generatePageAsync, and no build in this repository's evidence has both — so which to call has never been measured. Refusing rather than picking one.\");",
+  "}",
   // Each call is written as a method call on `api.app` — no hoisting, no `.call`. See the doc
   // comment above for why that matters more than the brevity of a single call site.
-  "if (typeof api.app.generateProject === \"function\") return relay(await api.app.generateProject({}));",
-  "if (typeof api.app.generatePageAsync === \"function\") return relay(await api.app.generatePageAsync({}));",
+  "if (hasGenerateProject) return relay(await api.app.generateProject({}));",
+  "if (hasGeneratePageAsync) return relay(await api.app.generatePageAsync({}));",
   "throw new Error(\"This Forguncy build exposes neither api.app.generateProject nor api.app.generatePageAsync, so the project cannot be generated.\");",
 ].join("\n");
 

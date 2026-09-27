@@ -252,6 +252,30 @@ describe("what has been executed on each route through the flow", () => {
     expect(unexecutedRuntimeCoverage().some(gap => gap.version === "12.0.101.0")).toBe(false);
   });
 
+  // The other half of the same position, pinned so the doc and the report cannot drift apart
+  // again: #20's **write**-route cells on the pinned build are counted as covered, and the
+  // reasoning is on the execution row (`SYNC_EXECUTIONS["issue-20-write-route"].evidence`).
+  // #116's second review found the comment claiming the opposite while this report and these
+  // tests counted them covered — a reader-facing contradiction in evidence metadata, which this
+  // assertion is what makes impossible to reintroduce silently.
+  it("counts the pinned build's write-route cells as covered by #20's run", () => {
+    const pinnedWrite = unexecutedRuntimeCoverage().filter(
+      gap => gap.version === "12.0.100.0" && gap.route === "write",
+    );
+
+    expect(pinnedWrite).toEqual([]);
+    // Not vacuous: there *are* write-route cells owed on that version, or the assertion above
+    // would hold for a report that simply omits them.
+    const writeCells = syncCoverageCells().filter(cell => cell.route === "write");
+    expect(writeCells.length).toBeGreaterThan(0);
+    // And the run that covers them is #20's, with the caveat that it does not speak to the
+    // read-back recognition — recorded on the row rather than in prose here.
+    const row = SYNC_EXECUTIONS["issue-20-write-route"];
+    expect(row.version).toBe("12.0.100.0");
+    expect(row.routes).toContain("write");
+    expect(row.evidence).toMatch(/Caveat|predates/i);
+  });
+
   // The property that makes the report meaningful rather than a hand-written list: every cell it
   // reports is one no single execution covers.
   it("derives the report from the executions, so a reopened gap reappears", () => {
@@ -411,6 +435,58 @@ describe("what has been executed on each product version", () => {
       "12.0.100.0:2",
       "12.0.101.0:1",
     ]);
+  });
+
+  // #116's second review: the note was version-keyed prose, so a version with a *partial* gap was
+  // described as "Nothing has run on <version>" — false for the exact state the cell model exists
+  // to express. The note is now derived from the execution rows, and these assertions are on the
+  // split scenario, which is the only state that distinguishes the two wordings.
+  it("describes a partial gap from the runs, never as an unvalidated version", () => {
+    const versions = ["12.0.100.0", "12.0.101.0"] as const;
+    const ex = (version: string, routes: readonly SyncRuntimeRoute[]) =>
+      ({ id: "issue-20-write-route", environment: "supplied", version, routes, evidence: "supplied" }) as never;
+    const split = [
+      {
+        id: "written-without-manual-copy",
+        runtimeRoutes: ["write"],
+        executions: [ex("12.0.100.0", ["write"])],
+      },
+      {
+        id: "sync-is-idempotent",
+        runtimeRoutes: ["write", "unchanged"],
+        executions: [ex("12.0.101.0", ["write", "unchanged"])],
+      },
+    ] as unknown as readonly SyncGuarantee[];
+
+    for (const entry of unexecutedRuntimeVersionCoverage(split, versions)) {
+      // The claim the old wording made, which was wrong on both versions: each one has a run.
+      expect(entry.whatARunWouldEstablish, entry.version).not.toContain("Nothing has run");
+      expect(entry.whatARunWouldEstablish, entry.version).toContain("1 execution(s) have run");
+      expect(entry.whatARunWouldEstablish, entry.version).toContain("partial");
+      // And it names what is actually open, so a reader does not have to re-derive it.
+      expect(entry.whatARunWouldEstablish, entry.version).toContain("Open:");
+    }
+  });
+
+  // The other branch of the same derivation, so the note is not simply "always partial": a version
+  // nothing has run on must still say so.
+  it("still says nothing has run when nothing has", () => {
+    const versions = ["12.0.100.0", "12.0.101.0"] as const;
+    const unrun = [
+      {
+        id: "sync-is-idempotent",
+        runtimeRoutes: ["write"],
+        executions: [
+          { id: "issue-20-write-route", environment: "supplied", version: "12.0.100.0", routes: ["write"], evidence: "supplied" },
+        ],
+      },
+    ] as unknown as readonly SyncGuarantee[];
+
+    const gaps = unexecutedRuntimeVersionCoverage(unrun, versions);
+    const onReprobe = gaps.find(entry => entry.version === "12.0.101.0");
+
+    expect(onReprobe?.whatARunWouldEstablish).toContain("Nothing has run on 12.0.101.0");
+    expect(onReprobe?.whatARunWouldEstablish).not.toContain("partial");
   });
 });
 
