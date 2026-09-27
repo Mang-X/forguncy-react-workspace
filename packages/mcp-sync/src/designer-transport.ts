@@ -226,7 +226,7 @@ function stringField(record: Record<string, unknown>, field: string, operation: 
 /**
  * The generation call, as one script that works on both builds the repository knows of.
  *
- * Two things happen in here, and both are deliberate.
+ * Three things happen in here, and all three are deliberate.
  *
  * **The call is negotiated by existence, not by version.** #5 measured `api.app.generatePageAsync`
  * on Forguncy 12.0.100.0 and #20's execution ran the flow on it; #115 found that 12.0.101.0 has
@@ -238,6 +238,17 @@ function stringField(record: Record<string, unknown>, field: string, operation: 
  * both are documented generation calls, and a build with *neither* is refused, which is the one
  * direction this must not smooth over.
  *
+ * **Each branch keeps its receiver.** The call is written `api.app.<name>({})` inside its own
+ * branch rather than hoisting the function to a local and calling that. #116's review is why:
+ * `const call = api.app.generateProject; await call({})` is a *different* call from
+ * `api.app.generateProject({})` — it is an unbound call, and a method that reads its own `this`
+ * would break. Measured on 12.0.101.0, every `api.app` and `api.page` method tried survives being
+ * detached (they are arrow-function properties on a plain object, so `this` is lexical and
+ * unused), but that is evidence about *one* build: 12.0.100.0 is the version this repository pins
+ * and the version this change did **not** re-validate, so the safe shape is the one that changes
+ * nothing about the call semantics on either. Restoring the receiver costs two duplicated call
+ * sites and buys a compatibility surface that does not depend on an unmeasured build's internals.
+ *
  * **The answer is relayed field by field, not passed through.** The cell's own code is arbitrary
  * generated source and travels to this script as data for exactly that reason (see
  * {@link scriptFor}); a response that carried it back would be re-parsed from the product's
@@ -248,14 +259,14 @@ function stringField(record: Record<string, unknown>, field: string, operation: 
  * proceed past a project the sync already failed on.
  */
 const GENERATE_PROJECT_SCRIPT = [
-  "const call = typeof api.app.generateProject === \"function\" ? api.app.generateProject",
-  "  : typeof api.app.generatePageAsync === \"function\" ? api.app.generatePageAsync",
-  "  : undefined;",
-  "if (call === undefined) {",
-  "  throw new Error(\"This Forguncy build exposes neither api.app.generateProject nor api.app.generatePageAsync, so the project cannot be generated.\");",
-  "}",
-  "const answer = await call({});",
-  "return typeof answer?.url === \"string\" ? { url: answer.url } : {};",
+  // One mapping, applied from each branch, so the two call sites cannot drift apart in what they
+  // relay even though each names its own method.
+  "const relay = (answer) => typeof answer?.url === \"string\" ? { url: answer.url } : {};",
+  // Each call is written as a method call on `api.app` — no hoisting, no `.call`. See the doc
+  // comment above for why that matters more than the brevity of a single call site.
+  "if (typeof api.app.generateProject === \"function\") return relay(await api.app.generateProject({}));",
+  "if (typeof api.app.generatePageAsync === \"function\") return relay(await api.app.generatePageAsync({}));",
+  "throw new Error(\"This Forguncy build exposes neither api.app.generateProject nor api.app.generatePageAsync, so the project cannot be generated.\");",
 ].join("\n");
 
 /**

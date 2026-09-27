@@ -11,9 +11,12 @@
  *
  * ## What a run of this discharges, and what #115 changed about it
  *
- * `guarantees.ts` records which routes and which product version each real-project promise has
- * been executed on; `unexecutedRuntimeRouteCoverage()` and `unexecutedRuntimeVersionCoverage()`
- * report the rest. Read those before reporting a run here as coverage.
+ * `guarantees.ts` records real-project executions as rows — a build, a route set, an environment —
+ * and `unexecutedRuntimeCoverage()` reports the (promise, route, version) cells no single row
+ * covers. Read it before reporting a run here as coverage, and note what it reports after a run of
+ * this script on the build available here: the **write** cells are covered, and the **unchanged**
+ * cells on 12.0.100.0 are not, because that build is not installed and this script's own step 7 is
+ * the only unchanged-route assertion it makes.
  *
  * Both routes are now reached through the **shipped adapter**, which is what makes a run of
  * this script adapter-level evidence rather than executor-level:

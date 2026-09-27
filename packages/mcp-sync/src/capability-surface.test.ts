@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { SYNC_EXPLORED_VERSIONS } from "./guarantees.ts";
 import {
   assertMcpSyncFlowIsCoherent,
   assertMcpSyncStepCoherent,
@@ -154,6 +155,15 @@ describe("what the evidence establishes", () => {
     expect(generation.evidenceSources).toContain("issue-115-designer-probe");
     expect(generation.method).toBe("api.app.generateProject");
 
+    // The versioned record is what makes the name a *version difference* rather than a rename
+    // applied to every build. Both halves must be present, because dropping the 12.0.100.0 entry
+    // would leave the capability claiming `generateProject` as a fact about the pinned build —
+    // the promotion #116's review found, and the one thing a flat `method` field cannot prevent.
+    expect(generation.calls).toEqual([
+      { method: "api.app.generatePageAsync", version: "12.0.100.0" },
+      { method: "api.app.generateProject", version: "12.0.101.0" },
+    ]);
+
     const source = findSyncEvidenceSource("issue-115-designer-probe");
     expect(source.channel).toBe("designer-api");
     expect(source.scope).toContain("12.0.101.0");
@@ -210,6 +220,23 @@ describe("what the evidence establishes", () => {
     // pair, because citing #115 while keeping the call name it found absent would be a claim the
     // source itself contradicts.
     expect(findSyncCapability("generate-page").method).toBe("api.app.generateProject");
+  });
+
+  // The general rule the generation case is the instance of: a capability's recorded calls are
+  // the evidence boundary, so every entry must be one a tracked version was actually probed on,
+  // and the version list a capability spans must be a subset of the repository's. Asserted over
+  // the whole table so the next version-sensitive call cannot be added as a flat name.
+  it("records every capability call against a version the repository tracks", () => {
+    for (const capability of SYNC_CAPABILITIES) {
+      for (const call of capability.calls ?? []) {
+        expect(SYNC_EXPLORED_VERSIONS, `${capability.id} ${call.method}`).toContain(call.version);
+      }
+    }
+    // And at least one capability *is* version-split, so the shape is exercised rather than
+    // merely available: if this ever fails, the versioned record has been flattened back to a
+    // single claim and the machinery around it is untested.
+    const split = SYNC_CAPABILITIES.filter(capability => (capability.calls ?? []).length > 1);
+    expect(split.map(capability => capability.id)).toEqual(["generate-page"]);
   });
 });
 
@@ -338,10 +365,34 @@ describe("the guards refuse an incoherent registry", () => {
     }
   });
 
-  it("refuses an established capability with no call name", () => {
+  it("refuses an established capability with no recorded call", () => {
     expect(() =>
-      assertSyncCapabilityCoherent({ ...findSyncCapability("write-cell-source"), method: undefined } as SyncCapability),
-    ).toThrow(/never paraphrases it/);
+      assertSyncCapabilityCoherent({ ...findSyncCapability("write-cell-source"), calls: [] } as SyncCapability),
+    ).toThrow(/without recording a call/);
+  });
+
+  // The versioned record is the authority, and the quoted name is derived from it — so a
+  // capability cannot maintain the two separately, in either direction. #116's review is why
+  // this pair of checks exists: the previous shape stored one flat name and could assert a fact
+  // about a build it had never been probed on.
+  it("refuses a quoted name that disagrees with the versioned record", () => {
+    const capability = findSyncCapability("write-cell-source");
+    expect(() =>
+      assertSyncCapabilityCoherent({
+        ...capability,
+        // A hand-written `method` overriding what `calls` resolves to.
+        method: "api.page.setCellValues",
+      } as SyncCapability),
+    ).toThrow(/derived from the versioned record/);
+  });
+
+  it("refuses a call recorded against a version the repository does not track", () => {
+    expect(() =>
+      assertSyncCapabilityCoherent({
+        ...findSyncCapability("write-cell-source"),
+        calls: [{ method: "api.page.setCells", version: "13.0.0.0" }],
+      } as unknown as SyncCapability),
+    ).toThrow(/not a version this repository tracks/);
   });
 
   it("refuses a capability that cites no evidence", () => {

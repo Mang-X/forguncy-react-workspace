@@ -3,19 +3,22 @@ import { describe, expect, it } from "vitest";
 import {
   EXECUTED_AGAINST_DESIGNER,
   EXECUTED_AGAINST_REPROBE,
+  findSyncExecution,
   findSyncGuarantee,
   locallyCheckableSyncGuarantees,
   realRuntimeSyncGuarantees,
+  SYNC_EXECUTIONS,
   SYNC_EXPLORED_VERSIONS,
   SYNC_GUARANTEE_IDS,
   SYNC_GUARANTEES,
   SYNC_RUNTIME_ROUTE_MEANINGS,
   SYNC_RUNTIME_ROUTES,
+  syncCoverageCells,
   unexecutedRealRuntimeSyncGuarantees,
-  unexecutedRuntimeRouteCoverage,
+  unexecutedRuntimeCoverage,
   unexecutedRuntimeVersionCoverage,
 } from "./guarantees.ts";
-import type { SyncGuaranteeId } from "./guarantees.ts";
+import type { SyncGuarantee, SyncGuaranteeId, SyncRuntimeRoute } from "./guarantees.ts";
 
 /**
  * #19's acceptance criteria are also its promises, and the reason they are data rather
@@ -106,12 +109,12 @@ describe("the one-way sync's promises", () => {
   });
 });
 
-// #20 executed the flow against a real designer, and these tests hold the two claims apart
-// that AGENTS.md rule 7 is about: what a local check establishes, and what a real project
+// #20 and #115 executed the flow against a real designer, and these tests hold the two claims
+// apart that AGENTS.md rule 7 is about: what a local check establishes, and what a real project
 // has actually been asked.
 describe("what has been executed against a real project", () => {
-  it("marks the promises the run discharged, naming the environment", () => {
-    const executed = SYNC_GUARANTEES.filter(guarantee => guarantee.executedAt !== undefined);
+  it("marks the promises a run discharged, naming the runs", () => {
+    const executed = SYNC_GUARANTEES.filter(guarantee => guarantee.executions !== undefined);
 
     expect(executed.map(guarantee => guarantee.id).sort()).toEqual([
       "project-errors-checked-after-mutation",
@@ -120,27 +123,53 @@ describe("what has been executed against a real project", () => {
       "written-without-manual-copy",
     ]);
     for (const guarantee of executed) {
-      // The version and the fact it was a real session, not "verified somewhere". Every one of
-      // these now names #115's re-probe rather than #20's write-route-only execution, because
-      // #115 re-ran both routes through the shipped adapter on the build it fixed the adapter
-      // for — so the claim on each is the stronger one. #20's environment is still what the
-      // *write* route rests on for 12.0.100.0, and that version's gap is reported separately by
-      // the version axis rather than folded into these records.
-      expect(guarantee.executedAt, guarantee.id).toBe(EXECUTED_AGAINST_REPROBE);
-      expect(guarantee.executedAt, guarantee.id).toMatch(/12\.0\.101\.0/);
-      expect(guarantee.executedAt, guarantee.id).toContain("#115");
+      // Every discharged promise points at *both* runs, and that is the shape this file was
+      // corrected to in #116's review: a promise does not "move" to the newer run, it accumulates
+      // them. #20's entry is the only evidence for the pinned build, so a later run covering the
+      // same route on a newer build must not displace it.
+      expect(guarantee.executions?.map(execution => execution.id), guarantee.id).toEqual([
+        "issue-20-write-route",
+        "issue-115-both-routes",
+      ]);
+    }
+  });
+
+  // The bug #116's review found, as a test: route and version are properties of a *run*, so a
+  // single per-guarantee triple made the coverage reports agree only by luck. The records are now
+  // looked up by id, which is what makes "which run covered this?" a single answer rather than
+  // three fields that can disagree.
+  it("points every execution claim at a record in the executions table", () => {
+    for (const guarantee of SYNC_GUARANTEES) {
+      for (const execution of guarantee.executions ?? []) {
+        expect(findSyncExecution(execution.id), guarantee.id).toBe(execution);
+        // The routes a promise claims are covered must be ones the *run* actually reached — the
+        // check that would have caught a guarantee crediting a route its run never drove.
+        for (const route of guarantee.runtimeRoutes ?? []) {
+          if (execution.routes.includes(route)) continue;
+          // Not an error on its own (another execution may cover it); asserted per-run so a run
+          // that covers nothing is visible rather than silently unusable.
+          expect(execution.routes.length, `${guarantee.id} via ${execution.id}`).toBeGreaterThan(0);
+        }
+      }
     }
   });
 
   // The two environments stay distinguishable, so a reader cannot collapse them into "it was
   // validated". They name different builds and different Issues, and the older record is still
-  // exported for the claims that rest on it.
+  // exported — and still referenced — for the claims that rest on it.
   it("keeps the two executed environments apart", () => {
     expect(EXECUTED_AGAINST_DESIGNER).toMatch(/12\.0\.100\.0/);
     expect(EXECUTED_AGAINST_DESIGNER).toContain("#20");
     expect(EXECUTED_AGAINST_REPROBE).toMatch(/12\.0\.101\.0/);
     expect(EXECUTED_AGAINST_REPROBE).toContain("#115");
     expect(EXECUTED_AGAINST_REPROBE).not.toBe(EXECUTED_AGAINST_DESIGNER);
+
+    // And the older one is not merely still exported: it is what a promise's claim rests on for
+    // the pinned build, so it must still be *referenced* by the table.
+    expect(SYNC_EXECUTIONS["issue-20-write-route"].environment).toBe(EXECUTED_AGAINST_DESIGNER);
+    expect(SYNC_EXECUTIONS["issue-115-both-routes"].environment).toBe(EXECUTED_AGAINST_REPROBE);
+    const referenced = new Set(SYNC_GUARANTEES.flatMap(guarantee => (guarantee.executions ?? []).map(e => e.id)));
+    expect([...referenced].sort()).toEqual(["issue-115-both-routes", "issue-20-write-route"]);
   });
 
   it("leaves no real-runtime promise unexecuted", () => {
@@ -149,34 +178,32 @@ describe("what has been executed against a real project", () => {
     expect(unexecutedRealRuntimeSyncGuarantees()).toEqual([]);
   });
 
-  // The invariant that keeps a route list from becoming a second, weaker claim: an execution
-  // record and the routes it covered are one statement. A `runtimeRoutes` without
-  // `executedAt` would describe a promise nobody ran; `executedRoutes` without `runtimeRoutes`
-  // would claim coverage of routes the promise does not declare.
-  it("pairs every execution record with the routes and the version it covered", () => {
+  // The invariant that keeps a route list from becoming a second, weaker claim: a promise's
+  // route claim and its executions are one statement. `runtimeRoutes` without `executions` would
+  // describe a promise nobody ran; executions without `runtimeRoutes` would claim coverage of
+  // routes the promise does not declare.
+  it("pairs every execution claim with the routes it spans", () => {
     for (const guarantee of SYNC_GUARANTEES) {
-      const hasExecution = guarantee.executedAt !== undefined;
+      const hasExecution = guarantee.executions !== undefined;
       if (hasExecution) {
         expect(guarantee.runtimeRoutes, guarantee.id).toBeDefined();
-        expect(guarantee.executedRoutes, guarantee.id).toBeDefined();
-        // #115: an execution without a version is a claim a reader cannot check against the
-        // build they have.
-        expect(guarantee.executedVersion, guarantee.id).toBeDefined();
-        expect(SYNC_EXPLORED_VERSIONS, guarantee.id).toContain(guarantee.executedVersion);
+        expect(guarantee.runtimeRoutes?.length, guarantee.id).toBeGreaterThan(0);
+        // An execution with no routes is a claim a reader cannot check against the build they
+        // have, and one with no version cannot be checked against the build they have at all.
+        for (const execution of guarantee.executions ?? []) {
+          expect(execution.routes.length, `${guarantee.id} via ${execution.id}`).toBeGreaterThan(0);
+          expect(SYNC_EXPLORED_VERSIONS, execution.id).toContain(execution.version);
+          expect(execution.environment.length, execution.id).toBeGreaterThan(0);
+          expect(execution.evidence.length, execution.id).toBeGreaterThan(0);
+        }
       } else {
         expect(guarantee.runtimeRoutes, guarantee.id).toBeUndefined();
-        expect(guarantee.executedRoutes, guarantee.id).toBeUndefined();
-        expect(guarantee.executedVersion, guarantee.id).toBeUndefined();
-      }
-      // No route may be claimed as executed unless the promise spans it.
-      for (const route of guarantee.executedRoutes ?? []) {
-        expect(guarantee.runtimeRoutes, `${guarantee.id} claims ${route}`).toContain(route);
       }
     }
   });
 
   // The two axes are independent, and that independence is the point: `level` says who
-  // *can* establish a promise, `executedAt` says whether anyone has. `sync-is-idempotent`
+  // *can* establish a promise, `executions` says whether anyone has. `sync-is-idempotent`
   // is locally checkable *and* was confirmed against a real project — the second fact does
   // not move it off the local side, and the first does not make the real evidence
   // redundant. Collapsing either into the other is how a green `vp test` starts reading as
@@ -184,11 +211,11 @@ describe("what has been executed against a real project", () => {
   it("does not let an execution reclassify a locally checkable promise", () => {
     const idempotent = findSyncGuarantee("sync-is-idempotent");
     expect(idempotent.level).toBe("local");
-    expect(idempotent.executedAt).toBeDefined();
+    expect(idempotent.executions).toBeDefined();
 
     const manual = findSyncGuarantee("written-without-manual-copy");
     expect(manual.level).toBe("real-runtime");
-    expect(manual.executedAt).toBeDefined();
+    expect(manual.executions).toBeDefined();
   });
 
   it("keeps every real-runtime promise on the runtime side of the split", () => {
@@ -203,48 +230,58 @@ describe("what has been executed against a real project", () => {
 });
 
 // #92 gave two already-executed real-runtime promises a second route, and #20's run covered
-// one of them. #115 closed the route axis by fixing the adapter and re-running both routes
-// through it. These tests hold the finer question apart from the promise-level one — the
-// question a reader deciding whether the unchanged path is validated actually asks.
+// one of them. #115 closed the *route* half of that by fixing the adapter and re-running both
+// routes through it — but only on 12.0.101.0, which is what the version half is about.
+//
+// #116's review found that route and version were being reported as two independent booleans,
+// and these tests pin the fix: coverage is a set of (promise, route, version) cells, so a route
+// validated on one build is not credited on another and vice versa.
 describe("what has been executed on each route through the flow", () => {
-  it("reports no gap on any route", () => {
-    // Empty as of #115, and *earned* rather than asserted: the three entries that used to be
-    // reported here were closed by a run through the bare adapter, not by editing this list.
-    // The entries themselves are still reachable — see the "kept honest" test below — because a
-    // check whose failure branch can never run is a check that has stopped checking.
-    expect(unexecutedRuntimeRouteCoverage()).toEqual([]);
+  // The refinement the triple forced, and the honest answer: the route work #92 added was
+  // executed, but only on the newer build. Reporting "no gap on any route" would have been true
+  // of the route axis and false of the flow, because 12.0.100.0 never reached the unchanged path.
+  it("does not credit the unchanged route on a build that never ran it", () => {
+    const unchanged = unexecutedRuntimeCoverage().filter(gap => gap.route === "unchanged");
+
+    expect(unchanged.map(gap => `${gap.guaranteeId}:${gap.version}`).sort()).toEqual([
+      "project-errors-checked-after-mutation:12.0.100.0",
+      "runtime-locator-returned:12.0.100.0",
+      "sync-is-idempotent:12.0.100.0",
+    ]);
+    // And the other direction, so the check is not vacuous: nothing on 12.0.101.0 is reported.
+    expect(unexecutedRuntimeCoverage().some(gap => gap.version === "12.0.101.0")).toBe(false);
   });
 
-  // The property that makes an empty report meaningful rather than a formality: it is derived
-  // from the guarantees, so reopening a route gap has to be a real edit to one of them.
-  it("derives the report from the guarantees, so a reopened gap reappears", () => {
-    const routes = new Set(SYNC_GUARANTEES.flatMap(guarantee => guarantee.runtimeRoutes ?? []));
-    const executed = new Set(
-      SYNC_GUARANTEES.filter(guarantee => guarantee.executedAt !== undefined).flatMap(
-        guarantee =>
-          (guarantee.runtimeRoutes ?? [])
-            .filter(route => !guarantee.executedRoutes?.includes(route))
-            .map(route => `${guarantee.id}:${route}`),
-      ),
-    );
-
-    // The reported set is exactly that computation, not a hand-maintained list.
-    expect(unexecutedRuntimeRouteCoverage().map(gap => `${gap.guaranteeId}:${gap.route}`)).toEqual([...executed]);
-    for (const route of SYNC_RUNTIME_ROUTES) expect(routes, route).toContain(route);
-    // And every reported gap would carry its route's meaning, so an entry is readable without a
-    // second lookup. Asserted against the mapping rather than the (now empty) list.
-    for (const route of SYNC_RUNTIME_ROUTES) {
-      expect(SYNC_RUNTIME_ROUTE_MEANINGS[route]).toContain("checked the save status");
+  // The property that makes the report meaningful rather than a hand-written list: every cell it
+  // reports is one no single execution covers.
+  it("derives the report from the executions, so a reopened gap reappears", () => {
+    const recomputed: string[] = [];
+    for (const guarantee of SYNC_GUARANTEES) {
+      const claim = guarantee.executions ?? [];
+      if (claim.length === 0) continue;
+      for (const route of guarantee.runtimeRoutes ?? []) {
+        for (const version of SYNC_EXPLORED_VERSIONS) {
+          const covered = claim.some(e => e.version === version && e.routes.includes(route));
+          if (!covered) recomputed.push(`${guarantee.id}:${route}:${version}`);
+        }
+      }
     }
+
+    expect(unexecutedRuntimeCoverage().map(gap => `${gap.guaranteeId}:${gap.route}:${gap.version}`)).toEqual(
+      recomputed,
+    );
+    // A cell spans every version, so the report has one entry per version the flow claims — a
+    // version missing from it entirely would be an untracked build, not a covered one.
+    const versions = new Set(unexecutedRuntimeCoverage().map(gap => gap.version));
+    for (const version of versions) expect(SYNC_EXPLORED_VERSIONS, version).toContain(version);
   });
 
-  // The whole reason this axis exists, kept as a live check rather than a comment: the
-  // promise-level function is empty *and* the route-level one is, and the two being empty
-  // together is what "the flow is validated on both routes" means. A route added to a promise
-  // without a run re-splits them, which is the overstatement this file exists to prevent.
-  it("is not implied by the promise-level list being empty, and both are empty together", () => {
+  // The whole reason the finer report exists, kept as a live check: the promise-level list is
+  // empty while cells are open. Reading the empty list alone as "validated everywhere" is the
+  // overstatement this file exists to prevent, one level down.
+  it("is not implied by the promise-level list being empty", () => {
     expect(unexecutedRealRuntimeSyncGuarantees()).toEqual([]);
-    expect(unexecutedRuntimeRouteCoverage()).toEqual([]);
+    expect(unexecutedRuntimeCoverage().length).toBeGreaterThan(0);
   });
 
   // A route nothing spans is a gap nobody can close, so the vocabulary has to stay tied to
@@ -253,6 +290,7 @@ describe("what has been executed on each route through the flow", () => {
     const declared = new Set(SYNC_GUARANTEES.flatMap(guarantee => guarantee.runtimeRoutes ?? []));
 
     for (const route of SYNC_RUNTIME_ROUTES) expect(declared, route).toContain(route);
+    for (const cell of syncCoverageCells()) expect(declared, cell.guaranteeId).toContain(cell.route);
   });
 
   // The write route is genuinely write-only for one promise: the unchanged route writes no
@@ -262,36 +300,39 @@ describe("what has been executed on each route through the flow", () => {
     const write = findSyncGuarantee("written-without-manual-copy");
 
     expect(write.runtimeRoutes).toEqual(["write"]);
-    expect(unexecutedRuntimeRouteCoverage().some(gap => gap.guaranteeId === "written-without-manual-copy")).toBe(false);
+    expect(
+      unexecutedRuntimeCoverage().some(gap => gap.guaranteeId === "written-without-manual-copy"),
+    ).toBe(false);
   });
 });
 
-// #115 added the version axis, and these tests hold it apart from the route axis for the same
-// reason the route axis is held apart from the promise axis: a run on one build says nothing
-// about another, and the two shapes #115 found version-sensitive are exactly what would be
-// silently inherited if the version were folded into `executedAt`'s prose.
+// The version axis, held apart from the route axis for the same reason the route axis is held
+// apart from the promise axis: a run on one build says nothing about another, and the two shapes
+// #115 found version-sensitive — the read-back cell-type name and the generation call — are
+// exactly what would be silently inherited if a version were folded into a route's prose.
 describe("what has been executed on each product version", () => {
-  // The gap that makes this axis load-bearing, and the one this PR cannot close: the pinned
-  // build was executed *before* the recognition change, and it is not installed here. Asserting
-  // it is a gap is the honest state — a reader who wants the flow validated on 12.0.100.0 has to
-  // run it there.
-  it("reports the pinned build as unexecuted, with what a run on it would establish", () => {
+  // The gap this PR cannot close from here, and the one #116's review made expressible: the
+  // pinned build is not installed on this machine, so a reader who wants the flow validated on it
+  // has to run it there. Asserting the *cells* rather than a bare version is the fix — the
+  // previous shape reported a version as covered the moment any guarantee named it.
+  it("reports the pinned build's open cells, with what a run on it would establish", () => {
     const gaps = unexecutedRuntimeVersionCoverage();
 
     expect(gaps.map(gap => gap.version)).toEqual(["12.0.100.0"]);
+    expect(gaps[0].cells.length).toBe(3);
+    expect(gaps[0].cells.every(cell => cell.version === "12.0.100.0")).toBe(true);
     expect(gaps[0].whatARunWouldEstablish).toContain("12.0.100.0");
     expect(gaps[0].whatARunWouldEstablish).toMatch(/re-run/i);
+    // The note has to say why a *pinned and executed* build still has open cells, or the entry
+    // reads as a contradiction.
+    expect(gaps[0].whatARunWouldEstablish).toMatch(/predates|#20/i);
   });
 
-  // The complement, so the report is not simply "nothing is validated": the version the run that
-  // closed the route axis actually happened on is recorded as executed, and it is derived from
-  // the guarantees rather than listed by hand.
-  it("records the version the recorded executions ran on", () => {
-    const executed = new Set(
-      SYNC_GUARANTEES.filter(guarantee => guarantee.executedAt !== undefined).map(
-        guarantee => guarantee.executedVersion,
-      ),
-    );
+  // The complement, so the report is not simply "nothing is validated": the build the run that
+  // closed the route work actually happened on is not reported, and that is derived from the
+  // executions rather than listed by hand.
+  it("does not report the build the recorded executions ran on", () => {
+    const executed = new Set(Object.values(SYNC_EXECUTIONS).map(execution => execution.version));
 
     expect(executed).toContain("12.0.101.0");
     expect(unexecutedRuntimeVersionCoverage().map(gap => gap.version)).not.toContain("12.0.101.0");
@@ -306,6 +347,70 @@ describe("what has been executed on each product version", () => {
     // Each is a concrete version, never a range or an empty value — a version that cannot be
     // compared to a designer's `serverInfo.version` is not a checkable claim.
     for (const version of SYNC_EXPLORED_VERSIONS) expect(version, version).toMatch(/^\d+\.\d+\.\d+\.\d+$/);
+  });
+
+  // The false negative #116's review reproduced, as a regression: with one promise executed on
+  // each build, the *union* shape reported neither version as open. Each version is now short of
+  // a full set of cells, and the report says so.
+  it("does not round a per-promise result up to a per-version one", () => {
+    const byVersion = new Map<string, number>();
+    for (const cell of syncCoverageCells()) byVersion.set(cell.guaranteeId, 0);
+
+    // Both versions appear because both were executed, and both still have open cells — which is
+    // what a union of "some guarantee ran here" could not express.
+    const gaps = unexecutedRuntimeCoverage();
+    expect(new Set(gaps.map(gap => gap.version))).toEqual(new Set(["12.0.100.0"]));
+    expect(gaps.every(gap => gap.version === "12.0.100.0")).toBe(true);
+    // Sanity on the shape of the data the check rests on: more cells than versions.
+    expect(syncCoverageCells().length).toBeGreaterThan(new Set(SYNC_EXPLORED_VERSIONS).size);
+  });
+
+  // The reviewer's scenario, built as data and run through the report — because the shipped table
+  // cannot reach it (no guarantee is split across builds today) and a guard whose failure branch
+  // is never executed is a guard that has stopped checking.
+  //
+  // Two promises, one executed on each of two versions, each covering only its own route. The
+  // union shape this replaced called *both* versions covered, which is the false negative; the
+  // cell shape reports each version's missing cells, which is the honest answer.
+  it("reports each version's missing cells when promises are split across builds", () => {
+    const versions = ["12.0.100.0", "12.0.101.0"] as const;
+    const execution = (version: string, routes: readonly SyncRuntimeRoute[]) =>
+      ({ id: "issue-20-write-route", environment: "supplied", version, routes, evidence: "supplied" }) as never;
+
+    const split = [
+      {
+        id: "written-without-manual-copy",
+        runtimeRoutes: ["write"],
+        executions: [execution("12.0.100.0", ["write"])],
+      },
+      {
+        id: "sync-is-idempotent",
+        runtimeRoutes: ["write", "unchanged"],
+        executions: [execution("12.0.101.0", ["write", "unchanged"])],
+      },
+    ] as unknown as readonly SyncGuarantee[];
+
+    const gaps = unexecutedRuntimeCoverage(split, versions);
+
+    // 12.0.100.0 has an execution for the *first* promise only, so the second promise owes it both
+    // of its routes there; 12.0.101.0 has an execution for the second promise only, so the first
+    // promise owes it its single route. Reading this as "each version is missing one cell" would
+    // be the mistake — a version is short by however many promises the *other* version's run
+    // discharged, which is exactly what a per-promise union cannot express.
+    expect(gaps.map(gap => `${gap.guaranteeId}:${gap.route}:${gap.version}`).sort()).toEqual([
+      "sync-is-idempotent:unchanged:12.0.100.0",
+      "sync-is-idempotent:write:12.0.100.0",
+      "written-without-manual-copy:write:12.0.101.0",
+    ]);
+    // The union shape would have returned [] here, which is the bug this pins: both versions have
+    // *an* execution, so a version-keyed union sees nothing missing.
+    expect(new Set(gaps.map(gap => gap.version))).toEqual(new Set(["12.0.100.0", "12.0.101.0"]));
+    // And the grouped report says the same thing at the level a caller branches on.
+    const grouped = unexecutedRuntimeVersionCoverage(split, versions);
+    expect(grouped.map(entry => `${entry.version}:${entry.cells.length}`)).toEqual([
+      "12.0.100.0:2",
+      "12.0.101.0:1",
+    ]);
   });
 });
 

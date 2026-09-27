@@ -50,6 +50,8 @@
 
 import type { RuntimeEvidenceChannel } from "@forguncy-react-workspace/core";
 
+import { SYNC_EXPLORED_VERSIONS } from "./guarantees.ts";
+import type { SyncExploredVersion } from "./guarantees.ts";
 import { FORGUNCY_SYNC_PORT_METHODS } from "./port.ts";
 import type { ForguncySyncPortMethod } from "./port.ts";
 
@@ -159,12 +161,45 @@ export type SyncCapabilityId = (typeof SYNC_CAPABILITY_IDS)[number];
  */
 export type SyncCapabilityConfirmation = "established" | "unestablished";
 
+/**
+ * One call a capability was established by, and the product version it was established *on*.
+ *
+ * A call name is not a timeless fact, and #116's review is why that is now expressible here: #5
+ * established `api.app.generatePageAsync` on `12.0.100.0`, #115 established
+ * `api.app.generateProject` on `12.0.101.0`, and naming either one as *the* call would promote a
+ * fact about one build into a claim about every build. So a capability records each call beside
+ * the version it was executed on, and {@link SyncCapability.method} is derived from the newest —
+ * which is the one the adapter asks for first, not a claim that the others do not exist.
+ */
+export interface SyncCapabilityCall {
+  /** The exact call, quoted rather than paraphrased. */
+  readonly method: string;
+  /** The product version this call was executed on. */
+  readonly version: SyncExploredVersion;
+}
+
 export interface SyncCapability {
   readonly id: SyncCapabilityId;
   readonly summary: string;
   readonly evidenceSources: readonly SyncEvidenceSourceId[];
   readonly confirmation: SyncCapabilityConfirmation;
-  /** The exact call, when {@link SyncCapability.confirmation} is `established`. */
+  /**
+   * The calls this capability was established by, oldest first.
+   *
+   * Present exactly when {@link SyncCapability.confirmation} is `established`. One entry for a
+   * capability whose surface has not moved; more than one when a version's build spells the same
+   * operation differently — which is a *version difference* to be recorded, not a rename to be
+   * applied to every version at once.
+   */
+  readonly calls?: readonly SyncCapabilityCall[];
+  /**
+   * The call the adapter asks for first, derived from {@link SyncCapability.calls}.
+   *
+   * A getter rather than a stored field, so it cannot disagree with the versioned record it is
+   * supposed to summarise. For a single-call capability it is that call; for a version-split one
+   * it is the entry established on the newest version, because that is the build a fresh designer
+   * session is most likely to be.
+   */
   readonly method?: string;
   /** The port method, exactly when this capability is established *and* required. */
   readonly portMethod?: ForguncySyncPortMethod;
@@ -175,13 +210,34 @@ export interface SyncCapability {
   readonly note?: string;
 }
 
+/**
+ * The call to quote for a capability, from its versioned record.
+ *
+ * The newest entry's method, because that is the build a fresh designer session is most likely to
+ * be and the call the adapter asks for first — **not** a claim that the older entries' calls do
+ * not exist. A capability with no calls is `unestablished`, and carries no method; the guards in
+ * {@link assertSyncCapabilityCoherent} are what enforce that pairing.
+ *
+ * `SYNC_EXPLORED_VERSIONS` order decides "newest" rather than version-string comparison, so the
+ * two cannot drift: the list is maintained for exactly this reason and is asserted to be explicit
+ * about the versions the repository claims.
+ */
+function preferredCallOf(calls: readonly SyncCapabilityCall[] | undefined): string | undefined {
+  if (calls === undefined || calls.length === 0) return undefined;
+  const rank = (call: SyncCapabilityCall) => SYNC_EXPLORED_VERSIONS.indexOf(call.version);
+  return [...calls].sort((a, b) => rank(b) - rank(a))[0]?.method;
+}
+
 export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
   {
     id: "list-frontend-libraries",
     summary: "Read the project's installed frontend extensions, with their stable ids.",
     evidenceSources: ["issue-5-designer-probe", "forguncy-library-guide"],
     confirmation: "established",
-    method: "api.app.listFrontendLibraries",
+    calls: [{ method: "api.app.listFrontendLibraries", version: "12.0.100.0" }],
+    get method() {
+      return preferredCallOf(this.calls);
+    },
     portMethod: "listFrontendLibraries",
     usedByStepIds: ["verify-extension-metadata"],
     note: "#19's step 2 rests entirely on this call being the authority for `libraryId`, `globalName`, `exists` and `typeDefinitionAvailable`, which is also #12's rule: the id comes from this listing or from a verified catalog artifact, never from a display name.",
@@ -196,7 +252,10 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
       "issue-115-designer-probe",
     ],
     confirmation: "established",
-    method: "api.page.getCells",
+    calls: [{ method: "api.page.getCells", version: "12.0.100.0" }],
+    get method() {
+      return preferredCallOf(this.calls);
+    },
     portMethod: "readCellSource",
     usedByStepIds: ["read-target-state"],
     note: "Established by #20's execution rather than by #5's probe, which is why the call is `getCells` and not `readCellCode`. Both read a Cell's persisted state and both were run; `readCellCode` was rejected as the divergence reader on evidence, not on preference: it is a segmented reader (`一次最多返回 200 行和 12000 个字符`) and returned `hasMore: true` at 12,000 characters of a 17,125-character cell, so using it would splice a truncated prefix into the marker parse and report a whole generated Cell as `malformed-marker` — the one refusal that tells a person their source was edited. `getCells` returned that same cell's full 17,125 characters. It also reports the two things the divergence check needs *together* — `cellTypeProps.code` and `cellTypeProps.frontendLibraries` — where the code readers return source alone, and it distinguishes 'the Cell is blank' (absent from `cells`) from 'the Cell holds something that is not a ReactCellType' (present, with a `value` or another `cellType`). The *call* is unchanged by #115; what #115 adds is the name this read reports for a React Cell, which is one value (`ReactCellType`) and not the write alias, and therefore the input `readOneCell`'s recognition check must be built from.",
@@ -206,7 +265,10 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
     summary: "Write one Cell's generated source and its `frontendLibraries` references.",
     evidenceSources: ["issue-5-designer-probe", "forguncy-library-guide"],
     confirmation: "established",
-    method: "api.page.setCells",
+    calls: [{ method: "api.page.setCells", version: "12.0.100.0" }],
+    get method() {
+      return preferredCallOf(this.calls);
+    },
     portMethod: "setCells",
     usedByStepIds: ["write-cell-source"],
     note: "The only mutating call in the flow, and the reason `assertMcpSyncFlowIsCoherent` insists the flow has exactly one mutation step: a second mutating call would be a second thing that has to be made idempotent.",
@@ -216,7 +278,10 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
     summary: "Persist the project after a mutation.",
     evidenceSources: ["forguncy-library-guide", "issue-20-designer-execution"],
     confirmation: "established",
-    method: "api.app.saveProject",
+    calls: [{ method: "api.app.saveProject", version: "12.0.100.0" }],
+    get method() {
+      return preferredCallOf(this.calls);
+    },
     portMethod: "saveProject",
     usedByStepIds: ["save-project-if-required"],
     note: "The call #5 left unnamed, established by #20's execution. `api.app.saveProject({})` resolved `{ saved: true, message: \"工程保存成功。\" }` and the save status read back `containsUnsavedChanges: false`; the product reference documents its permission as `write/safe` and its return type as `ProjectSaveStatusResponse` — the *same* type `getProjectSaveStatus` returns, with `saved` set only by `saveProject`. The guide's step 保存工程 is therefore real and named, not a paraphrase.",
@@ -226,7 +291,10 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
     summary: "Read the project's error count after a mutation.",
     evidenceSources: ["issue-5-designer-probe", "forguncy-library-guide"],
     confirmation: "established",
-    method: "api.app.checkProjectErrors",
+    calls: [{ method: "api.app.checkProjectErrors", version: "12.0.100.0" }],
+    get method() {
+      return preferredCallOf(this.calls);
+    },
     portMethod: "checkProjectErrors",
     usedByStepIds: ["check-project-errors"],
     note: "#5 records the field this returns (`errorCount`), which is why the sync contract can state the failure condition — non-zero is a failed sync — instead of describing it.",
@@ -236,17 +304,26 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
     summary: "Generate the target page and report the runtime locator a browser can open.",
     evidenceSources: ["issue-5-designer-probe", "forguncy-library-guide", "issue-115-designer-probe"],
     confirmation: "established",
-    method: "api.app.generateProject",
+    calls: [
+      { method: "api.app.generatePageAsync", version: "12.0.100.0" },
+      { method: "api.app.generateProject", version: "12.0.101.0" },
+    ],
+    get method() {
+      return preferredCallOf(this.calls);
+    },
     portMethod: "generatePageAsync",
     usedByStepIds: ["generate-page"],
-    note: "Generation is project-wide and answers with the runtime *base*; the adapter turns that base into a page locator (`runtimePageUrl`), which is the mapping `port.ts`'s `GeneratedPage` leaves to it. **The call name is version-sensitive, and this entry names the one that exists on both builds the repository knows of.** #5 measured `api.app.generatePageAsync` on 12.0.100.0 and #20 executed the flow on it; #115 executed `api.app.generateProject` on 12.0.101.0, where `generatePageAsync` is absent — same argument (`{}`, or `skipCheckProjectError`), same response shape, same base URL. `generateProject` is therefore the established name and the one the adapter asks for first, with `generatePageAsync` recognised as the older build's spelling of the same operation (`GENERATE_PROJECT_SCRIPT`). This is not a name that 'looks like' the right one: both were executed, both are documented by the product, and the two are distinguished by `typeof api.app.<name>` — a fact about the build — rather than by a version table. A build exposing *neither* is refused rather than guessed at; see the adapter.",
+    note: "Generation is project-wide and answers with the runtime *base*; the adapter turns that base into a page locator (`runtimePageUrl`), which is the mapping `port.ts`'s `GeneratedPage` leaves to it. **This is the one capability whose call name is version-split, and `calls` records both halves rather than promoting either to a cross-version fact.** `api.app.generatePageAsync` was executed on 12.0.100.0 (#5's probe, #20's flow) and `api.app.generateProject` on 12.0.101.0 (#115), where `generatePageAsync` is absent — same argument (`{}`, or `skipCheckProjectError`), same response shape, same base URL. So the *operation* is established on both builds and the *name* is not: `method` resolves to `generateProject` because it is the newest entry and the call the adapter asks for first, **not** because it is the only one. The adapter carries both names and picks by `typeof api.app.<name>` — a fact about the build rather than a version table — and refuses a build with neither. Which spelling 12.0.100.0 *reports* is not claimed beyond `generatePageAsync` having been executed there.",
   },
   {
     id: "project-save-status",
     summary: "Read whether the project has unsaved changes.",
     evidenceSources: ["issue-5-designer-probe", "issue-20-designer-execution"],
     confirmation: "established",
-    method: "api.app.getProjectSaveStatus",
+    calls: [{ method: "api.app.getProjectSaveStatus", version: "12.0.100.0" }],
+    get method() {
+      return preferredCallOf(this.calls);
+    },
     portMethod: "getProjectSaveStatus",
     usedByStepIds: ["save-project-if-required"],
     note: "Recorded by #5, and made *required* by #20's execution rather than merely recorded. The step is named `save-project-if-required`, and #20 measured what makes it required: a `setCells` write leaves `containsUnsavedChanges: true`, and `saveProject` clears it. Without this read the step could only guess, and guessing 'always save' would make a clean project's state depend on sync having run. The same execution keeps #5's warning true — this call *reports* dirtiness and does not persist anything; `saveProject` is the call that does, and it is the only one whose response sets `saved`.",
@@ -556,10 +633,35 @@ export function assertSyncCapabilityCoherent(capability: SyncCapability): void {
   }
 
   if (capability.confirmation === "established") {
-    if (capability.method === undefined || !capability.method.startsWith("api.")) {
+    // The versioned record is now the authority, and the quoted name is derived from it — so a
+    // capability cannot claim a call it has no version for, and cannot claim a *version* that the
+    // repository has not decided to track. Both directions matter: the first is the guess this
+    // axis exists to prevent, the second is what would let an unprobed build inherit a result.
+    const calls = capability.calls;
+    if (calls === undefined || calls.length === 0) {
       throw new SyncCapabilityContractError(
         "capability-not-coherent",
-        `Capability "${id}" is established without an exact designer call name. An established capability quotes the call; it never paraphrases it.`,
+        `Capability "${id}" is established without recording a call. An established capability quotes the calls it was established by, each beside the version it was executed on.`,
+      );
+    }
+    for (const call of calls) {
+      if (!call.method.startsWith("api.")) {
+        throw new SyncCapabilityContractError(
+          "capability-not-coherent",
+          `Capability "${id}" records the call "${call.method}", which is not an exact designer call name. An established capability quotes the call; it never paraphrases it.`,
+        );
+      }
+      if (!(SYNC_EXPLORED_VERSIONS as readonly string[]).includes(call.version)) {
+        throw new SyncCapabilityContractError(
+          "capability-not-coherent",
+          `Capability "${id}" records the call "${call.method}" as established on ${call.version}, which is not a version this repository tracks. An unprobed build cannot be named as evidence.`,
+        );
+      }
+    }
+    if (capability.method !== preferredCallOf(calls)) {
+      throw new SyncCapabilityContractError(
+        "capability-not-coherent",
+        `Capability "${id}" quotes "${capability.method}" while its recorded calls resolve to "${preferredCallOf(calls)}". The quoted name is derived from the versioned record; the two must not be maintained separately.`,
       );
     }
     if (capability.blockedBy !== undefined) {
@@ -569,6 +671,12 @@ export function assertSyncCapabilityCoherent(capability: SyncCapability): void {
       );
     }
   } else {
+    if (capability.calls !== undefined) {
+      throw new SyncCapabilityContractError(
+        "capability-not-coherent",
+        `Capability "${id}" is unestablished and records calls anyway, which is the guess the confirmation axis exists to prevent.`,
+      );
+    }
     if (capability.method !== undefined) {
       throw new SyncCapabilityContractError(
         "capability-not-coherent",

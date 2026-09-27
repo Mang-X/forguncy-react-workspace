@@ -157,32 +157,40 @@ export type {
 } from "./diagnostics.ts";
 
 // What a sync promises
-// Three coverage axes are exported together because they answer three different questions
-// about the same execution record: what has been promised (`*SyncGuarantees`), on which route
-// (`unexecutedRuntimeRouteCoverage`) and on which product version
-// (`unexecutedRuntimeVersionCoverage`). #115 is the change that made the third necessary.
+// Two coverage reports, and they answer different questions about the same triple:
+// `unexecutedRuntimeCoverage` is per (promise, route, version) cell, and
+// `unexecutedRuntimeVersionCoverage` groups those cells by version — which is the shape a
+// caller asking "is this build validated?" wants. Three independent booleans could not express
+// a cell, which is what #116's review found.
 export {
   EXECUTED_AGAINST_DESIGNER,
   EXECUTED_AGAINST_REPROBE,
+  findSyncExecution,
   findSyncGuarantee,
   locallyCheckableSyncGuarantees,
   realRuntimeSyncGuarantees,
+  SYNC_EXECUTIONS,
+  SYNC_EXECUTION_IDS,
   SYNC_EXPLORED_VERSIONS,
   SYNC_GUARANTEE_IDS,
   SYNC_GUARANTEES,
   SYNC_RUNTIME_ROUTE_MEANINGS,
   SYNC_RUNTIME_ROUTES,
+  syncCoverageCells,
   unexecutedRealRuntimeSyncGuarantees,
-  unexecutedRuntimeRouteCoverage,
+  unexecutedRuntimeCoverage,
   unexecutedRuntimeVersionCoverage,
 } from "./guarantees.ts";
 export type {
+  SyncCoverageCell,
+  SyncExecution,
+  SyncExecutionId,
   SyncExploredVersion,
   SyncGuarantee,
   SyncGuaranteeId,
   SyncRuntimeRoute,
+  UnexecutedCoverage,
   UnexecutedVersionCoverage,
-  UnexecutedRuntimeRoute,
 } from "./guarantees.ts";
 
 // The generated-artifact fingerprint and its marker

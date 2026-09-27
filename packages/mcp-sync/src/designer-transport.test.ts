@@ -467,14 +467,37 @@ describe("choosing the generation call the build actually has", () => {
     // which would also swallow a real generation failure.
     expect(script).toContain('typeof api.app.generateProject === "function"');
     expect(script).toContain('typeof api.app.generatePageAsync === "function"');
-    // Both names resolve to the *same* call site, so the two builds run one measured call
-    // rather than two branches that could drift apart.
-    expect(script).toContain("const answer = await call({});");
     // A build with neither must be refused in the script rather than called hopefully.
     expect(script).toContain("neither api.app.generateProject nor api.app.generatePageAsync");
     // The executor gates on `checkProjectErrors` itself, so the product is never asked to skip
     // its own check — the same rule the previous version of this method recorded.
     expect(script).not.toContain("skipCheckProjectError");
+  });
+
+  // #116's review finding, pinned. The first version hoisted the method to a local and called it
+  // bare (`const call = …; await call({})`), which is an *unbound* call — a different call from
+  // `api.app.generateProject({})`, and one a method reading its own `this` would break under.
+  // Measured on 12.0.101.0 every `api.app` method survives being detached, but 12.0.100.0 is the
+  // version this repository pins and the version this change did not re-validate, so the call
+  // shape must not depend on an unmeasured build's internals.
+  it("calls each method on its receiver rather than through a hoisted function", async () => {
+    const { callTool, calls } = recorder(() => ok({ url: "http://localhost:63982/Forguncy" }));
+    const port = createDesignerSyncPort({ callTool });
+
+    await port.generatePageAsync({ pageName: "P" });
+
+    const script = calls[0].code;
+    // Each branch is a method call on `api.app`, in full, at its own call site.
+    expect(script).toContain("await api.app.generateProject({})");
+    expect(script).toContain("await api.app.generatePageAsync({})");
+    // And nothing detaches a method from its object: no `const call = api.app.<name>`, and no
+    // `.call(api.app, …)` workaround either — the point is to keep the call semantics *unchanged*
+    // from the version that was measured, not to re-bind a changed one.
+    expect(script).not.toMatch(/=\s*api\.app\.\w+\s*[;,)]/);
+    expect(script).not.toContain(".call(");
+    // The answer mapping is shared by both branches, so the two cannot drift in what they relay.
+    expect(script).toContain("const relay = ");
+    expect(script.match(/relay\(await/g)?.length).toBe(2);
   });
 
   it("relays only the url, so a heavy answer cannot fail the parse", async () => {
