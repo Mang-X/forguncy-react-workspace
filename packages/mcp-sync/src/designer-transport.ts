@@ -42,16 +42,20 @@
  *
  * ## What this module does not claim
  *
- * That these calls work on any Forguncy version other than the one #20 measured
- * (12.0.100.0). The evidence is a real session's, and a different version is a
- * re-probe rather than an assumption — see `capability-surface.ts`'s
- * `issue-20-designer-execution` source for exactly what was and was not established.
+ * That these calls work on any Forguncy version other than the ones measured. #20 ran the
+ * flow on 12.0.100.0; #115 re-probed the two calls whose *shape* turned out to be
+ * version-sensitive on 12.0.101.0 (the read-back cell-type name, and which generation call
+ * exists), and those two are the subject of {@link REACT_CELL_TYPE_READ_BACK_NAMES} and
+ * {@link GENERATE_PROJECT_SCRIPT}. Everything else here is #20's 12.0.100.0 evidence and a
+ * different version is still a re-probe rather than an assumption — see
+ * `capability-surface.ts`'s evidence sources for exactly what was and was not established,
+ * including which version each claim is measured on.
  */
 
 import { EXTENSION_LIBRARY_REFERENCE_FIELD_NAME } from "@forguncy-react-workspace/core";
 import type { ExtensionLibraryListing } from "@forguncy-react-workspace/core";
 
-import { REACT_CELL_TYPE_NAME } from "./port.ts";
+import { REACT_CELL_TYPE_READ_BACK_NAMES } from "./port.ts";
 import type {
   ForguncySyncPort,
   GeneratedPage,
@@ -220,11 +224,77 @@ function stringField(record: Record<string, unknown>, field: string, operation: 
 }
 
 /**
+ * The generation call, as one script that works on both builds the repository knows of.
+ *
+ * Four things happen in here, and all four are deliberate.
+ *
+ * **The call is negotiated by existence, not by version.** #5 measured `api.app.generatePageAsync`
+ * on Forguncy 12.0.100.0 and #20's execution ran the flow on it; #115 found that 12.0.101.0 has
+ * no `generatePageAsync` at all and exposes `api.app.generateProject` instead, documented at
+ * `/apis/app/generateProject.md` with the *same* response shape (an `url` that is the runtime
+ * base). Which of the two a build has is a fact `typeof` answers, so the adapter asks instead of
+ * keeping a version table. Neither branch is a fallback from the other's failure: both are
+ * documented generation calls, and a build with *neither* is refused, which is the one direction
+ * this must not smooth over.
+ *
+ * **A build exposing *both* is refused too, and that is not caution for its own sake.** The
+ * evidence establishes `generatePageAsync` on 12.0.100.0 and `generateProject` on 12.0.101.0 —
+ * one call per build, never two. So "both are present" is a shape nothing has measured, and a
+ * precedence rule for it would be a guess: picking `generateProject` because its name is newer
+ * would run an unverified call on a build whose old call is the one that *was* verified, which is
+ * the versioned-evidence boundary in `capability-surface.ts` being bypassed at the last step. It
+ * therefore fails closed, and the message says which two calls collided so the fix is a probe
+ * rather than a re-read of this script.
+ *
+ * **Each branch keeps its receiver.** The call is written `api.app.<name>({})` inside its own
+ * branch rather than hoisting the function to a local and calling that. #116's review is why:
+ * `const call = api.app.generateProject; await call({})` is a *different* call from
+ * `api.app.generateProject({})` — it is an unbound call, and a method that reads its own `this`
+ * would break. Measured on 12.0.101.0, every `api.app` and `api.page` method tried survives being
+ * detached (they are arrow-function properties on a plain object, so `this` is lexical and
+ * unused), but that is evidence about *one* build: 12.0.100.0 is the version this repository pins
+ * and the version this change did **not** re-validate, so the safe shape is the one that changes
+ * nothing about the call semantics on either. Restoring the receiver costs two duplicated call
+ * sites and buys a compatibility surface that does not depend on an unmeasured build's internals.
+ *
+ * **The answer is relayed field by field, not passed through.** The cell's own code is arbitrary
+ * generated source and travels to this script as data for exactly that reason (see
+ * {@link scriptFor}); a response that carried it back would be re-parsed from the product's
+ * serialization, and a source string that is not JSON-representable would turn a successful
+ * generation into a parse failure. So only `url` is relayed, and only when it is a string.
+ * That is also why `skipCheckProjectError` is not sent: the executor calls `checkProjectErrors`
+ * itself and gates on it, and asking the product to skip its own check would let generation
+ * proceed past a project the sync already failed on.
+ */
+const GENERATE_PROJECT_SCRIPT = [
+  // One mapping, applied from each branch, so the call sites cannot drift apart in what they
+  // relay even though each names its own method.
+  "const relay = (answer) => typeof answer?.url === \"string\" ? { url: answer.url } : {};",
+  "const hasGenerateProject = typeof api.app.generateProject === \"function\";",
+  "const hasGeneratePageAsync = typeof api.app.generatePageAsync === \"function\";",
+  // The unknown shape. Checked before either branch so it cannot be reached by pick-one logic,
+  // and it is a throw rather than a preference because a preference is exactly what has no
+  // evidence behind it.
+  "if (hasGenerateProject && hasGeneratePageAsync) {",
+  "  throw new Error(\"This Forguncy build exposes both api.app.generateProject and api.app.generatePageAsync, and no build in this repository's evidence has both — so which to call has never been measured. Refusing rather than picking one.\");",
+  "}",
+  // Each call is written as a method call on `api.app` — no hoisting, no `.call`. See the doc
+  // comment above for why that matters more than the brevity of a single call site.
+  "if (hasGenerateProject) return relay(await api.app.generateProject({}));",
+  "if (hasGeneratePageAsync) return relay(await api.app.generatePageAsync({}));",
+  "throw new Error(\"This Forguncy build exposes neither api.app.generateProject nor api.app.generatePageAsync, so the project cannot be generated.\");",
+].join("\n");
+
+/**
  * The designer, as the sync flow's port.
  *
  * Every method below is one script and one parse. The scripts are fixed strings apart
  * from their embedded payload, because the *call* is the evidence: a script that
  * branched on its input would be a second, unmeasured path to the same operation.
+ *
+ * The generation method is the one exception, and it is the kind that keeps the rule rather
+ * than breaking it: it branches on `typeof api.app.<name>`, which is a fact about *which build
+ * is answering* rather than about the caller's input. It is a fixed script.
  */
 export function createDesignerSyncPort(options: DesignerSyncPortOptions): ForguncySyncPort {
   const { callTool } = options;
@@ -352,17 +422,20 @@ export function createDesignerSyncPort(options: DesignerSyncPortOptions): Forgun
       return { errorCount };
     },
 
-    // api.app.generatePageAsync
+    // api.app.generateProject, or api.app.generatePageAsync on the build that has it
     async generatePageAsync(request): Promise<GeneratedPage> {
       const response = await callTool(DESIGNER_EXECUTE_TOOL, {
         title: "sync: generate page",
-        code: scriptFor({ request }, "return await api.app.generatePageAsync({});"),
+        code: GENERATE_PROJECT_SCRIPT,
         permissionMode: "safeWriteAuto",
       });
       const result = valueOf(resultOf(response, "generatePageAsync"), "generatePageAsync");
-      // `skipCheckProjectError` is deliberately not sent: the executor calls
-      // `checkProjectErrors` itself and gates on it, so asking the product to skip its own
-      // check would let generation proceed past a project the sync already failed on.
+      // An answer with no usable `url` becomes the empty locator, which the executor's
+      // generation gate refuses (`runtime-generation-failed`). That mapping is deliberate and
+      // pinned: this layer reports what the product answered, and the gate is what decides
+      // whether an answer is usable for a browser. The script above relays a string `url` or
+      // nothing, so a renamed field arrives here as absent and fails closed rather than as a
+      // fabricated locator.
       const base = typeof result.url === "string" ? result.url : "";
       return { pageName: request.pageName, pageUrl: runtimePageUrl(base, request.pageName) };
     },
@@ -435,19 +508,38 @@ function mutationPayloadOf(request: IssuedSetCellsRequest): SetCellsRequest {
 }
 
 /**
+ * Is this Cell's `cellType` a ReactCellType, by the names a **read** reports?
+ *
+ * The predicate is over {@link REACT_CELL_TYPE_READ_BACK_NAMES} and not over
+ * {@link REACT_CELL_TYPE_NAME}, and that distinction is #115: the product accepts several
+ * spellings on the way in and reports one on the way out, so a reader that compared against the
+ * *write* alias refused every Cell sync had just written. The measurement and the version
+ * boundary are on the constant.
+ *
+ * `describeOccupant` asks this same question — "is this the type whose `code` is damaged?" —
+ * and gets the same answer, because the Cell in both callers' hands came from a *read*. One
+ * predicate for both is what keeps the two from drifting into disagreeing about what a React
+ * Cell is, which is the shape the original defect had.
+ */
+function isReactCellTypeName(value: unknown): boolean {
+  return typeof value === "string" && (REACT_CELL_TYPE_READ_BACK_NAMES as readonly string[]).includes(value);
+}
+
+/**
  * One Cell from a `getCells` response, as the contract's read result.
  *
- * Two conditions, not one, and the second is the safety property the reviewer was right to
- * insist on: a Cell is a managed React Cell only when its `cellType` is *exactly* the type
- * sync writes **and** it carries a string `code`. The contract's `react-cell` means "this
+ * Two conditions, not one: a Cell is a managed React Cell only when its `cellType` is a
+ * ReactCellType **and** it carries a string `code`. The contract's `react-cell` means "this
  * Cell is a ReactCellType", and inferring that from `code` alone would claim it from a
  * weaker fact — a different cell type that happened to carry a `code` property would be
  * read as a managed Cell, and if that `code` were empty it would classify `vacant` and be
  * overwritten. Anything that fails either condition is `occupied`, which is refused.
  *
- * The product's other supported cell type (`UserControlPageCellType`) carries no `code` at
- * all — measured, not assumed — so the stricter test costs nothing today and is what keeps
- * the *claim* true rather than merely currently-unfalsified.
+ * The name condition is `isReactCellTypeName`'s, so it is a *set* of read-back names rather
+ * than the write alias — see that function. The `code` condition is unchanged and is the
+ * half that does the safety work: `UserControlPageCellType` reads back as itself with no
+ * `code` (measured), so the two conditions together are what keep the *claim* true rather
+ * than merely currently-unfalsified. Widening the *name* set cannot widen the `code` set.
  *
  * The branch order matters for the same reason: the checker for "is this ours" runs first,
  * and there is no path that falls back from "not recognised" to "treat as empty".
@@ -457,7 +549,7 @@ function readOneCell(cell: Record<string, unknown>): ReadCellSourceResult {
   const propsRecord = typeof props === "object" && props !== null ? (props as Record<string, unknown>) : undefined;
   const code = propsRecord?.code;
 
-  if (cell.cellType !== REACT_CELL_TYPE_NAME || typeof code !== "string") {
+  if (!isReactCellTypeName(cell.cellType) || typeof code !== "string") {
     // Not a managed React Cell. Say what it does hold, so the conflict is actionable
     // rather than a generic "not ours".
     return { kind: "occupied", code: describeOccupant(cell) };
@@ -478,7 +570,7 @@ function describeOccupant(cell: Record<string, unknown>): string {
     // A cell of the right type whose `code` is missing is damage, not a designer edit, and
     // saying so is the difference between "look at what someone wrote" and "look at a
     // broken Cell".
-    return cell.cellType === REACT_CELL_TYPE_NAME
+    return isReactCellTypeName(cell.cellType)
       ? "a ReactCellType cell with no readable code"
       : `a ${cell.cellType} cell`;
   }

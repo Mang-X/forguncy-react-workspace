@@ -150,20 +150,53 @@ export type ReadCellSourceResult =
 export type SetCellsCellType = "ReactCellTypeCellType";
 
 /**
- * The same cell-type name, as a *value*.
+ * The same cell-type name, as a *value*, for the **write** direction.
  *
- * A runtime constant rather than only the type above, because the read path has to check
- * it: `ReadCellSourceResult`'s `react-cell` means "this Cell *is* a managed ReactCellType",
- * and a reader that accepted any cell with a string `code` would be claiming that from a
- * weaker fact. The product's other supported cell type (`UserControlPageCellType`) carries
- * no `code`, so the confusion is not currently reachable — but a future one might, and
- * `readOneCell`'s safety branch has to be able to say what it is looking for.
+ * A runtime constant rather than only the type above because it is the value `SetCellsCell`
+ * sends, so the name sync writes is stated once rather than spelled at each call site.
  *
- * One constant for both directions: the write sends this name and the read requires it, so
- * a divergence between "what sync writes" and "what sync recognises as its own" is a
- * one-line edit rather than two spellings that drift.
+ * **Not the name to recognise our own writes by.** The product accepts several spellings of
+ * this cell type on the way in and reports one on the way out; see
+ * {@link REACT_CELL_TYPE_READ_BACK_NAMES}. Using this write alias as the read check is what
+ * #115 found: the adapter refused Cells it had just written itself.
  */
 export const REACT_CELL_TYPE_NAME: SetCellsCellType = "ReactCellTypeCellType";
+
+/**
+ * The cell-type names `api.page.getCells` reports for a Cell that **is** a ReactCellType.
+ *
+ * Two entries, and their provenance is deliberately different — one is measured, one is
+ * tolerance, and the data says which is which rather than leaving a reader to assume both.
+ *
+ * - **`ReactCellType` — measured.** #115 probed Forguncy `12.0.101.0`: `api.page.setCells`
+ *   accepted `ReactCellTypeCellType`, `ReactCellType` and the display name `React AI 单元格`
+ *   for the same cell type (the `setCells` reference states this as 内置别名、类型名或显示名),
+ *   and all three read back through `api.page.getCells` as `cellType: "ReactCellType"` with the
+ *   same `cellTypeProps.code` byte for byte. The product's own reference
+ *   (`/apis/cellTypes/ReactCellType.md`) and cell-type index (`/apis/cellTypes/index.md`) also
+ *   name this cell type `ReactCellType`; `ReactCellTypeCellType` appears in neither, which is
+ *   consistent with it being an input alias the product normalizes away on the way out.
+ * - **`ReactCellTypeCellType` — the write alias, retained as tolerance for the build this
+ *   repository *pins*.** #5 established the contract on `12.0.100.0` and #20 executed the flow
+ *   there, but neither recorded which name that build *reported* — #20's read-back step recorded
+ *   `cellTypeProps` and not `cellType`, and the recognition check that compares against the write
+ *   alias was added during #74's review, i.e. after the run. `12.0.100.0` is not installed here,
+ *   so its read-back name is **unmeasured** rather than known to differ. Omitting the alias would
+ *   therefore risk reproducing #115's own defect on the pinned build — the adapter refusing Cells
+ *   it had just written — so the alias is recognised too.
+ *
+ * The tolerance is bounded, and it is bounded by *this cell type's own names*: both entries are
+ * names the product documents for ReactCellType, so neither can match a foreign cell type, and
+ * the `code` condition below is untouched by the name set. It is not the "accept anything that
+ * looks React-ish" layer the repository refuses: a name outside this list fails closed as
+ * `occupied`, and a test pins that with a name adjacent to these two.
+ *
+ * `UserControlPageCellType` is the product's other cell type and reads back as itself with
+ * `cellTypeProps: { overflowMode }` and no `code` at all (measured, same session), so the
+ * `code` condition alone already separates it — the name check is what keeps the claim true
+ * rather than merely currently-unfalsified.
+ */
+export const REACT_CELL_TYPE_READ_BACK_NAMES = ["ReactCellType", "ReactCellTypeCellType"] as const;
 
 /**
  * The `cellTypeProps` half of one Cell.
@@ -304,7 +337,7 @@ export interface ProjectErrorReport {
 }
 
 // ---------------------------------------------------------------------------
-// api.app.generatePageAsync
+// generating the project
 // ---------------------------------------------------------------------------
 
 /**

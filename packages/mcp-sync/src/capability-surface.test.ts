@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { SYNC_EXPLORED_VERSIONS } from "./guarantees.ts";
 import {
   assertMcpSyncFlowIsCoherent,
   assertMcpSyncStepCoherent,
@@ -86,10 +87,20 @@ describe("what the evidence establishes", () => {
    * The exact call names, pinned.
    *
    * This is the test that makes a guessed call name fail a check instead of shipping: the
-   * names below are the ones #5's and #20's executed designer evidence and the product's
-   * own guide record, and there is no eighth. A change to any of them has to come with the
-   * evidence that established it, because inventing one is precisely the failure #19's
-   * "or the exact supported equivalent" hedge invites.
+   * names below are the ones #5's, #20's and #115's executed designer evidence and the
+   * product's own guide record, and there is no eighth. A change to any of them has to come
+   * with the evidence that established it, because inventing one is precisely the failure
+   * #19's "or the exact supported equivalent" hedge invites.
+   *
+   * `generate-page`'s name moved from `api.app.generatePageAsync` to
+   * `api.app.generateProject` under #115, and it is worth being precise about why that is not
+   * the thing this test exists to prevent: the rule is "an established capability quotes a
+   * call that was *executed*", not "a call name never changes". #115 executed
+   * `api.app.generateProject` on 12.0.101.0 (and the product documents it), while
+   * `generatePageAsync` is absent there — so the pinned name is the one that was established
+   * for the surface the adapter now drives. The older spelling is not deleted: it remains a
+   * recognised build difference in `GENERATE_PROJECT_SCRIPT`, with its own 12.0.100.0
+   * evidence, and the adapter picks by `typeof` rather than by version.
    */
   it("quotes the observed designer calls verbatim", () => {
     const established = SYNC_CAPABILITIES.filter(capability => capability.confirmation === "established").map(
@@ -97,7 +108,7 @@ describe("what the evidence establishes", () => {
     );
     expect(established.sort()).toEqual([
       "api.app.checkProjectErrors",
-      "api.app.generatePageAsync",
+      "api.app.generateProject",
       "api.app.getProjectSaveStatus",
       "api.app.listFrontendLibraries",
       "api.app.saveProject",
@@ -135,6 +146,42 @@ describe("what the evidence establishes", () => {
     expect(findSyncCapability("read-cell-source").method).not.toBe("api.page.readCellCode");
   });
 
+  // #115: the two shapes that turned out to be version-sensitive, and the version they were
+  // measured on. Asserted rather than left to the note's prose because the load-bearing part
+  // is the *boundary*: the source has to say which build it is evidence for, so a later
+  // reader cannot mistake it for a claim about the pinned one.
+  it("records which build the generation and read-back shapes were probed on", () => {
+    const generation = findSyncCapability("generate-page");
+    expect(generation.evidenceSources).toContain("issue-115-designer-probe");
+    expect(generation.method).toBe("api.app.generateProject");
+
+    // The versioned record is what makes the name a *version difference* rather than a rename
+    // applied to every build. Both halves must be present, because dropping the 12.0.100.0 entry
+    // would leave the capability claiming `generateProject` as a fact about the pinned build —
+    // the promotion #116's review found, and the one thing a flat `method` field cannot prevent.
+    expect(generation.calls).toEqual([
+      { method: "api.app.generatePageAsync", version: "12.0.100.0" },
+      { method: "api.app.generateProject", version: "12.0.101.0" },
+    ]);
+
+    // The note and the adapter have to describe the same fail-closed set, or a reader learns the
+    // wrong contract from the registry. #116's second review is why `both present` is named here:
+    // the versioned record says one call per build, so the adapter refuses the unmeasured shape
+    // rather than picking a winner, and the note has to say so.
+    expect(generation.note).toContain("neither");
+    expect(generation.note).toContain("both");
+
+    const source = findSyncEvidenceSource("issue-115-designer-probe");
+    expect(source.channel).toBe("designer-api");
+    expect(source.scope).toContain("12.0.101.0");
+    expect(source.scope).toContain("ReactCellType");
+    expect(source.scope).toContain("generatePageAsync");
+    // The boundary that matters: this source is explicit that it did not re-measure the
+    // pinned build, so it cannot be read as discharging #20's 12.0.100.0 evidence.
+    expect(source.scope).toContain("not");
+    expect(source.scope).toContain("12.0.100.0");
+  });
+
   it("keeps the save status as the step's own reason for saving", () => {
     const status = findSyncCapability("project-save-status");
     expect(status.method).toBe("api.app.getProjectSaveStatus");
@@ -158,6 +205,45 @@ describe("what the evidence establishes", () => {
     expect(findSyncEvidenceSource("issue-5-designer-probe").channel).toBe("designer-api");
     expect(findSyncEvidenceSource("forguncy-library-guide").channel).toBe("product-documentation");
     expect(findSyncEvidenceSource("forguncy-library-guide").scope).toContain("documentation, not an execution");
+  });
+
+  // #115's evidence has to *reach* the capabilities it is evidence for.
+  //
+  // Without this, the two edits the change is made of can silently cancel: adding the source
+  // record on one line and the `evidenceSources` entry on another are separate edits, and either
+  // one alone still compiles, still passes every other test here, and still leaves the two
+  // capabilities quoting a name the new source is the only evidence for. The check is over the
+  // *registry*, so it fails on the half-edit in either direction.
+  it("cites the build the generation and read-back shapes were probed on, where it is evidence", () => {
+    const cited = SYNC_CAPABILITIES.filter(capability =>
+      capability.evidenceSources.includes("issue-115-designer-probe"),
+    ).map(capability => capability.id);
+
+    // Exactly the two shapes #115 measured, and no third: evidence spread by habit over
+    // capabilities it says nothing about is how a citation stops meaning anything.
+    expect(cited.sort()).toEqual(["generate-page", "read-cell-source"]);
+
+    // And the generation capability's name is the one that source *established* — asserting the
+    // pair, because citing #115 while keeping the call name it found absent would be a claim the
+    // source itself contradicts.
+    expect(findSyncCapability("generate-page").method).toBe("api.app.generateProject");
+  });
+
+  // The general rule the generation case is the instance of: a capability's recorded calls are
+  // the evidence boundary, so every entry must be one a tracked version was actually probed on,
+  // and the version list a capability spans must be a subset of the repository's. Asserted over
+  // the whole table so the next version-sensitive call cannot be added as a flat name.
+  it("records every capability call against a version the repository tracks", () => {
+    for (const capability of SYNC_CAPABILITIES) {
+      for (const call of capability.calls ?? []) {
+        expect(SYNC_EXPLORED_VERSIONS, `${capability.id} ${call.method}`).toContain(call.version);
+      }
+    }
+    // And at least one capability *is* version-split, so the shape is exercised rather than
+    // merely available: if this ever fails, the versioned record has been flattened back to a
+    // single claim and the machinery around it is untested.
+    const split = SYNC_CAPABILITIES.filter(capability => (capability.calls ?? []).length > 1);
+    expect(split.map(capability => capability.id)).toEqual(["generate-page"]);
   });
 });
 
@@ -286,10 +372,34 @@ describe("the guards refuse an incoherent registry", () => {
     }
   });
 
-  it("refuses an established capability with no call name", () => {
+  it("refuses an established capability with no recorded call", () => {
     expect(() =>
-      assertSyncCapabilityCoherent({ ...findSyncCapability("write-cell-source"), method: undefined } as SyncCapability),
-    ).toThrow(/never paraphrases it/);
+      assertSyncCapabilityCoherent({ ...findSyncCapability("write-cell-source"), calls: [] } as SyncCapability),
+    ).toThrow(/without recording a call/);
+  });
+
+  // The versioned record is the authority, and the quoted name is derived from it — so a
+  // capability cannot maintain the two separately, in either direction. #116's review is why
+  // this pair of checks exists: the previous shape stored one flat name and could assert a fact
+  // about a build it had never been probed on.
+  it("refuses a quoted name that disagrees with the versioned record", () => {
+    const capability = findSyncCapability("write-cell-source");
+    expect(() =>
+      assertSyncCapabilityCoherent({
+        ...capability,
+        // A hand-written `method` overriding what `calls` resolves to.
+        method: "api.page.setCellValues",
+      } as SyncCapability),
+    ).toThrow(/derived from the versioned record/);
+  });
+
+  it("refuses a call recorded against a version the repository does not track", () => {
+    expect(() =>
+      assertSyncCapabilityCoherent({
+        ...findSyncCapability("write-cell-source"),
+        calls: [{ method: "api.page.setCells", version: "13.0.0.0" }],
+      } as unknown as SyncCapability),
+    ).toThrow(/not a version this repository tracks/);
   });
 
   it("refuses a capability that cites no evidence", () => {
