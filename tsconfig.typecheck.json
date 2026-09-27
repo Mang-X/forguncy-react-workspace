@@ -5,8 +5,20 @@
     "(tracked separately as repository bootstrap work).",
     "",
     "This project type-checks every package, including the *.test.ts files, so type-level",
-    "contracts in packages/core are actually gated rather than merely written down."
+    "contracts in packages/core are actually gated rather than merely written down.",
+    "",
+    "The two `resolve.alias` fixtures (#97) are excluded, and the reason is the rule they",
+    "exist to test rather than an inconvenience: their Cell entries import `@app/shared/thing`,",
+    "an id only a bundler holding the project's `alias` can resolve. Type-checking them would",
+    "require re-declaring that alias as a tsconfig `paths` entry — a second declaration of one",
+    "project's alias set, free to drift from the one the build and the dev server read, which",
+    "is exactly what #97 forbids. The fixtures are still exercised: both packages' tests compile",
+    "and resolve them through the real alias, which is the stronger check."
   ],
   "extends": "./tsconfig.json",
-  "include": ["packages/**/*.ts", "packages/**/*.tsx"]
+  "include": ["packages/**/*.ts", "packages/**/*.tsx"],
+  "exclude": [
+    "packages/cell-compiler/tests/fixtures/alias-project/**",
+    "packages/dev-harness/tests/fixtures/project-alias/**"
+  ]
 }

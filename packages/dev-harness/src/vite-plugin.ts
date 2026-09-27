@@ -205,7 +205,10 @@ export interface DevHarnessVitePlugin {
    * because that is the only mechanism of the four tried that reaches the browser — see the same
    * docstring for the three that do not, and why an alias would over-claim subpaths.
    */
-  resolveId(id: string): string | null;
+  resolveId(
+    this: { readonly resolve: ResolveIdContext["resolve"] },
+    id: string,
+  ): Promise<string | null> | string | null;
   /** Generates the mount module, or an explanation, or `null` for ids this plugin does not own. */
   load(id: string): string | null;
   /**
@@ -223,6 +226,23 @@ export interface DevHarnessVitePlugin {
       readonly injectTo: "body";
     }[];
   };
+}
+
+/**
+ * The slice of a Vite plugin context the project-alias claim needs.
+ *
+ * Structural rather than imported, like every other host type in this file: the plugin is typed
+ * against the Vite plugin *contract* so nothing here pins a toolchain version. `resolve` is
+ * declared because a project alias is finished by the host's own resolver — the target may be a
+ * directory, may need an extension, and may itself be claimed by another plugin — so the claim
+ * asks the host to resolve the rewritten id rather than returning a bare path.
+ */
+interface ResolveIdContext {
+  resolve(
+    id: string,
+    importer: string | undefined,
+    options: { readonly skipSelf: boolean },
+  ): Promise<{ readonly id: string } | null>;
 }
 
 export const DEV_HARNESS_PLUGIN_NAME = "forguncy-dev-harness";
@@ -555,6 +575,71 @@ export function normalizeAliasFind(find: string, replacement: unknown): string {
     return find.slice(0, -1);
   }
   return find;
+}
+
+/**
+ * The project alias entry that matches a module id, by Vite's own string rule.
+ *
+ * #97's requirement is that one declared alias set drives the dev server and the artifact. The
+ * set comes from `registry.resolve.alias` — the normalization of the project's
+ * `forguncy.config.ts` `resolve.alias` block — and this is the dev half of applying it.
+ *
+ * ## Why the rule is written here rather than by handing Vite an alias
+ *
+ * The natural mechanism is `resolve.alias` in a `config()` hook, which is how the host aliases are
+ * already emitted. That route does not work for a *project* alias, and three measurements say so:
+ *
+ * - `config()` runs before the registry exists, and it cannot see the project root when the
+ *   project does not set one — so there is nothing to normalize the block against. Guessing
+ *   `process.cwd()` there reproduced Vite's own root rule in the measured cases, but it would be a
+ *   *second* normalization of one config file, with a second answer if the two roots ever
+ *   differed.
+ * - Mutating `config.resolve.alias` in `configResolved` is inert: Vite has already built the
+ *   resolver by then, so neither `unshift` nor replacing the array changes what resolves.
+ * - Emitting an alias from `config()` puts it *before* the project's own `vite.config.ts` aliases
+ *   (`mergeConfig` lets the later value win), which is the silent override the host-alias filter
+ *   exists to avoid.
+ *
+ * Applying it in this plugin's `resolveId` has none of those problems and one property the others
+ * lack: it reads the *normalized* set off the registry, so there is exactly one normalization of
+ * one config file and the dev server cannot disagree with the build about it.
+ *
+ * ## The rule itself, including the precedence — measured, not assumed
+ *
+ * `===` or `startsWith(find + "/")`, which is Vite's — and, measured against Rolldown 1.2.9,
+ * exactly what that engine's `resolve.alias` does too. That identity is the whole reason the config
+ * block accepts only this key shape: a rule the two engines agree on is one the two paths cannot
+ * diverge about.
+ *
+ * **First declaration wins, not the longest match.** That is worth stating because the intuitive
+ * reading is the opposite, and the difference is observable. With `@/lib` and `@/lib/deep` both
+ * declared, `@/lib/deep/x` is matched by both, and measured against Vite 8.3.0 and Rolldown 1.2.9:
+ *
+ * | declaration order | Vite resolved `@/lib/deep/x` to |
+ * | --- | --- |
+ * | `@/lib` first | `@/lib`'s target |
+ * | `@/lib/deep` first | `@/lib/deep`'s target |
+ *
+ * Both engines answer by declaration order, so this does too — `Object.entries` order over the
+ * normalized map, which `normalizeResolveConfig` preserves from the config file. Picking the
+ * longest key instead would be a *third* rule: correct in isolation, and a genuine divergence from
+ * both engines the first time a project declared overlapping prefixes. That is precisely the class
+ * of defect this whole change removes, so the ordering here is the engines' rather than a better
+ * one.
+ */
+export function projectAliasTarget(
+  moduleId: string,
+  alias: Readonly<Record<string, string>>,
+): string | undefined {
+  for (const [find, target] of Object.entries(alias)) {
+    if (moduleId === find || moduleId.startsWith(`${find}/`)) {
+      // `slice` rather than `replace`: the remainder has to survive verbatim, and `replace` with a
+      // string pattern also rewrites an occurrence inside the matched text.
+      return `${target}${moduleId.slice(find.length)}`;
+    }
+  }
+
+  return undefined;
 }
 
 /**
@@ -910,7 +995,7 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
       };
     },
 
-    resolveId(id) {
+    async resolveId(this: { readonly resolve: ResolveIdContext["resolve"] }, id) {
       // Returned as itself rather than `\0`-prefixed: this id is served to a browser, and a
       // resolved id beginning with NUL tells the rest of Vite "never look this up on disk".
       // The id is a URL path this plugin owns end to end, so claiming it here is enough —
@@ -930,6 +1015,25 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
       const substitution = substitutions === undefined ? undefined : substitutionForModuleId(id, substitutions);
       if (substitution !== undefined) {
         return extensionSubstitutionModuleId(substitution.moduleId);
+      }
+      // The project's own `resolve.alias` block (#97), applied here so the dev server and the
+      // artifact resolve a project alias to the same file. Last of the claims, and that position is
+      // load-bearing: the host bridge and the extension substitutions own their ids, and
+      // `resolve-config.ts` refuses a project alias naming a bridged id precisely so the two
+      // engines' opposite orderings — Vite's alias before a plugin's `resolveId`, Rolldown's
+      // interception hook before its `resolve.alias` — cannot make them diverge. See
+      // `projectAliasTarget` for why this is a `resolveId` claim rather than a Vite alias.
+      if (registry !== undefined) {
+        const rewritten = projectAliasTarget(id, registry.resolve.alias);
+        if (rewritten !== undefined) {
+          // Handed back to Vite to finish rather than returned as a bare path: the target may be a
+          // directory, may need an extension resolved, or may itself be claimed by another plugin,
+          // and all of that is what Vite's own resolution is for.
+          const resolved = await this.resolve(rewritten, undefined, { skipSelf: true });
+          // `.id` rather than the result object: this hook answers with an id, and Vite's own
+          // resolution carries the extension and folder-index work a bare concatenation does not.
+          return resolved === null ? rewritten : resolved.id;
+        }
       }
       // Everything else, including the Cell's own `virtual:forguncy/cell/<id>`, is the Cell
       // seam's business. Delegated rather than re-implemented: the seam owns the guards

@@ -364,6 +364,27 @@ export type {
   NormalizedExtensionMappings,
 } from "./extension-mappings-config.ts";
 
+// The portability predicates (#26), extracted to a leaf because `resolve-config` needs the
+// same rule for an alias target and may not import the registry that calls it.
+export { isSecretLikeKey, machineSpecificPathProblem } from "./portability.ts";
+
+// The module-resolution aliases (#97): one declared alias set, resolved once for both the
+// dev server and the Cell build.
+export {
+  EMPTY_NORMALIZED_RESOLVE_CONFIG,
+  formatResolveConfig,
+  normalizeResolveConfig,
+  RESOLVE_ALLOWED_FIELDS,
+  RESOLVE_CONFIG_FIELD,
+} from "./resolve-config.ts";
+export type {
+  NormalizedResolveConfig,
+  NormalizeResolveConfigResult,
+  ResolvedAliasEntry,
+  ResolveConfigDiagnostic,
+  ResolveConfigDiagnosticCode,
+} from "./resolve-config.ts";
+
 export {
   assertFgcLockDocument,
   assertFgcLockDocumentShape,
@@ -632,6 +653,7 @@ export type {
   ForguncyConfig,
   ForguncyConfigSchemaVersion,
   ForguncyTargetLocator,
+  ResolveConfig,
   RuntimeTargetConfig,
   TargetLocatorModel,
 } from "./forguncy-config.ts";
@@ -664,8 +686,6 @@ export {
   createCellRegistry,
   ForguncyConfigError,
   isCellRegistry,
-  isSecretLikeKey,
-  machineSpecificPathProblem,
   OUTPUT_ALLOWED_FIELDS,
   RETIRED_OUTPUT_BUDGET_FIELD,
   TARGET_ALLOWED_FIELDS,

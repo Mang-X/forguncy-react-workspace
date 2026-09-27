@@ -210,6 +210,33 @@ export interface ExtensionMappingsConfig {
 }
 
 /**
+ * Project-level module-resolution aliases.
+ *
+ * A deliberately narrow subset of what a `vite.config.ts` can express, because a Cell is one
+ * IIFE rather than a web bundle and both halves of the loop have to resolve identically
+ * (Issue #97). The shape is declared here and *validated* in `resolve-config.ts`, for the same
+ * split the rest of this file follows — this module states shape and intent and normalizes
+ * nothing.
+ *
+ * `alias` only, and only string keys with project-relative string targets. A `RegExp` key, a
+ * bare-specifier target and a target pointing at a host-bridged module id are each refused
+ * there with the reason, because each would resolve on one path and not the other.
+ */
+export interface ResolveConfig {
+  /**
+   * Module-id prefix to project-relative target path.
+   *
+   * The array form Vite also accepts (`{ find, replacement }` entries) is read too, so a
+   * block copied out of a `vite.config.ts` works rather than being refused as an unknown
+   * shape. Both forms normalize to one string-keyed map, which is the only shape the Cell
+   * build's Rolldown configuration supports.
+   */
+  readonly alias?:
+    | Readonly<Record<string, string>>
+    | readonly { readonly find: string; readonly replacement: string }[];
+}
+
+/**
  * The whole config document.
  *
  * `cells` may be empty so a project can adopt the contract before its first
@@ -222,10 +249,12 @@ export interface ForguncyConfig {
   readonly runtime?: RuntimeTargetConfig;
   /** Project-level extension mappings, when the built-in table is not enough. */
   readonly extensions?: ExtensionMappingsConfig;
+  /** Module-resolution aliases shared by the dev server and the Cell build. */
+  readonly resolve?: ResolveConfig;
 }
 
 /** Fields allowed at each level. Used verbatim in unknown-field diagnostics. */
-export const CONFIG_ALLOWED_FIELDS = ["schemaVersion", "cells", "runtime", "extensions"] as const;
+export const CONFIG_ALLOWED_FIELDS = ["schemaVersion", "cells", "runtime", "extensions", "resolve"] as const;
 export const CELL_ALLOWED_FIELDS = ["entry", "target", "fixture", "output"] as const;
 export const RUNTIME_ALLOWED_FIELDS = [
   "forguncyVersion",

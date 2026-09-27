@@ -99,6 +99,23 @@ export interface CreateRolldownCellBundlerOptions {
    * builds and two of them cannot contaminate each other.
    */
   readonly dir: string;
+  /**
+   * The project's module-resolution aliases, as `registry.resolve.alias` (#97).
+   *
+   * The second project-scope option, and the distinction from `CellBundlingRequest` is what
+   * makes it one: `dir` is here for the same reason it is — an alias set describes *this
+   * project*, not *this build*, so two builds of one project share it while two projects
+   * cannot contaminate each other. Anything that varies per Cell stays on the request.
+   *
+   * Optional, and the absent state is meaningful rather than a default: omitting it means the
+   * caller stated no aliases, which is what a #6 caller with a bare `CompileCellInput` has. A
+   * default here would be the "implicit second set of defaults" #97 forbids.
+   *
+   * Absolute targets, which is what `normalizeResolveConfig` produces. Rolldown *throws* on a
+   * relative replacement (measured: `resolve.alias: { "@/lib": "./srclib" }` fails the build
+   * outright), so a caller building this map by hand must resolve against `dir` first.
+   */
+  readonly alias?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -110,8 +127,8 @@ export interface CreateRolldownCellBundlerOptions {
  */
 export function createRolldownCellBundler(options: CreateRolldownCellBundlerOptions): CellBundlerPort {
   return {
-    bundle: request => bundleWithRolldown(options.dir, request),
-    resolveEntrySpecifiers: request => resolveEntrySpecifiersWithRolldown(options.dir, request),
+    bundle: request => bundleWithRolldown(options.dir, request, options.alias),
+    resolveEntrySpecifiers: request => resolveEntrySpecifiersWithRolldown(options.dir, request, options.alias),
   };
 }
 
@@ -431,6 +448,7 @@ async function resolveCellSpecifier(
 async function resolveEntrySpecifiersWithRolldown(
   dir: string,
   request: CellResolveRequest,
+  alias: Readonly<Record<string, string>> | undefined,
 ): Promise<readonly string[]> {
   const resolvedEntry = path.resolve(dir, request.entry);
   if (!isRegularFile(resolvedEntry)) {
@@ -445,6 +463,7 @@ async function resolveEntrySpecifiersWithRolldown(
       input: resolvedEntry,
       transform: { jsx: "react-jsx" },
       experimental: { attachDebugInfo: "none" },
+      ...rolldownAliasOptions(alias),
       plugins: [
         {
           name: "cell-compiler-entry-specifier-scan",
@@ -883,7 +902,49 @@ function assertEntryComponentBinding(logs: readonly CapturedLog[], entry: string
   }
 }
 
-async function bundleWithRolldown(dir: string, request: CellBundlingRequest): Promise<BundledCellModule> {
+/**
+ * The `resolve.alias` half of the Rolldown options, or nothing when the project declared none.
+ *
+ * Spread rather than always passing `resolve`, and the difference is a claim rather than
+ * tidiness: an empty `resolve.alias` object is *stated* and means "match nothing", while an
+ * absent `resolve` key means the caller said nothing at all. Collapsing them would make the
+ * compiler's own configuration indistinguishable from a project's, which is the "implicit
+ * default" #97 forbids — and the distinction is observable in the report a reviewer reads,
+ * because `resolve: { alias: {} }` in a diff reads as a decision somebody made.
+ *
+ * ## Why the alias is a build option and not a plugin
+ *
+ * Rolldown offers three ways to do this, and only one keeps the preflight and the build
+ * agreeing — which is the property `resolveCellSpecifier` exists to protect:
+ *
+ * - **`resolve.alias`** (used here) applies inside Rolldown's own resolver, after the plugin
+ *   `resolveId` hooks. Measured: an id the interception hook claims still resolves to the
+ *   interposed module with a matching alias present, so the host bridge and the extension
+ *   externals keep precedence and the alias answers only what they left alone. It also works
+ *   identically under `scan`, which is what the pre-bundle specifier pass runs — measured, and
+ *   that is the fact this whole choice turns on.
+ * - **`viteAliasPlugin`** from `rolldown/experimental` wraps the alias in a plugin. It would
+ *   put a second plugin in both passes' `plugins` arrays, and its ordering against the
+ *   interception hook would be a thing to get right rather than a thing that is right.
+ * - **Rewriting specifiers in this compiler's own `resolveId`** would make this package a
+ *   resolver for aliases, which #6 forbids, and would put the rule in a different place from
+ *   the one the dev server applies.
+ *
+ * The alias set is validated against both engines' rules before it reaches here
+ * (`normalizeResolveConfig`), so the subset that arrives is exactly the subset Vite and
+ * Rolldown agree on.
+ */
+function rolldownAliasOptions(
+  alias: Readonly<Record<string, string>> | undefined,
+): { readonly resolve?: { readonly alias: Readonly<Record<string, string>> } } {
+  return alias === undefined ? {} : { resolve: { alias } };
+}
+
+async function bundleWithRolldown(
+  dir: string,
+  request: CellBundlingRequest,
+  alias: Readonly<Record<string, string>> | undefined,
+): Promise<BundledCellModule> {
   const resolvedEntry = path.resolve(dir, request.entry);
   if (!isRegularFile(resolvedEntry)) {
     // Refused before the build rather than left to the bundler's
@@ -917,6 +978,7 @@ async function bundleWithRolldown(dir: string, request: CellBundlingRequest): Pr
       },
       transform: { jsx: "react-jsx" },
       experimental: { attachDebugInfo: "none" },
+      ...rolldownAliasOptions(alias),
       plugins: [
         {
           name: "cell-compiler-rolldown-bundler",

@@ -1,8 +1,19 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createCellRegistry, ForguncyConfigError, normalizeExtensionMappings } from "@forguncy-react-workspace/core";
-import type { CellRegistry, ForguncyConfig, NormalizedExtensionMappings, RegisteredCell } from "@forguncy-react-workspace/core";
+import {
+  createCellRegistry,
+  ForguncyConfigError,
+  normalizeExtensionMappings,
+  normalizeResolveConfig,
+} from "@forguncy-react-workspace/core";
+import type {
+  CellRegistry,
+  ForguncyConfig,
+  NormalizedExtensionMappings,
+  NormalizedResolveConfig,
+  RegisteredCell,
+} from "@forguncy-react-workspace/core";
 import { describe, expect, it } from "vitest";
 
 import { FORGUNCY_PLUGIN_NAME, cellVirtualModuleId, forguncy, virtualModuleCellId } from "./index.ts";
@@ -33,6 +44,13 @@ function forgedExtensionMappings(): NormalizedExtensionMappings {
   const result = normalizeExtensionMappings({});
   if (!result.ok) throw new Error("Normalizing an empty config must succeed.");
   return result.mappings;
+}
+
+/** The alias set a forged registry carries, from the real normalization for the same reason. */
+function forgedResolve(): NormalizedResolveConfig {
+  const result = normalizeResolveConfig({}, { root: validMultiRoot });
+  if (!result.ok) throw new Error("Normalizing an empty config must succeed.");
+  return result.resolve;
 }
 
 function captureConfigError(run: () => unknown): ForguncyConfigError {
@@ -245,6 +263,7 @@ describe("the virtual Cell module seam", () => {
         dependencyLockPathAbsolute: join(validMultiRoot, "fgc.lock.json"),
       },
       extensionMappings: forgedExtensionMappings(),
+      resolve: forgedResolve(),
       cells: [cell],
       cellIds: [cell.id],
       get: id => (id === cell.id ? cell : undefined),

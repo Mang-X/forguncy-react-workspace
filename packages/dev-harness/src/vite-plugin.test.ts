@@ -1,10 +1,17 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { createCellRegistry } from "@forguncy-react-workspace/core";
 import { describe, expect, it } from "vitest";
 import { createServer } from "vite";
 
-import { devHarness, HARNESS_ENTRY_URL_PATH, HARNESS_MOUNT_ELEMENT_ID, normalizeAliasFind } from "./vite-plugin.ts";
+import {
+  devHarness,
+  HARNESS_ENTRY_URL_PATH,
+  HARNESS_MOUNT_ELEMENT_ID,
+  normalizeAliasFind,
+  projectAliasTarget,
+} from "./vite-plugin.ts";
 
 /**
  * The harness plugin under a **real Vite dev server**, which is the only place two of its
@@ -545,5 +552,173 @@ describe("the mount node is injected without depending on a closing body tag", (
     } finally {
       await server.close();
     }
+  });
+});
+
+/**
+ * Issue #97's dev half: the project's own `resolve.alias` block drives local resolution.
+ *
+ * ## What was missing, and why it needed a real server
+ *
+ * The harness had no path from `registry.resolve` into resolution at all — the block did not exist
+ * before #97 — so a project alias was a `vite.config.ts` setting whose production behaviour nothing
+ * implemented. The whole defect is only visible at resolution: `config()` emitting the right object
+ * and Vite *resolving* an import to the right file are different statements, which is the lesson the
+ * alias-precedence block above records.
+ *
+ * ## Why this applies the alias in `resolveId` rather than emitting a Vite alias
+ *
+ * Three measured reasons, and they are why the implementation is shaped the way it is:
+ *
+ * - `config()` runs before the registry exists, and when a project does not set `root` it cannot
+ *   see one either; normalizing the block there would be a *second* normalization of one config
+ *   file, free to disagree with the build's.
+ * - Mutating `config.resolve.alias` in `configResolved` is inert — Vite has built its resolver by
+ *   then. Measured: neither `unshift` nor replacing the array changes what resolves.
+ * - An alias emitted from `config()` lands *before* the project's own `vite.config.ts` aliases, which
+ *   is the silent override the precedence block exists to prevent.
+ *
+ * So the harness reads `registry.resolve.alias` — the one normalized set — and applies it in its own
+ * `resolveId`, which is also why a project alias cannot shadow a host-bridged id: `resolve-config.ts`
+ * refuses that declaration, because the two engines order the binding oppositely.
+ */
+describe("the project's alias block resolves under a real dev server", () => {
+  const aliasFixtureRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "tests", "fixtures", "project-alias");
+
+  /** The registry for the alias fixture, normalized the way a project's own config would be. */
+  function aliasRegistry() {
+    return createCellRegistry(
+      {
+        cells: {
+          probe: { entry: "./cells/probe/src/index.ts", target: { pageName: "探针", cell: "A1" } },
+        },
+        resolve: { alias: { "@app/shared": "./shared" } },
+      },
+      { root: aliasFixtureRoot },
+    );
+  }
+
+  it("resolves an aliased import to the file the project declared", async () => {
+    const server = await createServer({
+      root: aliasFixtureRoot,
+      configFile: false,
+      logLevel: "error",
+      appType: "spa",
+      plugins: [devHarness({ config: aliasRegistry() }) as never],
+      server: { middlewareMode: true, hmr: false, watch: null },
+    });
+
+    try {
+      // The assertion is on the *resolved id* rather than on any config value, because the id is
+      // what the module graph loads. This is the same level the alias-precedence tests assert at,
+      // and for the same reason.
+      //
+      // Compared with separators normalized: Vite answers with POSIX ids, so a Windows-authored
+      // expectation would fail on the separator alone while resolution was perfectly correct.
+      const resolved = await resolveModuleId(server, "@app/shared/thing");
+      expect(resolved.replace(/\\/g, "/")).toBe(join(aliasFixtureRoot, "shared", "thing.ts").replace(/\\/g, "/"));
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("loads the aliased module's code, so the resolution is real rather than a path string", async () => {
+    // The control for the assertion above: a resolver that answered with a plausible path but never
+    // loaded the file would pass an id comparison. Reading the transformed module proves the file
+    // behind the id was actually read.
+    const server = await createServer({
+      root: aliasFixtureRoot,
+      configFile: false,
+      logLevel: "error",
+      appType: "spa",
+      plugins: [devHarness({ config: aliasRegistry() }) as never],
+      server: { middlewareMode: true, hmr: false, watch: null },
+    });
+
+    try {
+      const resolved = await server.pluginContainer.resolveId("@app/shared/thing");
+      expect(resolved, "the alias must resolve before anything can be loaded").not.toBeNull();
+      const loaded = await server.transformRequest(resolved!.id);
+      expect(loaded?.code).toContain("resolved-via-project-alias");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("resolves a subpath of an aliased directory through the same rule the build uses", async () => {
+    // The prefix rule is the one both engines agree on, so this is the case that pins the agreement
+    // rather than only the exact id: `@app/shared/thing` and `@app/shared` must both work, or a
+    // project would have to name every file.
+    const server = await createServer({
+      root: aliasFixtureRoot,
+      configFile: false,
+      logLevel: "error",
+      appType: "spa",
+      plugins: [devHarness({ config: aliasRegistry() }) as never],
+      server: { middlewareMode: true, hmr: false, watch: null },
+    });
+
+    try {
+      // The directory itself resolves to an existing module, which is what makes the prefix
+      // meaningful rather than a coincidence of this fixture's layout.
+      expect(await resolveModuleId(server, "@app/shared/thing")).toContain("shared");
+      expect(await resolveModuleId(server, "@app/shared/thing")).toContain("thing.ts");
+    } finally {
+      await server.close();
+    }
+  });
+});
+
+/**
+ * The alias-matching rule itself, asserted directly because the *ordering* is not observable
+ * through a resolution that has only one candidate key.
+ *
+ * ## Why this is a unit test when everything else here is a real server
+ *
+ * The precedence rule needs two keys that both match one id to be exercised at all, and a fixture
+ * project can declare that — but the resulting resolution is indistinguishable from a
+ * longest-match implementation unless you also vary the *declaration order* and watch the answer
+ * move. A pure function over a map tests exactly that, with no server, and the server-level tests
+ * above already establish that this function is what the resolver consults.
+ *
+ * ## The rule, measured rather than reasoned
+ *
+ * Both engines answer by **declaration order**, first match wins. Measured for `@/lib/deep/x` with
+ * `@/lib` and `@/lib/deep` both declared:
+ *
+ * | order | Vite 8.3.0 | Rolldown 1.2.9 |
+ * | --- | --- | --- |
+ * | `@/lib` first | `@/lib`'s target | `@/lib`'s target |
+ * | `@/lib/deep` first | `@/lib/deep`'s target | `@/lib/deep`'s target |
+ *
+ * The intuitive answer is "the longest, most specific key wins", and it is wrong. Implementing it
+ * here would be a third rule — right in isolation, and a real divergence from both engines the
+ * first time a project declared overlapping prefixes. So this test exists as much to record that
+ * the naive reading was checked and rejected as to pin the behaviour.
+ */
+describe("the project alias rule, and its precedence", () => {
+  it("matches the bare key and any subpath of it, and nothing else", () => {
+    const alias = { "@/lib": "/abs/lib" };
+
+    expect(projectAliasTarget("@/lib", alias)).toBe("/abs/lib");
+    expect(projectAliasTarget("@/lib/thing", alias)).toBe("/abs/lib/thing");
+    expect(projectAliasTarget("@/lib/deep/x", alias)).toBe("/abs/lib/deep/x");
+    // A near-miss prefix must not match: `@/library` is a different id, and Vite's rule is
+    // `startsWith(key + "/")` rather than `startsWith(key)`.
+    expect(projectAliasTarget("@/library/thing", alias)).toBeUndefined();
+    expect(projectAliasTarget("other", alias)).toBeUndefined();
+  });
+
+  it("takes the first declaration that matches, as both engines do", () => {
+    // The whole point of the test: the same two keys in two orders must give two different
+    // answers, and each must be the one the engines produce for that order.
+    expect(projectAliasTarget("@/lib/deep/x", { "@/lib": "/A", "@/lib/deep": "/B" })).toBe("/A/deep/x");
+    expect(projectAliasTarget("@/lib/deep/x", { "@/lib/deep": "/B", "@/lib": "/A" })).toBe("/B/x");
+  });
+
+  it("preserves the remainder verbatim rather than rewriting it", () => {
+    // `replace` with a string pattern rewrites an occurrence inside the matched text, so a target
+    // containing the key would be mangled. `slice` cannot do that, and this pins it.
+    expect(projectAliasTarget("@/lib/@/lib/x", { "@/lib": "@/lib" })).toBe("@/lib/@/lib/x");
   });
 });

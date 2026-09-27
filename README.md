@@ -144,6 +144,38 @@ lock 里的决策是**按挂载的那个 Cell 投影过**的。这很重要，�
 
 一个具体后果值得单独写下来：`react-dom/client` 在页面被收窄为 #5 实际观测到的成员，本地却是完整的已发布模块 —— 所以本地比页面**更宽松**，本地通过不能当作更强的结论。
 
+## 模块别名（`resolve.alias`）：本地与构建共用一份
+
+Cell 里想写 `import { Button } from "@/ui"` 这种短路径时，别名写在 **`forguncy.config.ts`** 里，不写在 `vite.config.ts` 里：
+
+```ts
+export default defineForguncyConfig({
+  cells: { /* ... */ },
+  resolve: {
+    alias: {
+      "@/ui": "./src/ui",
+      "@app/shared": "./packages/shared", // 指向 workspace 共享源码也可以
+    },
+  },
+});
+```
+
+**为什么必须写在项目配置里**：Cell 产物是**一个自包含的 IIFE**，不是普通 web bundle，所以生产构建直接驱动 Rolldown，而它读不到 `vite.config.ts` 里的任何东西。在 #97 之前，这个别名在 `vp dev` 下生效、在编译时直接失败 —— 也就是「本地一套、生产另一套」。现在 `core` 把这一块归一化一次、挂在 registry 上，dev server 与 Cell 构建**读的是同一个对象**，因此不可能各自解读成不同的文件。
+
+这一块刻意只支持**子集**，因为两个引擎只在一种键形态上规则一致（`importee === key || importee.startsWith(key + "/")`）：
+
+| 写法 | 结果 |
+| --- | --- |
+| `"@/ui": "./src/ui"` | ✅ 本地与构建解析同一文件 |
+| `"react/": "./patched/"`（两侧都带斜杠） | ✅ 归一化后同上 |
+| 数组形式 `[{ find, replacement }]`（字符串 `find`） | ✅ 同上，方便从 `vite.config.ts` 拷过来 |
+| `RegExp`，或 `"/正则/"` / `"^x$"` 之类键 | ❌ 明确报错。Rolldown 的 `resolve.alias` 是字符串 map，没有 pattern 能力；对象键在 Vite 里也**按字面**匹配，所以这种写法在两条路径上都不会别名到任何东西 |
+| 目标是裸包名（`{ "old": "new" }`） | ❌ 明确报错。Vite 从项目根解析、Rolldown 从引用文件解析，同一个声明会解析到不同位置 |
+| 目标是绝对路径 / `~` / `file://` | ❌ 明确报错（提交进仓库的配置必须换台机器意思一样） |
+| 键是宿主桥接的 id（`react` / `react-dom` / `antd` 等） | ❌ 明确报错。两个引擎对「桥接 vs 别名」的**顺序相反**（Vite 先别名、产物先桥接），写在这里只会改本地解析。要指向自己打的 React，请写 `vite.config.ts`，那是**本地覆盖**，不是对产物的声明 |
+
+不支持的都是**报错**而不是静默忽略 —— 一个「本地能跑、产物里没生效」的别名比一个明确的错误更贵。
+
 ## 依赖策略
 
 第三方依赖不会简单地分成“支持 / 不支持”，而是根据实际运行方式选择以下策略：

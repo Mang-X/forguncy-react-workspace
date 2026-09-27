@@ -41,6 +41,15 @@ import type { CellCodeBudgetOverrides, ForguncyTargetLocator, TargetLocatorModel
 import { normalizeExtensionMappings } from "./extension-mappings-config.ts";
 import type { NormalizedExtensionMappings } from "./extension-mappings-config.ts";
 import type { ExtensionExternalMapping } from "./extension-externals.ts";
+import { normalizeResolveConfig } from "./resolve-config.ts";
+import type { NormalizedResolveConfig } from "./resolve-config.ts";
+import { isSecretLikeKey, machineSpecificPathProblem } from "./portability.ts";
+
+// The portability predicates moved to `portability.ts` when `resolve-config.ts` needed the
+// same rule for an alias target. Re-exported rather than merely moved, so this module's
+// public surface and every existing caller are unchanged: the extraction is an internal
+// restructuring. See that module's header for why the shared half had to become a leaf.
+export { isSecretLikeKey, machineSpecificPathProblem } from "./portability.ts";
 
 /** Fields allowed inside a `target`. */
 export const TARGET_ALLOWED_FIELDS = ["pageName", "cell"] as const;
@@ -81,6 +90,13 @@ export type ConfigDiagnosticCode =
   | "invalid-extension-mapping"
   | "unknown-extension-mapping-field"
   | "extension-mapping-conflict"
+  // Module-resolution aliases (#97).
+  | "unknown-resolve-field"
+  | "invalid-resolve-config"
+  | "invalid-resolve-alias"
+  | "unsupported-resolve-alias-pattern"
+  | "nonportable-resolve-alias-target"
+  | "host-module-alias-conflict"
   // Portability.
   | "machine-specific-path"
   | "secret-looking-field"
@@ -210,6 +226,16 @@ export interface CellRegistry {
    * to load `core`'s built-in table.
    */
   readonly extensionMappings: NormalizedExtensionMappings;
+  /**
+   * The project's module-resolution aliases, normalized once (Issue #97).
+   *
+   * Carried on the registry beside {@link CellRegistry.extensionMappings} and for the same
+   * reason: the dev server and the Cell build must resolve a project alias to the same file,
+   * and the only way to guarantee that is for both to read one normalized object rather than
+   * for each to normalize the block itself. The paths here are already absolute, resolved
+   * against {@link CellRegistry.root}, because that is the only form both engines accept.
+   */
+  readonly resolve: NormalizedResolveConfig;
   readonly cells: readonly RegisteredCell[];
   /** Ids in declaration order. */
   readonly cellIds: readonly string[];
@@ -243,61 +269,10 @@ export interface CreateCellRegistryOptions {
   readonly builtinExtensionMappings?: readonly ExtensionExternalMapping[];
 }
 
-const WINDOWS_DRIVE_PATH = /^[A-Za-z]:[\\/]/;
-const WINDOWS_UNC_PATH = /^\\\\/;
-const POSIX_ABSOLUTE_PATH = /^\//;
-const HOME_RELATIVE_PATH = /^~/;
-const FILE_URL_PATTERN = /^file:\/\//i;
 const MARKER_NAMESPACE_PATTERN = /^[A-Za-z][A-Za-z0-9_-]*$/;
-
-const SECRET_KEY_WORDS = [
-  "token",
-  "secret",
-  "password",
-  "passwd",
-  "credential",
-  "apikey",
-  "accesskey",
-  "privatekey",
-  "session",
-  "cookie",
-  "bearer",
-  "authorization",
-];
 
 function diag(code: ConfigDiagnosticCode, path: string, message: string): ConfigDiagnostic {
   return { code, path, message };
-}
-
-/**
- * Why a string cannot be committed, or `undefined` when it is portable.
- *
- * Ordered from most to least specific so `C:\x` is reported as a Windows path
- * rather than as a generic directory-looking value.
- */
-export function machineSpecificPathProblem(value: string): string | undefined {
-  if (WINDOWS_DRIVE_PATH.test(value)) {
-    return "an absolute Windows path";
-  }
-  if (WINDOWS_UNC_PATH.test(value)) {
-    return "a UNC path";
-  }
-  if (FILE_URL_PATTERN.test(value)) {
-    return "a file:// URL";
-  }
-  if (HOME_RELATIVE_PATH.test(value)) {
-    return "a home-relative path";
-  }
-  if (POSIX_ABSOLUTE_PATH.test(value)) {
-    return "an absolute path";
-  }
-  return undefined;
-}
-
-/** True when the key names something that would have to be a secret. */
-export function isSecretLikeKey(key: string): boolean {
-  const normalized = key.toLowerCase().replace(/[-_]/g, "");
-  return SECRET_KEY_WORDS.some(word => normalized.includes(word));
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -916,6 +891,17 @@ export function createCellRegistry(config: unknown, options: CreateCellRegistryO
     diagnostics.push(...extensionMappingsResult.diagnostics);
   }
 
+  // The module-resolution aliases (#97), through their own module and folded into the same
+  // list, for the same reason as the mappings above: one error type, one `codes` accessor,
+  // and a config with two mistakes costs one round trip. The root is passed because every
+  // accepted alias target is made absolute against it — the paths are the ones the Cells'
+  // own entries were resolved against, so an alias and an entry cannot disagree about which
+  // directory the project is.
+  const resolveResult = normalizeResolveConfig(config, { root });
+  if (!resolveResult.ok) {
+    diagnostics.push(...resolveResult.diagnostics);
+  }
+
   const resolvedCells: ResolvedCell[] = [];
   if (isConfigRecord(config.cells)) {
     // Declaration order, not alphabetical: the registry should read back the way
@@ -949,6 +935,14 @@ export function createCellRegistry(config: unknown, options: CreateCellRegistryO
   }
   const extensionMappings: NormalizedExtensionMappings = extensionMappingsResult.mappings;
 
+  // Same narrowing, same reason: a failed alias normalization contributed a diagnostic, so
+  // the throw above already returned. `!` would become a lie the first time a finding was
+  // recorded without blocking.
+  if (!resolveResult.ok) {
+    throw new ForguncyConfigError(resolveResult.diagnostics, context);
+  }
+  const resolveConfig: NormalizedResolveConfig = resolveResult.resolve;
+
   const cells: RegisteredCell[] = resolvedCells.map(cell => ({
     id: cell.id,
     entry: cell.entry.authored,
@@ -969,6 +963,7 @@ export function createCellRegistry(config: unknown, options: CreateCellRegistryO
     targetLocatorModel: TARGET_LOCATOR_MODEL,
     runtime,
     extensionMappings,
+    resolve: resolveConfig,
     cells,
     cellIds: cells.map(cell => cell.id),
     get: id => byId.get(id),
@@ -1115,6 +1110,14 @@ export function isCellRegistry(value: unknown): value is CellRegistry {
     // actually wrong. Refusing it here re-normalizes from the raw config instead, which
     // is the correct answer for a document that has one.
     isConfigRecord(value.extensionMappings) &&
-    Array.isArray((value.extensionMappings as { readonly mappings?: unknown }).mappings)
+    Array.isArray((value.extensionMappings as { readonly mappings?: unknown }).mappings) &&
+    // `resolve` is required for the same reason as `extensionMappings`: a value that passed
+    // here is one every consumer reads `resolve` off, and a registry from an older shape has
+    // no such field. Admitting it would hand the dev server and the build `undefined` where
+    // a normalized alias set belongs — which reads as "this project declares no aliases",
+    // the one answer that must never be invented. Refusing re-normalizes from the raw config
+    // instead, which is the correct answer for a document that has one.
+    isConfigRecord(value.resolve) &&
+    isConfigRecord((value.resolve as { readonly alias?: unknown }).alias)
   );
 }
