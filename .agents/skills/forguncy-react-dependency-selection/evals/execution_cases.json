@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
   "capability": "为一个 Cell 需要的能力做依赖选型并记录决策",
-  "how_to_use": "这份文件同时记录两件事：(1) cases——语义期望（候选研究、排队、权衡与最终策略选择），无法由测试执行，审查时对照 actual 与 expected；(2) repeatable_commands——可重复跑的命令。两者与 CI 的关系不同，不要混为一谈：cases 里的 executed_by 指出谁执行它——selection-cases.test.ts 跑六个必需用例，walkthrough.test.ts 跑超限用例（没有该字段的是纯语义用例，只能人工/Agent 复核）；repeatable_commands 分两类——**没有占位符的条目（policy）与 walkthrough 由 walkthrough.test.ts 原样执行**，其余（probe / audit / record / status）含占位符、本就是模板，没有任何测试读取它们，改这些字符串不会让任何测试失败。CLI 的**行为**另由 cli-contract.test.ts 与 cap-e2e.test.ts 覆盖，但这两个套件不读本文件。",
+  "how_to_use": "这份文件同时记录两件事：(1) cases——语义期望（候选研究、排队、权衡与最终策略选择），无法由测试执行，审查时对照 actual 与 expected；(2) repeatable_commands——可重复跑的命令。两者与 CI 的关系不同，不要混为一谈：cases 里的 executed_by 指出谁执行它——selection-cases.test.ts 跑六个必需用例，walkthrough.test.ts 跑超限用例（没有该字段的是纯语义用例，只能人工/Agent 复核）；repeatable_commands 分两类——**没有占位符的条目（policy）与 walkthrough 由 walkthrough.test.ts 原样执行**，其余（probe / audit / record / status）含占位符、是模板：它们**会被测试读取**（walkthrough.test.ts 遍历全部条目判断占位符，从而决定哪些要执行），但**没有任何测试把它们当作源命令执行**，所以在保留占位符的前提下改这些字符串不会让任何测试失败。边界是实测的：去掉占位符就会让该条目变成可原样执行并被真的跑。CLI 的**行为**另由 cli-contract.test.ts 与 cap-e2e.test.ts 覆盖，但这两个套件不读本文件。",
   "repeatable_commands": {
     "policy": "node .agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs policy",
     "probe": "node .agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs probe --project examples/probe-proving-cases <package>",

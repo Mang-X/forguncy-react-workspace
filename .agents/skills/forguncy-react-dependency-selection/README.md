@@ -53,9 +53,10 @@
 - `evals/cli-contract.test.ts`：**CLI 级**回归测试，真正 spawn 脚本，覆盖证据可追溯、`--runtime-smoke` 可达性、conformance 门。
 - `evals/cap-e2e.test.ts`：`--cell` 声明的 code budget 端到端（probe / audit / record / status 都拿到同一个上限）。
 - `evals/execution_cases.json`：语义用例（不可执行的判断，人工/Agent 复核）**加上** `repeatable_commands`（可重复跑的命令）。每条 case 的 `executed_by` 指出谁执行它。
-  - `repeatable_commands` 分两类，**改这些字符串只有当条目被当作源执行时才会让测试失败**：
+  - `repeatable_commands` 分两类。注意区分**读取**与**执行**——两者不同，而且占位符本身就是被断言的性质：
     - **被执行的**：`walkthrough` 由 `walkthrough.test.ts` 读出并原样跑；没有占位符的条目（当前是 `policy`）由同一套件逐条执行。
-    - **文档**：`probe` / `audit` / `record` / `status` 含 `<root>` / `<package>` / `<file>` 占位符，是模板而非可原样执行的命令，没有任何测试读取它们。
+    - **模板（不被执行）**：`probe` / `audit` / `record` / `status` 含 `<root>` / `<package>` / `<file>` 占位符。它们**会被测试读取**——`walkthrough.test.ts` 遍历全部条目来判断占位符，从而决定哪些要执行——所以"没有任何测试读取它们"不成立；成立的是**没有任何测试把它们当作源命令执行**，改这些字符串也不会触发命令执行回归。
+    - 边界是**实测的**：在保留占位符的前提下改模板字符串（如 `<package>` → `<pkg>`）测试不会失败；一旦把占位符去掉，该条目就变成可原样执行、测试会真的去跑它。
   - CLI 的**行为**由 `cli-contract.test.ts` 与 `cap-e2e.test.ts` 覆盖，但这两个套件不读这个 JSON——它们覆盖的是行为，不是这些命令字符串。
 - `evals/trigger_cases.json` + `evals/semantic_config.json`：路由评测（precision 1.0 / recall 1.0，阈值 0.30）。
 

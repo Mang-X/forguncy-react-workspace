@@ -558,16 +558,26 @@ describe("the Skill's documented walkthrough runs as written", () => {
     }
   }, CASE_TIMEOUT_MS);
 
-  it("says which `repeatable_commands` entries a test reads, and which are documentation", () => {
+  it("separates `repeatable_commands` entries a test *executes* from those it only *reads*", () => {
     // The other half of the correction: the prose may not claim more coverage than exists. This
     // recomputes the executed set from the tests themselves — `repeatable_commands.<key>` appears
     // in a suite's source — and requires `how_to_use` to agree, so the summary cannot outrun the
     // tests the way `cli-contract.test.ts 与 cap-e2e.test.ts 覆盖` did.
+    //
+    // **Read and execute are different**, which the round-3 prose got wrong in the other
+    // direction: it said `probe`/`audit`/`record`/`status` were read by no test, while the
+    // placeholder partition below reads *every* value via `Object.entries` to decide which entries
+    // are runnable. So this case tracks both sets, and the prose must not claim the templates are
+    // unread. The distinction is measured, not asserted: a template edited with its placeholder
+    // kept passes today (it is read, not executed), and the same template with the placeholder
+    // removed fails as a command — the boundary is the placeholder, which is why it is load-bearing.
     const executed = new Set<string>();
+    const read = new Set<string>(Object.keys(readExecutionCases().repeatable_commands).filter(key => !key.startsWith("//")));
     for (const suite of ["walkthrough.test.ts"]) {
       const source = readFileSync(join(REPOSITORY_ROOT, `${SKILL_DIRECTORY}/evals/${suite}`), "utf8");
       for (const match of source.matchAll(/repeatable_commands\.(\w+)/g)) {
         executed.add(match[1]!);
+        read.add(match[1]!);
       }
       // The placeholder-free case above reads the object rather than one key, so it covers entries
       // by a route a `repeatable_commands.<key>` scan cannot see. Stated here so the recomputation
@@ -580,19 +590,25 @@ describe("the Skill's documented walkthrough runs as written", () => {
         }
       }
     }
-    expect(executed.size, "no entry is read by a test, so this guard asserts nothing").toBeGreaterThanOrEqual(1);
+    expect(executed.size, "no entry is executed by a test, so this guard asserts nothing").toBeGreaterThanOrEqual(1);
     expect(executed.has("walkthrough")).toBe(true);
+    // Every non-comment entry is *read* — the partition reads them all. Asserted so the claim
+    // below ("the prose may not say they are unread") cannot become vacuous either.
+    expect(read.size).toBeGreaterThanOrEqual(executed.size);
+    expect(read.has("probe") && read.has("audit") && read.has("record") && read.has("status")).toBe(true);
 
     const howToUse = readExecutionCases().how_to_use;
     for (const key of executed) {
       expect(howToUse, `\`${key}\` is executed by a test but \`how_to_use\` does not say so`).toContain(key);
     }
-    // And the entries that are documentation must be named as such, so the sentence cannot be
-    // neutral about them either. `probe`/`audit`/`record`/`status` carry placeholders and are read
-    // by nothing; `policy` is runnable but is now executed, so it is not in this list.
+    // The templates must be named, and must **not** be described as unread — the specific
+    // inaccuracy review round 4 found. Asserted as an absence because that is the defect.
     for (const key of ["probe", "audit", "record", "status"]) {
-      expect(executed.has(key), `\`${key}\` is asserted to be documentation, so no test may read it`).toBe(false);
+      expect(executed.has(key), `\`${key}\` is a template, so no test may execute it`).toBe(false);
       expect(howToUse).toContain(key);
+      expect(howToUse, `\`${key}\` is read by the partition, so \`how_to_use\` must not call it unread`).not.toMatch(
+        new RegExp(`没有任何测试读取[^。]*${key}|${key}[^。]*没有任何测试读取`),
+      );
     }
 
     // The README carries the same claim and had the same defect — review round 3 quoted its
@@ -607,6 +623,17 @@ describe("the Skill's documented walkthrough runs as written", () => {
     // The two suites that cover CLI *behaviour* without reading this JSON must not be described as
     // executing its entries. Asserted as an absence, because that phrasing is the defect itself.
     expect(readme).not.toMatch(/repeatable_commands[^。\n]*由上面两个测试执行/);
+    // And the round-4 inaccuracy must not reappear here either. The README's own copy of the
+    // sentence said the templates had no reader; both sites are guarded because guarding one is
+    // exactly the gap found last round.
+    //
+    // The pattern is the **defect's wording**, not the bare phrase: the corrected README quotes
+    // `"没有任何测试读取它们"不成立` to say what is no longer claimed, so matching the phrase alone
+    // fails on the correction itself. Found by falsification — the broad pattern reported the
+    // fix as the defect. Anchoring on `而非可原样执行的命令，` names the sentence that was wrong.
+    expect(readme).not.toMatch(/而非可原样执行的命令，没有任何测试读取它们/);
+    // The positive half, so deleting the paragraph cannot satisfy the pattern above.
+    expect(readme).toMatch(/没有任何测试把它们当作源命令执行/);
   });
 
   it("lists the walkthrough test in the Skill's own asset list, which named the other suites", async () => {
