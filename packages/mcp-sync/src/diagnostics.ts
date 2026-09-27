@@ -216,9 +216,17 @@ export const SYNC_DIAGNOSTIC_RULES: Readonly<Record<SyncDiagnosticCode, SyncDiag
     code: "project-errors-after-sync",
     origin: "issue-19-flow",
     label: "Project has errors after sync",
-    states: "The project reports errors after the Cell was written, so the write did not leave the project valid.",
+    // "after sync", not "after the Cell was written": #92 made this gate reachable on the
+    // `unchanged` path too, where no write happened. The gate is about the project being left
+    // valid, and it runs after the sync's own work either way — a sentence naming a write
+    // would tell a reader of an unchanged run that a Cell had been written when none was.
+    states: "The project reports errors after the sync, so the sync did not leave the project valid.",
+    // "after the sync / validation", not "after a mutation": the gate runs on the `unchanged`
+    // path too, where nothing was mutated. `remediation` is read by callers independently of
+    // `states` (it is its own field on the diagnostic), so generalizing one and not the other
+    // would hand an unchanged run contradictory guidance.
     remediation:
-      "Treat the sync as failed and read the project's own error list. A non-zero error count after a mutation is #19's validation gate: reporting success here would deploy a broken page and defer the discovery to whoever opens it.",
+      "Treat the sync as failed and read the project's own error list. A non-zero error count after the sync's validation is #19's gate: reporting success here would deploy a broken page and defer the discovery to whoever opens it.",
     fixOwner: "project-state",
     breaksGuarantees: ["project-errors-checked-after-mutation"],
     blocksMutation: false,

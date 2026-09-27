@@ -118,6 +118,24 @@ describe("whether a finding stops the write", () => {
   });
 });
 
+// A rule's `states` and `remediation` are read independently — they are separate fields on
+// every diagnostic a caller receives — so generalizing one and not the other hands a reader
+// contradictory guidance. #92 made `project-errors-after-sync` reachable on a run that wrote
+// nothing, which is when "after a mutation" stopped being true for half its uses.
+describe("the wording a rule exposes", () => {
+  it("describes the sync's own work rather than a mutation that may not have happened", () => {
+    const rule = syncDiagnosticRule("project-errors-after-sync");
+
+    // Both halves, because a caller may print either: the gate is about the project being
+    // left valid, and it runs on the unchanged path where no Cell was written.
+    expect(rule.states).toContain("after the sync");
+    expect(rule.remediation).toContain("after the sync");
+    for (const field of ["states", "remediation"] as const) {
+      expect(rule[field], field).not.toContain("after a mutation");
+    }
+  });
+});
+
 describe("translating #12's extension audit", () => {
   it("covers every code the audit can produce, and only those", () => {
     expect(Object.keys(EXTENSION_AUDIT_TRANSLATION).sort()).toEqual([...EXTENSION_EXTERNAL_DIAGNOSTIC_CODES].sort());
