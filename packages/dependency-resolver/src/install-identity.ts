@@ -112,6 +112,15 @@ const BINARY_LOCKFILE_NAMES: ReadonlySet<string> = new Set(["bun.lockb"]);
 export const WORKSPACE_CONFIG_FILE = "pnpm-workspace.yaml";
 
 /**
+ * The install records the package managers write into their own `node_modules`.
+ *
+ * Named as constants so the two readers and their tests cannot drift on the spelling:
+ * `node_modules/.modules.yaml` (pnpm) and `node_modules/.package-lock.json` (npm).
+ */
+const PNPM_MODULES_FILE = ".modules.yaml";
+const NPM_INSTALL_RECORD = ".package-lock.json";
+
+/**
  * The content digest of one file's text, with line endings normalized to `\n` first.
  *
  * **Normalization is required, not cosmetic**, and this was measured the hard way: the digest of a
@@ -804,12 +813,99 @@ export async function readInstallGraphIdentity(projectRoot: string): Promise<Ins
     readProjectManifest(installRoot),
   ]);
 
-  const [patches, configuration] = await Promise.all([
+  const [patches, configuration, installedTree] = await Promise.all([
     patchesDigest(installRoot, workspace, manifest),
     configurationDigest(installRoot, workspace, manifest),
+    installedTreeDigest(installRoot),
   ]);
 
-  return { lockfile: lockfile.claim.digest, patches, configuration };
+  return { lockfile: lockfile.claim.digest, patches, configuration, installedTree };
+}
+
+/**
+ * What the package manager actually installed, from its own on-disk record, or `null` when it
+ * writes none this toolchain can read.
+ *
+ * **Why this exists at all.** Every other component describes an input, and review showed inputs
+ * cannot confirm a result: part of the effective install is decided by *install-time* parameters
+ * that reach no digest. npm derives its `omit` default from `process.env.NODE_ENV` and accepts
+ * `--omit=optional`, and neither is recorded in `package-lock.json` or `.npmrc`. Measured end to
+ * end: on one real npm project, a default install puts `@rolldown/binding-win32-x64-msvc` on disk
+ * while `npm install --omit=optional` does not, and both runs leave a **byte-identical**
+ * `package-lock.json` — so every earlier component composed the same digest while the tree a probe
+ * would measure had changed.
+ *
+ * **pnpm** writes `node_modules/.modules.yaml`, and two of its fields are exactly this fact:
+ *
+ * - `included` — which dependency classes were installed. Measured: `pnpm install --no-optional`
+ *   flips `optionalDependencies` to `false` and drops the platform binding from disk.
+ * - `nodeLinker` — the layout (`isolated` / `hoisted`), which decides what a `node_modules` tree
+ *   even looks like.
+ *
+ * Both are **portable**, which is why they are the fields chosen: measured, they are plain booleans
+ * and a short enum with no machine path. `skipped`, by contrast, lists other platforms' bindings and
+ * would make the digest churn between a Windows and a Linux checkout of one project — the same
+ * defect the CRLF normalization in `digestOf` exists to avoid.
+ *
+ * **npm** writes `node_modules/.package-lock.json`, the materialized entry set. It captures the
+ * result (the omitted binding is absent from it — measured) and it is deliberately hashed as-is,
+ * including the platform-specific entry names: those really are different installs, and the honest
+ * answer is that a record measured on one does not describe the other.
+ *
+ * **yarn and bun write no record this toolchain can verify**, so the answer is `null` — unknown, and
+ * therefore stale. Inventing a marker would be the guess #94 exists to remove.
+ */
+async function installedTreeDigest(installRoot: string): Promise<string | null> {
+  const modules = await readTextFile(join(installRoot, "node_modules", PNPM_MODULES_FILE));
+  if (modules.kind === "unreadable") {
+    return null;
+  }
+  if (modules.kind === "read") {
+    let parsed: Record<string, unknown> | null;
+    try {
+      parsed = asPlainObject(parseYaml(modules.text));
+    } catch {
+      return null;
+    }
+    if (parsed === null) {
+      return null;
+    }
+    const included = parsed["included"];
+    const nodeLinker = parsed["nodeLinker"];
+    if (included === undefined || nodeLinker === undefined) {
+      // A record this toolchain cannot interpret is one it cannot claim to have covered.
+      return null;
+    }
+    return digestOf(canonicalJson({ included, nodeLinker }));
+  }
+
+  // npm's record is a *file inside* `node_modules`, and only its entry paths are read: the recorded
+  // integrity hashes duplicate the lockfile, and any machine-dependent field would be the portability
+  // defect described above.
+  const npmRecord = await readTextFile(join(installRoot, "node_modules", NPM_INSTALL_RECORD));
+  if (npmRecord.kind === "unreadable") {
+    return null;
+  }
+  if (npmRecord.kind === "read") {
+    let parsed: Record<string, unknown> | null;
+    try {
+      parsed = asPlainObject(JSON.parse(npmRecord.text));
+    } catch {
+      return null;
+    }
+    if (parsed === null) {
+      return null;
+    }
+    const packages = asPlainObject(parsed["packages"]);
+    if (packages === null) {
+      return null;
+    }
+    // Sorted so the digest is over the *set* of materialized entries rather than over whatever order
+    // npm happened to write them in.
+    return digestOf(canonicalJson(Object.keys(packages).sort()));
+  }
+
+  return null;
 }
 
 /**

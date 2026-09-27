@@ -72,6 +72,7 @@ function fixtureIdentity(): ToolchainIdentity {
       lockfile: "sha256:fixture-lockfile",
       patches: "sha256:fixture-patches",
       configuration: "sha256:fixture-configuration",
+      installedTree: "sha256:fixture-installed-tree",
     },
   };
 }
@@ -1176,6 +1177,7 @@ describe("runDependencyProbe: cache", () => {
         lockfile: "sha256:aaaa",
         patches: "sha256:bbbb",
         configuration: "sha256:cccc",
+        installedTree: "sha256:fixture-installed-tree",
       },
     } as const;
 

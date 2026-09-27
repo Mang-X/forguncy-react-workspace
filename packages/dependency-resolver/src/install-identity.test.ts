@@ -315,6 +315,107 @@ describe("#94: identity comes from the install graph, not from a declaration", (
     expect(after.configuration).not.toBe(before.configuration);
   });
 
+  it("digests what the manager installed, so install-time parameters cannot hide", async () => {
+    // PR #114 review round 5, P1. Every other component is an *input*, and inputs cannot confirm a
+    // result: review pointed out that npm's `omit` default comes from `process.env.NODE_ENV` and
+    // `--omit=optional` is a CLI flag, so neither reaches `package-lock.json` nor `.npmrc`.
+    //
+    // Reproduced end to end on a real npm project before this was written: a default install puts
+    // `@rolldown/binding-win32-x64-msvc` on disk while `npm install --omit=optional` does not, and
+    // the two runs leave a **byte-identical** `package-lock.json` — so every earlier digest agreed
+    // and a warm cache answered for a tree that had changed. The manager's own record is the fix,
+    // because it is a fact about the result.
+    const npmTree = async (entries: readonly string[]): Promise<string | null | undefined> =>
+      withProject(async root => {
+        await writeFileAt(
+          join(root, "package.json"),
+          JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "npm@11.0.0" }),
+        );
+        // Identical in both runs: the lockfile and the manifest do not move.
+        await writeFileAt(
+          join(root, "package-lock.json"),
+          JSON.stringify({ name: "consumer", dependencies: { rolldown: "1.2.9" } }),
+        );
+        const packages: Record<string, unknown> = {};
+        for (const entry of entries) {
+          packages[entry] = { version: "1.2.9" };
+        }
+        await writeFileAt(
+          join(root, "node_modules", ".package-lock.json"),
+          JSON.stringify({ name: "consumer", lockfileVersion: 3, packages }),
+        );
+        return (await readInstallGraphIdentity(root)).installedTree;
+      });
+
+    const base = ["node_modules/rolldown", "node_modules/@rolldown/pluginutils"];
+    const withOptionalBinding = [...base, "node_modules/@rolldown/binding-win32-x64-msvc"];
+
+    const installed = await npmTree(withOptionalBinding);
+    const omitted = await npmTree(base);
+
+    expect(installed).not.toBeNull();
+    // The lockfile, the patches and the configuration are byte-identical across these two runs, so
+    // `installedTree` is the only component that can carry the change.
+    expect(omitted).not.toBe(installed);
+
+    // pnpm's equivalent: `included` records the dependency classes that were installed, and
+    // `--no-optional` flips `optionalDependencies` (measured on a real install, where the platform
+    // binding then leaves disk).
+    const pnpmTree = async (optional: boolean, linker: string): Promise<string | null | undefined> =>
+      withProject(async root => {
+        await writeFileAt(
+          join(root, "package.json"),
+          JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "pnpm@11.18.0" }),
+        );
+        await writeFileAt(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+        await writeFileAt(
+          join(root, "node_modules", ".modules.yaml"),
+          [
+            "included:",
+            "  dependencies: true",
+            "  devDependencies: true",
+            `  optionalDependencies: ${String(optional)}`,
+            `nodeLinker: ${linker}`,
+            "",
+          ].join("\n"),
+        );
+        return (await readInstallGraphIdentity(root)).installedTree;
+      });
+
+    const pnpmDefault = await pnpmTree(true, "isolated");
+    expect(pnpmDefault).not.toBeNull();
+    expect(await pnpmTree(false, "isolated")).not.toBe(pnpmDefault);
+    expect(await pnpmTree(true, "hoisted")).not.toBe(pnpmDefault);
+  });
+
+  it("is unknown when the manager writes no install record this toolchain can read", async () => {
+    // The fail-closed half: yarn and bun write no record this module can verify, so the answer is
+    // `null` — unknown, and therefore stale. Inventing a marker would be the guess #94 removes.
+    const yarnProject = await withProject(async root => {
+      await writeFileAt(join(root, "package.json"), JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "yarn@4.0.0" }));
+      await writeFileAt(join(root, "yarn.lock"), "yarn lock\n");
+      return readInstallGraphIdentity(root);
+    });
+
+    expect(yarnProject.lockfile).not.toBeNull();
+    expect(yarnProject.installedTree).toBeNull();
+
+    // The positive control, and it is what keeps the assertion above from being vacuous: a pnpm
+    // project whose record IS readable reports a value. Without this half the case would pass
+    // against an implementation that never read a record at all.
+    const pnpmProject = await withProject(async root => {
+      await writeFileAt(join(root, "package.json"), JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "pnpm@11.18.0" }));
+      await writeFileAt(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+      await writeFileAt(
+        join(root, "node_modules", ".modules.yaml"),
+        ["included:", "  dependencies: true", "  devDependencies: true", "  optionalDependencies: true", "nodeLinker: isolated", ""].join("\n"),
+      );
+      return readInstallGraphIdentity(root);
+    });
+
+    expect(pnpmProject.installedTree).not.toBeNull();
+  });
+
   it("covers manager config that changes the installed tree without changing the lockfile", async () => {
     // PR #114 review round 4, P1. This module treats npm/yarn/bun lockfiles as verifiable
     // identities, but only pnpm's configuration was digested — so a non-pnpm project could change

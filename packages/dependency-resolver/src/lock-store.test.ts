@@ -74,6 +74,7 @@ const FIXTURE_TOOLCHAIN = {
     lockfile: "sha256:7c1e2a9b4d5f8e0a3c6b9d2f5a8e1b4c7d0a3f6e9b2c5d8a1f4e7b0c3d6a9f2e",
     patches: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     configuration: "sha256:a4f8d2c6b0e4a8d2c6b0e4a8d2c6b0e4a8d2c6b0e4a8d2c6b0e4a8d2c6b0e4a8",
+    installedTree: "sha256:fixture-installed-tree",
   },
 } as const;
 

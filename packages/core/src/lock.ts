@@ -185,6 +185,41 @@ export interface InstallGraphIdentity {
    * re-install leaves a lockfile that describes a resolution nobody has any more.
    */
   readonly configuration: string | null;
+  /**
+   * Digest of what the package manager actually **installed**, from its own on-disk record — or
+   * `null` when the manager writes no such record this toolchain can read.
+   *
+   * **Why a fourth component, when `lockfile` and `configuration` already describe the inputs.**
+   * Review showed that inputs cannot confirm a result: the effective install is decided partly by
+   * *install-time* parameters that reach no digest at all. npm derives its `omit` default from
+   * `process.env.NODE_ENV`, `--omit=optional` is a CLI flag, and neither is written to
+   * `package-lock.json` or `.npmrc`. Measured end to end, on a real npm project: a default install
+   * puts `@rolldown/binding-win32-x64-msvc` on disk while `npm install --omit=optional` does not,
+   * and the two runs produce a **byte-identical** `package-lock.json` — so every earlier component
+   * composed the same digest and a warm probe cache answered for a tree that had changed.
+   *
+   * The manager's own record is the answer because it is a fact about the *result* rather than
+   * about the request, and it is what the probe actually measured:
+   *
+   * - pnpm writes `node_modules/.modules.yaml`, whose `included` records which dependency classes
+   *   were installed (`--no-optional` flips `optionalDependencies` to `false`) and whose
+   *   `nodeLinker` records the layout. Both are portable — measured: plain booleans and an enum,
+   *   with no machine path.
+   * - npm writes `node_modules/.package-lock.json`, the materialized entry set.
+   *
+   * **`null` means unknown, and unknown is stale** — the same rule every other component follows.
+   * One consequence is deliberate rather than overlooked: npm's entry set names the *platform*
+   * binding it installed, so the digest differs between a Windows and a Linux install of the same
+   * project. That is the honest answer, because those really are different installs, and a record
+   * measured on one cannot describe the other.
+   *
+   * **Optional, for the read path's sake**, exactly as `ToolchainIdentity.rolldown` and the other
+   * post-hoc fields are: a record written before this component existed has no such key, and a
+   * required annotation would assert one the parser does not guarantee. Freshness reads an absent
+   * value as `unknown` through `?? null`, so the weaker type costs no verification strength — such a
+   * record is stale rather than passable.
+   */
+  readonly installedTree?: string | null;
 }
 
 /**
@@ -910,6 +945,7 @@ const LOCK_KEY_ORDER: readonly string[] = [
   "lockfile",
   "patches",
   "configuration",
+  "installedTree",
   "version",
   "identity",
   "kind",
@@ -1327,8 +1363,14 @@ function inspectToolchain(toolchain: Record<string, unknown>, where: string): re
     problems.push(`${where} must declare \`installGraph\` as an object or null.`);
     return problems;
   }
+  // `installedTree` is checked only when present, like the toolchain fields above: a record written
+  // before this component existed has no key for it, and the read path must keep accepting such a
+  // document as **readable and stale** rather than refusing it (#8's migration contract).
   for (const field of ["lockfile", "patches", "configuration"]) {
     inspectNullableString(problems, installGraph, field, `${where}.installGraph`);
+  }
+  if (installGraph["installedTree"] !== undefined) {
+    inspectNullableString(problems, installGraph, "installedTree", `${where}.installGraph`);
   }
   return problems;
 }

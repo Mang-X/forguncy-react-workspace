@@ -424,16 +424,23 @@ function assessInstallGraphFreshness(
     return ["install-graph-unknown"];
   }
 
-  // Compared component-wise rather than by composing the three into one digest at the comparison
+  // Compared component-wise rather than by composing them into one digest at the comparison
   // site. The *reason* is the same whichever component moved — the reader's action is "install,
   // then re-probe" in every case — but the loop is what makes an unobservable component stop the
   // comparison rather than pass it, which a single composed string could not express: a digest
   // over `{lockfile: "x", patches: null}` is a value, and comparing two of them would report
   // `changed` for a component neither side could read.
-  const components = ["lockfile", "patches", "configuration"] as const;
+  //
+  // `installedTree` is in the list even though it is optional on the type, and the consequence is
+  // deliberate: a record written before the component existed, or a project whose manager writes no
+  // install record this toolchain can read (yarn, bun), reports `install-graph-unknown`. Inputs
+  // cannot confirm a result — review measured a real npm project whose `package-lock.json` was
+  // byte-identical across a default and an `--omit=optional` install while `node_modules` differed —
+  // so a record that cannot say what was installed is stale rather than passable.
+  const components = ["lockfile", "patches", "configuration", "installedTree"] as const;
   for (const component of components) {
-    const recordedComponent = recorded[component];
-    const currentComponent = current[component];
+    const recordedComponent = recorded[component] ?? null;
+    const currentComponent = current[component] ?? null;
     // A component that is `null` on *either* side cannot be compared. The record states it
     // could not observe it, or this process cannot — and "cannot say" is unknown, not equal.
     if (recordedComponent === null || currentComponent === null) {

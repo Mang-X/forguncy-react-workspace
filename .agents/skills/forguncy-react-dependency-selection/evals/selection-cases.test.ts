@@ -143,6 +143,7 @@ const FIXTURE_TOOLCHAIN: ToolchainIdentity = {
     lockfile: "sha256:fixture-lockfile",
     patches: "sha256:fixture-patches",
     configuration: "sha256:fixture-configuration",
+    installedTree: "sha256:fixture-installed-tree",
   },
 };
 

@@ -133,6 +133,16 @@ async function projectWithExtensionLock(): Promise<{ root: string; cleanup: () =
   // missing-choice path they name.
   await writeFile(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n", "utf8");
 
+  // pnpm's own record of what it installed, which the identity now includes (`installedTree` reads
+  // `node_modules/.modules.yaml`); without it the fixture reports `install-graph-unknown` and is
+  // withheld. Written before the identity is read, so both sides describe the same install.
+  await mkdir(join(root, "node_modules"), { recursive: true });
+  await writeFile(
+    join(root, "node_modules", ".modules.yaml"),
+    ["included:", "  dependencies: true", "  devDependencies: true", "  optionalDependencies: true", "nodeLinker: isolated", ""].join("\n"),
+    "utf8",
+  );
+
   await writeFile(
     join(root, "fgc.lock.json"),
     JSON.stringify({
@@ -196,6 +206,13 @@ describe("the declared lock path is honoured, which `readFgcLock(projectRoot)` c
     // A lockfile in the project root, so the record's identity can be the project's own (#94).
     // Written before the lock below for the same reason `projectWithExtensionLock` states.
     await writeFile(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n", "utf8");
+    // The install record the identity now includes, for the reason `projectWithExtensionLock` gives.
+    await mkdir(join(root, "node_modules"), { recursive: true });
+    await writeFile(
+      join(root, "node_modules", ".modules.yaml"),
+      ["included:", "  dependencies: true", "  devDependencies: true", "  optionalDependencies: true", "nodeLinker: isolated", ""].join("\n"),
+      "utf8",
+    );
     const declaredPath = join(root, "locks", "fgc.lock.json");
     await writeFile(
       declaredPath,

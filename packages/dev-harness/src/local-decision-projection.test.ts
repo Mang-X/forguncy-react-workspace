@@ -66,6 +66,18 @@ async function projectWithDecision(overrides: {
   // irrelevant: the digest is over bytes, and both sides read the same file.
   writeFileSync(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n", "utf8");
 
+  // pnpm's own record of what it installed, which the identity now includes: `installedTree` reads
+  // `node_modules/.modules.yaml` because inputs alone cannot confirm a result (review measured a
+  // real npm project whose lockfile was byte-identical across a default and an `--omit=optional`
+  // install). A fixture without it reports `install-graph-unknown` and is withheld, so the fixture
+  // supplies the record the manager would have written.
+  mkdirSync(join(root, "node_modules"), { recursive: true });
+  writeFileSync(
+    join(root, "node_modules", ".modules.yaml"),
+    ["included:", "  dependencies: true", "  devDependencies: true", "  optionalDependencies: true", "nodeLinker: isolated", ""].join("\n"),
+    "utf8",
+  );
+
   const base = {
     packageName: "@tanstack/react-query",
     cellTarget: null,
