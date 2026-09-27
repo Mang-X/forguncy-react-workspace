@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,8 +35,13 @@ import { createVitest } from "vitest/node";
  * nothing. The property that matters is about what the *toolchain collects*, so this test asks the
  * toolchain: `createVitest(...).globTestSpecifications()` is Vitest's own public collection entry
  * point, and the list it returns is the same one a run uses. Same for the lint half, through
- * `vp lint --format json`, which is why that call is `--format json` rather than a scrape of
- * coloured text.
+ * `vp lint --debug=files`, which prints the files it will lint and exits without linting.
+ *
+ * That flag rather than `--format json` is a review finding, and the difference is not cosmetic:
+ * diagnostics only name files that *have* a finding, so a control built on them makes whatever
+ * warnings the repository happens to carry into this test's fixture. The file list is the tool's
+ * account of the walk itself, and on this tree it is identical before and after silencing the
+ * three unrelated `.agents` warnings, while the diagnostics change.
  *
  * ## The counterfactual, and what it is for
  *
@@ -46,14 +51,20 @@ import { createVitest } from "vitest/node";
  * machine the guard would be green for the wrong reason, and would stay green if `test.exclude`
  * were deleted, and CI would be the only place anything noticed.
  *
- * That is what the counterfactual assertion is for: it re-collects with the `.claude` exclusion
- * withheld and requires that the duplicates **appear**. It is a control on the fixture, not on the
- * fix — it fires when a reader's environment has no alias to deduplicate, and it fails loudly
- * instead of quietly reporting a green.
+ * That is what each half's control is for, and they take different shapes because the two tools
+ * offer different readings:
+ *
+ * - **Vitest** re-collects with the `.claude` exclusion withheld and requires the duplicates to
+ *   **appear**. It is a control on the fixture: it fires when a reader's environment has no alias
+ *   to deduplicate, and fails loudly instead of quietly reporting a green.
+ * - **Oxlint** pairs the two spellings for every file under the alias, read from the filesystem,
+ *   and requires each to be on the linter's list under its canonical spelling and not its alias
+ *   one. `--ignore-pattern` only *adds* exclusions, so there is no way to withdraw this one from
+ *   the command line; the filesystem walk supplies the counterfactual instead.
  *
  * This repository already has this exact problem documented: a Windows checkout materializes these
  * two links as files containing the relative path, so the `.claude` suite does not run locally at
- * all. The counterfactual makes that visible here rather than leaving it to CI.
+ * all. Both controls make that visible rather than leaving it to CI.
  */
 const here = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(here, "..", "..", "..");
@@ -93,6 +104,61 @@ function resolveVpEntry(): string {
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { bin: Record<string, string> };
 
   return join(dirname(manifestPath), manifest.bin.vp!);
+}
+
+/**
+ * The files the linter says it will lint, in repository-relative `/`-separated spelling.
+ *
+ * `--debug=files` is the tool's own account of that list and prints it to stdout, then exits
+ * without linting. It is the right reading here because it is **independent of the repository's
+ * warnings** — which the first draft of this file got wrong: asserting that canonical `.agents`
+ * paths appeared among `--format json` *diagnostics* made three unrelated warnings load-bearing
+ * for a test about symlink deduplication, so cleaning them up would have failed it. Verified on
+ * this tree: this list is byte-identical before and after silencing those warnings, while the
+ * diagnostics change.
+ */
+function lintedFiles(): readonly string[] {
+  const output = execFileSync(process.execPath, [resolveVpEntry(), "lint", "--debug=files"], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+
+  // Same disable as `vp-dev-command.test.ts`'s banner reader, on the line carrying the pattern for
+  // that hook's reason: matching the escape byte is the point, because `--debug=files` output is
+  // coloured whether or not anything reads it.
+  // eslint-disable-next-line no-control-regex -- matching the escape byte is the entire point of this pattern.
+  const plain = output.replace(/\u001b\[[0-9;]*m/g, "");
+
+  return plain
+    .split("\n")
+    .map(line => line.trim())
+    .filter(line => line.length > 0);
+}
+
+/** Extensions the linter's default walk considers, used only to pair the two spellings. */
+const LINTABLE_EXTENSIONS = new Set([".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".mts", ".cts"]);
+
+/** Every lintable file under `directory`, following the tree rather than the linter's ignore list. */
+function lintableFilesUnder(directory: string): readonly string[] {
+  const found: string[] = [];
+  const walk = (current: string): void => {
+    for (const entry of readdirSync(current)) {
+      const path = join(current, entry);
+      if (statSync(path).isDirectory()) {
+        walk(path);
+        continue;
+      }
+      if (LINTABLE_EXTENSIONS.has(path.slice(path.lastIndexOf(".")))) {
+        found.push(path);
+      }
+    }
+  };
+  if (existsSync(directory)) {
+    walk(directory);
+  }
+
+  return found;
 }
 
 /**
@@ -223,42 +289,86 @@ describe("the Skill eval suite is collected once per physical file (#100)", () =
   }, 300_000);
 
   it("does not lint the same physical file under both path spellings", () => {
-    // The lint half of the same deduplication, asserted through the linter's own structured output
-    // rather than by scraping its rendered text — the finding count is what a reader sees in CI,
-    // and it moves for reasons other than this rule (a new warning in a fixture, for instance), so
-    // the assertion is about *which files* were reported, not how many findings they hold.
-    const lintEntry = resolveVpEntry();
-    let stdout = "";
-    try {
-      stdout = execFileSync(process.execPath, [lintEntry, "lint", "--format", "json"], {
-        cwd: repositoryRoot,
-        encoding: "utf8",
-        maxBuffer: 32 * 1024 * 1024,
-      });
-    } catch (error) {
-      const failure = error as { stdout?: string; stderr?: string };
-      // Oxlint exits non-zero only on errors, and this repository's policy is warnings-on-existing
-      // noise, so a non-zero exit is a real finding to surface rather than a harness problem.
-      stdout = (failure.stdout ?? "") + (failure.stderr ?? "");
-    }
+    // The lint half of the same deduplication. It reads the linter's **file list**, not its
+    // diagnostics, and that distinction is the whole reason this test survives maintenance.
+    //
+    // The first draft asserted on `--format json` diagnostics under the canonical paths, and a
+    // review found that turns the repository's current warnings into this test's fixture. The
+    // `.agents` findings it required are ordinary warnings with nothing to do with #100, so
+    // anybody eventually cleaning them up — the correct thing to do — would have failed a
+    // regression test about symlink deduplication. Reproduced: silencing the three `.agents`
+    // warnings, with the deduplication config untouched, failed this test.
+    //
+    // `--debug=files` is the tool's own account of which files it will lint, which is exactly the
+    // property in question and is independent of whether any warning exists. Verified on this tree:
+    // the list is byte-identical before and after silencing those three warnings, while the
+    // diagnostics changed. So the control below cannot be maintained into a false failure, and an
+    // empty or truncated list still fails it because the canonical sources must appear.
+    const linted = lintedFiles();
+    const lintedSet = new Set(linted);
 
-    const report = JSON.parse(stdout) as { diagnostics?: readonly { filename?: string }[] };
-    const reportedFiles = [...new Set((report.diagnostics ?? []).map(diagnostic => diagnostic.filename))];
-
-    // The control: the linter ran over this repository, so "no `.claude` findings" is about a
-    // populated report. A linter that failed to start would produce no diagnostics and pass.
-    expect(reportedFiles.length).toBeGreaterThan(0);
+    // The control: the linter walked this repository, and the list is the linter's own — so "no
+    // `.claude` entries" is about a populated walk rather than about a command that never ran.
+    expect(linted.length).toBeGreaterThan(50);
 
     expect(
-      reportedFiles.filter(filename => filename?.startsWith(".claude/")),
-      "a finding was reported under the `.claude` alias, so the alias is being linted a second time",
+      linted.filter(path => path.startsWith(".claude/")),
+      "the `.claude` alias is in the lint file list, so it is being linted a second time",
     ).toEqual([]);
 
-    // Stated positively as well, because an over-broad ignore is the way this goes wrong: the
-    // canonical Skill sources are still linted, and the probe fixtures under a committed
-    // `node_modules` are still linted too — they are fixture data whose warnings are the point,
-    // which a blanket `node_modules` ignore would hide.
-    expect(reportedFiles.some(filename => filename?.startsWith(`${CANONICAL_SKILLS_ROOT}/`))).toBe(true);
-    expect(reportedFiles.some(filename => filename?.includes("__fixtures__"))).toBe(true);
+    // Stated positively, because an over-broad ignore is how this goes wrong: the probe fixtures
+    // under a committed `node_modules` are miniature dependency trees that *are* fixture data, and
+    // a blanket `node_modules` ignore would hide them along with everything else under that name.
+    // Warnings-independent like the rest of this test — they are on the list because they exist.
+    expect(linted.some(path => path.includes("__fixtures__"))).toBe(true);
+
+    // The counterfactual, which the Vitest half also carries and for the same reason: on a Windows
+    // checkout with `core.symlinks` false the alias is not a directory at all, so "no `.claude`
+    // entries" is true for a reason unrelated to the exclusion. Reported rather than passed.
+    if (!AGENT_DISCOVERY_LINKS.some(link => existsSync(join(repositoryRoot, link, "SKILL.md")))) {
+      process.stderr.write(
+        "note: `core.symlinks` is false, so `.claude/skills/*` did not materialize as symlinks " +
+          "and the #100 duplication cannot be reproduced on this machine; CI is what verifies it.\n",
+      );
+      return;
+    }
+
+    // The pairing that makes the assertion above non-vacuous, and the reason it does not need a
+    // second linter run to be meaningful: enumerate the lintable files under the alias *from the
+    // filesystem*, then require that each one appears on the linter's list under its **canonical**
+    // spelling and **not** under its alias spelling. That is a statement about this walk, not
+    // about whether the walk would otherwise have included the alias — a reading the tool does not
+    // offer, since `--ignore-pattern` adds exclusions and cannot withdraw one.
+    const aliasFiles = lintableFilesUnder(join(repositoryRoot, AGENT_DISCOVERY_LINKS[0]));
+    expect(
+      aliasFiles.length,
+      "no lintable file was found under the `.claude` alias, so this assertion would be vacuous",
+    ).toBeGreaterThan(0);
+
+    const canonicalWithoutAlias: string[] = [];
+    const aliasStillListed: string[] = [];
+    for (const file of aliasFiles) {
+      const canonicalSpelling = relativeToRoot(realpathSync(file));
+      const aliasSpelling = relativeToRoot(file);
+      if (lintedSet.has(aliasSpelling)) {
+        aliasStillListed.push(aliasSpelling);
+      } else if (!lintedSet.has(canonicalSpelling)) {
+        canonicalWithoutAlias.push(canonicalSpelling);
+      }
+    }
+
+    // Nothing was dropped by excluding the alias: every file it holds is still linted once, under
+    // the `.agents` path. This is the "uniqueness is not reduced" half of #100's acceptance,
+    // asserted by pairing the two spellings rather than by counting them.
+    expect(
+      canonicalWithoutAlias,
+      "a file under the `.claude` alias is neither linted by its alias spelling nor by its " +
+        "canonical one, so the alias exclusion dropped it instead of deduplicating it",
+    ).toEqual([]);
+    expect(
+      aliasStillListed,
+      "a file under the `.claude` alias is linted by its alias spelling, so it is linted twice",
+    ).toEqual([]);
   }, 300_000);
 });
+
