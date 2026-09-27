@@ -65,15 +65,56 @@ node $S record --project <projectRoot> --decision decision.json
 # cell-artifact-budget-exceeded。硬上限判定属于编译器对该 Cell 的 codeBudgetCharacters
 # 诊断——probe 的构建图与真实编译不同，合成候选可能比真实 Cell 更大。
 #
-# 但真实判定是可记录的：先真的编译该 Cell，从编译器自己的 cell-code-budget-exceeded
-# 诊断里逐字誊出两个数字，写进决策文件的 artifactEvidence，再 record：
-#   "artifactEvidence": { "codeCharacters": 200000, "budgetCharacters": 100000 }
-# budgetCharacters 必须等于该 Cell 声明的 output.codeBudgetCharacters，否则会被拒绝。
-# 决策文件里的 imports / cellTarget / artifactEvidence 写法见 references/decision-recording.md。
+# 但真实判定是可记录的，而且**由脚本自己编译产生**：决策文件只声明这条拒绝是
+# cell-code-budget-exceeded（外加 cellTarget），audit / record 会真的编译该 Cell，
+# 把编译器自己诊断里的两个数字写进锁记录的 artifactEvidence。
+# **决策文件里不要写 artifactEvidence**——那是脚本产出的锁字段，手填会被当场拒绝：
+#   { "packageName": "…", "role": "…", "strategy": "replace", "cellTarget": "…",
+#     "rationale": "…", "alternatives": ["…"],
+#     "rejection": { "kind": "technical", "code": "cell-code-budget-exceeded", … } }
+# 决策文件的字段与锁字段的区别见 references/decision-recording.md。
 
 # 5) 读回锁并报告每条记录是否仍然有效
 node $S status --project <projectRoot>
 ```
+
+### 走一遍：普通 inline 与编译超限 replace
+
+上面的命令在仓库里有一个**可运行的**项目：`examples/probe-proving-cases/walkthrough`
+（Cell `capped` 声明了 `codeBudgetCharacters: 8000`，`uncapped` 不声明上限）。它的两个决策文件
+就在 `walkthrough/decisions/` 下。
+
+**先复制到可写的临时目录再跑**：`record` 会在项目根写 `fgc.lock.json` 与 `fgc-evidence/`，
+直接对着提交进仓库的 fixture 跑会把它们变成工作树里的未跟踪文件。复制到该 example 的
+`.fgc/`（已被 git 忽略）下，probe 的祖先查找仍然能解析到 `es-toolkit`：
+
+```bash
+S=.agents/skills/forguncy-react-dependency-selection/scripts/select_dependency.mjs
+W=examples/probe-proving-cases/.fgc/walkthrough-demo
+mkdir -p "$W" && cp -r examples/probe-proving-cases/walkthrough/. "$W"/
+
+# 1) 先记录该包在这个 Cell 里的策略——超限拒绝要在"它确实进过这个 Cell"的编译上测量
+node $S record --project $W --decision $W/decisions/inline.json
+
+# 2) 再记录超限拒绝：脚本编译 capped，从编译器诊断取数写入锁
+node $S record --project $W --decision $W/decisions/oversize.json
+
+# 3) 读回：artifact-rejection profile，freshness 为 fresh
+node $S status --project $W
+```
+
+（`cp -r src/. dst/` 而不是 `cp -r src dst`：后者在重跑时会套成 `dst/walkthrough/`。）
+
+
+三步是一个**序列**，不能只跑第 2 步：`cell-code-budget-exceeded` 的测量必须发生在"该包确实
+进过这个 Cell"的那次编译上，而在干净状态下还没有适用于 `capped` 的既有记录，只跑第 2 步会被
+以 unattributable 拒绝。第 1 步就是产生那条既有记录的。
+
+把 `uncapped` 写进 `oversize.json` 的 `cellTarget` 会被拒绝——那个 Cell 没有声明上限，编译
+不产生该诊断，所以没有可记录的超限。
+
+`evals/walkthrough.test.ts` 读的**就是**这一段与上面 `decisions/` 里的文件，逐条执行它们。
+文档与示例因此不可能各自漂移：改错了文档，测试会失败。
 
 真机已验证过的决策要写入 `target` 时，必须传一个本地 hook 让 `runtime-smoke` 真的执行：
 
