@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -29,7 +30,17 @@ import { normalizeResolveConfig, RESOLVE_CONFIG_FIELD } from "./resolve-config.t
  * which is the half a second normalization would break.
  */
 
-const PROJECT_ROOT = join("C:", "repos", "sales-portal");
+/**
+ * The project root these tests resolve against.
+ *
+ * `join(tmpdir(), …)` rather than a literal drive path, and the distinction is the CI one:
+ * `node:path` is host-platform semantics, so `join("C:", "repos")` is **relative** on Linux
+ * (`posix.isAbsolute("C:/repos") === false`) and `resolve()` would then prefix the runner's cwd.
+ * A Windows-shaped string is not a portable way to spell an absolute directory. `tmpdir()` is
+ * absolute on every platform, which is what the fixtures need, and it matches what the rest of
+ * this repository's tests use for a root nobody has to create.
+ */
+const PROJECT_ROOT = join(tmpdir(), "fgc-sales-portal");
 
 function resolveOf(config: unknown): ReturnType<typeof normalizeResolveConfig> {
   return normalizeResolveConfig(config, { root: PROJECT_ROOT });
@@ -98,14 +109,79 @@ describe("the project's alias block normalizes to one set both engines take", ()
   });
 
   it("keeps the project's declaration order in the report", () => {
-    // The map is unordered for matching (see `projectAliasTarget`, which takes the longest match
-    // rather than the first), but a report that reordered a project's own lines would be hard to
-    // diff against the config it came from.
+    // The map is ordered for matching — `projectAliasTarget` takes the *first* declaration that
+    // matches, as both engines do — and a report that reordered a project's own lines would be hard
+    // to diff against the config it came from.
     const result = resolveOf({ resolve: { alias: { "~": "./src", "@/lib": "./src/lib" } } });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.resolve.entries.map(entry => entry.find)).toEqual(["~", "@/lib"]);
     expect(result.resolve.entries[0]?.replacement).toBe("./src");
+  });
+});
+
+/**
+ * Two entries that normalize to one key, in either shape.
+ *
+ * The regression this pins is subtle and was found by review: the array form accepts a repeated
+ * `find`, and building the alias map with `alias[entry.find] = entry.target` made the *resolved*
+ * set **last**-wins while `entries` still reported both — a map that disagrees with its own report
+ * and with Vite, which resolves a duplicate to the first declaration. It is the dev/artifact
+ * divergence #97 exists to remove, produced by #97's own output.
+ *
+ * The object form needs no repeated key to collide: Vite's trailing-slash normalization turns
+ * `"@x/"` into `find: "@x"`, so `{ "@x": "./a", "@x/": "./b/" }` is two entries for one id.
+ */
+describe("aliases that normalize to one key", () => {
+  it("refuses a repeated find in the array form", () => {
+    expect(
+      codesOf({
+        resolve: {
+          alias: [
+            { find: "@x", replacement: "./a" },
+            { find: "@x", replacement: "./b" },
+          ],
+        },
+      }),
+    ).toEqual(["duplicate-resolve-alias"]);
+  });
+
+  it("refuses two object keys that normalize to one find", () => {
+    // Only the trailing-slash key can move under normalization, so this is the whole collision
+    // space for the object form — and `"@x"` / `"@x/"` is exactly the pair Vite collapses.
+    expect(codesOf({ resolve: { alias: { "@x": "./a", "@x/": "./b/" } } })).toEqual([
+      "duplicate-resolve-alias",
+    ]);
+  });
+
+  it("names the key and both targets, so the repair needs no second read of the config", () => {
+    const result = resolveOf({
+      resolve: {
+        alias: [
+          { find: "@x", replacement: "./a" },
+          { find: "@x", replacement: "./b" },
+        ],
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    const [diagnostic] = result.diagnostics;
+    expect(diagnostic?.message).toContain('"@x"');
+    expect(diagnostic?.message).toContain('"./a"');
+    expect(diagnostic?.message).toContain('"./b"');
+  });
+
+  it("accepts two ids whose names merely share a prefix", () => {
+    // The control: a refusal that fired on `@x` and `@xy` would be catching a prefix, not an
+    // equality, and it would reject the ordinary case of aliasing a package and one of its
+    // subpaths.
+    expect(
+      aliasOf({ resolve: { alias: { "@x": "./a", "@xy": "./b", "@x/deep": "./c" } } }),
+    ).toEqual({
+      "@x": join(PROJECT_ROOT, "a"),
+      "@xy": join(PROJECT_ROOT, "b"),
+      "@x/deep": join(PROJECT_ROOT, "c"),
+    });
   });
 });
 

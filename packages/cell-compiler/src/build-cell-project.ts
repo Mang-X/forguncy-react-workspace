@@ -32,6 +32,12 @@
  *
  * ## What it deliberately does not do, and why the absence is the contract
  *
+ * - **It does not load a second config when the caller already has a registry.** #97's plan step 1
+ *   is "入口复用已加载 registry，不再加载第二份配置": the entry takes either a loaded `CellRegistry` or a
+ *   root to normalize one from ({@link CellProjectSource}), and the `{ registry }` branch uses the
+ *   object it was handed unchanged. A caller that already normalized the config — the dev server, a
+ *   plan command, an Agent that just measured a Cell — therefore builds through *that* registry and
+ *   *that* `resolve.alias` object, and can assert it by identity rather than by deep equality.
  * - **It does not read `fgc.lock.json`.** The compiler takes resolved decisions and does not
  *   resolve dependencies (#6/#8): projecting a lock onto a Cell is `dependency-resolver`'s job,
  *   and it is a *different* question from the one this entry answers. `dependencies` is therefore
@@ -55,7 +61,7 @@
 import { loadForguncyConfig } from "@forguncy-react-workspace/core";
 import type { CellRegistry, DependencyDecision, ForguncyConfigModuleLoader } from "@forguncy-react-workspace/core";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { compileCell } from "./artifact.ts";
 import type { CompileCellOutcome } from "./artifact.ts";
@@ -104,21 +110,93 @@ export interface CellProjectBuild {
   readonly workspaceAudited: boolean;
 }
 
-export interface BuildCellProjectOptions {
-  /** Absolute project root. */
-  readonly root: string;
-  /** Explicit config file, absolute or relative to `root`. Defaults to the candidate search. */
-  readonly configFile?: string;
-  /**
-   * Overrides the config module loader.
-   *
-   * Forwarded to `loadForguncyConfig`, whose default is right for a one-shot process. A host that
-   * lets its config import project files must supply one with module-graph invalidation — see that
-   * loader's own contract.
-   */
-  readonly loadModule?: ForguncyConfigModuleLoader;
-  /** Verify declared entries exist on disk while normalizing. Defaults to `true`. */
-  readonly requireEntryFiles?: boolean;
+/**
+ * Where the build's registry comes from.
+ *
+ * Two shapes, and both are needed rather than one being a convenience:
+ *
+ * - **`{ registry }`** is the one #97's plan step 1 asks for — "入口复用已加载 registry，不再加载第二份配置".
+ *   A caller that already normalized the config (the dev server, a plan/validate command, an Agent
+ *   that just measured a Cell) hands over *that* object, so the build provably resolves through the
+ *   same registry and the same `resolve.alias` object the other stages read. Loading a second time
+ *   would be a second normalization of one config file, free to disagree — which is the whole
+ *   failure mode #97 removes, so the boundary should be expressible rather than merely intended.
+ * - **`{ root }`** is the common case for a one-shot build: normalize from the config under that
+ *   root. The loader options live here because they are inputs to *loading*, and a caller that
+ *   already holds a registry has already made those choices.
+ *
+ * Both are absolute-rooted: a registry carries its own `root`, so there is no second root to
+ * reconcile.
+ */
+export type CellProjectSource =
+  | { readonly registry: CellRegistry }
+  | {
+      /** Absolute project root. */
+      readonly root: string;
+      /** Explicit config file, absolute or relative to `root`. Defaults to the candidate search. */
+      readonly configFile?: string;
+      /**
+       * Overrides the config module loader.
+       *
+       * Forwarded to `loadForguncyConfig`, whose default is right for a one-shot process. A host
+       * that lets its config import project files must supply one with module-graph invalidation —
+       * see that loader's own contract.
+       */
+      readonly loadModule?: ForguncyConfigModuleLoader;
+      /** Verify declared entries exist on disk while normalizing. Defaults to `true`. */
+      readonly requireEntryFiles?: boolean;
+    };
+
+/**
+ * Where the workspace graph is read from, when the project is part of a pnpm workspace.
+ *
+ * `"auto"` (the default) **walks up** from the project root for the nearest `pnpm-workspace.yaml`
+ * and audits against that, or audits nothing when there is none. The walk is the point: this
+ * repository's own examples are workspace *members* whose manifest lives at the repository root,
+ * not workspace roots of their own (`preflight.test.ts` and `workspace-package-poc.test.ts` both
+ * read the graph from `repositoryRoot` while compiling with `exampleRoot`). A build that only
+ * looked in the project root would report `workspaceAudited: false` for that layout — and would
+ * therefore skip #14's cycle and interception findings, which are *fatal* where they apply.
+ *
+ * `true` refuses a project with no workspace manifest anywhere above it, because "I asked for the
+ * audit and got none" is a different answer from "there was nothing to audit" and a boolean cannot
+ * distinguish them. `false` skips the audit deliberately.
+ *
+ * `{ root }` names the workspace root explicitly, which is the escape hatch for a layout the walk
+ * would answer differently — and the graph is read from *that* root, not from the project root.
+ */
+export type CellProjectWorkspace = "auto" | boolean | { readonly root: string };
+
+/**
+ * The nearest ancestor directory holding a `pnpm-workspace.yaml`, or `undefined`.
+ *
+ * Bounded by the filesystem root, and it stops at the first manifest rather than collecting them:
+ * pnpm resolves a workspace by the nearest enclosing manifest, so that is the graph the project is
+ * actually installed against.
+ */
+function findWorkspaceRoot(from: string): string | undefined {
+  let directory = resolve(from);
+  for (;;) {
+    if (existsSync(join(directory, PNPM_WORKSPACE_FILE))) {
+      return directory;
+    }
+    const parent = dirname(directory);
+    if (parent === directory) {
+      return undefined;
+    }
+    directory = parent;
+  }
+}
+
+/**
+ * Everything a build needs: the project (as a registry or a root), the decisions, and the knobs.
+ *
+ * An intersection with {@link CellProjectSource} rather than a nested `project` field, so a caller
+ * writes `buildCellProject({ root, dependencies })` or `buildCellProject({ registry, dependencies })`
+ * — the two inputs are mutually exclusive at the top level, which the compiler enforces and a
+ * nested union would leave to a runtime check.
+ */
+export type BuildCellProjectOptions = CellProjectSource & {
   /**
    * One resolved decision per non-source dependency, for every Cell in the project.
    *
@@ -132,41 +210,66 @@ export interface BuildCellProjectOptions {
   /** Which #5 entry shape to expose. Defaults to a function `App` binding. */
   readonly entryKind?: CellEntryKind;
   /**
-   * Whether to read and audit the project's pnpm workspace graph (#14/#15).
+   * Whether and where to read the project's pnpm workspace graph (#14/#15).
    *
-   * Defaults to `"auto"`: the graph is read when a `pnpm-workspace.yaml` sits at `root`, and
-   * skipped when it does not. `true` refuses a project with no workspace file rather than
-   * silently compiling without the audit, because "I asked for the audit and got none" is the
-   * failure a boolean cannot distinguish from "there was nothing to audit".
-   *
-   * The workspace root is `root`, the same directory the registry used. In this repository the
-   * examples are members of the *repository* workspace rather than workspace roots themselves, so
-   * an example that wants the audit passes its own root-relative file — which is why the option
-   * is reachable rather than inferred from a package.json walk.
+   * Defaults to `"auto"`, which walks up from the project root — see {@link CellProjectWorkspace}
+   * for why the project root is not the workspace root in the common monorepo layout.
    */
-  readonly workspace?: "auto" | boolean;
+  readonly workspace?: CellProjectWorkspace;
+};
+
+/**
+ * Resolves the project's registry, from whichever source the caller named.
+ *
+ * The `{ registry }` branch returns the object unchanged — deliberately, because "the same object"
+ * is the property being bought: a caller asserting that the build used its registry can compare
+ * identity, not deep equality.
+ */
+async function resolveProjectRegistry(project: CellProjectSource): Promise<CellRegistry> {
+  if ("registry" in project) {
+    return project.registry;
+  }
+
+  return loadForguncyConfig({
+    root: project.root,
+    ...(project.configFile === undefined ? {} : { configFile: project.configFile }),
+    ...(project.loadModule === undefined ? {} : { loadModule: project.loadModule }),
+    requireEntryFiles: project.requireEntryFiles ?? true,
+  });
 }
 
-/** The workspace graph this build was handed, or nothing when the project has none. */
+/** The workspace graph this build was handed, or nothing when there is none to audit. */
 async function readWorkspaceGraph(
-  root: string,
-  requested: "auto" | boolean,
+  projectRoot: string,
+  requested: CellProjectWorkspace,
 ): Promise<{ readonly graph: Awaited<ReturnType<typeof loadPnpmWorkspaceGraph>>["graph"] } | undefined> {
-  const workspaceFile = join(root, PNPM_WORKSPACE_FILE);
-
   if (requested === false) {
     return undefined;
   }
 
-  if (requested === "auto" && !existsSync(workspaceFile)) {
-    // Not an error, and saying so matters: `compileCell`'s workspace option is an *audit*, so a
-    // project with no workspace manifest has nothing to audit rather than a missing input —
-    // #14's rule that an absent input is not an empty one, applied in the direction that keeps
-    // an ordinary single-package project compiling.
+  if (typeof requested === "object") {
+    // Explicit root: read it, and let a missing manifest throw. A caller that named a workspace
+    // root has made a claim about the project, so silently auditing nothing would hide a wrong one.
+    const loaded = await loadPnpmWorkspaceGraph({ root: requested.root });
+    return { graph: loaded.graph };
+  }
+
+  const workspaceRoot = findWorkspaceRoot(projectRoot);
+
+  if (workspaceRoot === undefined) {
+    if (requested === true) {
+      throw new Error(
+        `No "${PNPM_WORKSPACE_FILE}" was found in "${projectRoot}" or any ancestor directory, so the workspace audit was requested and cannot run. Pass { workspace: { root } } to name the workspace root, or { workspace: false } to build without the audit.`,
+      );
+    }
+    // `"auto"` with nothing to find. Not an error, and saying so matters: `compileCell`'s workspace
+    // option is an *audit*, so a project outside any workspace has nothing to audit rather than a
+    // missing input — #14's rule that an absent input is not an empty one, applied in the direction
+    // that keeps an ordinary single-package project compiling.
     return undefined;
   }
 
-  const loaded = await loadPnpmWorkspaceGraph({ root });
+  const loaded = await loadPnpmWorkspaceGraph({ root: workspaceRoot });
   return { graph: loaded.graph };
 }
 
@@ -183,12 +286,7 @@ async function readWorkspaceGraph(
  * comparable rather than merely reproducible by eye.
  */
 export async function buildCellProject(options: BuildCellProjectOptions): Promise<CellProjectBuild> {
-  const registry = await loadForguncyConfig({
-    root: options.root,
-    ...(options.configFile === undefined ? {} : { configFile: options.configFile }),
-    ...(options.loadModule === undefined ? {} : { loadModule: options.loadModule }),
-    requireEntryFiles: options.requireEntryFiles ?? true,
-  });
+  const registry = await resolveProjectRegistry(options);
 
   const workspace = await readWorkspaceGraph(registry.root, options.workspace ?? "auto");
 

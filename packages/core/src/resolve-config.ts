@@ -93,7 +93,8 @@ export type ResolveConfigDiagnosticCode =
   | "invalid-resolve-alias"
   | "unsupported-resolve-alias-pattern"
   | "nonportable-resolve-alias-target"
-  | "host-module-alias-conflict";
+  | "host-module-alias-conflict"
+  | "duplicate-resolve-alias";
 
 /**
  * One actionable problem, located at the config path that produced it.
@@ -477,6 +478,52 @@ function normalizeAliasMap(
         "invalid-resolve-alias",
         path,
         `"alias" must be an object of module id to target, or an array of { find, replacement }.`,
+      ),
+    );
+  }
+
+  if (diagnostics.length > 0) {
+    return { ok: false, diagnostics };
+  }
+
+  // Two entries that normalize to one `find` are refused rather than resolved, and this check has
+  // to be on the *normalized* key rather than on the declaration. Both forms can collide:
+  //
+  // - the array form can name one `find` twice, which Vite accepts and resolves to the first;
+  // - the object form cannot repeat a key, but two distinct keys can normalize to one —
+  //   `{ "@x": "./a", "@x/": "./b/" }`, since Vite's trailing-slash rule turns the second into
+  //   `find: "@x"` as well (measured; see `normalizeAliasKey`).
+  //
+  // Building the map last-wins (which is what a plain `alias[entry.find] = entry.target` does) would
+  // make the *resolved* set disagree with `entries` and with Vite, which resolves a duplicate to the
+  // first declaration. That is the dev/artifact divergence this module exists to remove, arriving
+  // through its own output.
+  //
+  // Refusing rather than keeping the first, and the reason is the choice rather than the rule:
+  // first-wins would be Vite-faithful, but it would also accept a declaration that *means nothing*,
+  // which is the "ambiguous form is never handled silently" principle every other refusal here
+  // follows. A duplicate `find` is always a mistake — there is no reading in which a project wants
+  // one id routed to two targets — so the diagnostic is the useful answer.
+  const byFind = new Map<string, ResolvedAliasEntry[]>();
+  for (const entry of entries) {
+    const group = byFind.get(entry.find);
+    if (group === undefined) {
+      byFind.set(entry.find, [entry]);
+    } else {
+      group.push(entry);
+    }
+  }
+
+  for (const [find, group] of byFind) {
+    if (group.length < 2) {
+      continue;
+    }
+    const targets = group.map(entry => JSON.stringify(entry.replacement)).join(" and ");
+    diagnostics.push(
+      diag(
+        "duplicate-resolve-alias",
+        path,
+        `Alias "${find}" is declared ${group.length} times, targeting ${targets}. One module id cannot route to two targets, and which one wins is not something this config can express, so it is reported rather than resolved. Keep the one you mean.`,
       ),
     );
   }

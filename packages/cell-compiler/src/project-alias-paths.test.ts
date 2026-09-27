@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadForguncyConfig } from "@forguncy-react-workspace/core";
@@ -195,5 +195,89 @@ describe("one project alias set drives both the local dev server and the Cell bu
 
     expect(outcome.artifact.code).not.toContain("@app/shared");
     expect(readFileSync(join(fixtureRoot, "shared", "thing.ts"), "utf8")).toContain(ALIAS_MARKER);
+  });
+});
+
+/**
+ * The two inputs review found could not be expressed, both as execution-level tests.
+ *
+ * ## 1. A workspace *member* is not a workspace root
+ *
+ * Measured before the fix: `readWorkspaceGraph` looked only at `<projectRoot>/pnpm-workspace.yaml`,
+ * so for `examples/workspace-package` — a member of *this repository's* workspace, with no manifest
+ * of its own — the build reported `workspaceAudited: false` and skipped #14's audit entirely. That
+ * is not a cosmetic gap: the audit's fatal findings (`circular-workspace-dependency`,
+ * `workspace-package-decided-as-dependency`) are the ones that must refuse a compile, and a build
+ * that silently skips them is the "green build for an artifact that cannot exist" shape this whole
+ * line of work removes. Existing tests had the same layout but assembled the graph by hand, which is
+ * why the public entry could not express it.
+ *
+ * ## 2. The entry can consume a registry the caller already loaded
+ *
+ * #97's plan step 1 says the entry "复用已加载 registry，不再加载第二份配置". Without a `{ registry }`
+ * input, a caller that already normalized the config had to load it again — a second normalization
+ * of one file, free to disagree. Asserted by *identity*, since "the same object" is the property
+ * being bought and deep equality would not distinguish it from a re-load that happened to match.
+ */
+describe("the public build entry consumes the project it is handed", () => {
+  const packageRoot = join(here, "..");
+  const repositoryRoot = join(packageRoot, "..", "..");
+  /** A project with no manifest of its own, whose workspace root is the repository. */
+  const memberRoot = join(here, "..", "tests", "fixtures", "member-project");
+
+  it("audits the workspace of a member project, walking up to the workspace root", async () => {
+    // `member-project` has no `pnpm-workspace.yaml`; the nearest one is the repository's, two levels
+    // up. The walk is what makes this project audited rather than silently skipped — and the
+    // layout is not contrived, it is how every example in this repository is arranged.
+    expect(existsSync(join(memberRoot, "pnpm-workspace.yaml"))).toBe(false);
+    expect(existsSync(join(repositoryRoot, "pnpm-workspace.yaml"))).toBe(true);
+
+    const build = await buildCellProject({ root: memberRoot, dependencies: [] });
+
+    expect(build.workspaceAudited).toBe(true);
+    // The audit ran for real, so it carries a report rather than merely a flag.
+    expect(build.cells[0]?.outcome.workspace).toBeDefined();
+    // And the Cell still compiled, so the walk did not change what is built.
+    expect(build.cells[0]?.outcome.status).toBe("compiled");
+  });
+
+  it("refuses a named workspace root with no manifest, rather than auditing nothing", async () => {
+    // `{ workspace: { root } }` is the escape hatch for a layout the walk would answer differently.
+    // Naming a root that holds no manifest is a claim about the project that is wrong, so it throws
+    // instead of quietly producing an unaudited build — the `true`-vs-`"auto"` distinction applied
+    // to the explicit form.
+    await expect(
+      buildCellProject({
+        root: memberRoot,
+        dependencies: [],
+        workspace: { root: join(memberRoot, "no-such-workspace") },
+      }),
+    ).rejects.toThrowError(/pnpm-workspace\.yaml/);
+  });
+
+  it("builds through the registry object it was handed, without loading a second config", async () => {
+    // The registry is normalized by the caller here, exactly as the dev server and a plan command
+    // do. `{ registry }` returns that object unchanged, so identity is the assertion.
+    const registry = await loadForguncyConfig({ root: fixtureRoot });
+
+    const build = await buildCellProject({ registry, dependencies: [] });
+
+    expect(build.registry).toBe(registry);
+    // The alias set is the *same object* the caller's registry carries, which is the property #97
+    // is about: one normalization, read by both paths.
+    expect(build.alias).toBe(registry.resolve.alias);
+    // And it still builds, so reusing the registry is not a mode that compiles nothing.
+    expect(build.cells[0]?.outcome.status).toBe("compiled");
+  });
+
+  it("honours a registry whose root the registry itself carries", async () => {
+    // A registry is already rooted, so there is no second root to reconcile — the property that
+    // makes the `{ registry }` input safe rather than a way to build the wrong project.
+    const registry = await loadForguncyConfig({ root: fixtureRoot });
+    expect(registry.root).toBe(resolve(fixtureRoot));
+
+    const build = await buildCellProject({ registry, dependencies: [] });
+
+    expect(build.cells[0]?.target.locatorKey).toBe("探针#A1");
   });
 });
