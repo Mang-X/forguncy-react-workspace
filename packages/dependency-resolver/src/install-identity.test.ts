@@ -264,6 +264,42 @@ describe("#94: identity comes from the install graph, not from a declaration", (
     expect(manifestEdited).not.toBe(before);
   });
 
+  it("covers the legacy `pnpm.patchedDependencies` site, so editing its patch file moves the digest", async () => {
+    // PR #114 review round 3, P1. pnpm 10 and earlier read patches from
+    // `package.json#pnpm.patchedDependencies` (pnpm#11536 records 10.33.x still doing so, with the
+    // move to `pnpm-workspace.yaml` landing in 11). Only the **top-level** `patchedDependencies` was
+    // read here, so a patch declared at the legacy site reached `configuration` as a *path* but its
+    // file contents were never digested. Measured, under `pnpm@10.x`: keeping the lockfile and the
+    // declared path fixed and editing `patches/foo.patch` moved none of the three digests — a patch
+    // edit could not invalidate anything, which violates #94's "a patch change must move identity".
+    const withLegacyPatch = async (patchText: string): Promise<{ patches: string | null; configuration: string | null }> =>
+      withProject(async root => {
+        await project(root, {
+          packageManager: "pnpm@10.33.0",
+          extra: {
+            // The legacy location, nested under `pnpm`, and *no* top-level declaration.
+            "package.json": JSON.stringify({
+              name: "consumer",
+              version: "0.0.0",
+              packageManager: "pnpm@10.33.0",
+              pnpm: { patchedDependencies: { "b@1.0.0": "patches/foo.patch" } },
+            }),
+            "patches/foo.patch": patchText,
+          },
+        });
+        const identity = await readInstallGraphIdentity(root);
+        return { patches: identity.patches, configuration: identity.configuration };
+      });
+
+    const before = await withLegacyPatch("patch v1\n");
+    const after = await withLegacyPatch("patch v2 edited\n");
+
+    // The lockfile is unchanged in both runs (same `project()` default) and so is the declared path,
+    // so the *only* input that moved is the patch file's contents.
+    expect(before.patches).not.toBeNull();
+    expect(after.patches).not.toBe(before.patches);
+  });
+
   it("changes when the configuration that affects resolution changes", async () => {
     const before = await withProject(async root => {
       await project(root, { extra: { "pnpm-workspace.yaml": "packages:\n  - packages/*\n" } });
@@ -412,44 +448,46 @@ describe("#94: an install state that cannot be established is explicitly unknown
     });
   });
 
-  it("follows `packageManager` to the authoritative lockfile when several are present", async () => {
-    // PR #114 review, P2. A migrating project easily leaves both `pnpm-lock.yaml` and
-    // `package-lock.json` behind. Hashing whichever came first in a hardcoded order meant the digest
-    // could cover a lockfile that describes no install: measured on an npm project with a stale pnpm
-    // lock beside it, moving the *effective* npm lock's transitive dependency left the digest
-    // byte-identical.
-    // Both lockfiles are present in every run, and the case varies exactly one of them at a time.
-    // A 2x2 matrix over (which file moved) x (which manager is named), so "follows the manager"
-    // and "ignores the other file" are two separate assertions rather than one coincidence.
-    const forManager = async (packageManager: string, pnpmText: string, npmDeps: string): Promise<string | null> =>
+  it("does not let the declared `packageManager` exclude another manager's real lockfile", async () => {
+    // PR #114 review round 3, P1, which **corrected** round 2's advice. Round 2 asked for the
+    // lockfile to be chosen by the manifest's `packageManager`; that is the same "trust the request
+    // string" mistake #94 was written about, and this case is why.
+    //
+    // A project declaring `pnpm` can have had `npm install` run in it — Corepack does not intercept
+    // `npm` (its shims are not installed by default, so `npm` resolves to the Node-bundled copy).
+    // Selecting by the declaration then excludes `package-lock.json`, which is the lockfile that
+    // actually describes the install, and builds a complete-looking identity from a stale
+    // `pnpm-lock.yaml`. Measured before the fix: moving the npm transitive dependency left the
+    // identity byte-identical.
+    const declared = async (declaredManager: string, npmDeps: string): Promise<string | null> =>
       withProject(async root => {
-        // `lockfile: null` so the helper does not also write a pnpm lockfile: this case is about
-        // which of several *present* lockfiles is authoritative, and both must be written here.
         await project(root, {
-          packageManager,
+          packageManager: declaredManager,
           lockfile: null,
           extra: {
-            "pnpm-lock.yaml": pnpmText,
+            "pnpm-lock.yaml": "stale pnpm lock (never re-resolved)\n",
             "package-lock.json": JSON.stringify({ name: "consumer", dependencies: { b: npmDeps } }),
+            // The evidence of what actually ran, which must not be overruled by the declaration.
+            "node_modules/.package-lock.json": JSON.stringify({ lockfileVersion: 3 }),
           },
         });
         return (await readInstallGraphIdentity(root)).lockfile;
       });
 
-    const NPM = "npm@11.0.0";
-    const PNPM = "pnpm@11.18.0";
+    // Whichever manager the manifest *claims*, two lockfiles are present and neither may be
+    // silently dropped — the answer is `unknown`, not a stale identity built from the declared one.
+    expect(await declared("pnpm@11.18.0", "1.0.0")).toBeNull();
+    expect(await declared("pnpm@11.18.0", "9.9.9")).toBeNull();
+    expect(await declared("npm@11.0.0", "1.0.0")).toBeNull();
 
-    // npm project: the npm lock is followed, the pnpm lock is ignored.
-    const npmBase = await forManager(NPM, "pnpm v1\n", "1.0.0");
-    expect(npmBase).not.toBeNull();
-    expect(await forManager(NPM, "pnpm v1\n", "2.0.0")).not.toBe(npmBase);
-    expect(await forManager(NPM, "pnpm v2\n", "1.0.0")).toBe(npmBase);
-
-    // pnpm project: the mirror image, so the choice is the manager's rather than "always prefer one
-    // name" — a fixed priority list would have answered identically in both halves.
-    const pnpmBase = await forManager(PNPM, "pnpm v1\n", "1.0.0");
-    expect(await forManager(PNPM, "pnpm v2\n", "1.0.0")).not.toBe(pnpmBase);
-    expect(await forManager(PNPM, "pnpm v1\n", "2.0.0")).toBe(pnpmBase);
+    // The control: where only the declared manager's lockfile exists at all, the identity is still
+    // usable, so this is not a blanket refusal to read anything.
+    const unambiguous = await withProject(async root => {
+      await project(root, { packageManager: "pnpm@11.18.0", lockfile: null });
+      await writeFileAt(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+      return (await readInstallGraphIdentity(root)).lockfile;
+    });
+    expect(unambiguous).not.toBeNull();
   });
 
   it("is unknown when one manager's two lockfile spellings are both present", async () => {
@@ -580,11 +618,14 @@ describe("#94: an install state that cannot be established is explicitly unknown
 
       const identity = await readInstallGraphIdentity(root);
 
-      // "No patches declared" is a fact, not a gap — the digest of two empty source lists (the
-      // digest moved from a bare array to a per-source object in the PR #114 review fix, so that
-      // one source cannot shadow the other). Conflating it with `null` would make every unpatched
-      // project permanently stale.
-      expect(identity.patches).toBe(digestOf(JSON.stringify({ manifest: [], workspace: [] })));
+      // "No patches declared" is a fact, not a gap — the digest of every declared site being empty.
+      // The digest moved from a bare array to a per-site object during review, so that no site can
+      // shadow another; the sites are the workspace file, the manifest's top level, and the legacy
+      // `pnpm` field (the pnpm 10 location, pnpm#11536). Conflating "none declared" with `null`
+      // would make every unpatched project permanently stale.
+      expect(identity.patches).toBe(
+        digestOf(JSON.stringify({ manifestPnpm: [], manifestTopLevel: [], workspace: [] })),
+      );
     });
   });
 

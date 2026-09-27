@@ -254,10 +254,10 @@ type InstallLockfileResult =
  * fresh happens.
  *
  * Each directory is asked only about the names its **own** manifest claims (see
- * {@link candidateNamesFor}), so a root that names a manager is not disqualified by an unrelated
- * stray lockfile of another manager's spelling. `unreadable` short-circuits to `unknown` rather
- * than being skipped: reporting an identity taken from a different file would describe an install
- * this process never read.
+ * {@link candidateNamesFor}), which narrows only on an **installed** manager and otherwise keeps
+ * every recognized name. `unreadable` short-circuits to `unknown` rather than being skipped:
+ * reporting an identity taken from a different file would describe an install this process never
+ * read.
  */
 async function findInstallLockfile(projectRoot: string): Promise<InstallLockfileResult> {
   // Absolute before the walk, so the ancestor search is over real directories rather than over the
@@ -268,7 +268,7 @@ async function findInstallLockfile(projectRoot: string): Promise<InstallLockfile
   const claims: LockfileClaim[] = [];
 
   for (;;) {
-    const names = candidateNamesFor(await readProjectManifest(directory));
+    const names = candidateNamesFor();
     for (const name of names) {
       const path = join(directory, name);
       // A binary lockfile is digested from its bytes: decoding it first would let two distinct byte
@@ -313,32 +313,6 @@ async function findInstallLockfile(projectRoot: string): Promise<InstallLockfile
   return { kind: "found", claim: claims[0]! };
 }
 
-/** A package manager named by a manifest's `packageManager` field, reduced to its kind. */
-function packageManagerKind(manifest: ParsedConfig): "pnpm" | "npm" | "yarn" | "bun" | null {
-  if (manifest.kind !== "parsed") {
-    return null;
-  }
-  const declared = manifest.value["packageManager"];
-  if (typeof declared !== "string") {
-    return null;
-  }
-  // The field is `<name>@<version>`; the name is what decides which lockfile is authoritative.
-  const name = declared.split("@")[0]?.trim().toLowerCase() ?? "";
-  switch (name) {
-    case "pnpm":
-      return "pnpm";
-    case "npm":
-      return "npm";
-    case "yarn":
-      return "yarn";
-    case "bun":
-      return "bun";
-    default:
-      // An unrecognized or absent manager says nothing about which lockfile is authoritative.
-      return null;
-  }
-}
-
 /**
  * The lockfile spellings each manager can write, **unordered**.
  *
@@ -364,19 +338,37 @@ const LOCKFILES_BY_MANAGER: Readonly<Record<string, readonly string[]>> = {
 };
 
 /**
- * The lockfile names one directory's manifest claims, from that manifest's `packageManager`.
+ * The lockfile names a directory can be the install root of — every recognized name, always.
  *
- * A directory that names a manager is asked only about that manager's spellings, so a stray
- * lockfile of another manager's spelling cannot disqualify it. A directory that names none is asked
- * about every recognized name: with no declaration, any of them could be the one resolution uses.
+ * **Neither the declaration nor installed-manager evidence narrows this**, and both halves of that
+ * are deliberate.
  *
- * Deliberately independent of {@link findInstallLockfile}'s counting: this answers "what could this
- * directory be the install root of", and the walk decides whether exactly one claim survived.
+ * The declaration must not: an earlier revision selected by the manifest's `packageManager`, and
+ * review showed why that repeats the mistake #94 was written about. A project declaring `pnpm` can
+ * have had `npm install` run in it — Corepack does not intercept `npm` (its shims are not installed
+ * by default, so `npm` resolves to the Node-bundled copy) — and then `package-lock.json` describes
+ * the current install while the declared `pnpm` lockfile is stale. Measured: with a declared
+ * `pnpm@11`, a stale `pnpm-lock.yaml` and a live `package-lock.json`, moving the npm transitive
+ * dependency left the identity byte-identical, because the real lockfile had been excluded.
+ *
+ * **Installed-manager evidence does not narrow it either**, and that was measured rather than
+ * assumed. A manager's own marker (`node_modules/.modules.yaml` for pnpm, which even names the
+ * version that ran; `node_modules/.package-lock.json` for npm) was tried as the selector and then
+ * removed for two reasons:
+ *
+ * - It **changed no outcome.** It narrowed only when every other recognized name was absent — and
+ *   then those names contributed no claim anyway, so the collected set was identical. Measured:
+ *   `"pnpm marker + pnpm lock only"` and `"no marker + pnpm lock only"` both resolve, and both
+ *   ambiguity cases stay `unknown` either way.
+ * - It **can be stale, in the unsafe direction.** Markers accumulate: an old pnpm install followed
+ *   by `npm install` leaves `.modules.yaml` *and* `.package-lock.json`, and an old lockfile beside
+ *   them. A selector trusting the marker would then pick the stale lockfile — measured, both markers
+ *   present with both lockfiles. Counting claims instead reports `unknown`, which is safe.
+ *
+ * So the names stay a set, and ambiguity is resolved by counting claims in
+ * {@link findInstallLockfile} — the direction that can only *add* a claim.
  */
-function candidateNamesFor(manifest: ParsedConfig): readonly string[] {
-  const manager = packageManagerKind(manifest);
-  return manager === null ? RECOGNIZED_LOCKFILE_NAMES : (LOCKFILES_BY_MANAGER[manager] ?? []);
-}
+const candidateNamesFor = (): readonly string[] => RECOGNIZED_LOCKFILE_NAMES;
 
 /** A parsed YAML or JSON object, or why it could not be produced. */
 type ParsedConfig =
@@ -421,15 +413,23 @@ async function readProjectManifest(projectRoot: string): Promise<ParsedConfig> {
 /**
  * The `patchedDependencies` map a config declares, normalized to string→string.
  *
- * Read from **both** files this module parses, and the asymmetry is measured rather than assumed.
- * `pnpm-workspace.yaml` is where pnpm 11 acts on it (measured: a declaration there produces a
- * `patch_hash=` resolution key and a patched tree). A top-level `patchedDependencies` in
- * `package.json` is **silently ignored** by pnpm 12.4.2 — no `patch_hash`, no applied patch — so
- * covering it costs nothing and guards a project that believes it declared a patch.
+ * Read from **every** site a pnpm version has honoured, and the sites are measured rather than
+ * assumed:
  *
- * Reading it from the manifest is therefore *not* redundant with the workspace file: if pnpm ever
- * starts honouring it, this digest already moves when it does. A site that is ignored contributes
- * an empty map, which is the correct answer for it.
+ * - `pnpm-workspace.yaml#patchedDependencies` — where pnpm 11 acts on it (measured: a declaration
+ *   there produces a `patch_hash=` resolution key and a patched tree).
+ * - `package.json#pnpm.patchedDependencies` — the **pnpm 10 and earlier** site (pnpm#11536 records
+ *   pnpm 10.33.x still reading it, with the move to the workspace file landing in 11).
+ * - `package.json#patchedDependencies` (top level) — silently ignored by pnpm 12.4.2, covered
+ *   because it costs nothing and guards a project that believes it declared a patch.
+ *
+ * **The legacy site is read rather than modelled.** Review showed the gap: under `pnpm@10.x` the
+ * manager is recognized and a complete-looking identity was produced, but a patch declared at
+ * `pnpm.patchedDependencies` reached only {@link configurationDigest} — which covers the *declared
+ * path*, not the file's contents. Measured: keeping the lockfile and the declared path fixed and
+ * editing `patches/foo.patch` moved none of the three digests, so a patch edit could not invalidate
+ * anything. Reading the legacy site here fixes that without needing a version-to-site table, and a
+ * site that does not apply contributes an empty map — which is the correct answer for it.
  */
 function patchDeclarations(config: ParsedConfig): Record<string, string> | null {
   if (config.kind === "absent") {
@@ -438,22 +438,27 @@ function patchDeclarations(config: ParsedConfig): Record<string, string> | null 
   if (config.kind === "unreadable") {
     return null;
   }
-  const declared = config.value["patchedDependencies"];
-  if (declared === undefined || declared === null) {
+  const normalized = normalizePatchMap(config.value["patchedDependencies"]);
+  return normalized;
+}
+
+/** One site's declarations, normalized, or `null` when a declaration cannot be interpreted. */
+function normalizePatchMap(value: unknown): Record<string, string> | null {
+  if (value === undefined || value === null) {
     return {};
   }
-  const record = asPlainObject(declared);
+  const record = asPlainObject(value);
   if (record === null) {
     return null;
   }
   const normalized: Record<string, string> = {};
-  for (const [key, value] of Object.entries(record)) {
-    if (typeof value !== "string" || value.trim().length === 0) {
+  for (const [key, entry] of Object.entries(record)) {
+    if (typeof entry !== "string" || entry.trim().length === 0) {
       // A declaration this module cannot interpret is one it cannot claim to have covered, so it
       // reports unknown rather than hashing a shape it guessed at.
       return null;
     }
-    normalized[key] = value.trim();
+    normalized[key] = entry.trim();
   }
   return normalized;
 }
@@ -490,34 +495,58 @@ async function patchEntries(
  * says what they do, and a patch edited without a re-install is exactly the change a
  * declaration-only digest would miss.
  *
- * **The two sources stay separate in the digest**, and that is a correctness requirement rather
- * than tidiness. Merging them into one `declaration → path` map let `package.json` shadow
- * `pnpm-workspace.yaml` for the same key — so with both declaring a patch for one dependency, the
- * digest covered the manifest's file while pnpm applied the workspace's. Measured: editing the
- * *effective* (workspace) patch, with no re-install and an unchanged lockfile, left the digest
- * byte-identical and the record reporting `fresh` — a false fresh of exactly the class #94 removes.
- * Keeping the sources apart means an edit to either one moves the digest, so the conservative
- * direction is preserved whichever site a package manager of some future version honours.
+ * **Every source stays separate in the digest**, and that is a correctness requirement rather than
+ * tidiness. Merging declarations into one `declaration → path` map let one site shadow another for
+ * the same key — so with two sites declaring a patch for one dependency, the digest covered one
+ * site's file while the package manager applied the other's. Measured: editing the *effective*
+ * patch, with no re-install and an unchanged lockfile, left the digest byte-identical and the record
+ * reporting `fresh` — a false fresh of exactly the class #94 removes.
+ *
+ * The sites are keyed individually, which is also what covers the **legacy** `pnpm@10` location
+ * (`package.json#pnpm.patchedDependencies`): a patch declared there now contributes its file's
+ * contents, where before only its declared path reached {@link configurationDigest} and editing the
+ * file itself moved nothing.
  *
  * `null` when a declaration cannot be read or a named patch file is missing. A project with no
- * declarations yields the digest of two empty lists, which is a *known* answer rather than an
+ * declarations yields the digest of three empty lists, which is a *known* answer rather than an
  * unknown one.
  */
 async function patchesDigest(projectRoot: string, workspace: ParsedConfig, manifest: ParsedConfig): Promise<string | null> {
-  const fromWorkspace = patchDeclarations(workspace);
-  const fromManifest = patchDeclarations(manifest);
-  if (fromWorkspace === null || fromManifest === null) {
-    return null;
+  // Every site pnpm has honoured, keyed separately so none can shadow another.
+  const sites: { readonly site: string; readonly declarations: Record<string, string> | null }[] = [
+    {
+      site: "workspace",
+      declarations:
+        workspace.kind === "parsed" ? normalizePatchMap(workspace.value["patchedDependencies"]) : patchDeclarations(workspace),
+    },
+    {
+      site: "manifestTopLevel",
+      declarations:
+        manifest.kind === "parsed" ? normalizePatchMap(manifest.value["patchedDependencies"]) : patchDeclarations(manifest),
+    },
+    {
+      // The pnpm 10 and earlier site (pnpm#11536).
+      site: "manifestPnpm",
+      declarations:
+        manifest.kind === "parsed" ? normalizePatchMap(asPlainObject(manifest.value["pnpm"])?.["patchedDependencies"]) : {},
+    },
+  ];
+
+  const entries: Record<string, readonly PatchEntry[]> = {};
+  for (const { site, declarations } of sites) {
+    if (declarations === null) {
+      return null;
+    }
+    const resolved = await patchEntries(projectRoot, declarations);
+    if (resolved === null) {
+      return null;
+    }
+    entries[site] = resolved;
   }
 
-  const workspaceEntries = await patchEntries(projectRoot, fromWorkspace);
-  const manifestEntries = await patchEntries(projectRoot, fromManifest);
-  if (workspaceEntries === null || manifestEntries === null) {
-    return null;
-  }
-
-  // Keyed by source, so a declaration present in both is two entries rather than one shadowed one.
-  return digestOf(canonicalJson({ workspace: workspaceEntries, manifest: manifestEntries }));
+  // Keyed by source, so a declaration present in two sites is two entries rather than one shadowed
+  // one.
+  return digestOf(canonicalJson(entries));
 }
 
 /**

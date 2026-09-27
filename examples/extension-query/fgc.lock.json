@@ -25,7 +25,7 @@
         "node": "24",
         "installGraph": {
           "lockfile": "sha256:76ee5ff018eb3b529882c86a80fb9213ff0c0fb2ec093d004934e06d8435cdf2",
-          "patches": "sha256:e82f53abf3ba480ff8762ed5375418e5d87133e85262c2c4746928e5f293fc1d",
+          "patches": "sha256:a771d26ace30f31fffb826a3d192a292e9b4850485e671abf84cf3af95c713a8",
           "configuration": "sha256:0a222e1ab9808e51a198525c19d9261d62d93702947ac02c47f7ee0207b10926"
         }
       },
