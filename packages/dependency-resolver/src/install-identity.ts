@@ -374,6 +374,25 @@ async function nearerInstallIsAttributableTo(projectRoot: string, installRoot: s
     directory = parent;
   }
 
+  // The containment target, resolved lazily: a project with no `node_modules` anywhere has nothing
+  // to attribute and nothing to contradict, so it stays attributable without ever needing the
+  // target. Resolving eagerly would make that case `unknown` for no reason — and it is the ordinary
+  // state of a project whose install has not been run yet.
+  let canonicalInstallTree: string | null | undefined;
+  const installTree = async (): Promise<string | null> => {
+    if (canonicalInstallTree === undefined) {
+      // **Canonicalized**, and that is not tidiness: the entry below is `realpath`'d while
+      // `installRoot` arrives as whatever the walk spelled, so the two can differ for one directory.
+      // Measured on Windows, where a runner's temp directory is an 8.3 short path
+      // (`C:\Users\RUNNER~1\…`) that `realpath` expands to `runneradmin`: comparing an expanded entry
+      // against a short root made `isInside` false for every package, so every install reported
+      // `unknown`. That direction is fail-closed, but it disables the attribution check for a real
+      // project on a real runner.
+      canonicalInstallTree = await realpath(join(installRoot, "node_modules")).catch(() => null);
+    }
+    return canonicalInstallTree;
+  };
+
   for (const candidate of directories) {
     const nodeModules = join(candidate, "node_modules");
     let entries: string[];
@@ -428,8 +447,10 @@ async function nearerInstallIsAttributableTo(projectRoot: string, installRoot: s
       // The install a lockfile describes is the one under **its own `node_modules`** — that is where
       // its tree lives (and, for pnpm, where `.pnpm/` is). Checking "under the install root
       // directory" instead would accept a subproject's tree, because a subproject is *inside* the
-      // root's directory while having nothing to do with the root's install.
-      if (!isInside(join(installRoot, "node_modules"), resolved)) {
+      // root's directory while having nothing to do with the root's install. A root with no tree at
+      // all cannot own an entry that exists, so that is `false` — "cannot say".
+      const target = await installTree();
+      if (target === null || !isInside(target, resolved)) {
         return false;
       }
     }

@@ -28,7 +28,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative as relativePath } from "node:path";
 
@@ -462,6 +462,46 @@ describe("#94: identity comes from the install graph, not from a declaration", (
         return (await readInstallGraphIdentity(root)).configuration;
       });
     expect(await withYarnRc("nodeLinker: node-modules\n")).not.toBe(await withYarnRc("nodeLinker: pnp\n"));
+  });
+
+  it("attributes an install reached through a differently-spelled root", async () => {
+    // The containment test compares a `realpath`'d entry against the install root as the walk
+    // *spelled* it, and the two can differ for one directory. Measured on Windows: a runner's temp
+    // directory is an 8.3 short path (`C:\Users\RUNNER~1\…`) that `realpath` expands to
+    // `runneradmin`, so every entry compared unequal and every install reported `unknown` — the
+    // fail-closed direction, but it disables the attribution check on a real runner.
+    //
+    // Reproduced here the same way without needing a short path: the install root is reached through
+    // a **junction**, so the walk spells it with the junction while `realpath` yields the target. The
+    // project nests under that spelling, which is what makes the two sides differ.
+    await withProject(async root => {
+      const real = join(root, "real");
+      await writeFileAt(join(real, "package.json"), JSON.stringify({ name: "ws", version: "0.0.0", packageManager: "pnpm@11.18.0" }));
+      await writeFileAt(join(real, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+      await writeFileAt(
+        join(real, "node_modules", ".pnpm", "pkg@1.0.0", "node_modules", "pkg", "package.json"),
+        JSON.stringify({ name: "pkg", version: "1.0.0" }),
+      );
+
+      const linked = join(root, "linked");
+      await symlink(real, linked, "junction");
+      const project = join(linked, "sub");
+      await writeFileAt(join(project, "package.json"), JSON.stringify({ name: "sub", version: "0.0.0" }));
+      await mkdir(join(project, "node_modules"), { recursive: true });
+      // The entry links back into the store, so it is genuinely part of that install.
+      await symlink(
+        join(real, "node_modules", ".pnpm", "pkg@1.0.0", "node_modules", "pkg"),
+        join(project, "node_modules", "pkg"),
+        "junction",
+      );
+
+      const viaJunction = await readInstallGraphIdentity(project);
+      const viaReal = await readInstallGraphIdentity(join(real, "sub"));
+
+      // Both spellings name one install, so both must resolve — and to the *same* identity.
+      expect(viaJunction.lockfile).not.toBeNull();
+      expect(viaJunction.lockfile).toBe(viaReal.lockfile);
+    });
   });
 
   it("reads the patch set and the configuration at the install root, not at a nested project", async () => {
