@@ -1,0 +1,53 @@
+# Text this rule governs is written to the index as LF, so a fresh checkout is LF
+# on every platform. There are three exceptions in the tree today, and the rule
+# cannot remove them — it governs what is *written*, not bytes already in a blob:
+#
+#   - `governance.ts` has a CRLF blob that predates this rule, so it checks out CRLF
+#     (`i/crlf w/crlf`). Left that way deliberately; see the note at the end.
+#   - two `.claude/skills/*` entries are symlinks (mode 120000), not text.
+#   - `unreadable-manifest/package.json` is a one-line fixture with no newline in it
+#     at all, so Git reports `i/none` — there is nothing to normalize.
+#
+# Decision source: GitHub Issue #101 — "Windows Node 24 CI plus path, line-ending
+# and evidence-integrity regressions"
+# https://github.com/Mang-X/forguncy-react-workspace/issues/101
+#
+# Why this is a repository rule and not a developer preference:
+#
+# 1. **Evidence and fixtures are compared byte-for-byte.** `lock-store.test.ts`
+#    asserts the committed `fgc.lock.json` example is exactly what
+#    `serializeFgcLock` produces, and the dependency-selection Skill's evidence
+#    address is a hash of a serialized report. `core.autocrlf=true` (the Git for
+#    Windows default, and set on the machine this was written on) rewrites those
+#    files to CRLF on checkout, so the same commit failed on Windows and passed on
+#    CI — a local red that CI called green, which is the failure mode that makes a
+#    developer stop trusting the suite.
+# 2. **The two sides of a comparison then agree by construction.** For a file whose
+#    blob is LF, `eol=lf` makes the checkout LF whatever the reader's `core.autocrlf`
+#    is, so a test may compare LF text without first asking what Git did to the file.
+#    (The exceptions listed above are the files that do not get this, which is why
+#    they are enumerated rather than assumed away.)
+# 3. **`text=auto` keeps the index stable.** Text added with CRLF is stored as LF, so
+#    the index does not depend on which machine staged it. (This applies to *newly
+#    staged* text — see the note below on bytes already in a blob.)
+#
+# Note what this does *not* do: it does not normalize bytes that already reached a
+# blob (`git add --renormalize` is a separate, one-time act), and it deliberately
+# does not mark anything `-text`. `probe-engine.ts` carries two U+0000 code points
+# in a string literal, which makes Git treat it as binary; that is correct and is
+# left alone — a text attribute would make Git mangle the literal it exists to hold.
+#
+# `governance.ts` is the one text file whose blob is still CRLF, and it is left that
+# way on purpose rather than overlooked. Renormalizing it rewrites every line hash,
+# which then needs a `.git-blame-ignore-revs` entry naming the rewrite; such an entry
+# is only correct while the rewrite remains its own unsquashed commit, because
+# squashing folds it into a commit that also changed code — and a commit cannot be
+# excluded per-file. Trading a hidden merge-method condition for one file's line
+# endings is not a trade worth making: the CRLF blob is harmless. Nothing reads its
+# bytes, and a CRLF file under this rule still gives a clean `git status` and a clean
+# `git add .` with no whole-file diff. It does **not** self-heal on an ordinary edit:
+# measured, the blob becomes LF only when the edit is saved with LF endings, so an
+# editor that writes CRLF leaves it `i/crlf` indefinitely. That is acceptable because
+# nothing depends on it either way — but it is a reason this is a deliberate choice
+# rather than a temporary state.
+* text=auto eol=lf

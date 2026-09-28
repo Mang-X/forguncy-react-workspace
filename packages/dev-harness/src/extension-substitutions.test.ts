@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { describe, expect, it, onTestFinished } from "vitest";
@@ -9,7 +8,7 @@ import type { ForguncyConfig } from "@forguncy-react-workspace/core";
 
 import { readToolchainIdentity } from "@forguncy-react-workspace/dependency-resolver/local";
 
-import { removeTempProject } from "./temp-project.ts";
+import { canonicalTempProject, removeTempProject } from "./temp-project.ts";
 import { devHarness } from "./vite-plugin.ts";
 
 /**
@@ -37,7 +36,11 @@ import { devHarness } from "./vite-plugin.ts";
  */
 /** A throwaway project with a Cell, a shim, and a substitute package the project's tree installs. */
 async function projectWithShim(): Promise<{ root: string; shimMarker: string; substitutePackageMarker: string }> {
-  const root = mkdtempSync(join(tmpdir(), "dev-harness-subst-"));
+  // Canonicalized, because this project is *served*: Vite refuses to serve any path that looks
+  // like a Windows short name (`looksLikeWindowsShortNamePath`), before its allow list is even
+  // consulted. On the GitHub Windows runner `os.tmpdir()` is `C:\Users\RUNNER~1\…`, so a raw
+  // temp root makes every authored module a 403. See `canonicalTempProject`.
+  const root = canonicalTempProject("dev-harness-subst-");
   onTestFinished(() => removeTempProject(root));
 
   // A lockfile, so this throwaway project is one an install could have produced (#94): identity is

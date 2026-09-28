@@ -78,10 +78,36 @@ const config = {
  * middleware-mode server resolves just as well, while the HTML tests must *fetch* the transformed
  * page and `server.listen()` refuses in middleware mode. The split is the tests' own — one group
  * inspects resolved config, the other needs a real HTTP response.
+ *
+ * ## Why the non-listening case switches the dependency optimizer off
+ *
+ * The alias group deliberately points `react` at a path that does not exist (`/project-owned/react`
+ * and friends). Those paths are never read — the tests ask the resolver *which id wins* — but the
+ * plugin's `config()` hook also puts `react` in `optimizeDeps.include`, and the optimizer scans
+ * that include list in the background regardless. It then tries to load the aliased path, fails,
+ * and reports the failure as an **unhandled rejection** *after* the test that started the server
+ * has already passed. Vitest counts that as an error, so `vp test --run` exits non-zero with every
+ * test green.
+ *
+ * Measured on Windows, where it is deterministic for the whole `dev-harness` package (6 of 6 runs)
+ * and makes a full-suite run end `Errors 5 errors` beside `2196 passed`; it did not reproduce on
+ * the Linux CI log. A Windows CI leg would therefore have been red — or flaky — from the day it was
+ * added, which is the failure mode this repository treats as worse than a missing test.
+ *
+ * `disabled: true` is the switch the option is *for* ("true or 'dev' disables the optimizer"), and
+ * it is scoped to the servers that never serve a module: a server that binds no port and answers no
+ * request has no module graph for the optimizer to build, so this removes background work rather
+ * than an assertion. Verified to leave `pluginContainer.resolveId` answers and the resolved alias
+ * list byte-identical — the probe this reasoning came from compared them with the optimizer on and
+ * off.
  */
+
+/** Either alias shape Vite accepts, which is what the tests below vary. */
+type UserAlias = Record<string, string> | readonly { find: string | RegExp; replacement: string }[];
+
 async function serverFor(
   fixture: string,
-  options: { readonly userAlias?: Record<string, string>; readonly listening?: boolean } = {},
+  options: { readonly userAlias?: UserAlias; readonly listening?: boolean } = {},
 ) {
   return createServer({
     root: join(fixturesRoot, fixture),
@@ -89,6 +115,7 @@ async function serverFor(
     logLevel: "error",
     appType: "spa",
     ...(options.userAlias === undefined ? {} : { resolve: { alias: options.userAlias } }),
+    ...(options.listening === true ? {} : { optimizeDeps: { disabled: true } }),
     plugins: [devHarness({ config }) as never],
     server:
       options.listening === true
@@ -204,19 +231,11 @@ describe("alias precedence between the project and the plugin's config() hook", 
    * them was wrong in the direction that matters.
    */
   it("reads the array form for both string and RegExp finds", async () => {
-    const server = await createServer({
-      root: join(fixturesRoot, "ordinary"),
-      configFile: false,
-      logLevel: "error",
-      appType: "spa",
-      resolve: {
-        alias: [
-          { find: "react", replacement: "/array-owned/react" },
-          { find: /^react-dom$/, replacement: "/array-owned/react-dom" },
-        ],
-      },
-      plugins: [devHarness({ config }) as never],
-      server: { middlewareMode: true, hmr: false, watch: null },
+    const server = await serverFor("ordinary", {
+      userAlias: [
+        { find: "react", replacement: "/array-owned/react" },
+        { find: /^react-dom$/, replacement: "/array-owned/react-dom" },
+      ],
     });
 
     try {
@@ -277,14 +296,8 @@ describe("alias precedence between the project and the plugin's config() hook", 
    * what makes it a real guard rather than a restatement.
    */
   it("lets an array-form `react` find claim its subpaths, at resolution time", async () => {
-    const server = await createServer({
-      root: join(fixturesRoot, "ordinary"),
-      configFile: false,
-      logLevel: "error",
-      appType: "spa",
-      resolve: { alias: [{ find: "react", replacement: "/array-owned/react" }] },
-      plugins: [devHarness({ config }) as never],
-      server: { middlewareMode: true, hmr: false, watch: null },
+    const server = await serverFor("ordinary", {
+      userAlias: [{ find: "react", replacement: "/array-owned/react" }],
     });
 
     try {
@@ -306,14 +319,8 @@ describe("alias precedence between the project and the plugin's config() hook", 
    * the test actually measures.
    */
   it("lets a RegExp find that matches a host id claim it, at resolution time", async () => {
-    const server = await createServer({
-      root: join(fixturesRoot, "ordinary"),
-      configFile: false,
-      logLevel: "error",
-      appType: "spa",
-      resolve: { alias: [{ find: /^react(?=\/|$)/, replacement: "/regex-owned/react" }] },
-      plugins: [devHarness({ config }) as never],
-      server: { middlewareMode: true, hmr: false, watch: null },
+    const server = await serverFor("ordinary", {
+      userAlias: [{ find: /^react(?=\/|$)/, replacement: "/regex-owned/react" }],
     });
 
     try {
@@ -335,14 +342,8 @@ describe("alias precedence between the project and the plugin's config() hook", 
    * entries either way, which is exactly why this defect survived two rounds of list inspection.
    */
   it("honours an array alias whose find and replacement both end in a slash", async () => {
-    const server = await createServer({
-      root: join(fixturesRoot, "ordinary"),
-      configFile: false,
-      logLevel: "error",
-      appType: "spa",
-      resolve: { alias: [{ find: "react/", replacement: "/slash-owned/react/" }] },
-      plugins: [devHarness({ config }) as never],
-      server: { middlewareMode: true, hmr: false, watch: null },
+    const server = await serverFor("ordinary", {
+      userAlias: [{ find: "react/", replacement: "/slash-owned/react/" }],
     });
 
     try {
@@ -404,15 +405,7 @@ describe("alias precedence between the project and the plugin's config() hook", 
    * exists to prevent. Asserted on the entry set, where the difference is visible.
    */
   it("does not leave a duplicate host alias for an object-form key with trailing slashes", async () => {
-    const server = await createServer({
-      root: join(fixturesRoot, "ordinary"),
-      configFile: false,
-      logLevel: "error",
-      appType: "spa",
-      resolve: { alias: { "react/": "/patched-react/" } },
-      plugins: [devHarness({ config }) as never],
-      server: { middlewareMode: true, hmr: false, watch: null },
-    });
+    const server = await serverFor("ordinary", { userAlias: { "react/": "/patched-react/" } });
 
     try {
       const entries = (server.config.resolve.alias as { find?: unknown }[]).filter(
@@ -440,14 +433,8 @@ describe("alias precedence between the project and the plugin's config() hook", 
    */
   it("leaves a global RegExp pattern's lastIndex untouched", async () => {
     const pattern = /react/g;
-    const server = await createServer({
-      root: join(fixturesRoot, "ordinary"),
-      configFile: false,
-      logLevel: "error",
-      appType: "spa",
-      resolve: { alias: [{ find: pattern, replacement: "/g-owned/react" }] },
-      plugins: [devHarness({ config }) as never],
-      server: { middlewareMode: true, hmr: false, watch: null },
+    const server = await serverFor("ordinary", {
+      userAlias: [{ find: pattern, replacement: "/g-owned/react" }],
     });
 
     try {

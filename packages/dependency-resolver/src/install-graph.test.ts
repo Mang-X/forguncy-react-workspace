@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -145,6 +145,45 @@ describe("resolving exact installed versions", () => {
     const { versions } = await resolveInstalledVersions(root, ["react", "react/jsx-runtime"]);
 
     expect(versions).toEqual({ react: "19.2.7", "react/jsx-runtime": "19.2.7" });
+  });
+
+  it("resolves the same install when the project root is not a canonical path", async () => {
+    // The GitHub Windows runner addresses its temp directory through an 8.3 short name
+    // (`C:\Users\RUNNER~1\AppData\Local\Temp`), and `realpath` expands it to `runneradmin`.
+    // `package-locator` realpaths the directory it located, so the located path is canonical
+    // while the `projectRoot` a caller handed in is not — and the prefix test in
+    // `isInProjectGraph` is then false for every package, so the entire install graph reads as
+    // `not-installed`. Measured on CI as 17 assertion failures across this file,
+    // `local-decision-projection`, `extension-substitutions` and `local-dev-audit-server`, all
+    // of them `expected {} to deeply equal { dayjs: '1.11.13' }` in some form — while the same
+    // commit was green on a developer machine whose temp path has no short name.
+    //
+    // The stand-in is a junction **beside** the real directory, not inside it. That placement is
+    // the whole of the test: the guard also accepts any path under an ancestor's `node_modules`,
+    // so a link created as a child of the real root resolves through an ancestor and the case
+    // passes even with the defect present — measured, which is why this is a sibling. The
+    // assertion is that the two spellings of one directory answer identically.
+    const base = await mkdtemp(join(tmpdir(), "fgc-install-graph-alias-"));
+    const real = join(base, "real-project");
+    await writeFileAt(join(real, "package.json"), JSON.stringify({ name: "probe-project", version: "0.0.0" }));
+    await install(real, "dayjs", { name: "dayjs", version: "1.11.13" });
+
+    const alias = join(base, "alias");
+    try {
+      await symlink(real, alias, "junction");
+    } catch (error) {
+      // A platform without the privilege to create it (Windows without developer mode). The
+      // property is still worth asserting where it can be; skipping is honest, and the CI leg
+      // that found this runs on a file system that supports it.
+      process.stderr.write(`install-graph: junction unavailable, skipping the alias case: ${String(error)}\n`);
+      return;
+    }
+
+    const canonical = await resolveInstalledVersions(real, ["dayjs"]);
+    const viaAlias = await resolveInstalledVersions(alias, ["dayjs"]);
+
+    expect(canonical.versions).toEqual({ dayjs: "1.11.13" });
+    expect(viaAlias).toEqual(canonical);
   });
 
   it("reports a package that is not installed rather than throwing", async () => {
