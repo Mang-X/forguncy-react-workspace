@@ -64,6 +64,33 @@ export const RUNTIME_EVIDENCE_CHANNELS = [
  * Pinned rather than described, because a contract without a version is a
  * claim about "Forguncy" in the abstract, and Forguncy ships its own React and
  * transpiler per version.
+ *
+ * ## Which version, and what "re-based" did and did not re-measure
+ *
+ * The target was established against `12.0.100.0` and is now `12.0.101.0` — the version
+ * actually in use. The rebase is **measured, not renamed**, and the measurements are on
+ * #120; each field below says whether it was re-read on `12.0.101.0` or carried forward.
+ *
+ * Re-measured on `12.0.101.0` (designer session, 2026-09-27/28):
+ *
+ * - `productVersion` / `productBuild` — read from the installed `Forguncy.exe`.
+ * - `reactCellTypePluginGuid`, the plugin resource paths, `browserTranspiler` and
+ *   `browserTranspilerVersion` — the plugin GUID is unchanged and its resources are readable
+ *   at the same paths; the React bundle reports `19.2.7` and Babel standalone `7.29.4`.
+ *
+ * **Carried forward, and flagged rather than implied:** `hostReactDomVersion` is recorded as
+ * `19.2.7` because the `12.0.101.0` React bundle is a single artifact reporting one React
+ * version and the `createRoot` entry, and #5's probe read `ReactDOM.version` as the same value
+ * on this product line. It was **not** read back as `ReactDOM.version` on `12.0.101.0` in the
+ * rebase session — the runtime site's generated page could not be opened (it requires two-step
+ * verification this machine has no credential for), so no browser-side field was re-read. A
+ * `ReactDOM` version that disagreed with `React` would be a real finding; nothing observed
+ * disagrees, and nothing observed confirms it either. See #120 for the open item.
+ *
+ * `evidence` is `product-runtime-source` plus `generated-runtime-browser` because #5's original
+ * browser observations remain the *only* browser behaviour recorded for this contract. The
+ * rebase did not reproduce them; that is the gap #120 tracks, and it is stated here so a reader
+ * does not read these fields as freshly observed in a page.
  */
 export interface RuntimeContractTarget {
   readonly product: string;
@@ -80,8 +107,8 @@ export interface RuntimeContractTarget {
 
 export const RUNTIME_CONTRACT_TARGET: RuntimeContractTarget = {
   product: "Forguncy",
-  productVersion: "12.0.100.0",
-  productBuild: "12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623",
+  productVersion: "12.0.101.0",
+  productBuild: "12.0.101.0+92cefba44ce06dc75c2633bf5f6c6771e4ee41f0",
   hostReactVersion: "19.2.7",
   hostReactDomVersion: "19.2.7",
   browserTranspiler: "Babel standalone",
@@ -571,9 +598,44 @@ export const CELL_SOURCE_REJECTIONS: readonly CellSourceRejection[] = [
   },
 ];
 
-/** How the platform reports a rejected source, so a compiler can match the wording. */
+/**
+ * How the platform reports a rejected source, so a compiler can match the wording.
+ *
+ * ## The envelope changed between `12.0.100.0` and `12.0.101.0`
+ *
+ * This is a measured drift (#120), and it is why the field is a list rather than one string:
+ *
+ * ```text
+ * 12.0.100.0: Invalid AI-generated object 'ReactCellTypeCellType': ReactCellType 代码验证失败 [<stage>]：<message>
+ * 12.0.101.0: api.page.setCells 调用失败：校验失败：ReactCellType.code：代码验证失败 [<stage>]：<message>
+ * ```
+ *
+ * The **inner** wording is unchanged — every message below was produced verbatim on both
+ * builds — and `<stage>` is still `preview` or `babel` with the same distribution. What moved
+ * is the frame around it: the object-name form is gone, the call and the property are named
+ * instead, and the rejection now arrives wrapped in the failing call's own error.
+ *
+ * Both are recorded because both were measured, and because a consumer that hard-codes one
+ * frame silently stops matching on the other. {@link RUNTIME_CONTRACT_TARGET} names which build
+ * is current, and {@link CELL_SOURCE_REJECTION_ENVELOPE.templates} keeps the older frame as
+ * history rather than deleting it — a compiler matching only the current one is correct, and a
+ * tool reading an older session's output needs to know what it is looking at.
+ */
 export const CELL_SOURCE_REJECTION_ENVELOPE = {
-  template: "Invalid AI-generated object 'ReactCellTypeCellType': ReactCellType 代码验证失败 [<stage>]：<message>",
+  /**
+   * The frames a rejected source can arrive in, newest first, each tagged with the builds it
+   * was observed on. `<stage>` and `<message>` are the placeholders; see `stageTags`.
+   */
+  templates: [
+    {
+      versions: ["12.0.101.0"],
+      template: "api.page.setCells 调用失败：校验失败：ReactCellType.code：代码验证失败 [<stage>]：<message>",
+    },
+    {
+      versions: ["12.0.100.0"],
+      template: "Invalid AI-generated object 'ReactCellTypeCellType': ReactCellType 代码验证失败 [<stage>]：<message>",
+    },
+  ] as const,
   stageTags: ["preview", "babel"],
   evidence: ["designer-api"] as readonly RuntimeEvidenceChannel[],
 };

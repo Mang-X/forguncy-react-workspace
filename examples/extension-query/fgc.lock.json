@@ -15,8 +15,8 @@
       },
       "target": {
         "product": "Forguncy",
-        "productVersion": "12.0.100.0",
-        "productBuild": "12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623",
+        "productVersion": "12.0.101.0",
+        "productBuild": "12.0.101.0+92cefba44ce06dc75c2633bf5f6c6771e4ee41f0",
         "hostReactVersion": "19.2.7"
       },
       "probedWith": {

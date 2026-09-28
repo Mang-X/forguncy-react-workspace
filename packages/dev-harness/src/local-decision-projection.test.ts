@@ -69,10 +69,13 @@ function projectWithDecision(overrides: {
     probe: { status: "passed", fingerprint: "probe=x", versionIndependent: false },
     target: {
       product: "Forguncy",
-      productVersion: "12.0.100.0",
-      // The contract's own build, because a record's `target` is compared field-by-field against it
-      // and any other value is `forguncy-target-changed` — a real finding about a real drift, and a
-      // fixture using a placeholder build would be asserting that instead of the case it names.
+      // Version and build both come from the contract, because a record's `target` is compared
+      // field-by-field against it and any other value is `forguncy-target-changed` — a real finding
+      // about a real drift, and a fixture using a placeholder would be asserting that instead of the
+      // case it names. They are taken *together* on purpose: the version was hard-coded while the
+      // build was not, so re-basing the contract silently split the pair and failed nine tests in
+      // this package for a reason none of them was about.
+      productVersion: RUNTIME_CONTRACT_TARGET.productVersion,
       productBuild: RUNTIME_CONTRACT_TARGET.productBuild,
       hostReactVersion: RUNTIME_CONTRACT_TARGET.hostReactVersion,
     },

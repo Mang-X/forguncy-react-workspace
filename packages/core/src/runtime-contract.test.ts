@@ -225,8 +225,8 @@ function auditExportedFacts(module: Record<string, unknown>): {
 
 describe("runtime contract target", () => {
   it("pins the exact product build the contract was established against", () => {
-    expect(RUNTIME_CONTRACT_TARGET.productVersion).toBe("12.0.100.0");
-    expect(RUNTIME_CONTRACT_TARGET.productBuild).toContain("12.0.100.0+");
+    expect(RUNTIME_CONTRACT_TARGET.productVersion).toBe("12.0.101.0");
+    expect(RUNTIME_CONTRACT_TARGET.productBuild).toContain("12.0.101.0+");
     expect(RUNTIME_CONTRACT_TARGET.hostReactVersion).toBe("19.2.7");
     expect(RUNTIME_CONTRACT_TARGET.hostReactDomVersion).toBe(RUNTIME_CONTRACT_TARGET.hostReactVersion);
     expect(RUNTIME_CONTRACT_TARGET.browserTranspilerVersion).toBe("7.29.4");
@@ -241,7 +241,7 @@ describe("runtime contract target", () => {
 
   it("renders a header a report or PR body can carry", () => {
     const header = describeRuntimeContractTarget();
-    expect(header).toContain("12.0.100.0");
+    expect(header).toContain("12.0.101.0");
     expect(header).toContain("19.2.7");
     expect(header).toContain("7.29.4");
   });
@@ -522,7 +522,21 @@ describe("rejected source", () => {
   });
 
   it("documents the error envelope both validation passes surface through", () => {
-    expect(CELL_SOURCE_REJECTION_ENVELOPE.template).toContain("ReactCellType 代码验证失败");
+    // Both measured frames, newest first, each tied to the build it was observed on — because
+    // the frame moved between 12.0.100.0 and 12.0.101.0 (#120) and a reader has to be able to
+    // tell which one it is looking at.
+    const templates = CELL_SOURCE_REJECTION_ENVELOPE.templates;
+    expect(templates.map(t => t.versions[0])).toEqual(["12.0.101.0", "12.0.100.0"]);
+    for (const { template, versions } of templates) {
+      // The inner wording and the stage placeholder are the *unchanged* parts.
+      expect(template, versions.join()).toContain("代码验证失败 [<stage>]：<message>");
+    }
+    // The current frame names the call and the property; the older one names the object.
+    expect(templates[0].template).toContain("api.page.setCells");
+    expect(templates[0].template).toContain("ReactCellType.code");
+    expect(templates[1].template).toContain("Invalid AI-generated object 'ReactCellTypeCellType'");
+    // The two are genuinely different frames, so a consumer matching one does not match the other.
+    expect(templates[0].template).not.toBe(templates[1].template);
     expect(CELL_SOURCE_REJECTION_ENVELOPE.stageTags).toEqual(["preview", "babel"]);
   });
 
