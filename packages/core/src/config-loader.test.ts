@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -410,5 +410,44 @@ describe("the freshness boundary: what the default loader does not cover", () =>
     expect(third.require("scratch").target.locatorKey).toBe("新页#B2");
     expect(global.__fgcGraphEvaluations).toBe(2);
     delete global.__fgcGraphEvaluations;
+  });
+});
+
+describe("project roots that are awkward for a shell and a filesystem", () => {
+  /**
+   * A root containing a space and non-ASCII characters, which is the ordinary case on the Windows
+   * machines this repository is developed on and is not exotic on Linux either.
+   *
+   * Decision source: GitHub Issue #101 — a Cell project under `C:\…\我的 项目\` has to configure
+   * the same way one under `/tmp/fgc/` does. Measured before this test existed: the config already
+   * resolved correctly end to end, so what this pins is the property rather than a fix — a path
+   * that started truncating at the space, or a `file://` URL that lost its percent-encoding, would
+   * show here first.
+   *
+   * The root is used three ways in one load, and each is a separate way to get it wrong: walked to
+   * find the config file, converted to a URL to import it, and joined to resolve the entry. That is
+   * the whole of the claim; it is not a compile or probe test.
+   */
+  it("loads a config from a root with a space and non-ASCII characters", async () => {
+    const parent = mkdtempSync(join(tmpdir(), "fgc-awkward-root-"));
+    const root = join(parent, "我的 项目 with space");
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "cell.ts"), "export const cell = 1;\n");
+    writeFileSync(
+      join(root, "forguncy.config.mjs"),
+      'export default { cells: { scratch: { entry: "./src/cell.ts", target: { pageName: "中文 页", cell: "D4" } } } };\n',
+    );
+
+    try {
+      // The file is found by walking the root, imported through a `file://` URL built from it, and
+      // its relative entry is resolved against it — three separate places the root is used.
+      expect(findForguncyConfigFile({ root })).toBe(join(root, "forguncy.config.mjs"));
+
+      const registry = await loadForguncyConfig({ root });
+      expect(registry.require("scratch").entryPath).toBe(resolve(root, "src", "cell.ts"));
+      expect(registry.require("scratch").target.locatorKey).toBe("中文 页#D4");
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
   });
 });

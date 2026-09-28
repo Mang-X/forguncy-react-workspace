@@ -119,6 +119,46 @@ describe("fgc.lock.json as a project artifact", () => {
     expect(findMachineSpecificPaths(JSON.parse(text))).toEqual([]);
   });
 
+  it("reads a lock a Windows checkout converted to CRLF, and rewrites it without inventing a change", async () => {
+    // A regression pin for the store's *read* contract, which the `.gitattributes` rule does not
+    // cover. That rule governs this repository's own checkouts; `fgc.lock.json` lives in the
+    // *consumer's* project, where the line endings are whatever that developer's Git produced —
+    // `core.autocrlf=true`, the Git for Windows default, checks a text file out as CRLF. So the
+    // tolerance has to live in the code, not only in this repository's checkout.
+    //
+    // The behaviour was already correct (`JSON.parse` accepts CRLF), which is why this pins it
+    // rather than fixing it. What is easy to break is the other half: writing the lock back must
+    // canonicalize to LF rather than preserve the conversion, or the second write produces a diff
+    // nobody made — the "every run rewrites the file" failure `#92` was about.
+    //
+    // The conversion is simulated rather than inherited from the machine's `core.autocrlf`, so
+    // this means the same thing on CI as locally.
+    const projectRoot = await emptyProject();
+    const lock: FgcLockDocument = {
+      schemaVersion: FGC_LOCK_SCHEMA_VERSION,
+      decisions: [{ ...inlineRecord, packageName: "es-toolkit" }, inlineRecord],
+    };
+    const canonical = serializeFgcLock(lock);
+    const asCheckedOutByWindowsGit = canonical.replace(/\r?\n/g, "\r\n");
+    expect(asCheckedOutByWindowsGit).toContain("\r\n");
+
+    await writeFile(fgcLockPath(projectRoot), asCheckedOutByWindowsGit, "utf8");
+    const reread = await readFgcLock(projectRoot);
+
+    // The document is the same document, not a parse that dropped the trailing newline.
+    expect(reread).toEqual(canonicalizeFgcLock(lock));
+
+    // And writing it back canonicalizes rather than preserving the conversion, which is what makes
+    // the rewrite idempotent: the second write sees LF and changes nothing.
+    await writeFgcLock(projectRoot, reread);
+    const rewritten = await readFile(fgcLockPath(projectRoot), "utf8");
+    expect(rewritten).toBe(canonical);
+    expect(rewritten).not.toContain("\r");
+
+    await writeFgcLock(projectRoot, await readFgcLock(projectRoot));
+    expect(await readFile(fgcLockPath(projectRoot), "utf8")).toBe(canonical);
+  });
+
   it("resolves every record in the committed example as verified", async () => {
     const lock = await readFixture();
     const environment = fixtureEnvironment();
