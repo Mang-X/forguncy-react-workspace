@@ -1151,13 +1151,51 @@ describe("runDependencyProbe: cache", () => {
       vitePlus: "0.3.2",
       rolldown: "1.2.9",
       node: "24",
-      installGraph: { lockfile: "sha256:aaaa", patches: "sha256:bbbb", configuration: "sha256:cccc" },
+      installGraph: { lockfile: "sha256:aaaa", patches: "sha256:bbbb", configuration: "sha256:cccc", installedTree: "sha256:dddd" },
     } as const;
 
     await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: identity });
     const second = await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: identity });
 
     expect(second.fromCache).toBe(true);
+  });
+
+  it("re-probes when only the installed tree differs from the cached report", async () => {
+    // PR #114 review round 6, P1. `installedTree` was added to the *record* but not to this
+    // comparison, and the warm cache is what actually answers a repeat run — so a component the
+    // comparison ignores is a component that cannot invalidate anything. Measured: with only
+    // `installedTree` differing (the real `npm install --omit=optional` shape), the second run
+    // returned the first run's report with `fromCache: true`, which is the original defect restored.
+    const projectRoot = fixture("pure-esm-utility");
+    await rm(join(projectRoot, ".fgc"), { recursive: true, force: true });
+
+    const identity = {
+      vitePlus: "0.3.2",
+      rolldown: "1.2.9",
+      node: "24",
+      installGraph: {
+        lockfile: "sha256:aaaa",
+        patches: "sha256:bbbb",
+        configuration: "sha256:cccc",
+        installedTree: "sha256:tree-one",
+      },
+    } as const;
+
+    const first = await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: identity });
+    expect(first.fromCache).toBe(false);
+
+    // Same everything else, and the same fingerprint — the install graph is not in it by design.
+    const moved = { ...identity, installGraph: { ...identity.installGraph, installedTree: "sha256:tree-two" } };
+    const second = await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: moved });
+
+    expect(second.fingerprint).toBe(first.fingerprint);
+    expect(second.fromCache).toBe(false);
+
+    // And the fail-closed half: `null` on either side is not "agrees", even when both are `null`.
+    const unknown = { ...identity, installGraph: { ...identity.installGraph, installedTree: null } };
+    await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: unknown });
+    const bothUnknown = await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: unknown });
+    expect(bothUnknown.fromCache).toBe(false);
   });
 
   // #94. The cache's own half of the defect: the fingerprint deliberately excludes the toolchain
@@ -1204,7 +1242,7 @@ describe("runDependencyProbe: cache", () => {
       vitePlus: "0.3.2",
       rolldown: "1.2.9",
       node: "24",
-      installGraph: { lockfile: "sha256:aaaa", patches: "sha256:bbbb", configuration: "sha256:cccc" },
+      installGraph: { lockfile: "sha256:aaaa", patches: "sha256:bbbb", configuration: "sha256:cccc", installedTree: "sha256:dddd" },
     } as const;
 
     await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: base });
@@ -1231,7 +1269,7 @@ describe("runDependencyProbe: cache", () => {
       vitePlus: "0.3.2",
       rolldown: "1.2.9",
       node: "24",
-      installGraph: { lockfile: "sha256:aaaa", patches: "sha256:bbbb", configuration: "sha256:cccc" },
+      installGraph: { lockfile: "sha256:aaaa", patches: "sha256:bbbb", configuration: "sha256:cccc", installedTree: "sha256:dddd" },
     } as const;
 
     const first = await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: identity });

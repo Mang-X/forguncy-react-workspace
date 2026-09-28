@@ -333,7 +333,14 @@ function sameToolchainIdentity(cached: ToolchainIdentity, current: ToolchainIden
   if (cachedGraph === null || currentGraph === null) {
     return false;
   }
-  for (const component of ["lockfile", "patches", "configuration"] as const) {
+  // Every component of the graph, `installedTree` included. Leaving it out is not a smaller
+  // comparison, it is the *original* defect restored: the warm cache is what actually answers a
+  // repeat run, so a component the cache ignores is a component that cannot invalidate anything.
+  // Measured — with only `installedTree` differing (the real `npm install --omit=optional` shape),
+  // the second run returned the first run's report with `fromCache: true`. The freshness axis in
+  // `core` compares the same four components; the two lists are kept in step deliberately, and this
+  // one is the one that governs.
+  for (const component of ["lockfile", "patches", "configuration", "installedTree"] as const) {
     const a = nullable(cachedGraph[component]);
     const b = nullable(currentGraph[component]);
     // A digest either side cannot establish means "cannot say", and #94 requires that to be

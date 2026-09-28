@@ -74,7 +74,7 @@ async function projectWithDecision(overrides: {
   mkdirSync(join(root, "node_modules"), { recursive: true });
   writeFileSync(
     join(root, "node_modules", ".modules.yaml"),
-    ["included:", "  dependencies: true", "  devDependencies: true", "  optionalDependencies: true", "nodeLinker: isolated", ""].join("\n"),
+    ["included:", "  dependencies: true", "  devDependencies: true", "  optionalDependencies: true", "nodeLinker: isolated", "hoistPattern:", "  - \"*\"", "publicHoistPattern: []", ""].join("\n"),
     "utf8",
   );
 

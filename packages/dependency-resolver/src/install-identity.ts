@@ -484,12 +484,28 @@ function isInside(directory: string, candidate: string): boolean {
  * presented as a complete one, and "unknown" costs a re-measurement while a wrong choice ships
  * stale evidence.
  */
+/** The package managers whose lockfile spellings this toolchain knows. */
+type ManagerKind = "pnpm" | "npm" | "yarn" | "bun";
+
 const LOCKFILES_BY_MANAGER: Readonly<Record<string, readonly string[]>> = {
   pnpm: ["pnpm-lock.yaml"],
   npm: ["package-lock.json", "npm-shrinkwrap.json"],
   yarn: ["yarn.lock"],
   bun: ["bun.lock", "bun.lockb"],
 };
+
+/**
+ * The inverse of {@link LOCKFILES_BY_MANAGER}: the manager a lockfile name belongs to.
+ *
+ * Derived from that table rather than written out again, so a spelling added there cannot be
+ * forgotten here — the two are the same fact from opposite ends, and a hand-copied second list is
+ * the "second copy of a rule" this repository keeps finding.
+ */
+const MANAGER_BY_LOCKFILE: Readonly<Record<string, ManagerKind>> = Object.fromEntries(
+  Object.entries(LOCKFILES_BY_MANAGER).flatMap(([manager, names]) =>
+    names.map(name => [name, manager as ManagerKind] as const),
+  ),
+);
 
 /**
  * The lockfile names a directory can be the install root of — every recognized name, always.
@@ -837,7 +853,9 @@ export async function readInstallGraphIdentity(projectRoot: string): Promise<Ins
   const [patches, configuration, installedTree] = await Promise.all([
     patchesDigest(installRoot, workspace, manifest),
     configurationDigest(installRoot, workspace, manifest),
-    installedTreeDigest(installRoot),
+    // The claim's own lockfile decides which manager's record to read, so a stale marker from a
+    // previous manager cannot answer for the one that is actually installed (see the function).
+    installedTreeDigest(installRoot, lockfile.claim.name),
   ]);
 
   return { lockfile: lockfile.claim.digest, patches, configuration, installedTree };
@@ -873,60 +891,106 @@ export async function readInstallGraphIdentity(projectRoot: string): Promise<Ins
  * including the platform-specific entry names: those really are different installs, and the honest
  * answer is that a record measured on one does not describe the other.
  *
- * **yarn and bun write no record this toolchain can verify**, so the answer is `null` — unknown, and
- * therefore stale. Inventing a marker would be the guess #94 exists to remove.
+ * **Which record is read follows the lockfile the walk already identified**, and that is a
+ * correctness requirement rather than a tidy-up. Choosing by first match re-trusted the accumulated
+ * markers review had already measured: a project that ran `pnpm install` and later `npm install`
+ * keeps **both** markers, so with `pnpm-lock.yaml` deleted — the migration case — the walk correctly
+ * identifies npm while a first-match read still preferred the stale `.modules.yaml`. Measured: npm's
+ * materialized entry set changed under `--omit=optional` and `installedTree` did not move.
+ *
+ * So the manager comes from the claim: pnpm's lockfile reads pnpm's record, npm's reads npm's. A
+ * manager whose record this toolchain cannot read — yarn, bun — is `null`, and so is a claim whose
+ * manager has no record reader at all. Inventing a marker would be the guess #94 exists to remove.
  */
-async function installedTreeDigest(installRoot: string): Promise<string | null> {
+async function installedTreeDigest(installRoot: string, lockfileName: string): Promise<string | null> {
+  const manager = MANAGER_BY_LOCKFILE[lockfileName] ?? null;
+  if (manager === "pnpm") {
+    return pnpmInstalledTreeDigest(installRoot);
+  }
+  if (manager === "npm") {
+    return npmInstalledTreeDigest(installRoot);
+  }
+  // yarn, bun, or a lockfile name with no reader: the result record is not something this toolchain
+  // can verify, so the answer is `unknown` rather than a value taken from a different manager's file.
+  return null;
+}
+
+/** pnpm's `node_modules/.modules.yaml`, as the two portable fields that record the layout. */
+async function pnpmInstalledTreeDigest(installRoot: string): Promise<string | null> {
   const modules = await readTextFile(join(installRoot, "node_modules", PNPM_MODULES_FILE));
   if (modules.kind === "unreadable") {
     return null;
   }
-  if (modules.kind === "read") {
-    let parsed: Record<string, unknown> | null;
-    try {
-      parsed = asPlainObject(parseYaml(modules.text));
-    } catch {
-      return null;
-    }
-    if (parsed === null) {
-      return null;
-    }
-    const included = parsed["included"];
-    const nodeLinker = parsed["nodeLinker"];
-    if (included === undefined || nodeLinker === undefined) {
-      // A record this toolchain cannot interpret is one it cannot claim to have covered.
-      return null;
-    }
-    return digestOf(canonicalJson({ included, nodeLinker }));
+  if (modules.kind !== "read") {
+    return null;
   }
+  let parsed: Record<string, unknown> | null;
+  try {
+    parsed = asPlainObject(parseYaml(modules.text));
+  } catch {
+    return null;
+  }
+  if (parsed === null) {
+    return null;
+  }
+  // The fields that decide what is on disk *and* what resolution can reach:
+  //
+  // - `included` — which dependency classes were installed.
+  // - `nodeLinker` — `isolated` versus `hoisted`.
+  // - `hoistPattern` / `publicHoistPattern` — which undeclared packages are lifted into the root
+  //   and virtual-store `node_modules`, i.e. which names Node and Rolldown can find at all. Review
+  //   round 6: the CLI changes these while `included` and `nodeLinker` hold still, so omitting them
+  //   left a real layout change invisible. Measured: `pnpm install --shamefully-hoist` moves
+  //   `publicHoistPattern` from `[]` to `["*"]` with the other two unchanged.
+  //
+  // `hoistedDependencies` is deliberately **not** here, and both halves of that were measured on a
+  // real install. It is not a better signal: `pnpm install --public-hoist-pattern='@rolldown/*'`
+  // changed `publicHoistPattern` while `hoistedDependencies` stood still, so it would have missed
+  // the very case the patterns catch. And it is not *portable*: its keys name the platform's own
+  // binary — `@rolldown/binding-win32-x64-msvc` on this machine, the linux binding on CI — so
+  // digesting it would make a committed lock churn between platforms, which is the portability rule
+  // #94 requires and the same defect the CRLF normalization in `digestOf` exists to avoid.
+  const fields = {
+    included: parsed["included"],
+    nodeLinker: parsed["nodeLinker"],
+    hoistPattern: parsed["hoistPattern"],
+    publicHoistPattern: parsed["publicHoistPattern"],
+  };
+  // A record missing any of them is one this toolchain cannot claim to have covered. `?? null`
+  // would silently digest an absent pattern as if it were the empty one.
+  if (Object.values(fields).some(value => value === undefined)) {
+    return null;
+  }
+  return digestOf(canonicalJson(fields));
+}
 
-  // npm's record is a *file inside* `node_modules`, and only its entry paths are read: the recorded
-  // integrity hashes duplicate the lockfile, and any machine-dependent field would be the portability
-  // defect described above.
+/** npm's `node_modules/.package-lock.json`, as the materialized entry set. */
+async function npmInstalledTreeDigest(installRoot: string): Promise<string | null> {
+  // Only the entry paths are read: the recorded integrity hashes duplicate the lockfile, and any
+  // machine-dependent field would be the portability defect described above.
   const npmRecord = await readTextFile(join(installRoot, "node_modules", NPM_INSTALL_RECORD));
   if (npmRecord.kind === "unreadable") {
     return null;
   }
-  if (npmRecord.kind === "read") {
-    let parsed: Record<string, unknown> | null;
-    try {
-      parsed = asPlainObject(JSON.parse(npmRecord.text));
-    } catch {
-      return null;
-    }
-    if (parsed === null) {
-      return null;
-    }
-    const packages = asPlainObject(parsed["packages"]);
-    if (packages === null) {
-      return null;
-    }
-    // Sorted so the digest is over the *set* of materialized entries rather than over whatever order
-    // npm happened to write them in.
-    return digestOf(canonicalJson(Object.keys(packages).sort()));
+  if (npmRecord.kind !== "read") {
+    return null;
   }
-
-  return null;
+  let parsed: Record<string, unknown> | null;
+  try {
+    parsed = asPlainObject(JSON.parse(npmRecord.text));
+  } catch {
+    return null;
+  }
+  if (parsed === null) {
+    return null;
+  }
+  const packages = asPlainObject(parsed["packages"]);
+  if (packages === null) {
+    return null;
+  }
+  // Sorted so the digest is over the *set* of materialized entries rather than over whatever order
+  // npm happened to write them in.
+  return digestOf(canonicalJson(Object.keys(packages).sort()));
 }
 
 /**

@@ -27,7 +27,7 @@
           "lockfile": "sha256:76ee5ff018eb3b529882c86a80fb9213ff0c0fb2ec093d004934e06d8435cdf2",
           "patches": "sha256:a771d26ace30f31fffb826a3d192a292e9b4850485e671abf84cf3af95c713a8",
           "configuration": "sha256:37aa2b39da9427a8629b68238ea0fa6bd1dc19017afbf7b7fa8d9cc7b9974c46",
-          "installedTree": "sha256:da3ef05b39e973370dbd7fb8f2abdee89933687b9833f41661086a30fa0cfd70"
+          "installedTree": "sha256:8df5f4bdf203807d3f16883029ea12b1c7068f39a0dffd8c57950dec8d221d9a"
         }
       },
       "extension": {

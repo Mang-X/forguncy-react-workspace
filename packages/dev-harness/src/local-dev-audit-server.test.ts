@@ -139,7 +139,7 @@ async function projectWithExtensionLock(): Promise<{ root: string; cleanup: () =
   await mkdir(join(root, "node_modules"), { recursive: true });
   await writeFile(
     join(root, "node_modules", ".modules.yaml"),
-    ["included:", "  dependencies: true", "  devDependencies: true", "  optionalDependencies: true", "nodeLinker: isolated", ""].join("\n"),
+    ["included:", "  dependencies: true", "  devDependencies: true", "  optionalDependencies: true", "nodeLinker: isolated", "hoistPattern:", "  - \"*\"", "publicHoistPattern: []", ""].join("\n"),
     "utf8",
   );
 
@@ -210,7 +210,7 @@ describe("the declared lock path is honoured, which `readFgcLock(projectRoot)` c
     await mkdir(join(root, "node_modules"), { recursive: true });
     await writeFile(
       join(root, "node_modules", ".modules.yaml"),
-      ["included:", "  dependencies: true", "  devDependencies: true", "  optionalDependencies: true", "nodeLinker: isolated", ""].join("\n"),
+      ["included:", "  dependencies: true", "  devDependencies: true", "  optionalDependencies: true", "nodeLinker: isolated", "hoistPattern:", "  - \"*\"", "publicHoistPattern: []", ""].join("\n"),
       "utf8",
     );
     const declaredPath = join(root, "locks", "fgc.lock.json");

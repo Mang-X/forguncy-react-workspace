@@ -361,7 +361,11 @@ describe("#94: identity comes from the install graph, not from a declaration", (
     // pnpm's equivalent: `included` records the dependency classes that were installed, and
     // `--no-optional` flips `optionalDependencies` (measured on a real install, where the platform
     // binding then leaves disk).
-    const pnpmTree = async (optional: boolean, linker: string): Promise<string | null | undefined> =>
+    //
+    // The record is written in the **real** shape (JSON, one line per field), copied field-for-field
+    // from a pnpm install rather than hand-rolled as block YAML — a hand-rolled fixture is how the
+    // `hoistPattern` count in an earlier revision of this case got written wrong.
+    const pnpmTree = async (overrides: Record<string, unknown>): Promise<string | null | undefined> =>
       withProject(async root => {
         await writeFileAt(
           join(root, "package.json"),
@@ -370,22 +374,104 @@ describe("#94: identity comes from the install graph, not from a declaration", (
         await writeFileAt(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
         await writeFileAt(
           join(root, "node_modules", ".modules.yaml"),
-          [
-            "included:",
-            "  dependencies: true",
-            "  devDependencies: true",
-            `  optionalDependencies: ${String(optional)}`,
-            `nodeLinker: ${linker}`,
-            "",
-          ].join("\n"),
+          JSON.stringify({
+            included: { dependencies: true, devDependencies: true, optionalDependencies: true },
+            nodeLinker: "isolated",
+            hoistPattern: ["*"],
+            publicHoistPattern: [],
+            ...overrides,
+          }),
         );
         return (await readInstallGraphIdentity(root)).installedTree;
       });
 
-    const pnpmDefault = await pnpmTree(true, "isolated");
+    const pnpmDefault = await pnpmTree({});
     expect(pnpmDefault).not.toBeNull();
-    expect(await pnpmTree(false, "isolated")).not.toBe(pnpmDefault);
-    expect(await pnpmTree(true, "hoisted")).not.toBe(pnpmDefault);
+    // Each of these is a real pnpm flag, and each changes what resolution can reach while the
+    // lockfile stays put.
+    expect(
+      await pnpmTree({ included: { dependencies: true, devDependencies: true, optionalDependencies: false } }),
+    ).not.toBe(pnpmDefault);
+    expect(await pnpmTree({ nodeLinker: "hoisted" })).not.toBe(pnpmDefault);
+    // `pnpm install --shamefully-hoist` moves this from `[]` to `["*"]` with `included` and
+    // `nodeLinker` both unchanged — measured on a real install. The pair is the shape review round 6
+    // named, and omitting the hoisting fields left it invisible.
+    expect(await pnpmTree({ publicHoistPattern: ["*"] })).not.toBe(pnpmDefault);
+
+    // A record missing a hoisting field is unknown rather than silently read as the empty pattern —
+    // the fail-closed direction, since an absent field is not the same fact as an empty one.
+    const absent = await withProject(async root => {
+      await writeFileAt(
+        join(root, "package.json"),
+        JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "pnpm@11.18.0" }),
+      );
+      await writeFileAt(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+      await writeFileAt(
+        join(root, "node_modules", ".modules.yaml"),
+        JSON.stringify({ included: { dependencies: true }, nodeLinker: "isolated" }),
+      );
+      return readInstallGraphIdentity(root);
+    });
+    expect(absent.installedTree).toBeNull();
+  });
+
+  it("reads the record of the lockfile's manager, not whichever marker is found first", async () => {
+    // PR #114 review round 6, P1. Choosing the record by first match re-trusted the accumulated
+    // markers: a project that ran `pnpm install` and later `npm install` keeps **both**, so in the
+    // migration case — `pnpm-lock.yaml` deleted, `package-lock.json` the only lockfile — the walk
+    // correctly identified npm while the record read still preferred the stale `.modules.yaml`.
+    // Measured: npm's materialized entry set changed under `--omit=optional` and `installedTree` did
+    // not move.
+    const migrating = async (npmEntries: readonly string[]): Promise<{ lockfile: string | null; installedTree: string | null | undefined }> =>
+      withProject(async root => {
+        await writeFileAt(
+          join(root, "package.json"),
+          JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "npm@11.0.0" }),
+        );
+        // Only npm's lockfile is present; the pnpm one was removed by the migration.
+        await writeFileAt(
+          join(root, "package-lock.json"),
+          JSON.stringify({ name: "consumer", dependencies: { rolldown: "1.2.9" } }),
+        );
+        // A stale marker from the old pnpm install, frozen across both runs.
+        await writeFileAt(
+          join(root, "node_modules", ".modules.yaml"),
+          [
+            "included:",
+            "  dependencies: true",
+            "  devDependencies: true",
+            "  optionalDependencies: true",
+            "nodeLinker: isolated",
+            "hoistPattern:",
+            '  - "*"',
+            "publicHoistPattern: []",
+            "",
+          ].join("\n"),
+        );
+        const packages: Record<string, unknown> = {};
+        for (const entry of npmEntries) {
+          packages[entry] = { version: "1.2.9" };
+        }
+        await writeFileAt(
+          join(root, "node_modules", ".package-lock.json"),
+          JSON.stringify({ name: "consumer", lockfileVersion: 3, packages }),
+        );
+        const identity = await readInstallGraphIdentity(root);
+        return { lockfile: identity.lockfile, installedTree: identity.installedTree };
+      });
+
+    const base = ["node_modules/rolldown"];
+    const withBinding = [...base, "node_modules/@rolldown/binding-win32-x64-msvc"];
+
+    const before = await migrating(withBinding);
+    const after = await migrating(base);
+
+    // npm's lockfile is what was digested in both runs...
+    expect(before.lockfile).not.toBeNull();
+    expect(after.lockfile).toBe(before.lockfile);
+    // ...so npm's record must be what was read, and its movement must show.
+    expect(before.installedTree).not.toBeNull();
+    expect(after.installedTree).not.toBe(before.installedTree);
   });
 
   it("is unknown when the manager writes no install record this toolchain can read", async () => {
@@ -408,7 +494,7 @@ describe("#94: identity comes from the install graph, not from a declaration", (
       await writeFileAt(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
       await writeFileAt(
         join(root, "node_modules", ".modules.yaml"),
-        ["included:", "  dependencies: true", "  devDependencies: true", "  optionalDependencies: true", "nodeLinker: isolated", ""].join("\n"),
+        ["included:", "  dependencies: true", "  devDependencies: true", "  optionalDependencies: true", "nodeLinker: isolated", "hoistPattern:", "  - \"*\"", "publicHoistPattern: []", ""].join("\n"),
       );
       return readInstallGraphIdentity(root);
     });
