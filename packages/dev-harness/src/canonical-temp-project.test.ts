@@ -32,7 +32,7 @@
  * caught by a pattern this narrow.
  */
 
-import { mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { afterAll, describe, expect, it } from "vitest";
@@ -72,10 +72,10 @@ describe("Vite refuses a Windows short-name path, so a served root must be canon
 
   it("canonicalizes a root whose own path is a short-name shape", () => {
     // The load-bearing operation, exercised with an input that *is* a short-name path rather than
-    // relying on `os.tmpdir()` to provide one. This is the assertion that fails if
-    // `servableRoot` stops canonicalizing: measured by removing the `realpath` call, which this
-    // catches while the properties above do not — on a developer machine the helper is otherwise a
-    // no-op and every other case here passes for that reason.
+    // relying on `os.tmpdir()` to provide one. This is the assertion that fails if `servableRoot`
+    // stops canonicalizing: measured by removing the `realpath` call, which this catches while the
+    // properties above do not — on a developer machine the helper is otherwise a no-op and every
+    // other case here passes for that reason.
     const base = canonicalTempProject("dev-harness-servable-");
     created.push(base);
     const real = join(base, "real-project");
@@ -96,6 +96,44 @@ describe("Vite refuses a Windows short-name path, so a served root must be canon
     expect(looksLikeWindowsShortNamePath(asViteSees(junction))).toBe(true);
     expect(looksLikeWindowsShortNamePath(asViteSees(servableRoot(junction)))).toBe(false);
     expect(servableRoot(junction)).toBe(real);
+  });
+
+  it("expands a real OS-generated 8.3 name, which `realpathSync` alone does not", () => {
+    // A junction is resolved by both `realpathSync` and `realpathSync.native`, so the case above is
+    // satisfied by either — and the CI failure was the *other* one. Node's plain `realpathSync` does
+    // not expand an 8.3 short name; `.native` and `fs.promises.realpath` do. Measured on this
+    // repository's Windows machine:
+    //
+    //   realpathSync        C:\…\A-VERY~1   →  C:\…\A-VERY~1                    (unchanged)
+    //   realpathSync.native C:\…\A-VERY~1   →  C:\…\a-very-long-directory-name   (expanded)
+    //
+    // That is why `servableRoot` uses `.native`, and a junction cannot show it: the first version of
+    // this helper used `realpathSync` and passed every junction assertion here while still failing on
+    // CI. The directory name is long enough for the volume to generate a short name for it, and the
+    // assertion is conditional because a volume with 8.3 generation disabled legitimately has none.
+    const base = canonicalTempProject("dev-harness-83-");
+    created.push(base);
+    const longName = "a-very-long-directory-name-here";
+    const longDirectory = join(base, longName);
+    mkdirSync(longDirectory, { recursive: true });
+
+    // The 8.3 name for a directory created by this test. Derived the way the file system derives it
+    // (first six significant characters, `~1`), and tested with `existsSync` — never created by this
+    // test: a literal directory of that name would be a different thing, and would make the
+    // assertions below measure the wrong path. A volume with 8.3 generation disabled legitimately
+    // has none, which is why this is conditional.
+    const shortDirectory = join(base, "A-VERY~1");
+    if (!existsSync(shortDirectory)) {
+      process.stderr.write("8.3 short names are not generated on this volume; skipping.\n");
+      return;
+    }
+
+    const asViteSees = (path: string): string => path.split("\\").join("/");
+
+    // Exactly the pair the CI failure turned on, and the one the junction case cannot distinguish.
+    expect(looksLikeWindowsShortNamePath(asViteSees(shortDirectory))).toBe(true);
+    expect(looksLikeWindowsShortNamePath(asViteSees(servableRoot(shortDirectory)))).toBe(false);
+    expect(servableRoot(shortDirectory)).toBe(realpathSync.native(longDirectory));
   });
 
   it("returns a root with no short-name segment, which is what makes it servable", () => {

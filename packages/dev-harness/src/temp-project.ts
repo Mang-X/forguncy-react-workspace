@@ -54,15 +54,29 @@ import { join } from "node:path";
  * #101: `extension-substitutions.test.ts` failed exactly this way on CI while passing on a developer
  * machine whose temp path has no short name.
  *
- * `realpath` expands the short name, so a canonical root is a servable one — and `realpathSync` of
- * an already-canonical path is a no-op, so a developer machine is unaffected.
+ * ## `realpathSync.native`, not `realpathSync`, and the difference is the whole fix
  *
- * Split out from {@link canonicalTempProject} so this operation can be tested with an input whose
- * path *is* a short-name shape (a junction), rather than only through `os.tmpdir()`, which has no
- * short name locally and would make the helper look like it does nothing.
+ * Node's `realpathSync` **does not expand an 8.3 short name**; `realpathSync.native` and
+ * `fs.promises.realpath` both do. Measured on this repository's own Windows machine, on a directory
+ * whose short name the OS generated:
+ *
+ * ```
+ * shortDir          C:\…\sn-iWu85s\A-VERY~1
+ * realpathSync      C:\…\sn-iWu85s\A-VERY~1        ← unchanged, so Vite still refuses it
+ * realpathSync.native  C:\…\sn-iWu85s\a-very-long-directory-name-here
+ * promises.realpath    C:\…\sn-iWu85s\a-very-long-directory-name-here
+ * ```
+ *
+ * So the first version of this function — `realpathSync` — did nothing about the `~1` and the test
+ * still failed on CI, while `dependency-resolver`'s fix worked because it uses `fs.promises.realpath`.
+ * Two spellings of "canonicalize" that differ on exactly the case at hand.
+ *
+ * Split out from {@link canonicalTempProject} so this can be tested with an input whose path *is* a
+ * short-name shape (a junction), rather than only through `os.tmpdir()`, which generates no short
+ * name locally and would make the helper look like it does nothing.
  */
 export function servableRoot(root: string): string {
-  return realpathSync(root);
+  return realpathSync.native(root);
 }
 
 /** A throwaway project directory, canonicalized via {@link servableRoot} for a test that serves it. */
