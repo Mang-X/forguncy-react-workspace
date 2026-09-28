@@ -46,16 +46,32 @@ import { describe, expect, it } from "vitest";
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
+/**
+ * A repository file's text, with line endings normalized to LF.
+ *
+ * Centralized rather than repeated per assertion for the reason `#91` recorded: a test that
+ * regex-matches file *contents* must not depend on what the reader's Git did to the file. A
+ * Windows checkout is CRLF without a `.gitattributes`, and the `.gitattributes` this PR adds
+ * cannot be relied on by the test that asserts it exists.
+ */
 function readRepositoryFile(relativePath: string): string {
-  return readFileSync(join(repositoryRoot, relativePath), "utf8");
+  return readFileSync(join(repositoryRoot, relativePath), "utf8").replace(/\r\n/g, "\n");
 }
 
 /**
- * The workflow split into its top-level jobs: name to that job's own lines.
+ * The workflow split into its top-level jobs: name to that job's own configuration lines.
  *
  * Deliberately a small hand-rolled splitter rather than a YAML dependency: the shape being read
  * is one this repository writes, and `jobs:` with two-space-indented job keys is the whole of it.
  * A dependency here would be a second thing to keep fresh for no gain.
+ *
+ * **Comment lines are dropped, and that is load-bearing rather than tidiness.** A job's own
+ * explanatory comment sits *above* its key, so it is appended to the *previous* job's body by any
+ * splitter that only looks for declarations — measured: with the workflow as written,
+ * `blocks.get("check")` contains `check-windows`'s prose. These assertions are about what a job
+ * *does* (`runs-on:`, `matrix:`, the install `args:`), so prose that merely discusses those words
+ * must not be able to satisfy — or trip — a check. Without this, documenting "do not make this a
+ * matrix: …" beside the job would fail the very guard it was describing.
  */
 function jobBlocks(workflow: string): Map<string, string> {
   const jobs = new Map<string, string>();
@@ -68,7 +84,7 @@ function jobBlocks(workflow: string): Map<string, string> {
       inJobs = true;
       continue;
     }
-    if (!inJobs) {
+    if (!inJobs || line.trimStart().startsWith("#")) {
       continue;
     }
     const declared = /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(line);
@@ -92,17 +108,20 @@ function jobBlocks(workflow: string): Map<string, string> {
   return jobs;
 }
 
-/** The status-check contexts the recorded ruleset requires, in the order it lists them. */
-function requiredCheckContexts(): readonly string[] {
+/** The status-check contexts the recorded ruleset requires, paired with the app they must come from. */
+function requiredStatusChecks(): readonly { context: string; integrationId: number }[] {
   const ruleset = JSON.parse(readRepositoryFile(".github/rulesets/main-pr-ci-protection.json")) as {
     rules: readonly {
       type: string;
-      parameters?: { required_status_checks?: readonly { context: string }[] };
+      parameters?: { required_status_checks?: readonly { context: string; integration_id?: number }[] };
     }[];
   };
   const rule = ruleset.rules.find(entry => entry.type === "required_status_checks");
 
-  return (rule?.parameters?.required_status_checks ?? []).map(entry => entry.context);
+  return (rule?.parameters?.required_status_checks ?? []).map(entry => ({
+    context: entry.context,
+    integrationId: entry.integration_id as number,
+  }));
 }
 
 const ciWorkflow = (): Map<string, string> =>
@@ -110,9 +129,12 @@ const ciWorkflow = (): Map<string, string> =>
 
 describe("the CI workflow keeps the required check and adds a Windows leg", () => {
   it("still exposes a job named exactly `check`, which is what the ruleset requires", () => {
-    // The ruleset's required context, read from the record rather than restated, so the two
-    // files cannot drift apart without this test failing.
-    expect(requiredCheckContexts()).toEqual(["check"]);
+    // The ruleset's requirement, read from the record rather than restated, so the two files
+    // cannot drift apart without this test failing. The `integration_id` is part of it: GitHub
+    // matches a required check on the (context, app) pair, so a same-named context published by
+    // a different integration does not satisfy the rule — asserting only the context would call
+    // such a ruleset satisfied.
+    expect(requiredStatusChecks()).toEqual([{ context: "check", integrationId: 15368 }]);
     expect(ciWorkflow().has("check")).toBe(true);
   });
 
@@ -141,16 +163,20 @@ describe("the CI workflow keeps the required check and adds a Windows leg", () =
     expect(windows).toContain("vp run typecheck");
   });
 
-  it("installs from the frozen lockfile on both legs, so a stale lock fails every platform", () => {
-    // Per-leg, and that is the point: a Windows leg that omitted the flag would let a lockfile
-    // stale only there pass. Counted rather than merely present, so dropping one is visible — and
-    // counted on the `args:` line that actually configures the install, not on the prose above it
-    // that names the same flag while explaining why it is passed.
-    const installs = readRepositoryFile(join(".github", "workflows", "ci.yml")).match(
-      /args: \['--frozen-lockfile'\]/g,
-    );
+  it("installs from the frozen lockfile on each leg, so a stale lock fails every platform", () => {
+    // Per-leg, and reading it per-leg is the whole point. A global count over the file is
+    // satisfied by an offsetting edit — measured: removing the flag from `check-windows` and
+    // adding a duplicate inside `check` keeps the count at two while the Windows leg stops
+    // checking the lockfile, which is the failure this assertion exists to prevent.
+    //
+    // Matched on the `args:` line that actually configures the install rather than on any
+    // occurrence of the flag: the comment above the Linux install names it too while explaining
+    // why it is passed, so an occurrence count over the raw text is not a count of installs.
+    const install = /args: \['--frozen-lockfile'\]/;
 
-    expect(installs).toHaveLength(2);
+    for (const job of ["check", "check-windows"]) {
+      expect(ciWorkflow().get(job), `the ${job} job`).toMatch(install);
+    }
   });
 
   it("keeps read-only workflow permissions", () => {
@@ -163,7 +189,7 @@ describe("the CI workflow keeps the required check and adds a Windows leg", () =
 
 describe("the repository fixes its own line endings", () => {
   it("declares LF for text files in a tracked .gitattributes", () => {
-    const attributes = readRepositoryFile(".gitattributes").replace(/\r\n/g, "\n");
+    const attributes = readRepositoryFile(".gitattributes");
 
     // `text=auto` normalizes the index; `eol=lf` makes the checkout deterministic. Both are
     // needed: the first keeps the stored blob stable, the second is the one that makes a Windows

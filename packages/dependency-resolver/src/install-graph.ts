@@ -43,6 +43,7 @@
  * run install yet" into a crash in the middle of an Agent flow.
  */
 
+import { realpath } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { locatePackage } from "./package-locator.ts";
@@ -159,6 +160,20 @@ function projectResolutionRoots(projectRoot: string): string[] {
  * directory and the walk can disagree about drive-letter case while pointing at
  * the same file.
  *
+ * **Both sides are canonical paths, and that is a precondition rather than a
+ * detail.** `directory` reaches here as `realpath` output (`package-locator` takes
+ * it so a symlinked package is compared by where it really is), and `roots` are
+ * derived from `projectRoot`. If `projectRoot` is *not* already canonical, the two
+ * sides are the same directory written two ways and the prefix test is false for
+ * every package — the whole install graph reads as `not-installed`.
+ *
+ * That is not hypothetical: on a GitHub Windows runner `os.tmpdir()` is
+ * `C:\\Users\\RUNNER~1\\AppData\\Local\\Temp`, and `realpath` expands the 8.3 short
+ * name to `runneradmin`. Measured on a junction standing in for the short name:
+ * `resolveInstalledVersions(canonicalRoot, ["dayjs"])` answers `1.11.13` while the
+ * same tree addressed through the link answers `not-installed`. `resolveInstalledVersions`
+ * therefore canonicalizes `projectRoot` before calling this (#101).
+ *
  * This guard used to be what kept `NODE_PATH` out, because `require.resolve`
  * appends every `Module.globalPaths` entry and the test runner injects
  * `NODE_PATH` entries pointing into this workspace's pnpm store — measured, a
@@ -228,17 +243,30 @@ export async function resolveInstalledVersions(
   projectRoot: string,
   packageNames: readonly string[],
 ): Promise<InstalledVersions> {
+  // Canonicalized once, here, because everything downstream that compares paths against
+  // it compares against the *locator's* output, which is `realpath` — see
+  // `isInProjectGraph`. A non-canonical root (Windows 8.3 short names, a junction, a
+  // symlinked checkout) would otherwise make every package read as `not-installed`. The
+  // canonical form is also what the resolution scope is walked from, so the roots below
+  // are canonical too and the two sides of the prefix test agree.
+  //
+  // A root that cannot be canonicalized is not an error: the locator will fail on its own
+  // terms and report `not-installed`, which is the same answer this function would give,
+  // and turning "the directory is unreadable" into a throw here would replace a lock
+  // environment's reportable reason with a crash mid-Agent-flow.
+  const canonicalRoot = await realpath(projectRoot).catch(() => projectRoot);
+
   // A filename, not a directory: the locator takes the location whose resolution
   // scope is wanted, and it does not have to exist for the scope to be correct —
   // the ancestor `node_modules` walk from its directory is what answers.
-  const roots = projectResolutionRoots(projectRoot);
+  const roots = projectResolutionRoots(canonicalRoot);
   const requested = [...new Set(packageNames)].sort(compareStrings);
 
   const versions: Record<string, string> = {};
   const unresolved: UnresolvedInstalledPackage[] = [];
 
   for (const packageName of requested) {
-    const resolution = await resolveManifest(packageName, projectRoot, roots);
+    const resolution = await resolveManifest(packageName, canonicalRoot, roots);
 
     if (resolution.outcome === "unresolved") {
       unresolved.push({ packageName, reason: resolution.reason });
