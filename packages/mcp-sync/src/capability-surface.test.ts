@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { SYNC_CAPABILITY_IDS } from "./capability-surface.ts";
+import { SYNC_CAPABILITY_IDS, preferredCallOf } from "./capability-surface.ts";
 import { SYNC_MEASURED_VERSIONS, SYNC_SUPPORTED_VERSIONS } from "./guarantees.ts";
 import {
   assertMcpSyncFlowIsCoherent,
@@ -254,6 +254,45 @@ describe("what the evidence establishes", () => {
         (capability.calls ?? []).find(call => SYNC_SUPPORTED_VERSIONS.includes(call.version as never))?.method,
       );
     }
+  });
+
+  // The rule, on constructed inputs. The shipped table cannot distinguish the two rankings,
+  // because support happens to be a suffix of measurement — so a test supplying only today's
+  // records passes under either rule and proves nothing about which is intended. These inputs
+  // make the two disagree, which is the only way the rule is actually under test.
+  describe("which recorded call a capability quotes", () => {
+    const call = (method: string, version: string) => ({ method, version }) as never;
+
+    it("prefers a supported version's call over a newer measured-only one", () => {
+      // Support is deliberately NOT the tail here: the newest measured build is unsupported.
+      const measured = ["12.0.100.0", "12.0.101.0", "12.0.102.0"];
+      const supported = ["12.0.101.0"];
+      const calls = [
+        call("api.page.onOldSupported", "12.0.100.0"),
+        call("api.page.onSupported", "12.0.101.0"),
+        call("api.page.onNewerUnsupported", "12.0.102.0"),
+      ];
+
+      // Ranking by the measured list alone would pick the newest overall; the rule picks the
+      // newest *supported* one, which is the claim the capability is making.
+      expect(preferredCallOf(calls, supported, measured)).toBe("api.page.onSupported");
+      // Position in the record must not matter, or the property is really about array order.
+      expect(preferredCallOf([...calls].reverse(), supported, measured)).toBe("api.page.onSupported");
+    });
+
+    it("falls back to the newest measured call when nothing is supported", () => {
+      const measured = ["12.0.100.0", "12.0.101.0"];
+      const calls = [call("api.page.older", "12.0.100.0"), call("api.page.newer", "12.0.101.0")];
+
+      // A capability whose every call is historical still quotes the most recent of them rather
+      // than nothing, so the port never loses its name for an established operation.
+      expect(preferredCallOf(calls, [], measured)).toBe("api.page.newer");
+    });
+
+    it("quotes nothing for an absent or empty record", () => {
+      expect(preferredCallOf(undefined)).toBeUndefined();
+      expect(preferredCallOf([])).toBeUndefined();
+    });
   });
 });
 

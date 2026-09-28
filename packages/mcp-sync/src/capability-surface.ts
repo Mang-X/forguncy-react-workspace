@@ -227,14 +227,24 @@ export interface SyncCapability {
  *
  * A capability with no calls is `unestablished` and carries no method; the guards in
  * {@link assertSyncCapabilityCoherent} enforce that pairing.
+ *
+ * The version lists are parameters, which is what makes the rule *testable* rather than merely
+ * implemented. While support is a suffix of measurement — which it has been at every point so
+ * far — ranking by either list gives the same answer, so a test supplying only today's records
+ * could not tell the two rules apart. #120 narrowed support to one version and that coincidence
+ * survived it; parameterising is what lets a caller construct the state where they disagree.
  */
-function preferredCallOf(calls: readonly SyncCapabilityCall[] | undefined): string | undefined {
+export function preferredCallOf(
+  calls: readonly SyncCapabilityCall[] | undefined,
+  supportedVersions: readonly string[] = SYNC_SUPPORTED_VERSIONS,
+  measuredVersions: readonly string[] = SYNC_MEASURED_VERSIONS,
+): string | undefined {
   if (calls === undefined || calls.length === 0) return undefined;
-  const supported = calls.filter(call => (SYNC_SUPPORTED_VERSIONS as readonly string[]).includes(call.version));
+  const supported = calls.filter(call => supportedVersions.includes(call.version));
   // Newest supported if there is one; otherwise newest measured, so a capability whose calls are
   // all historical still names the most recent of them rather than nothing.
   const pool = supported.length > 0 ? supported : calls;
-  const rank = (call: SyncCapabilityCall) => SYNC_MEASURED_VERSIONS.indexOf(call.version);
+  const rank = (call: SyncCapabilityCall) => measuredVersions.indexOf(call.version);
   return [...pool].sort((a, b) => rank(b) - rank(a))[0]?.method;
 }
 
