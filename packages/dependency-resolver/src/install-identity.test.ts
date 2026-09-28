@@ -674,21 +674,44 @@ describe("#94: the versions recorded are the ones that actually ran", () => {
     // perfectly well installed. Every caller here passes an absolute root, so the bug was invisible
     // until the two spellings were compared, and it would have shipped as a record reported
     // `toolchain-unknown` for no reason.
-    await withProject(async root => {
-      await project(root);
-      await install(root, "vite-plus", { name: "vite-plus", version: "0.3.9" });
+    //
+    // The project is created **under the repo's own `.fgc/`** rather than in `os.tmpdir()`, and that
+    // is required rather than convenient: this case needs a relative spelling of the root to exist,
+    // and `path.relative` answers with an absolute path when the two are on different drives — which
+    // is exactly what `windows-latest` does (its temp directory is on another drive from the
+    // checkout). Measured: the first version of this case guarded on a relative path existing and
+    // **failed the Windows CI leg** with "this platform cannot spell the temp root relatively". A
+    // project under the cwd always has a `..`-prefixed spelling, on every platform. `.fgc/` is
+    // gitignored and is already the scratch space other tooling here uses.
+    //
+    // Being under the repo has one consequence the assertions must account for: the walk sees this
+    // project's lockfile **and** the repository's, so the install graph is `unknown` (two claims).
+    // That is fine for what this case measures — the toolchain identity, which is resolved from the
+    // *project* rather than from the lockfile claim — but it means `toEqual` alone would compare two
+    // all-null graphs and pass without exercising the relative branch at all. So the fields that
+    // actually move are asserted positively.
+    const scratchRoot = join(process.cwd(), ".fgc", "identity-spelling");
+    await rm(scratchRoot, { recursive: true, force: true });
+    try {
+      await project(scratchRoot);
+      await install(scratchRoot, "vite-plus", { name: "vite-plus", version: "0.3.9" });
 
-      const spelledRelatively = relativeToCwd(root);
+      const spelledRelatively = relativeToCwd(scratchRoot);
       // Asserted rather than skipped silently: if this ever becomes `null` the case stops measuring
-      // the relative branch, and a green run would mean nothing.
-      expect(spelledRelatively, "this platform cannot spell the temp root relatively").not.toBeNull();
+      // the relative branch. It cannot be `null` for a root under the cwd, which is why it lives there.
+      expect(spelledRelatively, "a root under the cwd always has a relative spelling").not.toBeNull();
 
-      const absolute = await readToolchainIdentity(root);
+      const absolute = await readToolchainIdentity(scratchRoot);
       const relative = await readToolchainIdentity(spelledRelatively!);
 
-      expect(relative).toEqual(absolute);
+      // The positive control: the relative spelling resolved the installed manifest rather than
+      // reporting it missing, which is the defect this case exists for.
+      expect(absolute.vitePlus).toBe("0.3.9");
       expect(relative.vitePlus).toBe("0.3.9");
-    });
+      expect(relative).toEqual(absolute);
+    } finally {
+      await rm(scratchRoot, { recursive: true, force: true });
+    }
   });
 });
 
