@@ -8,7 +8,7 @@ import type { ForguncyConfig } from "@forguncy-react-workspace/core";
 
 import { readToolchainIdentity } from "@forguncy-react-workspace/dependency-resolver/local";
 
-import { canonicalTempProject, removeTempProject } from "./temp-project.ts";
+import { canonicalTempProject, removeTempProject, writePnpmInstallFixture } from "./temp-project.ts";
 import { devHarness } from "./vite-plugin.ts";
 
 /**
@@ -50,26 +50,10 @@ async function projectWithShim(): Promise<{ root: string; shimMarker: string; su
   // the record carries has to be the one this project reports.
   writeFileSync(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n", "utf8");
 
-  // pnpm's own record of what it installed, which the identity now includes: `installedTree` reads
-  // `node_modules/.modules.yaml`, because inputs alone cannot confirm a result (review measured a
-  // real npm project whose lockfile was byte-identical across a default and an `--omit=optional`
-  // install). Without it this fixture reports `install-graph-unknown` and is withheld.
-  mkdirSync(join(root, "node_modules"), { recursive: true });
-  writeFileSync(
-    join(root, "node_modules", ".modules.yaml"),
-    [
-      "included:",
-      "  dependencies: true",
-      "  devDependencies: true",
-      "  optionalDependencies: true",
-      "nodeLinker: isolated",
-      "hoistPattern:",
-      '  - "*"',
-      "publicHoistPattern: []",
-      "",
-    ].join("\n"),
-    "utf8",
-  );
+  // pnpm's install result, which the identity digests: the layout record *and* the `.pnpm` store's
+  // package identities (review round 7). Without both this fixture reports
+  // `install-graph-unknown` and is withheld.
+  writePnpmInstallFixture(root);
 
   const shimMarker = "PROJECT_SHIM_MARKER_7f3a";
   const substitutePackageMarker = "SUBSTITUTE_PACKAGE_MARKER_9c14";

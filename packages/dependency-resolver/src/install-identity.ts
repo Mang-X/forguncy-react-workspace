@@ -961,7 +961,36 @@ async function pnpmInstalledTreeDigest(installRoot: string): Promise<string | nu
   if (Object.values(fields).some(value => value === undefined)) {
     return null;
   }
-  return digestOf(canonicalJson(fields));
+
+  // The layout fields above describe the *strategy*; the virtual store names the *result*. Review
+  // round 7: with `--no-lockfile` (or a stale lock left in place), pnpm re-resolves from the
+  // manifest and registry, so a transitive can move `b@1` → `b@2` while every layout field and the
+  // old lockfile digest hold still. Measured: two `--no-lockfile` installs of the same tree produce
+  // records that differ only in the `prunedAt` timestamp — every digestable field identical. The
+  // store's directory names are the installed package identities (`is-odd@3.0.1`,
+  // `@scope/pkg@2.0.0`), so they capture exactly that move.
+  //
+  // They are **portable**, which is why they are the signal: a directory under `.pnpm/` is
+  // `name@version` (plus a peer hash), with no machine path. Platform-specific *binaries* do appear
+  // when the platform's own binding is installed — measured, `@rolldown/binding-win32-x64-msvc@…` —
+  // and those really are different installs, the same reasoning the npm side records deliberately.
+  const storeDirectory = join(installRoot, "node_modules", ".pnpm");
+  let storeEntries: string[] = [];
+  try {
+    // `withFileTypes` avoids a stat per entry, and the `node_modules` subdirectory inside the store
+    // is the shared root the links point into rather than a package, so it is excluded by name.
+    storeEntries = (await readdir(storeDirectory, { withFileTypes: true }))
+      .filter(entry => entry.isDirectory() && entry.name !== "node_modules")
+      .map(entry => entry.name)
+      .sort();
+  } catch {
+    // No store on disk: `nodeLinker: hoisted` or an incomplete install. The layout fields above are
+    // still a partial answer, but a partial answer to "what did this install" is the unknown the
+    // third criterion asks for rather than a value pretending to be complete.
+    return null;
+  }
+
+  return digestOf(canonicalJson({ ...fields, store: storeEntries }));
 }
 
 /** npm's `node_modules/.package-lock.json`, as the materialized entry set. */
@@ -988,9 +1017,30 @@ async function npmInstalledTreeDigest(installRoot: string): Promise<string | nul
   if (packages === null) {
     return null;
   }
-  // Sorted so the digest is over the *set* of materialized entries rather than over whatever order
-  // npm happened to write them in.
-  return digestOf(canonicalJson(Object.keys(packages).sort()));
+
+  // One entry per materialized package, carrying the portable artifact identity rather than only
+  // the path. Review round 7: hashing the key *set* alone could not see an artifact change under an
+  // unchanged path — the `--no-save` shape, where npm reifies a different version of a transitive
+  // (and its integrity with it) while the root `package-lock.json` and the manifest stay put, then
+  // saves the current tree to the hidden lock regardless. Measured: same keys, `installedTree`
+  // byte-identical. `version` and `integrity` are the identity of what is on disk; `resolved` is the
+  // registry URL and is portable (a URL, not a path); `link`/`workspace` entries have no version, so
+  // their *type* is recorded instead — a link to somewhere is a different artifact from a copy.
+  const entries = Object.entries(packages).map(([path, entry]) => {
+    const record = asPlainObject(entry) ?? {};
+    return {
+      path,
+      version: record["version"] ?? null,
+      integrity: record["integrity"] ?? null,
+      resolved: record["resolved"] ?? null,
+      link: record["link"] ?? false,
+      workspace: record["workspace"] ?? false,
+    };
+  });
+  // Sorted by path so the digest is over the *set* of artifacts rather than over whatever order npm
+  // happened to write them in.
+  entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return digestOf(canonicalJson(entries));
 }
 
 /**

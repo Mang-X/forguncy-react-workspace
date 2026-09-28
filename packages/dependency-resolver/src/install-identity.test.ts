@@ -365,7 +365,10 @@ describe("#94: identity comes from the install graph, not from a declaration", (
     // The record is written in the **real** shape (JSON, one line per field), copied field-for-field
     // from a pnpm install rather than hand-rolled as block YAML — a hand-rolled fixture is how the
     // `hoistPattern` count in an earlier revision of this case got written wrong.
-    const pnpmTree = async (overrides: Record<string, unknown>): Promise<string | null | undefined> =>
+    const pnpmTree = async (
+      overrides: Record<string, unknown>,
+      store: readonly string[] = ["a@1.0.0", "b@1.0.0"],
+    ): Promise<string | null | undefined> =>
       withProject(async root => {
         await writeFileAt(
           join(root, "package.json"),
@@ -382,6 +385,11 @@ describe("#94: identity comes from the install graph, not from a declaration", (
             ...overrides,
           }),
         );
+        // The store, whose directory names are the installed package identities the digest covers.
+        await writeFileAt(join(root, "node_modules", ".pnpm", "node_modules", ".keep"), "");
+        for (const name of store) {
+          await writeFileAt(join(root, "node_modules", ".pnpm", name, "node_modules", "pkg", "package.json"), "{}");
+        }
         return (await readInstallGraphIdentity(root)).installedTree;
       });
 
@@ -397,6 +405,9 @@ describe("#94: identity comes from the install graph, not from a declaration", (
     // `nodeLinker` both unchanged — measured on a real install. The pair is the shape review round 6
     // named, and omitting the hoisting fields left it invisible.
     expect(await pnpmTree({ publicHoistPattern: ["*"] })).not.toBe(pnpmDefault);
+    // And the round-7 case: with `--no-lockfile` pnpm re-resolves, so a transitive can move while
+    // every layout field and the lockfile digest hold still. The store names are what capture it.
+    expect(await pnpmTree({}, ["a@1.0.0", "b@2.0.0"])).not.toBe(pnpmDefault);
 
     // A record missing a hoisting field is unknown rather than silently read as the empty pattern —
     // the fail-closed direction, since an absent field is not the same fact as an empty one.
@@ -487,8 +498,8 @@ describe("#94: identity comes from the install graph, not from a declaration", (
     expect(yarnProject.installedTree).toBeNull();
 
     // The positive control, and it is what keeps the assertion above from being vacuous: a pnpm
-    // project whose record IS readable reports a value. Without this half the case would pass
-    // against an implementation that never read a record at all.
+    // project whose record AND store are readable reports a value. Without this half the case would
+    // pass against an implementation that never read a record at all.
     const pnpmProject = await withProject(async root => {
       await writeFileAt(join(root, "package.json"), JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "pnpm@11.18.0" }));
       await writeFileAt(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
@@ -496,6 +507,8 @@ describe("#94: identity comes from the install graph, not from a declaration", (
         join(root, "node_modules", ".modules.yaml"),
         ["included:", "  dependencies: true", "  devDependencies: true", "  optionalDependencies: true", "nodeLinker: isolated", "hoistPattern:", "  - \"*\"", "publicHoistPattern: []", ""].join("\n"),
       );
+      await writeFileAt(join(root, "node_modules", ".pnpm", "node_modules", ".keep"), "");
+      await writeFileAt(join(root, "node_modules", ".pnpm", "a@1.0.0", "node_modules", "pkg", "package.json"), "{}");
       return readInstallGraphIdentity(root);
     });
 

@@ -12,7 +12,7 @@ import { createEmptyFgcLock } from "@forguncy-react-workspace/core";
 import { readToolchainIdentity } from "@forguncy-react-workspace/dependency-resolver/local";
 
 import { readProjectDependencyDecisions } from "./local-dev-audit.ts";
-import { removeTempProject } from "./temp-project.ts";
+import { removeTempProject, writePnpmInstallFixture } from "./temp-project.ts";
 import { devHarness, HARNESS_ENTRY_URL_PATH } from "./vite-plugin.ts";
 
 /**
@@ -133,15 +133,10 @@ async function projectWithExtensionLock(): Promise<{ root: string; cleanup: () =
   // missing-choice path they name.
   await writeFile(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n", "utf8");
 
-  // pnpm's own record of what it installed, which the identity now includes (`installedTree` reads
-  // `node_modules/.modules.yaml`); without it the fixture reports `install-graph-unknown` and is
-  // withheld. Written before the identity is read, so both sides describe the same install.
-  await mkdir(join(root, "node_modules"), { recursive: true });
-  await writeFile(
-    join(root, "node_modules", ".modules.yaml"),
-    ["included:", "  dependencies: true", "  devDependencies: true", "  optionalDependencies: true", "nodeLinker: isolated", "hoistPattern:", "  - \"*\"", "publicHoistPattern: []", ""].join("\n"),
-    "utf8",
-  );
+  // pnpm's install result, which the identity digests: the layout record *and* the `.pnpm` store's
+  // package identities (review round 7). Without both the fixture reports `install-graph-unknown`
+  // and is withheld. Written before the identity is read, so both sides describe the same install.
+  writePnpmInstallFixture(root);
 
   await writeFile(
     join(root, "fgc.lock.json"),
@@ -206,13 +201,8 @@ describe("the declared lock path is honoured, which `readFgcLock(projectRoot)` c
     // A lockfile in the project root, so the record's identity can be the project's own (#94).
     // Written before the lock below for the same reason `projectWithExtensionLock` states.
     await writeFile(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n", "utf8");
-    // The install record the identity now includes, for the reason `projectWithExtensionLock` gives.
-    await mkdir(join(root, "node_modules"), { recursive: true });
-    await writeFile(
-      join(root, "node_modules", ".modules.yaml"),
-      ["included:", "  dependencies: true", "  devDependencies: true", "  optionalDependencies: true", "nodeLinker: isolated", "hoistPattern:", "  - \"*\"", "publicHoistPattern: []", ""].join("\n"),
-      "utf8",
-    );
+    // The install result the identity digests, for the reason `projectWithExtensionLock` gives.
+    writePnpmInstallFixture(root);
     const declaredPath = join(root, "locks", "fgc.lock.json");
     await writeFile(
       declaredPath,
