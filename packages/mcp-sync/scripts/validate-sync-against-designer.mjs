@@ -487,7 +487,7 @@ async function main() {
   // the executor is given *ids*, and the coordinates it writes are the config's.
   const registry = createCellRegistry(
     {
-      runtime: { forguncyVersion: "12.0.100", projectAlias: "fgc-sync-validation" },
+      runtime: { forguncyVersion: "12.0.101", projectAlias: "fgc-sync-validation" },
       cells: {
         probeA: { entry: "cells/probeA/App.tsx", target: { pageName: PAGE, cell: "F1" } },
         probeB: { entry: "cells/probeB/App.tsx", target: { pageName: PAGE, cell: "G1" } },

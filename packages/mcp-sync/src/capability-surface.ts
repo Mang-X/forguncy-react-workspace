@@ -50,8 +50,8 @@
 
 import type { RuntimeEvidenceChannel } from "@forguncy-react-workspace/core";
 
-import { SYNC_EXPLORED_VERSIONS } from "./guarantees.ts";
-import type { SyncExploredVersion } from "./guarantees.ts";
+import { SYNC_MEASURED_VERSIONS, SYNC_SUPPORTED_VERSIONS } from "./guarantees.ts";
+import type { SyncMeasuredVersion } from "./guarantees.ts";
 import { FORGUNCY_SYNC_PORT_METHODS } from "./port.ts";
 import type { ForguncySyncPortMethod } from "./port.ts";
 
@@ -175,7 +175,7 @@ export interface SyncCapabilityCall {
   /** The exact call, quoted rather than paraphrased. */
   readonly method: string;
   /** The product version this call was executed on. */
-  readonly version: SyncExploredVersion;
+  readonly version: SyncMeasuredVersion;
 }
 
 export interface SyncCapability {
@@ -213,19 +213,29 @@ export interface SyncCapability {
 /**
  * The call to quote for a capability, from its versioned record.
  *
- * The newest entry's method, because that is the build a fresh designer session is most likely to
- * be and the call the adapter asks for first — **not** a claim that the older entries' calls do
- * not exist. A capability with no calls is `unestablished`, and carries no method; the guards in
- * {@link assertSyncCapabilityCoherent} are what enforce that pairing.
+ * **A supported version's call wins**, because that is the build a designer session is now most
+ * likely to be and the call the adapter asks for first — **not** a claim that the older entries'
+ * calls do not exist. Falls back to the newest measured entry only when no entry is on a
+ * supported version, which is the state a version-split capability would be in if support moved
+ * away from every version it has a call for.
  *
- * `SYNC_EXPLORED_VERSIONS` order decides "newest" rather than version-string comparison, so the
- * two cannot drift: the list is maintained for exactly this reason and is asserted to be explicit
- * about the versions the repository claims.
+ * #120 is why the supported list decides rather than the measured one: after the rebase, a
+ * capability could legitimately hold a call established on the old build and another on the new
+ * one, and *which one is current* is a support question, not an evidence question. Ranking by
+ * `SYNC_MEASURED_VERSIONS` happened to give the right answer while the two lists shared a tail;
+ * it would have gone on quietly giving it after they stopped.
+ *
+ * A capability with no calls is `unestablished` and carries no method; the guards in
+ * {@link assertSyncCapabilityCoherent} enforce that pairing.
  */
 function preferredCallOf(calls: readonly SyncCapabilityCall[] | undefined): string | undefined {
   if (calls === undefined || calls.length === 0) return undefined;
-  const rank = (call: SyncCapabilityCall) => SYNC_EXPLORED_VERSIONS.indexOf(call.version);
-  return [...calls].sort((a, b) => rank(b) - rank(a))[0]?.method;
+  const supported = calls.filter(call => (SYNC_SUPPORTED_VERSIONS as readonly string[]).includes(call.version));
+  // Newest supported if there is one; otherwise newest measured, so a capability whose calls are
+  // all historical still names the most recent of them rather than nothing.
+  const pool = supported.length > 0 ? supported : calls;
+  const rank = (call: SyncCapabilityCall) => SYNC_MEASURED_VERSIONS.indexOf(call.version);
+  return [...pool].sort((a, b) => rank(b) - rank(a))[0]?.method;
 }
 
 export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
@@ -234,7 +244,10 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
     summary: "Read the project's installed frontend extensions, with their stable ids.",
     evidenceSources: ["issue-5-designer-probe", "forguncy-library-guide"],
     confirmation: "established",
-    calls: [{ method: "api.app.listFrontendLibraries", version: "12.0.100.0" }],
+    calls: [
+      { method: "api.app.listFrontendLibraries", version: "12.0.100.0" },
+      { method: "api.app.listFrontendLibraries", version: "12.0.101.0" },
+    ],
     get method() {
       return preferredCallOf(this.calls);
     },
@@ -252,7 +265,10 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
       "issue-115-designer-probe",
     ],
     confirmation: "established",
-    calls: [{ method: "api.page.getCells", version: "12.0.100.0" }],
+    calls: [
+      { method: "api.page.getCells", version: "12.0.100.0" },
+      { method: "api.page.getCells", version: "12.0.101.0" },
+    ],
     get method() {
       return preferredCallOf(this.calls);
     },
@@ -265,7 +281,10 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
     summary: "Write one Cell's generated source and its `frontendLibraries` references.",
     evidenceSources: ["issue-5-designer-probe", "forguncy-library-guide"],
     confirmation: "established",
-    calls: [{ method: "api.page.setCells", version: "12.0.100.0" }],
+    calls: [
+      { method: "api.page.setCells", version: "12.0.100.0" },
+      { method: "api.page.setCells", version: "12.0.101.0" },
+    ],
     get method() {
       return preferredCallOf(this.calls);
     },
@@ -278,7 +297,10 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
     summary: "Persist the project after a mutation.",
     evidenceSources: ["forguncy-library-guide", "issue-20-designer-execution"],
     confirmation: "established",
-    calls: [{ method: "api.app.saveProject", version: "12.0.100.0" }],
+    calls: [
+      { method: "api.app.saveProject", version: "12.0.100.0" },
+      { method: "api.app.saveProject", version: "12.0.101.0" },
+    ],
     get method() {
       return preferredCallOf(this.calls);
     },
@@ -291,7 +313,10 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
     summary: "Read the project's error count after a mutation.",
     evidenceSources: ["issue-5-designer-probe", "forguncy-library-guide"],
     confirmation: "established",
-    calls: [{ method: "api.app.checkProjectErrors", version: "12.0.100.0" }],
+    calls: [
+      { method: "api.app.checkProjectErrors", version: "12.0.100.0" },
+      { method: "api.app.checkProjectErrors", version: "12.0.101.0" },
+    ],
     get method() {
       return preferredCallOf(this.calls);
     },
@@ -320,7 +345,10 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
     summary: "Read whether the project has unsaved changes.",
     evidenceSources: ["issue-5-designer-probe", "issue-20-designer-execution"],
     confirmation: "established",
-    calls: [{ method: "api.app.getProjectSaveStatus", version: "12.0.100.0" }],
+    calls: [
+      { method: "api.app.getProjectSaveStatus", version: "12.0.100.0" },
+      { method: "api.app.getProjectSaveStatus", version: "12.0.101.0" },
+    ],
     get method() {
       return preferredCallOf(this.calls);
     },
@@ -651,7 +679,7 @@ export function assertSyncCapabilityCoherent(capability: SyncCapability): void {
           `Capability "${id}" records the call "${call.method}", which is not an exact designer call name. An established capability quotes the call; it never paraphrases it.`,
         );
       }
-      if (!(SYNC_EXPLORED_VERSIONS as readonly string[]).includes(call.version)) {
+      if (!(SYNC_MEASURED_VERSIONS as readonly string[]).includes(call.version)) {
         throw new SyncCapabilityContractError(
           "capability-not-coherent",
           `Capability "${id}" records the call "${call.method}" as established on ${call.version}, which is not a version this repository tracks. An unprobed build cannot be named as evidence.`,

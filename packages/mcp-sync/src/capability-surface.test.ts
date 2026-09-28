@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { SYNC_EXPLORED_VERSIONS } from "./guarantees.ts";
+import { SYNC_CAPABILITY_IDS } from "./capability-surface.ts";
+import { SYNC_MEASURED_VERSIONS, SYNC_SUPPORTED_VERSIONS } from "./guarantees.ts";
 import {
   assertMcpSyncFlowIsCoherent,
   assertMcpSyncStepCoherent,
@@ -236,14 +237,23 @@ describe("what the evidence establishes", () => {
   it("records every capability call against a version the repository tracks", () => {
     for (const capability of SYNC_CAPABILITIES) {
       for (const call of capability.calls ?? []) {
-        expect(SYNC_EXPLORED_VERSIONS, `${capability.id} ${call.method}`).toContain(call.version);
+        expect(SYNC_MEASURED_VERSIONS, `${capability.id} ${call.method}`).toContain(call.version);
       }
     }
-    // And at least one capability *is* version-split, so the shape is exercised rather than
-    // merely available: if this ever fails, the versioned record has been flattened back to a
-    // single claim and the machinery around it is untested.
+    // Every capability is now version-split, so the shape is exercised rather than merely
+    // available: #120 gave each one a 12.0.101.0 entry beside its 12.0.100.0 one, because
+    // #115's adapter-level run drove all of them through the shipped port on that build. If this
+    // drops back to a single entry anywhere, the versioned record has been flattened and the
+    // machinery around it stops being tested.
     const split = SYNC_CAPABILITIES.filter(capability => (capability.calls ?? []).length > 1);
-    expect(split.map(capability => capability.id)).toEqual(["generate-page"]);
+    expect(split.map(capability => capability.id).sort()).toEqual([...SYNC_CAPABILITY_IDS].sort());
+    // And the current call for each is the one on the *supported* version, not the historical
+    // one — the property `preferredCallOf` exists to provide.
+    for (const capability of SYNC_CAPABILITIES) {
+      expect(capability.method, capability.id).toBe(
+        (capability.calls ?? []).find(call => SYNC_SUPPORTED_VERSIONS.includes(call.version as never))?.method,
+      );
+    }
   });
 });
 
