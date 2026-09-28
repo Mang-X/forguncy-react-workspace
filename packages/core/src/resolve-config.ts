@@ -94,7 +94,8 @@ export type ResolveConfigDiagnosticCode =
   | "unsupported-resolve-alias-pattern"
   | "nonportable-resolve-alias-target"
   | "host-module-alias-conflict"
-  | "duplicate-resolve-alias";
+  | "duplicate-resolve-alias"
+  | "unpreservable-resolve-alias-order";
 
 /**
  * One actionable problem, located at the config path that produced it.
@@ -303,8 +304,17 @@ function readAliasEntry(
 
   // Both separators are accepted on input and the authored spelling is kept for the report;
   // `resolve` normalizes to the host's form, which is what the engines receive.
+  //
+  // `normalizedRoot` rather than `options.root` in the comparison below, and the difference is a
+  // real hole rather than tidiness: `resolve` normalizes its answer, while the root arrives as
+  // authored and `createCellRegistry` only requires it to be *absolute*. So `root: "/work/app/"`
+  // (or `"/work/app/./"`, or any equivalent spelling with a trailing separator or a `.`/`..`
+  // segment) made `resolve(root, ".")` — `"/work/app"` — compare unequal to the raw
+  // `"/work/app/"`, and the project-root refusal was bypassed: the whole root became importable
+  // under one alias. Measured on both separators.
+  const normalizedRoot = resolve(options.root);
   const target = resolve(options.root, replacement);
-  if (target === options.root) {
+  if (target === normalizedRoot) {
     out.push(
       diag(
         "invalid-resolve-alias",
@@ -535,6 +545,65 @@ function normalizeAliasMap(
   const alias: Record<string, string> = {};
   for (const entry of entries) {
     alias[entry.find] = entry.target;
+  }
+
+  // The fold into a plain object can **change the order the consumers see**, and precedence is
+  // order-sensitive — so the invariant is checked rather than assumed.
+  //
+  // ECMAScript enumerates integer-index keys first, in ascending numeric order, whatever the
+  // insertion order was. Measured: folding the array form `[{find:"1/deep"}, {find:"1"}]` yields a
+  // map that `Object.keys` reports as `["1","1/deep"]`, so the *general* key is consulted first
+  // although it was declared second. Vite reads the array form in array order and Rolldown reads
+  // its map in enumeration order (both measured — the specific key wins when it is declared first,
+  // and the general one wins when it is), so the fold would make the two engines disagree, and make
+  // `entries` disagree with the `alias` map they actually consume.
+  //
+  // ## Why the check is narrow rather than "any reordering"
+  //
+  // Only two keys that can match the *same* specifier have a precedence relationship at all, which
+  // is one key being a prefix of the other. So a reordering that swaps an unrelated pair — `["2",
+  // "1"]` becoming `["1", "2"]` — changes nothing observable and is accepted. Refusing it would be a
+  // false positive on a config that works, which is the direction this module avoids: it reports
+  // what cannot be honoured, not what merely looks unusual.
+  //
+  // Note the **object** form is unaffected and needs no clause: it has no authored order to lose,
+  // because `Object.entries` — how both this module and Vite read it — already hoists integer-like
+  // keys. Only the array form carries an order the fold can destroy.
+  //
+  // The overlap test is **symmetric**, and getting that wrong is how the first version of this check
+  // was dead: `second.find.startsWith(first.find + "/")` only catches the case where the *later*
+  // declaration is the more specific one, while the reported defect is the opposite shape —
+  // `[{ "1/deep" }, { "1" }]`, where the earlier declaration is more specific. Either direction
+  // gives a pair that matches one specifier, so either direction can be reordered underneath the
+  // config's feet.
+  const enumeration = new Map(Object.keys(alias).map((key, index) => [key, index]));
+  for (const [declared, first] of entries.entries()) {
+    for (const [later, second] of entries.entries()) {
+      if (later <= declared) {
+        continue;
+      }
+      const overlaps =
+        first.find.startsWith(`${second.find}/`) || second.find.startsWith(`${first.find}/`);
+      if (!overlaps) {
+        continue;
+      }
+      // `first` is declared earlier, so Vite — which reads the array in order — takes it for any
+      // specifier both match. If the map enumerates `second` earlier, Rolldown takes `second`, and
+      // the two paths resolve the same import to different targets.
+      if ((enumeration.get(second.find) ?? 0) < (enumeration.get(first.find) ?? 0)) {
+        diagnostics.push(
+          diag(
+            "unpreservable-resolve-alias-order",
+            path,
+            `Aliases "${first.find}" and "${second.find}" overlap — a specifier matched by both exists — and the declaration order that decides which wins cannot be preserved: the engines read the alias map in a different order than the config declares, because a key that looks like a number is enumerated first. Rename one of the ids, or reorder them so the more specific one is declared after the more general one.`,
+          ),
+        );
+      }
+    }
+  }
+
+  if (diagnostics.length > 0) {
+    return { ok: false, diagnostics };
   }
 
   return {

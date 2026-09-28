@@ -1,5 +1,5 @@
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
@@ -57,6 +57,12 @@ function aliasOf(config: unknown): Readonly<Record<string, string>> {
     );
   }
   return result.resolve.alias;
+}
+
+/** The diagnostic codes a config produces against an explicit root. */
+function codesOf2(config: unknown, root = PROJECT_ROOT): readonly string[] {
+  const result = normalizeResolveConfig(config, { root });
+  return result.ok ? [] : result.diagnostics.map(diagnostic => diagnostic.code);
 }
 
 /** The diagnostic codes a config produces, for the refusal cases. */
@@ -345,5 +351,100 @@ describe("the registry carries the normalized alias set", () => {
     // valid alias block would be refused for having one.
     expect(RESOLVE_CONFIG_FIELD).toBe("resolve");
     expect(() => registryOf({ cells: {}, resolve: { alias: { "@/lib": "./src/lib" } } })).not.toThrow();
+  });
+});
+
+/**
+ * Two normalization holes review found in round 3, both reproduced before being fixed.
+ *
+ * The first is a guard that existed but could be **bypassed by spelling**; the second is an
+ * ordering property the fold into a plain object silently rewrote. They are grouped because both
+ * are "the normalization accepted something it said it refused", which is the failure mode this
+ * module exists to prevent rather than to have.
+ */
+describe("paths and orders the normalization must not lose", () => {
+  it("refuses an alias to the project root however the root is spelled", () => {
+    // The guard compared `resolve(root, replacement)` — normalized — against `options.root` — as
+    // authored. `createCellRegistry` only requires a root to be *absolute*, so a trailing separator
+    // or a `.`/`..` segment made the two strings unequal and the refusal was skipped entirely:
+    // measured, `root: "<abs>/"` plus `{ "@": "." }` was ACCEPTED, making the whole project
+    // importable under one id. Comparing normalized to normalized is the fix.
+    const spelled = [
+      PROJECT_ROOT,
+      `${PROJECT_ROOT}${sep}`,
+      `${PROJECT_ROOT}${sep}.${sep}`,
+      join(PROJECT_ROOT, "..", "fgc-sales-portal"),
+    ];
+
+    for (const root of spelled) {
+      // Every spelling names the same directory, so every one must produce the same refusal.
+      expect(codesOf2({ resolve: { alias: { "@": "." } } }, root), JSON.stringify(root)).toEqual([
+        "invalid-resolve-alias",
+      ]);
+    }
+
+    // The control: a subdirectory of the same root is fine, so the refusal is about the root rather
+    // than about the target being relative.
+    expect(codesOf2({ resolve: { alias: { "@": "./src" } } }, `${PROJECT_ROOT}${sep}`)).toEqual([]);
+  });
+
+  it("refuses an array-form pair whose declaration order the alias map cannot preserve", () => {
+    // `Object.keys` enumerates integer-index keys first, so folding the array form
+    // `[{ "1/deep" }, { "1" }]` puts the *general* key first even though it was declared second.
+    // Vite reads the array in order (taking the specific key) and Rolldown reads its map in
+    // enumeration order (taking the general one), so the two engines would resolve one import to
+    // two different targets — and `entries` would report yet a third account.
+    expect(
+      codesOf2({
+        resolve: {
+          alias: [
+            { find: "1/deep", replacement: "./a" },
+            { find: "1", replacement: "./b" },
+          ],
+        },
+      }),
+    ).toEqual(["unpreservable-resolve-alias-order"]);
+  });
+
+  it("accepts the same two keys when declaration order already matches enumeration order", () => {
+    // The narrow half, and the reason the check is not "refuse any overlapping pair": the defect is
+    // the *disagreement* between declared and enumerated order, not the overlap. Here the general
+    // key is declared first, which is the order the map will enumerate, so both engines take it and
+    // there is nothing to refuse.
+    expect(
+      codesOf2({
+        resolve: {
+          alias: [
+            { find: "1", replacement: "./b" },
+            { find: "1/deep", replacement: "./a" },
+          ],
+        },
+      }),
+    ).toEqual([]);
+  });
+
+  it("accepts reordered keys that cannot both match one specifier", () => {
+    // The other control: `"2"` and `"1"` are both integer-like and will be enumerated in numeric
+    // order rather than declaration order, but neither is a prefix of the other, so no specifier
+    // matches both and precedence between them does not exist. Refusing this would be a false
+    // positive on a config that works.
+    expect(
+      codesOf2({
+        resolve: {
+          alias: [
+            { find: "2", replacement: "./a" },
+            { find: "1", replacement: "./b" },
+          ],
+        },
+      }),
+    ).toEqual([]);
+  });
+
+  it("needs no such check for the object form, which has no order to lose", () => {
+    // `Object.entries` — how this module *and* Vite read the object form — already hoists
+    // integer-like keys, so the object's enumeration order is the order both engines see. There is
+    // no authored array order for the fold to destroy, which is why the refusal above is
+    // array-form-only rather than a blanket rule about numeric keys.
+    expect(codesOf2({ resolve: { alias: { "1/deep": "./a", "1": "./b" } } })).toEqual([]);
   });
 });
