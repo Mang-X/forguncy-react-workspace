@@ -99,6 +99,7 @@ export type ConfigDiagnosticCode =
   | "host-module-alias-conflict"
   | "duplicate-resolve-alias"
   | "unpreservable-resolve-alias-order"
+  | "unpreservable-resolve-alias-key"
   // Portability.
   | "machine-specific-path"
   | "secret-looking-field"

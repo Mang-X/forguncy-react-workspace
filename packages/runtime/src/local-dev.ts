@@ -1757,6 +1757,7 @@ export const LOCAL_DEV_DIAGNOSTIC_CODES = [
   "local-dev-extension-real-runtime-only",
   "local-dev-host-version-mismatch",
   "local-dev-mock-surface-incomplete",
+  "local-dev-project-alias-shadowed",
 ] as const;
 
 export type LocalDevDiagnosticCode = (typeof LOCAL_DEV_DIAGNOSTIC_CODES)[number];
@@ -1873,6 +1874,15 @@ export const LOCAL_DEV_DIAGNOSTIC_RULES: Readonly<Record<LocalDevDiagnosticCode,
     fixOwner: "project-configuration",
     blocksLocalDevelopment: true,
   },
+  "local-dev-project-alias-shadowed": {
+    code: "local-dev-project-alias-shadowed",
+    label: "A `vite.config.ts` alias claims an id the project declared in `forguncy.config.ts`",
+    states: "A user Vite alias matches a module id a project alias resolves, so it rewrites the import before the project alias is consulted.",
+    remediation:
+      "Remove the overlapping `vite.config.ts` alias, or rename the project alias. Vite applies its own `resolve.alias` *before* a plugin's `resolveId` (measured), which is where the project alias is applied, so the local loop would resolve the id to the Vite target while the Cell build resolves it to `forguncy.config.ts`. That is the dev/production split #97 exists to remove, and it is silent: both paths succeed and disagree. An alias that does not overlap a project alias is unaffected and stays allowed.",
+    fixOwner: "project-configuration",
+    blocksLocalDevelopment: true,
+  },
 };
 
 export interface LocalDevDiagnostic {
@@ -1937,6 +1947,23 @@ export interface LocalDevAuditInput {
    * ask.
    */
   readonly referencedSpecifiers?: readonly string[];
+  /**
+   * The aliases the project's `vite.config.ts` declares, when the caller knows them.
+   *
+   * Compared against {@link LocalDevAuditInput.projectAlias} to find an overlap, which is the one
+   * way a project alias can be silently overridden locally. The values are opaque here: this audit
+   * compares *keys*, because whether two patterns overlap is a question about Vite's matching rule
+   * and the caller (the harness) already reads that rule to filter its own host aliases. Passing
+   * only the keys would be narrower than the truth, since an overlap is a prefix relation on either
+   * side of the pair.
+   */
+  readonly userAliasKeys?: readonly string[];
+  /**
+   * The project's own aliases, as `registry.resolve.alias` carries them (#97).
+   *
+   * Only the keys matter to this audit; the values are for the report.
+   */
+  readonly projectAlias?: Readonly<Record<string, string>>;
 }
 
 export interface LocalDevAudit {
@@ -2175,6 +2202,36 @@ export function auditLocalDevConfiguration(input: LocalDevAuditInput = {}): Loca
         ),
       );
     }
+  }
+
+  // #97 round 4: a `vite.config.ts` alias that overlaps a project alias silently wins locally.
+  //
+  // Vite applies the user's `resolve.alias` **before** a plugin's `resolveId`, and the project
+  // aliases are applied in the harness plugin's `resolveId` — so a user alias naming an overlapping
+  // id rewrites the import first. The Cell build reads `registry.resolve.alias` and never sees
+  // `vite.config.ts`, so both paths succeed and resolve one import to different files.
+  //
+  // The overlap is **symmetric**: either key being a prefix of the other (on a `/` boundary) is
+  // enough, because any specifier both match goes to the user's entry. Measured for a project alias
+  // `@/ui -> ./ui`: `vite.config.ts`'s `@/ui -> /local` wins for `@/ui/thing`, and so does its
+  // deeper `@/ui/thing -> /sub` — the second is the case a one-directional check misses.
+  //
+  // The caller supplies the user's keys already read by Vite's own matching rule, so this does not
+  // re-derive one: `runtime` may not depend on Vite, and a second copy of that rule is what took
+  // three review rounds to get right in the harness.
+  const projectAlias = input.projectAlias ?? {};
+  for (const [moduleId, target] of Object.entries(projectAlias)) {
+    const overlapping = (input.userAliasKeys ?? []).find(
+      key => key === moduleId || key.startsWith(`${moduleId}/`) || moduleId.startsWith(`${key}/`),
+    );
+    if (overlapping === undefined) continue;
+    diagnostics.push(
+      createLocalDevDiagnostic(
+        "local-dev-project-alias-shadowed",
+        moduleId,
+        `\`vite.config.ts\` declares an alias "${overlapping}" that overlaps "${moduleId}", which \`forguncy.config.ts\` already resolves to ${JSON.stringify(target)}. Vite applies its own aliases before the harness resolver, so the local loop would use the Vite target while the Cell build uses ${JSON.stringify(target)}. Remove the overlapping entry, or rename one of the two.`,
+      ),
+    );
   }
 
   const alignment = localDevAlignmentChecks(resolutions);

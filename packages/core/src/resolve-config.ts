@@ -95,7 +95,8 @@ export type ResolveConfigDiagnosticCode =
   | "nonportable-resolve-alias-target"
   | "host-module-alias-conflict"
   | "duplicate-resolve-alias"
-  | "unpreservable-resolve-alias-order";
+  | "unpreservable-resolve-alias-order"
+  | "unpreservable-resolve-alias-key";
 
 /**
  * One actionable problem, located at the config path that produced it.
@@ -274,6 +275,32 @@ function readAliasEntry(
         "invalid-resolve-alias",
         path,
         `An alias key must be a module id (what the source reads), not a path. Got "${authoredKey}". Put the path on the right-hand side.`,
+      ),
+    );
+    return undefined;
+  }
+
+  // `__proto__` is refused rather than carried, and the reason is measured rather than stylistic.
+  //
+  // It is the one key a plain object cannot hold: `alias["__proto__"] = target` runs the
+  // `Object.prototype.__proto__` *setter*, so the fold produced a map that `Object.keys` reported
+  // as empty while `entries` still listed the alias — the normalizer accepted a declaration that no
+  // consumer could see, which is the "looks declared, does not take effect" failure every other
+  // refusal in this module exists to prevent.
+  //
+  // Writing the fold as `Object.fromEntries` (or a null-prototype map) *would* preserve it, and both
+  // engines can be made to honour it — measured, Rolldown resolves it when the key is an own data
+  // property. But **Vite does not**: it resolves `__proto__` to an internal `undefined?v=undefined`
+  // module rather than to the alias target, both as a literal key and via `Object.fromEntries`. So
+  // accepting the alias would make the dev server and the artifact resolve one import to two
+  // different modules, which is precisely the divergence #97 removes. Refusing is the honest answer;
+  // the key is not a module id anyone means literally.
+  if (authoredKey === "__proto__") {
+    out.push(
+      diag(
+        "invalid-resolve-alias",
+        path,
+        `"__proto__" cannot be an alias key. A plain object cannot hold it as an own property, so it would be dropped before the dev server or the build ever saw it — and Vite resolves the id to one of its own internal modules rather than to any alias target (measured), so no target could be honoured consistently on both paths. Alias the real module id instead.`,
       ),
     );
     return undefined;
@@ -542,9 +569,32 @@ function normalizeAliasMap(
     return { ok: false, diagnostics };
   }
 
-  const alias: Record<string, string> = {};
-  for (const entry of entries) {
-    alias[entry.find] = entry.target;
+  // `Object.fromEntries` rather than an assignment loop, so the fold cannot silently drop a key.
+  //
+  // A key that collides with an `Object.prototype` accessor — `__proto__` is the only one that can
+  // arrive here — is *defined* as an own data property rather than *assigned*, which runs the
+  // prototype setter and loses the entry. `__proto__` is refused earlier, so this is belt-and-braces
+  // rather than the guard: the point is that "the map the consumers read" is built in a way that
+  // cannot disagree with `entries` for a reason unrelated to the config being wrong. The assertion
+  // below makes that a checked property rather than a comment.
+  const alias: Record<string, string> = Object.fromEntries(
+    entries.map(entry => [entry.find, entry.target]),
+  );
+
+  // The invariant the fold must not break: every entry the normalizer accepted is a key the dev
+  // server and the build will actually consult. Reported as its own code rather than as a silent
+  // difference, because the failure mode is exactly "`entries` says one thing, the map says
+  // another" — the shape `__proto__` produced before it was refused.
+  const missing = entries.filter(entry => !Object.prototype.hasOwnProperty.call(alias, entry.find));
+  if (missing.length > 0) {
+    diagnostics.push(
+      diag(
+        "unpreservable-resolve-alias-key",
+        path,
+        `Alias ${missing.map(entry => JSON.stringify(entry.find)).join(", ")} would not survive normalization into the alias map, so the dev server and the build would not see ${missing.length === 1 ? "it" : "them"} although the config declares ${missing.length === 1 ? "it" : "them"}. Rename the module id.`,
+      ),
+    );
+    return { ok: false, diagnostics };
   }
 
   // The fold into a plain object can **change the order the consumers see**, and precedence is

@@ -448,3 +448,52 @@ describe("paths and orders the normalization must not lose", () => {
     expect(codesOf2({ resolve: { alias: { "1/deep": "./a", "1": "./b" } } })).toEqual([]);
   });
 });
+
+/**
+ * The `__proto__` key, which a plain object cannot hold.
+ *
+ * Review found this in round 4, and it is the sharpest instance of the failure every other
+ * refusal here exists to prevent: the normalizer **accepted** the alias, `entries` listed it, and
+ * the map the consumers actually read was empty — `alias["__proto__"] = target` runs the
+ * `Object.prototype.__proto__` setter rather than creating an own property. A declaration that
+ * looks accepted and does nothing is worse than a refused one.
+ *
+ * The fix is two-layered on purpose, and the layers are separately tested:
+ *
+ * - `__proto__` is **refused** by name, because the engines genuinely disagree about it (measured:
+ *   Rolldown honours it once it is an own property, Vite resolves the id to one of its own internal
+ *   modules instead of any alias target), so no target could be honoured on both paths;
+ * - the fold uses `Object.fromEntries`, and the result is **checked** against `entries`, so no key
+ *   can be silently dropped for any reason — including one nobody has thought of yet.
+ */
+describe("an alias key that normalization cannot carry", () => {
+  it("refuses `__proto__` as a key in the array form, where it is expressible", () => {
+    // The array form is the only way this shape reaches the normalizer: as an *object literal*
+    // `{ __proto__: "./x" }` JavaScript discards the key before any library sees it, so there is
+    // nothing for this module to refuse — and nothing silently lost either.
+    expect(codesOf2({ resolve: { alias: [{ find: "__proto__", replacement: "./src/shim" }] } })).toEqual([
+      "invalid-resolve-alias",
+    ]);
+  });
+
+  it("keeps `entries` and the consumed map in exact agreement", () => {
+    // The invariant the refusal protects, asserted on an ordinary config so it holds for every
+    // accepted alias rather than only the rejected one. This is the property that broke: `entries`
+    // and `alias` disagreeing is the whole defect.
+    const result = resolveOf({
+      resolve: {
+        alias: {
+          "@/ui": "./src/ui",
+          "~": "./src",
+          "@app/shared": "./packages/shared",
+        },
+      },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    expect(Object.keys(result.resolve.alias).sort()).toEqual(
+      result.resolve.entries.map(entry => entry.find).sort(),
+    );
+  });
+});

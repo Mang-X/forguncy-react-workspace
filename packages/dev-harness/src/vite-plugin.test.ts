@@ -722,3 +722,89 @@ describe("the project alias rule, and its precedence", () => {
     expect(projectAliasTarget("@/lib/@/lib/x", { "@/lib": "@/lib" })).toBe("@/lib/@/lib/x");
   });
 });
+
+/**
+ * The `vite.config.ts` versus `forguncy.config.ts` alias disagreement, refused at startup.
+ *
+ * ## The divergence, and why it is refused rather than warned about
+ *
+ * Vite applies the user's `resolve.alias` **before** a plugin's `resolveId` — the ordering this
+ * file's own module docstring records, and the reason a project alias cannot be a Vite alias (#97).
+ * The harness applies project aliases in its `resolveId`, so a `vite.config.ts` alias naming the
+ * same id rewrites the import first and the project alias never runs. The Cell build reads
+ * `registry.resolve.alias` and never sees `vite.config.ts`. Both paths therefore **succeed** and
+ * resolve one import to different files, which is the dev/production split #97 exists to remove.
+ *
+ * ## What is asserted, and the case a first version missed
+ *
+ * The overlap is symmetric, and the first version asked only one direction (does the user pattern
+ * claim the project's key). Measured with a project alias `@/ui -> ./ui`, a user alias **deeper**
+ * than the project's also wins — `@/ui/thing -> /sub` resolves `@/ui/thing` to `/sub`, while
+ * production uses `./ui/thing`. Both directions are asserted, because the miss was invisible in the
+ * one-directional test.
+ *
+ * Asserted through a real server: the refusal has to happen at *startup*, not at some later import,
+ * and only a real `createServer` decides that.
+ */
+describe("a `vite.config.ts` alias that shadows a project alias refuses the server", () => {
+  const shadowRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "tests", "fixtures", "project-alias");
+
+  function registry() {
+    return createCellRegistry(
+      {
+        cells: { probe: { entry: "./cells/probe/src/index.ts", target: { pageName: "探针", cell: "A1" } } },
+        resolve: { alias: { "@app/shared": "./shared" } },
+      },
+      { root: shadowRoot },
+    );
+  }
+
+  async function startWith(userAlias: unknown): Promise<void> {
+    const server = await createServer({
+      root: shadowRoot,
+      configFile: false,
+      logLevel: "error",
+      appType: "spa",
+      ...(userAlias === undefined ? {} : { resolve: { alias: userAlias as Record<string, string> } }),
+      plugins: [devHarness({ config: registry() }) as never],
+      server: { middlewareMode: true, hmr: false, watch: null },
+    });
+    await server.close();
+  }
+
+  it("refuses when the user alias names the same id exactly", async () => {
+    await expect(startWith({ "@app/shared": "/local-copy" })).rejects.toThrowError(
+      /refused to start/,
+    );
+  });
+
+  it("refuses when the user alias is deeper than the project's, which is the same shadow", async () => {
+    // The direction the first version of the check missed: `@/app/shared/thing` also matches a
+    // specifier the project alias `@/app/shared` matches, and Vite consults the user's entry first.
+    await expect(startWith({ "@app/shared/thing": "/local-copy" })).rejects.toThrowError(
+      /refused to start/,
+    );
+  });
+
+  it("names the alias and the project target, so the repair needs no second lookup", async () => {
+    let thrown: unknown;
+    try {
+      await startWith({ "@app/shared": "/local-copy" });
+    } catch (error) {
+      thrown = error;
+    }
+
+    const message = String(thrown);
+    expect(message).toContain("local-dev-project-alias-shadowed");
+    expect(message).toContain("@app/shared");
+    expect(message).toContain("shared");
+  });
+
+  it("still starts for a Vite-only alias that overlaps nothing in the project config", async () => {
+    // The control, and the half that keeps this from being "refuse every user alias": a project's
+    // own local concern (a patched build, a stub) is legitimate and production has no opinion about
+    // it. Only an *overlap* is a divergence.
+    await expect(startWith({ "@something-else": "/x" })).resolves.toBeUndefined();
+    await expect(startWith(undefined)).resolves.toBeUndefined();
+  });
+});

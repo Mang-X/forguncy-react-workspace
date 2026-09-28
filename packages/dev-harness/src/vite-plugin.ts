@@ -168,7 +168,18 @@ export interface DevHarnessVitePlugin {
     registry(): CellRegistry | undefined;
     mountedCell(): RegisteredCell | undefined;
   };
-  configResolved(config: { readonly root: string; readonly plugins: readonly { readonly name: string }[] }): void;
+  configResolved(config: {
+    readonly root: string;
+    readonly plugins: readonly { readonly name: string }[];
+    /**
+     * The user's own alias settings, read to detect a shadowing alias (#97).
+     *
+     * `unknown` rather than a typed alias shape, matching `config()`: the value has to be read with
+     * `readAliasPatterns` anyway (Vite accepts two forms and normalizes a trailing slash), and
+     * typing it here would invite a caller to trust the shape instead of that reader.
+     */
+    readonly resolve?: { readonly alias?: unknown };
+  }): void;
   /**
    * Audits the project's local-dev configuration once, and refuses the server on a blocking finding.
    *
@@ -461,6 +472,22 @@ function unclaimedHostAliases(userAlias: unknown): Record<string, string> {
  * Returning patterns of one type rather than a `{ find, replacement }` record keeps
  * `isClaimedBy`'s contract as simple as the string-or-RegExp question it actually asks.
  */
+/**
+ * A `RegExp` alias `find` as a comparable key, for the shadowing audit.
+ *
+ * Only the *source* is used, and only exact equality can result, which is a deliberate narrowing
+ * rather than an approximation of regex matching: a pattern's language cannot be compared to a
+ * literal key without evaluating it, and the audit's question is "do these two declarations overlap"
+ * rather than "does this pattern match that id". The narrowing fails in the safe direction — an
+ * anchored pattern equal to a project key is caught, a pattern that merely *could* match one is not
+ * — because a missed warning leaves the old behaviour rather than refusing a working config.
+ */
+function stripRegexDelimiters(pattern: RegExp): string {
+  // `source` excludes the delimiters already; anchoring is stripped so `/^@\/ui$/` compares equal to
+  // the literal `@/ui`, which is the pattern spelling people actually write for an exact alias.
+  return pattern.source.replace(/^\^/, "").replace(/\$$/, "").replace(/\\([./@~-])/g, "$1");
+}
+
 function readAliasPatterns(userAlias: unknown): readonly unknown[] {
   if (Array.isArray(userAlias)) {
     return userAlias
@@ -761,6 +788,16 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
   // honest state: there is no project to read a declaration from yet.
   let substitutions: readonly ExtensionSubstitution[] | undefined;
 
+  /**
+   * The keys of the project's own `vite.config.ts` aliases, read in `configResolved`.
+   *
+   * Held rather than recomputed so the audit and any later reader see one extraction. Populated
+   * with Vite's own matching rule (`readAliasPatterns`), because that rule is the whole reason the
+   * comparison is meaningful — see the hook for why this package does the reading rather than
+   * `runtime`.
+   */
+  let userAliasKeys: readonly string[] | undefined;
+
   return {
     name: DEV_HARNESS_PLUGIN_NAME,
     enforce: "pre",
@@ -790,6 +827,28 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
       if (registry === undefined) {
         return;
       }
+
+      // The project's own `vite.config.ts` aliases, read once and held for the audit below.
+      //
+      // This is the earliest hook that can read them alongside a registry: the registry exists only
+      // after `configResolved`, and `config.resolve.alias` is final by the same point. The *keys*
+      // are extracted here with `readAliasPatterns` — Vite's own matching rule, including its
+      // trailing-slash normalization and its `RegExp` branch — because `runtime` may not depend on
+      // Vite and a second reproduction of that rule is exactly what took three review rounds to get
+      // right in this file.
+      //
+      // What the overlap *means* is decided in `runtime`'s audit, not here: whether it blocks is
+      // `LOCAL_DEV_DIAGNOSTIC_RULES[code].blocksLocalDevelopment`, so a rule the contract marks
+      // blocking cannot be downgraded by this package omitting it.
+      userAliasKeys = readAliasPatterns(config.resolve?.alias).flatMap(pattern => {
+        if (typeof pattern === "string") return [pattern];
+        // A `RegExp` can shadow by matching a key exactly, which the audit's comparison catches
+        // only if the key is known — and a pattern's string form is not that. The audit is given
+        // the pattern's `source` as a key, which is a deliberate narrowing: it catches an anchored
+        // identical pattern and never a near-miss, and a false negative here is a missed warning
+        // rather than a wrong refusal.
+        return pattern instanceof RegExp ? [stripRegexDelimiters(pattern)] : [];
+      });
 
       if (options.cellId !== undefined) {
         mounted = registry.require(options.cellId);
@@ -886,6 +945,8 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
       const audit = auditHarnessConfiguration({
         decisions: projection.decisions,
         extensionChoices: options.extensionChoices ?? [],
+        ...(userAliasKeys === undefined ? {} : { userAliasKeys }),
+        projectAlias: registry.resolve.alias,
       });
 
       // Built *here*, from the audit's own answer about which choices matched, and the ordering is
