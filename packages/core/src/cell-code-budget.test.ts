@@ -11,6 +11,7 @@ import {
   CELL_CODE_BUDGET_DECISION,
   CELL_CODE_BUDGET_GOVERNING_DECISIONS,
   CELL_CODE_BUDGET_MEASUREMENT,
+  CELL_CODE_BUDGET_REBASE_101,
   CELL_CODE_INLINE_CEILING_CHARACTERS,
   CELL_CODE_PROJECT_VOLUME_OBSERVATION,
   CELL_CODE_REVIEW_CEILING_CHARACTERS,
@@ -370,6 +371,68 @@ describe("what the measurement does and does not establish", () => {
     // that stops the single observation becoming a calibrated ceiling later.
     expect(CELL_CODE_PROJECT_VOLUME_OBSERVATION.conclusion).toMatch(/single point|no project-level ceiling/);
     expect(Object.keys(CELL_CODE_PROJECT_VOLUME_OBSERVATION)).not.toContain("thresholdCharacters");
+  });
+
+  // #120: the 101 re-measurement is recorded as its own fact, and these checks are
+  // about the *epistemics* rather than the digits — that it did not silently replace the
+  // published series, that its two series are kept apart, and that the one finding which
+  // might exceed sampling noise is stated as observed rather than decided.
+  describe("the 12.0.101.0 re-measurement record", () => {
+    const rebase = CELL_CODE_BUDGET_REBASE_101;
+
+    it("did not replace the published figures, and says so", () => {
+      expect(rebase.replacedPublishedFigures).toBe(false);
+      // The published measurement still names the build it was taken from. If a later change
+      // does replace the series, it has to come through here — not by editing a version string.
+      expect(CELL_CODE_BUDGET_MEASUREMENT.target).toContain("12.0.100.0");
+      expect(rebase.target).toContain("12.0.101.0");
+    });
+
+    // The comparison only means something if the two series are keyed to the same sizes, and
+    // the ratios have to be *computed* from the record rather than asserted as literals — a
+    // hand-typed ratio cannot disagree with the numbers it claims to summarise.
+    it("compares the two write series size by size, on shared sizes only", () => {
+      const measured = Object.entries(rebase.writeMsByCharacters).map(([chars, ms]) => [Number(chars), ms] as const);
+      const recorded = new Map(
+        Object.entries(rebase.recordedWriteMsByCharacters).map(([chars, ms]) => [Number(chars), ms] as const),
+      );
+
+      expect(measured.length).toBeGreaterThan(0);
+      for (const [chars, ms] of measured) {
+        expect(chars, `${chars} must be a measured point`).toBeGreaterThan(0);
+        expect(ms, `${chars} must be a measured duration`).toBeGreaterThan(0);
+      }
+      // Every measured size that the published series also has, compared as a ratio.
+      const shared = measured.filter(([chars]) => recorded.has(chars));
+      expect(shared.length, "at least one size must exist in both series or the comparison is vacuous").toBeGreaterThan(0);
+      const ratios = shared.map(([chars, ms]) => ms / (recorded.get(chars) as number));
+      // Same order of magnitude: a ratio far from 1 would mean the re-measurement found a
+      // different cost regime, which would have to be reconciled rather than recorded.
+      for (const ratio of ratios) {
+        expect(ratio, `ratio ${ratio.toFixed(2)} is outside the same-regime band`).toBeGreaterThan(0.5);
+        expect(ratio, `ratio ${ratio.toFixed(2)} is outside the same-regime band`).toBeLessThan(2);
+      }
+    });
+
+    it("names the series it could not re-measure rather than leaving it implied", () => {
+      expect(rebase.notReMeasured.browserEntry).toMatch(/two-step|browser/i);
+      // And the published browser figure is therefore still the 100 one, unreplaced.
+      expect(CELL_CODE_BUDGET_MEASUREMENT.browserEntryMsPerKilobyte).toBeGreaterThan(0);
+    });
+
+    // The finding most likely to be mistaken for a decided limit. It is recorded with both
+    // outcomes of the control, so a reader cannot read it as "4 MiB is refused".
+    it("records the validation timeout as a duration observation, not a size limit", () => {
+      const observed = rebase.validationTimeoutObservation;
+
+      expect(observed.message).toContain("20 秒");
+      expect(observed.controlOutcomes.length).toBeGreaterThan(1);
+      expect(observed.controlOutcomes.some(outcome => /accepted/.test(outcome))).toBe(true);
+      expect(observed.controlOutcomes.some(outcome => /rejected/.test(outcome))).toBe(true);
+      expect(observed.reading).toMatch(/duration|not a size/i);
+      expect(Object.keys(observed)).not.toContain("maxCharacters");
+      expect(Object.keys(rebase)).not.toContain("maxCharacters");
+    });
   });
 
   it("never states a size as a refusal, because no measured size was refused", () => {
