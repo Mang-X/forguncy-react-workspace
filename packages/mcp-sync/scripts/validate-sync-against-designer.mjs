@@ -13,10 +13,10 @@
  *
  * `guarantees.ts` records real-project executions as rows — a build, a route set, an environment —
  * and `unexecutedRuntimeCoverage()` reports the (promise, route, version) cells no single row
- * covers. Read it before reporting a run here as coverage, and note what it reports after a run of
- * this script on the build available here: the **write** cells are covered, and the **unchanged**
- * cells on 12.0.100.0 are not, because that build is not installed and this script's own step 7 is
- * the only unchanged-route assertion it makes.
+ * covers. Read it before reporting a run here as coverage. On the build this repository supports,
+ * a passing run of both sibling scripts leaves nothing open; the older build's cells are short
+ * of coverage, but #120 narrowed *support* to 12.0.101.0, so they are history rather than an
+ * outstanding item and are not in the default report.
  *
  * Both routes are now reached through the **shipped adapter**, which is what makes a run of
  * this script adapter-level evidence rather than executor-level:
@@ -35,9 +35,9 @@
  * the adapter fixed, not the evidence loosened. `validate-unchanged-against-designer.mjs` is the
  * sibling run that drives the unchanged route on its own and asserts the refusal path.
  *
- * The *version* axis is a separate gap and this run does not close it: it ran on 12.0.101.0,
- * and 12.0.100.0 — the version #5 pinned and #20 executed, before the recognition change — is
- * not installed on the machine #115 ran on, so `unexecutedRuntimeVersionCoverage()` reports it.
+ * The `runtime.forguncyVersion` this script builds is `12.0.101.0` since #120, matching the
+ * contract target. It is the project *declaration* the flow writes into its disposable project,
+ * not a measurement: the run's actual build is the one `getProjectSaveStatus` reports.
  *
  * ## Why it is a script and not a vitest test
  *
