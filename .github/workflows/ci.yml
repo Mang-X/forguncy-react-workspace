@@ -9,6 +9,11 @@ permissions:
   contents: read
 
 jobs:
+  # The required status check on `main` is the context `check` (integration 15368), pinned by
+  # `.github/rulesets/main-pr-ci-protection.json`. Required checks match by name, so this job
+  # keeps its name and stays a non-matrix job: a matrix would report as `check (ubuntu-latest)`,
+  # a different string the ruleset does not require, and every PR would then wait on a check that
+  # can never report. New platforms are added as separate jobs below, never folded in here.
   check:
     runs-on: ubuntu-latest
     steps:
@@ -23,6 +28,35 @@ jobs:
           # file, so "is the lockfile actually checked here?" could not be answered by
           # reading the workflow — and one of us concluded the opposite. Passing it
           # makes a stale `pnpm-lock.yaml` fail the `check` every reviewer can see.
+          run-install: |
+            - args: ['--frozen-lockfile']
+      - run: vp toolchain
+      - run: vp check
+      - run: vp test --run
+      - run: vp run typecheck
+
+  # Issue #101: the same gates on Windows, which is where this repository is developed and where
+  # its path, line-ending and process behaviour differs from the runner everything else uses.
+  #
+  # Separate from `check` for the reason above, and additive rather than a replacement: `check`
+  # still runs on Linux and is still the required context. This job is not a required check, so a
+  # Windows-only infrastructure failure is visible in the PR's checks without being able to block
+  # a merge — which is the honest position while this leg is new. If it should become required,
+  # that is a ruleset change (an administrator action, and a deliberate one) plus an entry in
+  # `.github/rulesets/main-pr-ci-protection.json`; adding it to this file alone would not do it.
+  #
+  # It is not a substitute for Forguncy runtime validation, and a green run here is not evidence
+  # about a real designer — see AGENTS.md on keeping local and simulated evidence separate from a
+  # real page. All it establishes is that the repository's own toolchain, tests and type check
+  # agree on Windows.
+  check-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: voidzero-dev/setup-vp@v1.17.0
+        with:
+          node-version: "24"
+          cache: true
           run-install: |
             - args: ['--frozen-lockfile']
       - run: vp toolchain
