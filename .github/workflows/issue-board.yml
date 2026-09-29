@@ -1,0 +1,89 @@
+name: Issue board
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, feat/103-audit-dependency-board]
+    paths: ['tools/issue-board/**', '.github/workflows/issue-board.yml']
+  pull_request:
+    paths: ['tools/issue-board/**', '.github/workflows/issue-board.yml']
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: issue-board-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  board:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@v1.17.0
+        with:
+          node-version: "24"
+          cache: true
+          run-install: |
+            - args: ['--frozen-lockfile']
+      - name: Run board regressions
+        run: node --test tools/issue-board/*.node-test.mjs
+      - name: Read live Issue and open PR snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BOARD_REPOSITORY: ${{ github.repository }}
+        run: |
+          mkdir -p dist/issue-board
+          node --input-type=module <<'NODE'
+          import { writeFile } from 'node:fs/promises';
+          import { normalizeRepoApiUrl } from './tools/issue-board/api-url.mjs';
+          const repo = process.env.BOARD_REPOSITORY;
+          const base = `https://api.github.com/repos/${repo}/`;
+          const headers = { Accept: 'application/vnd.github+json', Authorization: `Bearer ${process.env.GH_TOKEN}` };
+          async function pages(initial) {
+            const all = []; const seen = new Set(); let url = initial;
+            while (url) {
+              url = normalizeRepoApiUrl(url);
+              if (seen.has(url) || seen.size >= 100) throw new Error(`Invalid pagination: ${url}`);
+              seen.add(url);
+              const response = await fetch(url, { headers, signal: AbortSignal.timeout(30000) });
+              if (!response.ok) throw new Error(`GitHub HTTP ${response.status}: ${url}`);
+              const data = await response.json();
+              if (!Array.isArray(data)) throw new Error('Expected a paginated array');
+              all.push(...data);
+              url = /<([^>]+)>;\s*rel="next"/.exec(response.headers.get('link') || '')?.[1] || null;
+            }
+            return all;
+          }
+          const records = await pages(`${base}issues?state=all&per_page=100&sort=created&direction=asc`);
+          const openPRs = await pages(`${base}pulls?state=open&per_page=100`);
+          for (const pr of openPRs) {
+            const item = { ...pr, pull_request: { url: pr.url, html_url: pr.html_url, merged_at: pr.merged_at ?? null } };
+            const at = records.findIndex(record => record.number === pr.number);
+            if (at < 0) records.push(item); else records[at] = item;
+          }
+          const native = {}; const incomplete = [];
+          for (const issue of records.filter(item => !item.pull_request)) {
+            const count = issue.issue_dependencies_summary?.total_blocked_by;
+            if (count === 0) { native[issue.number] = []; continue; }
+            try { native[issue.number] = await pages(`${base}issues/${issue.number}/dependencies/blocked_by?per_page=100`); }
+            catch (error) { incomplete.push(issue.number); console.warn(`Dependency read incomplete for #${issue.number}: ${error.message}`); }
+          }
+          const snapshot = { schemaVersion: 2, prReadComplete: true, repo, fetchedAt: new Date().toISOString(), records, native, incomplete };
+          await writeFile('dist/issue-board/snapshot.json', JSON.stringify(snapshot, null, 2) + '\n');
+          console.log(`Snapshot: ${records.filter(item => !item.pull_request).length} issues, ${records.filter(item => item.pull_request).length} PR records, ${incomplete.length} incomplete dependency reads.`);
+          NODE
+      - name: Build single-file board
+        run: node tools/issue-board/build.mjs dist/issue-board/snapshot.json dist/issue-board/index.html
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: forguncy-issue-board
+          path: |
+            dist/issue-board/
+            tools/issue-board/
+          if-no-files-found: error
