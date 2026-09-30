@@ -22,12 +22,12 @@
       "probedWith": {
         "vitePlus": "0.3.2",
         "rolldown": "1.2.9",
-        "node": "24",
+        "node": "24.21.0",
         "installGraph": {
           "lockfile": "sha256:76ee5ff018eb3b529882c86a80fb9213ff0c0fb2ec093d004934e06d8435cdf2",
           "patches": "sha256:a771d26ace30f31fffb826a3d192a292e9b4850485e671abf84cf3af95c713a8",
           "configuration": "sha256:37aa2b39da9427a8629b68238ea0fa6bd1dc19017afbf7b7fa8d9cc7b9974c46",
-          "installedTree": "sha256:ebde9d01f3b553871a13c01960748131e007da46702c1ad799b0c96bb3b50935"
+          "installedTree": "sha256:58be1907258b6ac4a43317e88f6275c42f0b0ec77f6353236a6c6019545849bf"
         }
       },
       "extension": {

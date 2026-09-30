@@ -266,23 +266,26 @@ export interface ToolchainIdentity {
    */
   readonly rolldown?: string | null;
   /**
-   * The Node **major line** the probe ran under, e.g. `24`. Optional for {@link rolldown}'s reason.
+   * The exact Node version the probe ran under, e.g. `24.21.0`. Optional for {@link rolldown}'s
+   * reason.
    *
-   * Deliberately not the full `24.21.0`, and the reason is the granularity at which this component
-   * can change what was measured. A Node major is a runtime change — module resolution, the
-   * `exports` conditions a bundler evaluates, the loader a package is read through — and any of
-   * those can move an artifact. A patch release cannot: Node's own release policy makes patch
-   * lines bugfix-only, so a record tied to `24.21.0` would report `toolchain-changed` for a
-   * security update that changed no resolution at all.
+   * **Exact, not the major line**, and this component was the major until review round 8. The
+   * argument for the major was that only a major changes resolution while patch and minor lines are
+   * bugfix-only — and that argument is false, because a resolver bugfix *is* a resolution change.
+   * The counterexample is Node's own and it is about the primitive this toolchain calls: 23.6.0
+   * carries `module: fix async resolution error within the sync findPackageJSON`
+   * (nodejs/node#56382), a **minor** release within one major, and `package-locator.ts` resolves
+   * every identity through exactly that function. Under the major reading, 23.5.x and 23.6.0 both
+   * record `"23"`, so a package graph that moved between them left every toolchain axis reporting
+   * "unchanged".
    *
-   * That false positive is not hypothetical in this repository: CI pins `node-version: "24"`, which
-   * resolves to whatever the newest 24.x is, so a full version here would rot every committed lock
-   * in the tree on a schedule unrelated to the project — and a reason that fires for nothing is a
-   * reason readers learn to ignore. `rolldown` and `vitePlus` stay exact for the opposite reason:
-   * a bundler patch changes emitted bytes, which is exactly what a size measurement is about.
+   * The cost is real and deliberate: CI pins `node-version: "24"`, which resolves to whatever the
+   * newest 24.x is, so a runner that picks up a new patch reports `toolchain-changed` and re-probes
+   * a record that would have been fine. That is a false *stale* — it costs one measurement — and it
+   * is the direction this axis has chosen over a false *fresh* at every review round.
    *
-   * Recorded and compared at the same granularity, so there is one spelling of this fact rather
-   * than a precise one on the record and a coarse one in the rule.
+   * `rolldown` and `vitePlus` are exact for the same reason rather than the opposite one: a bundler
+   * patch changes emitted bytes, which is exactly what a size measurement is about.
    */
   readonly node?: string | null;
   /**

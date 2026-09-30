@@ -485,6 +485,57 @@ describe("#94: identity comes from the install graph, not from a declaration", (
     expect(after.installedTree).not.toBe(before.installedTree);
   });
 
+  it("digests a workspace link's target contents, not only the link path", async () => {
+    // PR #114 review round 8, P1. A workspace dependency is a symlink **out of** the install tree —
+    // measured, pnpm links `node_modules/bar` to `packages/bar` and npm records
+    // `{resolved: "packages/bar", link: true}` with the same symlink on disk — and no other digest
+    // describes the target's files. So a consumer of `bar@1.0.0` could cache a probe, then an edit to
+    // `packages/bar/src/index.js` alone moved nothing while Rolldown's next build read the new
+    // source. Measured: `installedTree` byte-identical across exactly that edit.
+    const withWorkspaceSource = async (source: string): Promise<string | null | undefined> =>
+      withProject(async root => {
+        await writeFileAt(
+          join(root, "package.json"),
+          JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "pnpm@11.18.0" }),
+        );
+        await writeFileAt(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+        // The workspace package: same name, same version, in every run.
+        await writeFileAt(
+          join(root, "packages", "bar", "package.json"),
+          JSON.stringify({ name: "bar", version: "1.0.0" }),
+        );
+        await writeFileAt(join(root, "packages", "bar", "src", "index.js"), source);
+        // The link pnpm materializes, pointing out of the install tree.
+        await mkdir(join(root, "node_modules"), { recursive: true });
+        await symlink(join(root, "packages", "bar"), join(root, "node_modules", "bar"), "junction");
+        await writeFileAt(
+          join(root, "node_modules", ".modules.yaml"),
+          JSON.stringify({
+            included: { dependencies: true, devDependencies: true, optionalDependencies: true },
+            nodeLinker: "isolated",
+            hoistPattern: ["*"],
+            publicHoistPattern: [],
+          }),
+        );
+        await writeFileAt(join(root, "node_modules", ".pnpm", "node_modules", ".keep"), "");
+        await writeFileAt(
+          join(root, "node_modules", ".pnpm", "consumer@1.0.0", "node_modules", "consumer", "package.json"),
+          "{}",
+        );
+        return (await readInstallGraphIdentity(root)).installedTree;
+      });
+
+    const before = await withWorkspaceSource("export const VERSION = 1;\n");
+    const after = await withWorkspaceSource("export const VERSION = 2; // source edited, nothing else\n");
+
+    expect(before).not.toBeNull();
+    expect(after).not.toBe(before);
+
+    // The control: the same source composes the same identity, so the case above is about the
+    // *content* and not about the fixture being non-deterministic in some other way.
+    expect(await withWorkspaceSource("export const VERSION = 1;\n")).toBe(before);
+  });
+
   it("is unknown when the manager writes no install record this toolchain can read", async () => {
     // The fail-closed half: yarn and bun write no record this module can verify, so the answer is
     // `null` — unknown, and therefore stale. Inventing a marker would be the guess #94 removes.
@@ -667,16 +718,21 @@ describe("#94: the versions recorded are the ones that actually ran", () => {
     });
   });
 
-  it("records the Node major line rather than the exact patch release", async () => {
+  it("records the exact Node version, because a resolver fix moves within one major", async () => {
+    // PR #114 review round 8, P1, and this case previously asserted the opposite — it required the
+    // major line, on the argument that only a major can change resolution. That argument is false:
+    // Node 23.6.0 carries `module: fix async resolution error within the sync findPackageJSON`
+    // (nodejs/node#56382, commit 4f77920a9d), a **minor** release of one major, and
+    // `package-locator.ts` resolves every identity through exactly that function. Verified against
+    // the nodejs repository before changing this: the commit is in `CHANGELOG_V23.md` under 23.6.0.
     await withProject(async root => {
       await project(root);
       const identity = await readToolchainIdentity(root);
 
-      // A major is where Node can change resolution; patch lines are bugfix-only. CI pins `"24"`,
-      // so an exact version here would rot every committed lock on a schedule unrelated to the
-      // project — a reason that fires for nothing is one readers learn to ignore.
-      expect(identity.node).toBe(process.versions.node.split(".")[0]);
-      expect(identity.node).not.toContain(".");
+      expect(identity.node).toBe(process.versions.node);
+      // The positive control for "exact": a major-only reading would fail this on any release whose
+      // version has more than one component, which is every real release.
+      expect(identity.node).toContain(".");
     });
   });
 

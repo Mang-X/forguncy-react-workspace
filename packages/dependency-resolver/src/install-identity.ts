@@ -66,7 +66,7 @@
 
 import { createHash } from "node:crypto";
 import { readFile, readdir, realpath } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative as relativePath, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { InstallGraphIdentity, ToolchainIdentity } from "@forguncy-react-workspace/core";
@@ -990,7 +990,14 @@ async function pnpmInstalledTreeDigest(installRoot: string): Promise<string | nu
     return null;
   }
 
-  return digestOf(canonicalJson({ ...fields, store: storeEntries }));
+  // Link targets last, because they are the one part of the result no manager's own record
+  // describes: the store names registry packages, while a workspace dependency is a symlink out of
+  // the tree whose *files* are the artifact (see `linkTargetsDigest`).
+  const links = await linkTargetsDigest(installRoot);
+  if (links === null) {
+    return null;
+  }
+  return digestOf(canonicalJson({ ...fields, store: storeEntries, links }));
 }
 
 /** npm's `node_modules/.package-lock.json`, as the materialized entry set. */
@@ -1040,7 +1047,149 @@ async function npmInstalledTreeDigest(installRoot: string): Promise<string | nul
   // Sorted by path so the digest is over the *set* of artifacts rather than over whatever order npm
   // happened to write them in.
   entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-  return digestOf(canonicalJson(entries));
+  // Link targets are folded in here as well: npm records a `link: true` entry with only a relative
+  // `resolved` path, which does not move when the target's source does (see `linkTargetsDigest`).
+  const links = await linkTargetsDigest(installRoot);
+  if (links === null) {
+    return null;
+  }
+  return digestOf(canonicalJson({ entries, links }));
+}
+
+/**
+ * Content identity of every **workspace/link target** reached from `node_modules`, or `null` when
+ * one cannot be read.
+ *
+ * **Why this is a component of its own.** Review round 8: a workspace dependency is materialized as
+ * a symlink out of the install tree — measured, both managers do this identically, pnpm linking
+ * `node_modules/bar` to `packages/bar` and npm recording `{resolved: "packages/bar", link: true}`
+ * with the same symlink on disk — and *nothing* in the other digests describes the target's files.
+ * So a consumer could depend on `bar@1.0.0`, the probe could be cached, and then an edit to
+ * `packages/bar/src/index.js` alone would move no version, no lockfile, no link path and no store
+ * entry, while Rolldown's next build reads the new source. Measured: `installedTree` byte-identical
+ * across exactly that edit, with the warm cache answering from the old report.
+ *
+ * **What is digested.** For each link whose target lies *outside* the install tree, the sorted
+ * `(relative path, content digest)` pairs of its package files, skipping `node_modules` and dot
+ * directories. Paths are relative to the link's own root, so the identity is portable: the same
+ * workspace package in two checkouts composes the same bytes. The link's *name* is included too, so
+ * two links to one target are not silently merged into one entry.
+ *
+ * **Why contents and not a target path.** A path is what the previous revision recorded, and it is
+ * exactly what does not move when the source does — the defect this exists for. Digesting the tree
+ * is the conservative answer, and it is affordable because these targets are source packages:
+ * measured at 2–3 files in this repository's own workspace examples.
+ *
+ * **The cost, stated rather than discovered later.** A linked package that is *built* into a
+ * gitignored `dist/` churns this digest: the output appears, the identity moves, and a record is
+ * re-probed although the declared source never changed. That is a false *stale* — the direction this
+ * axis has chosen over a false *fresh* at every round — and narrowing it (say, to the files the
+ * probe's build actually reached) would mean guessing which files those are, which is the bundler's
+ * answer rather than this module's. No fixture or example in this repository has a linked package
+ * with build output today, so nothing here depends on the churn either way.
+ *
+ * `null` when a target cannot be read, which the caller reports as `unknown` — the fail-closed
+ * direction, and the one the third criterion asks for.
+ */
+async function linkTargetsDigest(installRoot: string): Promise<string | null> {
+  const nodeModules = join(installRoot, "node_modules");
+  const canonicalTree = await realpath(nodeModules).catch(() => null);
+  if (canonicalTree === null) {
+    return null;
+  }
+
+  const links: { readonly name: string; readonly files: readonly string[] }[] = [];
+  let entries: string[];
+  try {
+    entries = await readdir(nodeModules);
+  } catch {
+    return null;
+  }
+
+  for (const entry of entries) {
+    // Dot entries are the manager's own bookkeeping (`.bin`, `.pnpm`, `.modules.yaml`), never a link.
+    if (entry.startsWith(".")) {
+      continue;
+    }
+    const names = entry.startsWith("@")
+      ? await readdir(join(nodeModules, entry)).then(scoped => scoped.map(name => `${entry}/${name}`)).catch(() => null)
+      : [entry];
+    if (names === null) {
+      return null;
+    }
+
+    for (const name of names) {
+      const path = join(nodeModules, ...name.split("/"));
+      let resolved: string;
+      try {
+        // `realpath` follows the link; an entry that is *not* a link resolves to itself and so lands
+        // inside the tree, which is how a registry package is told apart from a workspace one.
+        resolved = await realpath(path);
+      } catch {
+        return null;
+      }
+      if (isInside(canonicalTree, resolved)) {
+        continue;
+      }
+
+      const files = await collectPackageFiles(resolved, resolved);
+      if (files === null) {
+        return null;
+      }
+      links.push({ name, files });
+    }
+  }
+
+  links.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return digestOf(canonicalJson(links));
+}
+
+/**
+ * Sorted `"<relative path>:<content digest>"` for every file under `directory`, or `null` when one
+ * cannot be read.
+ *
+ * `node_modules` and dot directories are skipped: a workspace package's own install is a different
+ * install graph with its own identity, and following it would make this digest depend on a tree the
+ * link does not own.
+ */
+async function collectPackageFiles(directory: string, root: string): Promise<readonly string[] | null> {
+  let entries: { readonly name: string; readonly isDirectory: () => boolean; readonly isFile: () => boolean }[];
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  const files: string[] = [];
+  for (const entry of entries) {
+    if (entry.name.startsWith(".") || entry.name === "node_modules") {
+      continue;
+    }
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      const nested = await collectPackageFiles(path, root);
+      if (nested === null) {
+        return null;
+      }
+      files.push(...nested);
+      continue;
+    }
+    if (!entry.isFile()) {
+      // A symlink or socket inside the target: its content is elsewhere, so this digest cannot claim
+      // to have covered it.
+      return null;
+    }
+    const bytes = await readFile(path).catch(() => null);
+    if (bytes === null) {
+      return null;
+    }
+    // Paths relative to the link's own root, so a checkout in another directory composes the same
+    // identity. Separators normalized for the same reason.
+    const relative = relativePath(root, path).split(/[\\/]/).join("/");
+    files.push(`${relative}:${digestOfBytes(bytes)}`);
+  }
+  files.sort();
+  return files;
 }
 
 /**
@@ -1063,11 +1212,21 @@ export async function readToolchainIdentity(projectRoot: string): Promise<Toolch
   return {
     vitePlus,
     rolldown,
-    // The major line, not `process.versions.node`: the granularity at which Node can change what a
-    // probe measured is a major (resolution, `exports` conditions, the loader), while patch lines
-    // are bugfix-only. `ToolchainIdentity.node` carries the full argument, including why a
-    // committed lock must not be tied to a patch release CI moves under it.
-    node: process.versions.node.split(".")[0] ?? null,
+    // The **exact** version, not the major line. This was the major until review round 8, on the
+    // argument that only a major can change resolution while patch lines are bugfix-only — and that
+    // argument is false, because a "bugfix" to the resolver *is* a behaviour change to resolution.
+    // The counterexample is Node's own and it is about the primitive this module calls: 23.6.0
+    // carries `module: fix async resolution error within the sync findPackageJSON`
+    // (nodejs/node#56382, commit 4f77920a9d), a **minor** release of the same major, and
+    // `package-locator.ts` resolves every identity through exactly that function. Under the major
+    // reading both 23.5.x and 23.6.0 record `"23"`, so a package graph that moved between them
+    // would leave every toolchain axis reporting "unchanged".
+    //
+    // The cost is the one #94's third criterion asks for: a CI runner that picks up a new 24.x
+    // patch reports `toolchain-changed` and re-probes a record that would have been fine. That is a
+    // false *stale*, which costs a measurement, and it is the direction this whole axis has
+    // deliberately chosen over a false *fresh* at every previous review round.
+    node: process.versions.node,
     installGraph,
   };
 }
