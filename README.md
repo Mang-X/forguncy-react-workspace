@@ -185,6 +185,8 @@ export default defineForguncyConfig({
 
 重叠是**双向**判定的：`vite.config.ts` 写得更深（`@app/shared/thing`）同样会盖住项目里的 `@app/shared`，一样被拒绝。不重叠的 `vite.config.ts` 别名不受影响。
 
+**正则形式的 `find` 同样会被判定**，而不是压成字符串近似。`{ find: /^@app\/shared(?=\/|$)/ }` 这种写法会被真的求值：Vite 确实会用它改写 `@app/shared/thing`，所以必须拒绝 —— 早先版本把它降成 `source` 字符串比较，会**静默漏过**，等于恢复本票要消除的分叉。判定规则是「把该正则对着项目 key 能匹配的 specifier 集合实际求值」：命中即拒绝；未命中且正则可静态证明与该 key 不相交（如 `^` 锚定、强制字面前缀不含该 key）则放行；其余无法判定的**一律拒绝**（fail closed，因为这是 blocking gate，漏报的代价是不一致，误拒的代价只是让用户改写成普通字符串别名）。
+
 ## 依赖策略
 
 第三方依赖不会简单地分成“支持 / 不支持”，而是根据实际运行方式选择以下策略：

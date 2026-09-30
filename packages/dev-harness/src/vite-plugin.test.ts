@@ -795,3 +795,83 @@ describe("a `vite.config.ts` alias that shadows a project alias refuses the serv
     await expect(startWith(undefined)).resolves.toBeUndefined();
   });
 });
+
+/**
+ * A `RegExp` `find` in `vite.config.ts` that would shadow a project alias.
+ *
+ * ## Why this is its own test and not a variation on the string case
+ *
+ * The shadowing check is a **blocking correctness gate**: a miss restores the dev/build split #97
+ * exists to remove, and it does so silently, because both paths succeed and disagree. An earlier
+ * version therefore reduced a `RegExp` `find` to its `source` string and let the string comparison
+ * decide — and the comment claimed that "fails in the safe direction". That was wrong. Measured
+ * against the reviewer's counter-example:
+ *
+ * | `vite.config.ts` alias | Vite resolves `@app/shared/thing` to | old check |
+ * | --- | --- | --- |
+ * | `{ find: /^@app\/shared(?=\/|$)/ }` | `/local-copy/thing` | **allowed** |
+ *
+ * The source string is `@app/shared(?=/|$)`, which is neither equal to the project key nor a `/`
+ * prefix of it, so nothing fired. A lookahead is exactly the spelling someone writes for "this id
+ * and its subpaths", so this was not an exotic input.
+ *
+ * ## What replaced it
+ *
+ * The pattern is **evaluated** against the specifiers a project alias can match, using the caller's
+ * own regex engine, so a detection is a fact rather than an approximation. The residue — patterns
+ * the bounded probes miss that are still not provably disjoint — fails closed, and a `^`-anchored
+ * pattern whose mandatory literal run excludes the key is exempt on a proof rather than a guess.
+ */
+describe("a `RegExp` `vite.config.ts` alias cannot evade the shadow check", () => {
+  const reRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "tests", "fixtures", "project-alias");
+
+  function registry() {
+    return createCellRegistry(
+      {
+        cells: { probe: { entry: "./cells/probe/src/index.ts", target: { pageName: "探针", cell: "A1" } } },
+        resolve: { alias: { "@app/shared": "./shared" } },
+      },
+      { root: reRoot },
+    );
+  }
+
+  async function startsWith(userAlias: unknown): Promise<void> {
+    const server = await createServer({
+      root: reRoot,
+      configFile: false,
+      logLevel: "error",
+      appType: "spa",
+      resolve: { alias: userAlias as Record<string, string> },
+      plugins: [devHarness({ config: registry() }) as never],
+      server: { middlewareMode: true, hmr: false, watch: null },
+    });
+    await server.close();
+  }
+
+  it("refuses the lookahead pattern Vite really does apply, the counter-example that got through", async () => {
+    await expect(
+      startsWith([{ find: /^@app\/shared(?=\/|$)/, replacement: "/local-copy" }]),
+    ).rejects.toThrowError(/refused to start/);
+  });
+
+  it("refuses an unanchored pattern that matches the project key anywhere", async () => {
+    await expect(startsWith([{ find: /shared/, replacement: "/local-copy" }])).rejects.toThrowError(
+      /refused to start/,
+    );
+  });
+
+  it("allows an anchored pattern whose forced prefix cannot match the project key", async () => {
+    // The exemption has to be a *proof* or it is a second approximation: `^` makes
+    // `some-other-lib` mandatory on every match, so no string beginning `@app/shared` can match it.
+    await expect(
+      startsWith([{ find: /^some-other-lib(\/|$)/, replacement: "/x" }]),
+    ).resolves.toBeUndefined();
+  });
+
+  it("still allows a RegExp that overlaps nothing at all, in the unanchored form too", async () => {
+    // The control for the fail-closed branch: an unanchored pattern is never exempt on a prefix
+    // argument, so this one is allowed because the probes actually miss it *and* its source is
+    // a literal with no metacharacters — the only case where a probe miss is a true miss.
+    await expect(startsWith([{ find: /totally-unrelated-package/, replacement: "/x" }])).resolves.toBeUndefined();
+  });
+});
