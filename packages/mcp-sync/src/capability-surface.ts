@@ -150,13 +150,14 @@ export const SYNC_EVIDENCE_SOURCES: Readonly<Record<SyncEvidenceSourceId, SyncEv
     // `api.page.getCells`: that scope says the read call was never recorded, which is why the
     // operation was `unestablished` until #20 executed it. Listing it here would make the field
     // contradict the prose it is derived from.
-        establishedCalls: [
-        { version: "12.0.100.0", method: "api.page.setCells" },
-        { version: "12.0.100.0", method: "api.app.listFrontendLibraries" },
-        { version: "12.0.100.0", method: "api.app.checkProjectErrors" },
-        { version: "12.0.100.0", method: "api.app.generatePageAsync" },
-        { version: "12.0.100.0", method: "api.app.getProjectSaveStatus" },
-      ],  },
+    establishedCalls: [
+      { version: "12.0.100.0", method: "api.page.setCells" },
+      { version: "12.0.100.0", method: "api.app.listFrontendLibraries" },
+      { version: "12.0.100.0", method: "api.app.checkProjectErrors" },
+      { version: "12.0.100.0", method: "api.app.generatePageAsync" },
+      { version: "12.0.100.0", method: "api.app.getProjectSaveStatus" },
+    ],
+  },
   "forguncy-library-guide": {
     id: "forguncy-library-guide",
     channel: "product-documentation",
@@ -177,15 +178,16 @@ export const SYNC_EVIDENCE_SOURCES: Readonly<Record<SyncEvidenceSourceId, SyncEv
     // to read and `api.app.saveProject` to persist — plus the rest of the flow it drove through the
     // port on the same build. `api.page.getCells` is here and is **not** in #5's list, which is the
     // whole point of the two rows differing.
-        establishedCalls: [
-        { version: "12.0.100.0", method: "api.page.getCells" },
-        { version: "12.0.100.0", method: "api.page.getCellCodeContext" },
-        { version: "12.0.100.0", method: "api.app.saveProject" },
-        { version: "12.0.100.0", method: "api.app.listFrontendLibraries" },
-        { version: "12.0.100.0", method: "api.app.checkProjectErrors" },
-        { version: "12.0.100.0", method: "api.app.getProjectSaveStatus" },
-        { version: "12.0.100.0", method: "api.app.generatePageAsync" },
-      ],  },
+    establishedCalls: [
+      { version: "12.0.100.0", method: "api.page.getCells" },
+      { version: "12.0.100.0", method: "api.page.getCellCodeContext" },
+      { version: "12.0.100.0", method: "api.app.saveProject" },
+      { version: "12.0.100.0", method: "api.app.listFrontendLibraries" },
+      { version: "12.0.100.0", method: "api.app.checkProjectErrors" },
+      { version: "12.0.100.0", method: "api.app.getProjectSaveStatus" },
+      { version: "12.0.100.0", method: "api.app.generatePageAsync" },
+    ],
+  },
   "issue-115-designer-probe": {
     id: "issue-115-designer-probe",
     channel: "designer-api",
@@ -197,15 +199,16 @@ export const SYNC_EVIDENCE_SOURCES: Readonly<Record<SyncEvidenceSourceId, SyncEv
     // The seven port methods the adapter-level run drove on this build (write route 20/20,
     // unchanged route 13/13): every call in the flow, plus the generation call, which on this
     // build is `api.app.generateProject`.
-        establishedCalls: [
-        { version: "12.0.101.0", method: "api.app.listFrontendLibraries" },
-        { version: "12.0.101.0", method: "api.page.getCells" },
-        { version: "12.0.101.0", method: "api.page.setCells" },
-        { version: "12.0.101.0", method: "api.app.getProjectSaveStatus" },
-        { version: "12.0.101.0", method: "api.app.saveProject" },
-        { version: "12.0.101.0", method: "api.app.checkProjectErrors" },
-        { version: "12.0.101.0", method: "api.app.generateProject" },
-      ],  },
+    establishedCalls: [
+      { version: "12.0.101.0", method: "api.app.listFrontendLibraries" },
+      { version: "12.0.101.0", method: "api.page.getCells" },
+      { version: "12.0.101.0", method: "api.page.setCells" },
+      { version: "12.0.101.0", method: "api.app.getProjectSaveStatus" },
+      { version: "12.0.101.0", method: "api.app.saveProject" },
+      { version: "12.0.101.0", method: "api.app.checkProjectErrors" },
+      { version: "12.0.101.0", method: "api.app.generateProject" },
+    ],
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -771,35 +774,40 @@ export function assertMcpSyncStepCoherent(step: McpSyncStep, index: number): voi
  * from a real session is evidence *about what that session ran*, so a source that did not run the
  * call cannot have established it, however well matched the build is.
  */
-function evidenceEstablishesCall(sourceId: SyncEvidenceSourceId, method: string, version: SyncMeasuredVersion): boolean {
+function establishesCall(
+  source: SyncEvidenceSource,
+  method: string,
+  version: SyncMeasuredVersion,
+): boolean {
   // One lookup over *paired* records, so a source cannot establish a call on a build it did not
-  // run it on. Reading `observedVersions` and `establishedMethods` separately would take the
-  // Cartesian product of the two — #116's sixth review.
+  // run it on. Reading `observedVersions` and the calls' methods separately would take the Cartesian
+  // product of the two — #116's sixth review. Every shipped source observes one build, so the two
+  // readings agree on today's data and disagree the moment a source observes two, which is why
+  // the rule is stated over the pairs rather than over the data.
   return (
-    findSyncEvidenceSource(sourceId).establishedCalls?.some(
-      (call) => call.method === method && call.version === version,
-    ) === true
+    source.establishedCalls?.some(call => call.method === method && call.version === version) === true
   );
 }
 
-/**
- * May this source be cited alongside a versioned call at all?
- *
- * The weaker question, and the one that keeps the product's documentation usable: it documents a
- * call's shape, which is a real contribution beside a call, without being evidence that the call
- * ran on any build. Distinct from {@link evidenceEstablishesVersion} on purpose — the two were
- * conflated, and conflating them is what let documentation satisfy an execution requirement.
- */
-function evidenceCanBeCitedFor(sourceId: SyncEvidenceSourceId, _version: SyncMeasuredVersion): boolean {
-  void findSyncEvidenceSource(sourceId);
-  return true;
-}
 
 /**
  * Refuse a capability that claims more than its evidence supports. See the guard below.
  */
-export function assertSyncCapabilityCoherent(capability: SyncCapability): void {
+export function assertSyncCapabilityCoherent(
+  capability: SyncCapability,
+  sources: Readonly<Record<SyncEvidenceSourceId, SyncEvidenceSource>> = SYNC_EVIDENCE_SOURCES,
+): void {
   const id = capability.id;
+  // The evidence table is a parameter for the same reason the other guards take theirs: a
+  // multi-build source is a shape no shipped source has today, and a rule that only holds for the
+  // shipped data is not a rule. #116's sixth review is the case.
+  const find = (sourceId: SyncEvidenceSourceId): SyncEvidenceSource => {
+    const source = sources[sourceId];
+    if (source === undefined) {
+      throw new SyncCapabilityContractError("capability-not-coherent", `Unknown evidence source "${sourceId}".`);
+    }
+    return source;
+  };
 
   if (capability.evidenceSources.length === 0) {
     throw new SyncCapabilityContractError(
@@ -808,7 +816,7 @@ export function assertSyncCapabilityCoherent(capability: SyncCapability): void {
     );
   }
   for (const sourceId of capability.evidenceSources) {
-    findSyncEvidenceSource(sourceId);
+    find(sourceId);
   }
 
   for (const stepId of capability.usedByStepIds) {
@@ -863,14 +871,14 @@ export function assertSyncCapabilityCoherent(capability: SyncCapability): void {
       // evidence: one that does not name this build cannot establish the call, however
       // authoritative its channel looks.
       for (const sourceId of cited) {
-        if (!evidenceCanBeCitedFor(sourceId, call.version)) {
+        if (sources[sourceId] === undefined) {
           throw new SyncCapabilityContractError(
             "capability-not-coherent",
             `Capability "${id}" cites "${sourceId}" for "${call.method}", and that is not an evidence source.`,
           );
         }
       }
-      if (!cited.some(sourceId => evidenceEstablishesCall(sourceId, call.method, call.version))) {
+      if (!cited.some(sourceId => establishesCall(find(sourceId), call.method, call.version))) {
         throw new SyncCapabilityContractError(
           "capability-not-coherent",
           `Capability "${id}" records "${call.method}" as established on ${call.version}, but no cited source (${cited.join(", ")}) both observed that build and executed that call. A call is established by executing it on that build; a run of some other operation, and documentation of a call's shape, cannot establish it.`,
@@ -993,7 +1001,7 @@ export function assertSyncPortMatchesCapabilities(
 
 export function assertMcpSyncFlowIsCoherent(): void {
   MCP_SYNC_STEPS.forEach(assertMcpSyncStepCoherent);
-  SYNC_CAPABILITIES.forEach(assertSyncCapabilityCoherent);
+  for (const capability of SYNC_CAPABILITIES) assertSyncCapabilityCoherent(capability);
 
   const mutations = MCP_SYNC_STEPS.filter(step => step.phase === "mutation");
   if (mutations.length !== 1) {

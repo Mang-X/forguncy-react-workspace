@@ -19,7 +19,7 @@ import {
   syncMutationStep,
   unestablishedSyncCapabilities,
 } from "./capability-surface.ts";
-import type { McpSyncStep, SyncCapability } from "./capability-surface.ts";
+import type { McpSyncStep, SyncCapability, SyncEvidenceSource } from "./capability-surface.ts";
 import { FORGUNCY_SYNC_PORT_METHODS } from "./port.ts";
 
 describe("the MCP sync flow", () => {
@@ -613,6 +613,24 @@ describe("the guards refuse an incoherent registry", () => {
     );
   });
 
+  // The review's own counter-example, kept as the regression it is: deleting #115 from
+  // `write-cell-source`'s top-level list is exactly the shipped state that passed the first
+  // version of this guard.
+  it("refuses a top-level list that omits a source its calls cite", () => {
+    const capability = {
+      ...findSyncCapability("write-cell-source"),
+      evidenceSources: ["issue-5-designer-probe", "forguncy-library-guide"],
+      calls: [
+        { method: "api.page.setCells", version: "12.0.100.0", evidenceSourceIds: ["issue-5-designer-probe", "forguncy-library-guide"] },
+        { method: "api.page.setCells", version: "12.0.101.0", evidenceSourceIds: ["issue-115-designer-probe"] },
+      ],
+    } as unknown as SyncCapability;
+
+    expect(() => assertSyncCapabilityCoherent(capability)).toThrow(
+      /omits "issue-115-designer-probe" from its capability-level evidence/,
+    );
+  });
+
   it("has no orphaned capability-level source in the shipped table", () => {
     for (const capability of SYNC_CAPABILITIES) {
       const cited = new Set((capability.calls ?? []).flatMap(call => call.evidenceSourceIds));
@@ -656,26 +674,52 @@ describe("the guards refuse an incoherent registry", () => {
   // one — the hole #116's sixth review described was latent, and a guard that only holds for the
   // shipped data is not one.
   it("will not let a source establish a call on a build it did not run it on", () => {
-    // What the previous shape (observedVersions × establishedMethods) would have produced.
-    const cartesian: { version: string; method: string }[] = [];
-    for (const version of ["12.0.100.0", "12.0.101.0"]) {
-      for (const method of ["api.app.generatePageAsync", "api.app.generateProject"]) {
-        cartesian.push({ version, method });
-      }
-    }
-    const paired = [
-      { version: "12.0.100.0", method: "api.app.generatePageAsync" },
-      { version: "12.0.101.0", method: "api.app.generateProject" },
-    ];
-    const establishes = (records: readonly { version: string; method: string }[], method: string, version: string) =>
-      records.some(record => record.method === method && record.version === version);
+    // A source that observed **both** builds and ran one operation on each — the state an evidence
+    // source reaches after being re-observed, and the one a `observedVersions × methods` reading
+    // answers wrongly. No shipped source looks like this, which is exactly why the earlier version
+    // of this test passed against a broken guard: it copied the rule instead of calling it.
+    const bothBuilds = {
+      "issue-5-designer-probe": {
+        id: "issue-5-designer-probe",
+        channel: "designer-api",
+        citation: "supplied: a session that ran one generation call per build",
+        scope: "supplied",
+        observedVersions: ["12.0.100.0", "12.0.101.0"],
+        establishedCalls: [
+          { version: "12.0.100.0", method: "api.app.generatePageAsync" },
+          { version: "12.0.101.0", method: "api.app.generateProject" },
+        ],
+      },
+    } as unknown as Readonly<Record<string, SyncEvidenceSource>>;
 
-    // The pairs establish their own entries and neither of the crossed ones.
-    for (const record of paired) expect(establishes(paired, record.method, record.version)).toBe(true);
-    expect(establishes(paired, "api.app.generateProject", "12.0.100.0")).toBe(false);
-    expect(establishes(paired, "api.app.generatePageAsync", "12.0.101.0")).toBe(false);
-    // And the Cartesian product would have claimed all four, which is the error being closed.
-    expect(cartesian.filter(record => establishes(cartesian, record.method, record.version))).toHaveLength(4);
+    const capability = (method: string, version: string) =>
+      ({
+        id: "generate-page",
+        summary: "Generate the target page and report the runtime locator a browser can open.",
+        confirmation: "established",
+        usedByStepIds: ["generate-page"],
+        evidenceSources: ["issue-5-designer-probe"],
+        calls: [{ method, version, evidenceSourceIds: ["issue-5-designer-probe"] }],
+        get method() {
+          return method;
+        },
+      }) as unknown as SyncCapability;
+    const establishes = (method: string, version: string) => () =>
+      assertSyncCapabilityCoherent(capability(method, version), bothBuilds);
+
+    // Each operation on the build it was run on: established.
+    expect(establishes("api.app.generatePageAsync", "12.0.100.0")).not.toThrow();
+    expect(establishes("api.app.generateProject", "12.0.101.0")).not.toThrow();
+    // The two crossed pairs. The source observed both builds and ran both operations, so a build
+    // x method reading would answer "established" for all four; the pairs answer two.
+    for (const [method, version] of [
+      ["api.app.generateProject", "12.0.100.0"],
+      ["api.app.generatePageAsync", "12.0.101.0"],
+    ] as const) {
+      expect(establishes(method, version), `${method}@${version}`).toThrow(
+        /no cited source .* both observed that build and executed that call/,
+      );
+    }
   });
 
   // The list records calls a source *establishes*, not every call it made: #20 executed
