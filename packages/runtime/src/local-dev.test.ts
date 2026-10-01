@@ -16,7 +16,9 @@ import {
   hostBridgeInterceptedModuleIds,
   hostBridgeModuleIds,
   RUNTIME_CONTRACT_TARGET,
-} from "@forguncy-react-workspace/core";
+  RUNTIME_CONTRACT_TARGET_FIELD_SOURCES,
+  RUNTIME_CONTRACT_TARGET_FIELDS_NOT_BROWSER_OBSERVED,
+} from "@forguncy-react-workspace/core/browser";
 import type { DependencyDecision, HostBridgeMapping } from "@forguncy-react-workspace/core";
 
 import type { RuntimeFacadeHostBindings, RuntimeFacadeProvider } from "./contract.ts";
@@ -71,6 +73,7 @@ import {
   localDevRealRuntimeOwedChecks,
   localDevRealRuntimeStage,
   localDevRecordedVersion,
+  localDevVersionFieldIsBrowserObserved,
   localDevResolvableModuleIds,
   localDevResolvedBridgeRows,
   localDevUnsupportedModuleIds,
@@ -493,6 +496,31 @@ describe("host module resolution in local mode", () => {
       RUNTIME_CONTRACT_TARGET.hostReactDomVersion,
     );
     expect([...LOCAL_DEV_VERSION_FIELDS]).toEqual(["hostReactVersion", "hostReactDomVersion"]);
+  });
+
+  // #116's review: the re-base moved the target to 12.0.101.0 and left these fields holding the
+  // values #5 recorded on 12.0.100.0, and a comment saying so would not stop a consumer from
+  // reading them as re-verified. The provenance is therefore machine-readable on this side too,
+  // and the property asserted here is the one that makes it load-bearing: *every* field this
+  // module checks a local package against is declared as not browser-observed. A field added to
+  // `LOCAL_DEV_VERSION_FIELDS` without being declared either way fails, which is the half-edit
+  // the review's alternative would have allowed.
+  it("declares the browser-observation status of every field it checks against", () => {
+    expect([...LOCAL_DEV_VERSION_FIELDS].sort()).toEqual(
+      [...RUNTIME_CONTRACT_TARGET_FIELDS_NOT_BROWSER_OBSERVED]
+        .filter(field => (LOCAL_DEV_VERSION_FIELDS as readonly string[]).includes(field))
+        .sort(),
+    );
+    for (const field of LOCAL_DEV_VERSION_FIELDS) {
+      expect(localDevVersionFieldIsBrowserObserved(field), field).toBe(false);
+    }
+    // Not vacuous: the list is non-empty and its entries are fields the contract *does* declare
+    // sources for, so a list that emptied itself would fail the equality above rather than
+    // passing the loop.
+    expect(RUNTIME_CONTRACT_TARGET_FIELDS_NOT_BROWSER_OBSERVED.length).toBeGreaterThan(0);
+    for (const field of RUNTIME_CONTRACT_TARGET_FIELDS_NOT_BROWSER_OBSERVED) {
+      expect(RUNTIME_CONTRACT_TARGET_FIELD_SOURCES[field], field).toBeDefined();
+    }
   });
 
   // The asymmetry worth recording: the local check is one field richer than #9's

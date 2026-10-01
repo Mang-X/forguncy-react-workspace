@@ -196,6 +196,8 @@ export {
   persistedDefaultCellPreset,
   rejectedCellSourceConstructs,
   RUNTIME_CONTRACT_TARGET,
+  RUNTIME_CONTRACT_TARGET_FIELD_SOURCES,
+  RUNTIME_CONTRACT_TARGET_FIELDS_NOT_BROWSER_OBSERVED,
   RUNTIME_CONTRACT_UNKNOWNS,
   RUNTIME_EVIDENCE_CHANNELS,
 } from "./runtime-contract.ts";
@@ -214,6 +216,8 @@ export type {
   CellUserScopeBinding,
   FrontendLibraryReference,
   RuntimeContractTarget,
+  RuntimeContractTargetField,
+  RuntimeContractTargetFieldSource,
   RuntimeContractUnknown,
   RuntimeEvidenceChannel,
 } from "./runtime-contract.ts";

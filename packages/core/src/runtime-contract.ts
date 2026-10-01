@@ -69,28 +69,22 @@ export const RUNTIME_EVIDENCE_CHANNELS = [
  *
  * The target was established against `12.0.100.0` and is now `12.0.101.0` — the version
  * actually in use. The rebase is **measured, not renamed**, and the measurements are on
- * #120; each field below says whether it was re-read on `12.0.101.0` or carried forward.
+ * #120; each field's basis is in {@link RUNTIME_CONTRACT_TARGET_FIELD_SOURCES}, which is data
+ * a consumer can read rather than a paragraph it has to trust.
  *
- * Re-measured on `12.0.101.0` (designer session, 2026-09-27/28):
+ * Re-measured on `12.0.101.0` (live designer session, 2026-09-27/28): `productVersion` and
+ * `productBuild` from the installed assembly; the plugin GUID and its resource paths; the
+ * designer operations this contract's flows make. The React and Babel versions were read from
+ * the **shipped runtime source** the plugin serves.
  *
- * - `productVersion` / `productBuild` — read from the installed `Forguncy.exe`.
- * - `reactCellTypePluginGuid`, the plugin resource paths, `browserTranspiler` and
- *   `browserTranspilerVersion` — the plugin GUID is unchanged and its resources are readable
- *   at the same paths; the React bundle reports `19.2.7` and Babel standalone `7.29.4`.
- *
- * **Carried forward, and flagged rather than implied:** `hostReactDomVersion` is recorded as
- * `19.2.7` because the `12.0.101.0` React bundle is a single artifact reporting one React
- * version and the `createRoot` entry, and #5's probe read `ReactDOM.version` as the same value
- * on this product line. It was **not** read back as `ReactDOM.version` on `12.0.101.0` in the
- * rebase session — the runtime site's generated page could not be opened (it requires two-step
- * verification this machine has no credential for), so no browser-side field was re-read. A
- * `ReactDOM` version that disagreed with `React` would be a real finding; nothing observed
- * disagrees, and nothing observed confirms it either. See #120 for the open item.
- *
- * `evidence` is `product-runtime-source` plus `generated-runtime-browser` because #5's original
- * browser observations remain the *only* browser behaviour recorded for this contract. The
- * rebase did not reproduce them; that is the gap #120 tracks, and it is stated here so a reader
- * does not read these fields as freshly observed in a page.
+ * **What was not done, and is therefore absent from `evidence`:** no browser observation on
+ * `12.0.101.0`. The generated page could not be opened — the runtime site requires two-step
+ * verification this machine has no credential for — so `generated-runtime-browser` was
+ * **removed from `evidence`** rather than left over from #5's run on `12.0.100.0`. That matters
+ * because `evidence` is machine-readable and this object is read as the *current* contract:
+ * leaving that channel there would claim a browser observation of this build that nobody made.
+ * #5's browser observation is where the version numbers *originate*; it is not evidence that
+ * they still read the same here, and {@link RUNTIME_CONTRACT_UNKNOWNS} carries that as open.
  */
 export interface RuntimeContractTarget {
   readonly product: string;
@@ -115,8 +109,82 @@ export const RUNTIME_CONTRACT_TARGET: RuntimeContractTarget = {
   browserTranspilerVersion: "7.29.4",
   reactCellTypePluginGuid: "96205a31-0c2e-4b98-9ce5-6555088e6cbd",
   decision: RUNTIME_CONTRACT_DECISION,
-  evidence: ["product-runtime-source", "generated-runtime-browser"],
+  // `product-runtime-source` because the plugin's shipped resources were read on this build;
+  // `designer-api` because the designer operations were executed against it. No
+  // `generated-runtime-browser` — see the doc comment. This is deliberately *not* #5's list.
+  evidence: ["product-runtime-source", "designer-api"],
 };
+
+/** A field of {@link RUNTIME_CONTRACT_TARGET} that states something about the product. */
+export type RuntimeContractTargetField = Exclude<keyof RuntimeContractTarget, "decision" | "evidence">;
+
+/** One field's basis, as something a consumer can read rather than infer from a comment. */
+export interface RuntimeContractTargetFieldSource {
+  /**
+   * The product build whose session produced the value.
+   *
+   * Equal to `RUNTIME_CONTRACT_TARGET.productVersion` when the value was measured here, and an
+   * older build when it was carried forward. A consumer that must not present a field as
+   * verified on the current build asks this rather than reading prose.
+   */
+  readonly observedOn: string;
+  /** The channels that produced the value, for this field specifically. */
+  readonly evidence: readonly RuntimeEvidenceChannel[];
+  /**
+   * Present exactly when `observedOn` is not the current `productVersion`, so a field cannot be
+   * carried forward without that being stated here rather than implied by a mismatch.
+   */
+  readonly carriedForward?: true;
+}
+
+/**
+ * Field-level provenance for {@link RUNTIME_CONTRACT_TARGET}.
+ *
+ * Why this is data and not a paragraph: `packages/runtime/src/local-dev.ts` reads
+ * `RUNTIME_CONTRACT_TARGET.hostReactDomVersion` as the version the target ships and compares
+ * the locally installed package against it, so a re-base that left a carried-forward value
+ * there would hand that consumer a number it never checked. #116's review called this the
+ * defect a comment cannot fix, and this is the machine-readable half of the fix: the target's
+ * own `evidence` no longer claims the channel that was not exercised, and this table says per
+ * field which build each value came from and through which channel.
+ *
+ * Total over the product-stating fields, asserted — a new field on the target that nobody gives
+ * a source is the same unbacked claim this table exists to prevent.
+ */
+export const RUNTIME_CONTRACT_TARGET_FIELD_SOURCES: Readonly<
+  Record<RuntimeContractTargetField, RuntimeContractTargetFieldSource>
+> = {
+  product: { observedOn: "12.0.101.0", evidence: ["designer-api"] },
+  productVersion: { observedOn: "12.0.101.0", evidence: ["designer-api"] },
+  productBuild: { observedOn: "12.0.101.0", evidence: ["designer-api"] },
+  // Read from the plugin's shipped `react-vendor.production.min.js` on this build, which
+  // reports one React version for the bundle. That is the version the target *ships*; it is not
+  // an observation of `React.version` on a running page — see the open question below, which is
+  // the same gap for both version fields, not a defect unique to ReactDOM.
+  hostReactVersion: { observedOn: "12.0.101.0", evidence: ["product-runtime-source"] },
+  hostReactDomVersion: { observedOn: "12.0.101.0", evidence: ["product-runtime-source"] },
+  // Read from the plugin's shipped `babel.min.js`, whose own version string is 7.29.4.
+  browserTranspiler: { observedOn: "12.0.101.0", evidence: ["product-runtime-source"] },
+  browserTranspilerVersion: { observedOn: "12.0.101.0", evidence: ["product-runtime-source"] },
+  // The GUID the plugin's resources are served under — unchanged from 12.0.100.0, and re-read
+  // on this build from the resource URLs themselves.
+  reactCellTypePluginGuid: { observedOn: "12.0.101.0", evidence: ["product-runtime-source", "designer-api"] },
+};
+
+/**
+ * The target fields this build's evidence does **not** come from a browser observation.
+ *
+ * A separate list because these are the fields a machine consumer reads as "what the page
+ * actually runs" (`LOCAL_DEV_VERSION_FIELDS` in the runtime package, and #5's React/ReactDOM
+ * numbers). They were read from the shipped source on 12.0.101.0, which establishes the version
+ * the product *ships*; whether the page reports the same on load was not observed here, and a
+ * consumer that needs that distinction should read this rather than infer it.
+ */
+export const RUNTIME_CONTRACT_TARGET_FIELDS_NOT_BROWSER_OBSERVED: readonly RuntimeContractTargetField[] = [
+  "hostReactVersion",
+  "hostReactDomVersion",
+  "browserTranspilerVersion",
+];
 
 /** Short header for reports, PR bodies and diagnostics. */
 export function describeRuntimeContractTarget(target: RuntimeContractTarget = RUNTIME_CONTRACT_TARGET): string {
@@ -1323,6 +1391,14 @@ export const RUNTIME_CONTRACT_UNKNOWNS: readonly RuntimeContractUnknown[] = [
     id: "permission-refresh-without-reload",
     question: "Does the permission snapshot refresh when the signed-in user's roles change?",
     whyOpen: "Not exercised.",
+  },
+  {
+    id: "host-versions-not-browser-observed-101",
+    question:
+      "Do `React.version` and `ReactDOM.version` still read 19.2.7 in a running page on 12.0.101.0?",
+    whyOpen:
+      "The rebase read the version from the plugin's shipped `react-vendor.production.min.js` on 12.0.101.0, which establishes the version the product ships, and did not observe a running page: the generated page could not be opened because the runtime site's login requires two-step verification this machine has no credential for. `RUNTIME_CONTRACT_TARGET.evidence` therefore no longer lists `generated-runtime-browser`, and `RUNTIME_CONTRACT_TARGET_FIELDS_NOT_BROWSER_OBSERVED` names the fields so a machine consumer can tell the difference. Nothing observed disagrees with the carried values; nothing observed confirms them on this build.",
+    ownedBy: "#120",
   },
 ];
 

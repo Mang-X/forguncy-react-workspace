@@ -40,8 +40,10 @@ import {
   rejectedCellSourceConstructs,
   RUNTIME_CONTRACT_TARGET,
   RUNTIME_CONTRACT_UNKNOWNS,
+  RUNTIME_CONTRACT_TARGET_FIELD_SOURCES,
+  RUNTIME_CONTRACT_TARGET_FIELDS_NOT_BROWSER_OBSERVED,
 } from "./runtime-contract.ts";
-import type { RuntimeEvidenceChannel } from "./runtime-contract.ts";
+import type { RuntimeContractTargetField, RuntimeEvidenceChannel } from "./runtime-contract.ts";
 import {
   citesDecision,
   citesEveryArchitectureDecision,
@@ -87,6 +89,13 @@ const NON_FACT_EXPORTS: readonly string[] = [
   // An unanswered question is recorded precisely because nobody observed an
   // answer, so requiring evidence on it would be backwards.
   "RUNTIME_CONTRACT_UNKNOWNS",
+  // The *absence* of an observation, listed per field. Its entries are field names, not claims
+  // about the product, and the evidence that they are absent is the absence itself — which is
+  // the same reasoning as `RUNTIME_CONTRACT_UNKNOWNS` above, and the reason
+  // `RUNTIME_CONTRACT_TARGET.evidence` had to drop `generated-runtime-browser` rather than keep
+  // it: this list and that array are the same fact stated twice, so it is checked against the
+  // target's own channels by the provenance tests instead of by carrying evidence here.
+  "RUNTIME_CONTRACT_TARGET_FIELDS_NOT_BROWSER_OBSERVED",
 ];
 
 /**
@@ -216,11 +225,45 @@ function auditExportedFacts(module: Record<string, unknown>): {
       continue;
     }
 
+    // A map whose *entries* are the facts. `RUNTIME_CONTRACT_TARGET_FIELD_SOURCES` is one, and
+    // it was the first export that is a keyed record rather than a fact or a list of them: the
+    // traversal fell through to `evidenceProblem` on the map itself, which has no `evidence`
+    // property, and reported "has no evidence array" — a false positive that would have been
+    // silenced with a `NON_FACT_EXPORTS` entry.
+    //
+    // That exemption would have been wrong twice over. The entries *do* carry evidence (it is
+    // the whole point of the table), and the entry being checked is the innermost thing that
+    // could claim something without a source. Teaching the traversal the shape keeps the check
+    // running on it, so a future row that drops its `evidence` fails like any other fact.
+    if (isEvidenceBearingMap(value)) {
+      for (const [key, entry] of Object.entries(value)) {
+        const why = evidenceProblem(entry);
+        if (why) problems.push(`${name}.${key} ${why}`);
+      }
+      continue;
+    }
+
     const why = evidenceProblem(value);
     if (why) problems.push(`${name} ${why}`);
   }
 
   return { problems, inspected };
+}
+
+/**
+ * A plain object whose every value is a fact record, and which therefore is a container of
+ * facts rather than a fact itself.
+ *
+ * Deliberately narrow: every own value must satisfy {@link evidenceProblem}, so a map with one
+ * bare string in it is not this shape and falls through to the ordinary check. An empty object
+ * does not qualify either — it is reported as `is not a fact record` rather than passing
+ * vacuously, which is the failure mode an "empty map" exemption would introduce.
+ */
+function isEvidenceBearingMap(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const entries = Object.entries(value);
+  if (entries.length === 0) return false;
+  return entries.every(([, entry]) => evidenceProblem(entry) === undefined);
 }
 
 describe("runtime contract target", () => {
@@ -244,6 +287,69 @@ describe("runtime contract target", () => {
     expect(header).toContain("12.0.101.0");
     expect(header).toContain("19.2.7");
     expect(header).toContain("7.29.4");
+  });
+
+  // #116's review: a re-base that moves the target while leaving fields recorded on the old
+  // build hands `local-dev.ts` numbers it never checked, and a comment does not stop a consumer
+  // reading them as re-verified. The provenance table is the machine-readable half of the fix, so
+  // these checks are about it staying *total* and *consistent* with the target.
+  describe("field-level provenance", () => {
+    it("gives every product-stating field a source", () => {
+      const productFields = Object.keys(RUNTIME_CONTRACT_TARGET).filter(
+        key => key !== "decision" && key !== "evidence",
+      ) as readonly RuntimeContractTargetField[];
+
+      expect(Object.keys(RUNTIME_CONTRACT_TARGET_FIELD_SOURCES).sort()).toEqual([...productFields].sort());
+      // Not vacuous: the check would pass on an empty table if the two lists were both empty.
+      expect(productFields.length).toBeGreaterThan(4);
+    });
+
+    it("marks a field carried forward exactly when it was not measured on this build", () => {
+      for (const [field, source] of Object.entries(RUNTIME_CONTRACT_TARGET_FIELD_SOURCES)) {
+        const current = RUNTIME_CONTRACT_TARGET.productVersion;
+        // The flag and the observed build cannot disagree — a field cannot claim to be current
+        // while naming an older one, or claim to be historical while naming the current build.
+        expect(source.carriedForward, field).toBe(source.observedOn === current ? undefined : true);
+      }
+    });
+
+    it("keeps every field's evidence inside the target's own channels", () => {
+      for (const [field, source] of Object.entries(RUNTIME_CONTRACT_TARGET_FIELD_SOURCES)) {
+        for (const channel of source.evidence) {
+          expect(RUNTIME_CONTRACT_TARGET.evidence, field).toContain(channel);
+        }
+      }
+    });
+
+    // The specific overclaim the review named: `generated-runtime-browser` stayed in the
+    // target's `evidence` across the re-base although no browser observation was made on the new
+    // build, and the version fields are exactly the ones a consumer reads as "what the page runs".
+    it("does not claim a browser observation this build did not make", () => {
+      expect(RUNTIME_CONTRACT_TARGET.evidence).not.toContain("generated-runtime-browser");
+
+      for (const field of RUNTIME_CONTRACT_TARGET_FIELDS_NOT_BROWSER_OBSERVED) {
+        const source = RUNTIME_CONTRACT_TARGET_FIELD_SOURCES[field];
+        expect(source, field).toBeDefined();
+        expect(source.evidence, field).not.toContain("generated-runtime-browser");
+      }
+      // The two version fields a machine consumer reads must both be named, and the list must
+      // not be longer than the fields it is about.
+      expect([...RUNTIME_CONTRACT_TARGET_FIELDS_NOT_BROWSER_OBSERVED].sort()).toEqual([
+        "browserTranspilerVersion",
+        "hostReactDomVersion",
+        "hostReactVersion",
+      ]);
+    });
+
+    // The file's own rule is that a question the probe could not settle lives in
+    // `RUNTIME_CONTRACT_UNKNOWNS` rather than being guessed into the contract. The missing
+    // browser observation is such a question, so it has to be there and not only here.
+    it("carries the missing browser observation as an open question", () => {
+      const open = openRuntimeContractQuestions("#120");
+
+      expect(open.map(question => question.id)).toContain("host-versions-not-browser-observed-101");
+      expect(open[0]?.whyOpen).toMatch(/two-step verification|browser/);
+    });
   });
 });
 

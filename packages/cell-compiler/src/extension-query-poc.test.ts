@@ -64,8 +64,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createContext, Script } from "node:vm";
 
-import type { DependencyDecision, LockEnvironment } from "@forguncy-react-workspace/core";
-import { EXTENSION_EXTERNAL_MAPPINGS, RUNTIME_CONTRACT_TARGET } from "@forguncy-react-workspace/core";
+import type { DependencyDecision, ForguncyTargetIdentity, LockEnvironment, RuntimeContractTarget } from "@forguncy-react-workspace/core";
+import { assessLockDecision, EXTENSION_EXTERNAL_MAPPINGS, RUNTIME_CONTRACT_TARGET } from "@forguncy-react-workspace/core";
 import type { ExtensionCatalog, WithheldCompilationDependency } from "@forguncy-react-workspace/dependency-resolver";
 import {
   auditLockDecisionConformance,
@@ -128,13 +128,37 @@ async function environmentFor(overrides: Partial<LockEnvironment> = {}): Promise
 
   return {
     resolvedVersions: versions,
-    target: RUNTIME_CONTRACT_TARGET,
+    // **The record's own target, not the current contract's** (#120). This suite's claim is that
+    // #13 steps 7–8 ran and that the lock's recorded runtime validation is projected through
+    // both gates — the environment that claim holds in is the one the record names. Reading
+    // `RUNTIME_CONTRACT_TARGET` here would silently re-assert that claim for whatever build the
+    // repository currently targets, which after the 12.0.101.0 re-base it does not: the record
+    // was probed against 12.0.100.0, and pretending otherwise is the same defect as rewriting
+    // its content-addressed evidence. The drift itself is asserted, one test below, rather than
+    // assumed away.
+    target: targetOfRecordedRun(lock),
     toolchain: { vitePlus: "0.3.2" },
     probeFingerprints,
     extensionVersions: { "tanstack-query": EXPECTED_VERSION },
     extensionIdentities: { "tanstack-query": EXPECTED_IDENTITY },
     ...overrides,
   };
+}
+
+/**
+ * The Forguncy build the example's recorded runtime validation actually ran against.
+ *
+ * A lock record carries {@link ForguncyTargetIdentity} — the four fields freshness compares —
+ * not the full {@link RuntimeContractTarget}, so this reconstructs an environment target from
+ * the record's own values with the rest taken from the current contract. That is not a way of
+ * pretending the run happened on 12.0.101.0: the comparison that matters is the identity, the
+ * recorded version is the one that goes in, and the test below asserts the drift explicitly.
+ */
+function targetOfRecordedRun(lock: { readonly decisions: readonly { readonly target: ForguncyTargetIdentity | null; readonly packageName: string }[] }): RuntimeContractTarget {
+  const record = lock.decisions.find(candidate => candidate.packageName === PACKAGE_NAME);
+  const recorded = record?.target;
+  if (recorded === null || recorded === undefined) return RUNTIME_CONTRACT_TARGET;
+  return { ...RUNTIME_CONTRACT_TARGET, ...recorded };
 }
 
 /** Read + conformance-audit the example's lock, asserting no conformance errors. */
@@ -416,6 +440,30 @@ describe("extension tanstack-query PoC (#13)", () => {
 
     const outcome = await compileWith(dependencies);
     expect(outcome.status).toBe("compiled");
+  });
+
+  // #120: the example's probe was run against 12.0.100.0 and the repository now targets
+  // 12.0.101.0, so this record is correctly withheld for a *different* build than the one the
+  // rest of the suite assumes. Asserted rather than assumed away, because the two ways of
+  // handling it — re-labelling the record, or quietly reading a different environment — are
+  // exactly what #116's review rejected, and neither shows up as a failure anywhere else.
+  it("withholds the recorded decision against the current target, because the probe ran on an older build", async () => {
+    const lock = await conformedLock();
+    const record = lock.decisions.find(candidate => candidate.packageName === PACKAGE_NAME);
+
+    // The record is on an older build than the contract targets.
+    expect(record?.target?.productVersion).not.toBe(RUNTIME_CONTRACT_TARGET.productVersion);
+    expect(record?.probe.versionIndependent).toBe(false);
+
+    // And that is what the gate says when it is handed the *current* target: stale, not admitted.
+    const environment = await environmentFor({ target: RUNTIME_CONTRACT_TARGET });
+    const assessment = assessLockDecision(record as never, environment);
+
+    expect(assessment.freshness).toBe("stale");
+    expect(assessment.stalenessReasons).toContain("forguncy-target-changed");
+    // The recorded runtime claim is still what it was — the target change withholds it, it does
+    // not erase it — which is the distinction the gates below are about.
+    expect(assessment.realRuntimeValidation).toBe("validated");
   });
 
   it("withholds a target-less copy of the decision from the deployment gate", async () => {
