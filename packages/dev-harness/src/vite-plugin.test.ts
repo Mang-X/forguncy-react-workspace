@@ -1207,3 +1207,83 @@ describe("the final-alias subtraction compares whole entries, not keys", () => {
     await expect(start([])).resolves.toBeUndefined();
   });
 });
+
+/**
+ * Vite's trailing-slash rule is **conditional on both sides**, and comparing the two halves
+ * independently is wider than Vite — which merges two genuinely different aliases.
+ *
+ * The rule, already pinned elsewhere in this file by
+ * `does not normalize a slash on find alone, since Vite does not either`: `{ find: "foo/",
+ * replacement: "/a" }` is **not** normalized, and is therefore a different pattern from
+ * `{ find: "foo", replacement: "/a" }` — the first matches nothing, the second matches `foo/x`.
+ *
+ * Measured with the project declaring the inert form and a later plugin adding the active one:
+ *
+ * | alias | Vite resolves `some-unrelated/thing` to |
+ * | --- | --- |
+ * | project: `{ find: "some-unrelated/", replacement: "/local-copy" }` | unresolved (matches nothing) |
+ * | plus a later plugin: `{ "some-unrelated": "/local-copy" }` | `/local-copy/thing` |
+ *
+ * Trimming each side unconditionally made `some-unrelated/` and `some-unrelated` compare equal, so
+ * the plugin's entry was accepted as the project's own and nothing was reported — while dev
+ * resolution had in fact changed.
+ */
+describe("the alias comparison follows Vite's pair-wise slash rule", () => {
+  const reRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "tests", "fixtures", "project-alias");
+
+  function registry() {
+    return createCellRegistry(
+      {
+        cells: { probe: { entry: "./cells/probe/src/index.ts", target: { pageName: "探针", cell: "A1" } } },
+        resolve: { alias: { "@app/shared": "./shared" } },
+      },
+      { root: reRoot },
+    );
+  }
+
+  async function start(
+    extra: readonly unknown[],
+    userAlias?: unknown,
+  ): Promise<void> {
+    const server = await createServer({
+      root: reRoot,
+      configFile: false,
+      logLevel: "error",
+      appType: "spa",
+      ...(userAlias === undefined ? {} : { resolve: { alias: userAlias as never } }),
+      plugins: [devHarness({ config: registry() }) as never, ...(extra as never[])],
+      server: { middlewareMode: true, hmr: false, watch: null },
+    });
+    await server.close();
+  }
+
+  it("refuses a later plugin that adds the active form of an inert one-sided-slash alias", async () => {
+    const inert = [{ find: "some-unrelated/", replacement: "/local-copy" }];
+    const latePlugin = {
+      name: "late-active-alias",
+      config() {
+        return { resolve: { alias: { "some-unrelated": "/local-copy" } } };
+      },
+    };
+
+    await expect(start([latePlugin], inert)).rejects.toThrowError(/refused to start/);
+  });
+
+  it("still accepts a project alias that writes a trailing slash on both sides, in either form", async () => {
+    // Vite strips both slashes, so the merged entry is `react -> /project-owned/react`; the project's
+    // declaration must normalize the same way or a correctly-declared alias is refused. Both alias
+    // forms are asserted because the object form was where the key was stripped without the value.
+    await expect(
+      start([], [{ find: "react/", replacement: "/project-owned/react/" }]),
+    ).resolves.toBeUndefined();
+    await expect(start([], { "react/": "/project-owned/react/" })).resolves.toBeUndefined();
+  });
+
+  it("still accepts a project's inert one-sided-slash alias when nothing else adds to it", async () => {
+    // The counterpart: the inert form is a legitimate (if pointless) declaration, and only a
+    // *different* entry behind it is a problem.
+    await expect(
+      start([], [{ find: "some-unrelated/", replacement: "/local-copy" }]),
+    ).resolves.toBeUndefined();
+  });
+});

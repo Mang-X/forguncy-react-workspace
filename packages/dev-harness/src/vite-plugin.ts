@@ -556,6 +556,11 @@ interface AliasEntry {
 }
 
 function readAliasEntries(userAlias: unknown): readonly AliasEntry[] {
+  // Both branches go through the same pair normalization, and the object form needs it as much as
+  // the array form: `normalizeAliasFind` strips a trailing `/` from the key only, so reading
+  // `{ "react/": "/patched-react/" }` as `find: "react"` with the *unstripped* value leaves a pair
+  // that no longer matches Vite's own merged entry `react -> /patched-react` (measured — the
+  // pre-existing trailing-slash test failed until this was applied to both halves).
   if (Array.isArray(userAlias)) {
     return userAlias
       .filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
@@ -563,6 +568,12 @@ function readAliasEntries(userAlias: unknown): readonly AliasEntry[] {
         const { find, replacement } = entry;
         if (typeof find !== "string" && !(find instanceof RegExp)) {
           return undefined;
+        }
+        if (typeof find === "string" && typeof replacement === "string") {
+          // The pair rule produces the normalized halves; the raw spelling is deliberately not kept
+          // alongside, because comparing against a Vite-merged entry can only ever succeed on the
+          // normalized form.
+          return { ...normalizeAliasEntryPair(find, replacement) };
         }
         return { find, replacement: typeof replacement === "string" ? replacement : undefined };
       })
@@ -572,10 +583,11 @@ function readAliasEntries(userAlias: unknown): readonly AliasEntry[] {
   if (typeof userAlias === "object" && userAlias !== null) {
     return Object.entries(userAlias as Record<string, unknown>)
       .filter(([key]) => key.length > 0)
-      .map(([key, value]) => ({
-        find: normalizeAliasFind(key, value),
-        replacement: typeof value === "string" ? value : undefined,
-      }));
+      .map(([key, value]) =>
+        typeof value === "string"
+          ? { ...normalizeAliasEntryPair(key, value) }
+          : { find: normalizeAliasFind(key, value), replacement: undefined },
+      );
   }
 
   return [];
@@ -629,11 +641,15 @@ function undeclaredAliasPatterns(
       // same normalization as the project's, because Vite strips the slashes off whichever entry it
       // merged — so the harness's own emitted spelling is not what the final list carries.
       if (
-        Object.prototype.hasOwnProperty.call(harnessOwned, find) &&
-        normalizeAliasKeyForCompare(harnessOwned[find] ?? "") === normalizeAliasKeyForCompare(replacement ?? "")
+        replacement !== undefined &&
+        isSameStringAlias({ find: find, replacement: harnessOwned[find] ?? "" }, find, replacement)
       ) {
         continue;
       }
+      // Then the project's own, which is what a project claiming a host id actually ends up with:
+      // the harness defers to it (see `unclaimedHostAliases`), so the merged entry carries the
+      // project's value and the harness's never appears. Checked after the harness's own value so a
+      // later plugin overwriting a host alias is still caught — the two differ only in the value.
       if (declaredEntries.some(known => isSameStringAlias(known, find, replacement))) {
         continue;
       }
@@ -706,16 +722,40 @@ function isViteClientReplacement(entry: { readonly replacement: string | undefin
  * refused a project that had declared its alias correctly, in both the array and the object form).
  */
 function isSameStringAlias(known: AliasEntry, find: string, replacement: string | undefined): boolean {
-  if (typeof known.find !== "string" || replacement === undefined) {
+  if (typeof known.find !== "string" || known.replacement === undefined || replacement === undefined) {
     return false;
   }
-  return (
-    normalizeAliasKeyForCompare(known.find) === normalizeAliasKeyForCompare(find) &&
-    normalizeAliasKeyForCompare(known.replacement ?? "") === normalizeAliasKeyForCompare(replacement)
-  );
+  const a = normalizeAliasEntryPair(known.find, known.replacement);
+  const b = normalizeAliasEntryPair(find, replacement);
+  return a.find === b.find && a.replacement === b.replacement;
 }
 
-/** Two pattern aliases are the same contribution when source, flags and value all agree. */
+/**
+ * One alias entry through Vite's own `normalizeSingleAlias` rule, as a pair.
+ *
+ * The rule is **conditional on both sides**: Vite strips a trailing `/` only when `find` *and*
+ * `replacement` both end in one, and leaves both alone otherwise. That is not a detail — this file's
+ * own test `does not normalize a slash on find alone, since Vite does not either` exists to pin
+ * it, and `{ find: "foo/", replacement: "/a" }` is consequently a *different* pattern from
+ * `{ find: "foo", replacement: "/a" }`: the first matches nothing, the second matches `foo/x`.
+ *
+ * An earlier version of this comparison trimmed each side **unconditionally**, which is wider than
+ * Vite and therefore merges two genuinely different aliases. Measured: with the project declaring
+ * the inert `{ find: "some-unrelated/", replacement: "/local-copy" }` and a later plugin adding
+ * `{ "some-unrelated": "/local-copy" }`, the plugin's entry was accepted as the project's own, while
+ * Vite resolved `some-unrelated/thing` to `/local-copy/thing` — the plugin's copy — which the
+ * harness did not report.
+ *
+ * So the pair is normalized together, exactly as Vite normalizes it, and `foo/` stays distinct from
+ * `foo`. Comparing the two halves independently would be the same mistake one level down.
+ */
+function normalizeAliasEntryPair(find: string, replacement: string): { find: string; replacement: string } {
+  if (find.endsWith("/") && replacement.endsWith("/")) {
+    return { find: find.replace(/\/+$/, ""), replacement: replacement.replace(/\/+$/, "") };
+  }
+  return { find, replacement };
+}
+
 function isSamePatternAlias(
   known: AliasEntry,
   find: RegExp,
@@ -729,10 +769,6 @@ function isSamePatternAlias(
   );
 }
 
-/** A key as the audit compares it, so a project's `react/` and the harness's `react` are one id. */
-function normalizeAliasKeyForCompare(key: string): string {
-  return key.endsWith("/") ? key.replace(/\/+$/, "") : key;
-}
 
 function projectAliasShadowKeys(
   pattern: RegExp,
