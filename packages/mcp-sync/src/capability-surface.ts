@@ -89,46 +89,45 @@ export interface SyncEvidenceSource {
   /** What this source can and cannot establish. */
   readonly scope: string;
   /**
-   * The product builds this source **observed something on** — that is, executed a call against.
+   * The builds this source observed something on — **derived** from {@link establishedCalls}.
    *
-   * Present for every source that ran anything: `issue-5-designer-probe` and
-   * `issue-20-designer-execution` on `12.0.100.0`, `issue-115-designer-probe` on `12.0.101.0`. #5 is
-   * here rather than treated as neutral because its own citation records
-   * `serverInfo = Forguncy 12.0.100.0` and its `[DT]` rows are calls made against that session — a
-   * probe record is authoritative about the build it probed, and reading it as evidence for any
-   * build is how #116's fourth review found a 12.0.101.0 call backed by nothing but 12.0.100.0 work.
+   * A getter rather than a stored list because the two were the same fact twice, and that is what
+   * #116's sixth review pointed at: a source that records calls on two builds and names one in
+   * `observedVersions` is a registry contradicting itself, with nothing to say which is true.
+   * The builds are exactly the builds its recorded calls ran on, so they cannot disagree.
    *
-   * Absent means the source is **documentation**, not an execution: only
-   * `forguncy-library-guide` is in that position. It may be cited beside a versioned call, because
-   * it documents the call's shape, but it can never *establish* one — which
-   * {@link evidenceEstablishesVersion} enforces with an explicit `includes` rather than treating
-   * absence as a wildcard. The distinction is the one that matters: "this source says nothing
-   * about any build" and "this source can back a call on any build" are opposites.
-   *
-   * A field rather than a text match over `citation`/`scope`, because the check cannot be done by
-   * reading prose: matching a version string accepts a source that merely mentions one in passing,
-   * and rejects a correct call whose evidence is a different build's run.
+   * Absent means the source is **documentation**, not an execution — only
+   * `forguncy-library-guide` — and it may be cited beside a versioned call without ever
+   * establishing one. "This source says nothing about any build" and "this source can back a call
+   * on any build" are opposites, and only the second was ever wrong.
    */
   readonly observedVersions?: readonly SyncMeasuredVersion[];
   /**
-   * The exact calls this source executed, as the product spells them.
+   * The calls this source **establishes** — the ones that could back a capability record — each
+   * paired with the build it was executed on.
    *
-   * The second half of "established by execution on its own build": a source observes a *build*
-   * and runs *calls* on it, and a call established by one build's probe of a different operation
-   * is not established at all. #116's fifth review is what made it a field: the version check
-   * alone let `read-cell-source`'s `api.page.getCells` be attributed to `issue-5-designer-probe`,
-   * whose own `scope` states it *did not record the call it used to read persisted cell state
-   * back* — the operation was `unestablished` until #20 executed it. A registry that can contradict
-   * its own evidence source's scope is not evidence.
+   * **"Establishes", not merely "executed".** `issue-20-designer-execution` also executed
+   * `api.page.readCellCode` and rejected it: it is a segmented reader that returned exactly 12,000
+   * characters with `hasMore: true` for a 17,125-character cell, so using it for the divergence
+   * check would splice a truncated prefix into the marker parse. A source therefore records the
+   * calls that can carry a claim, not every call that crossed the wire — and naming `readCellCode`
+   * would be a machine-readable claim that it establishes something the very evidence citing it
+   * rejects. #116's sixth review is what drew the distinction; without it the field and the
+   * `scope` it derives from had two different answers about the same session.
    *
-   * Absent means the source executed no call on any build — the product's documentation — which
- * makes it supplementary and never establishing.
+   * Paired rather than two parallel lists because a build and a method are not independent: a
+   * source that ran `api.app.generatePageAsync` on 12.0.100.0 and `api.app.generateProject` on
+   * 12.0.101.0 has **not** established the first on the second build or the second on the first.
+   * Two arrays (`observedVersions` × `establishedMethods`) read as a pair per call and are checked
+   * as a Cartesian product, so a source recording both versions would silently claim all four
+   * combinations — which is exactly the cross-version promotion this work keeps closing.
+   * #116's sixth review found it; no source declares two versions today, so the hole is latent, but
+   * the type and its comment invited it, which is enough.
    *
-   * Derived from each source's own record rather than restated freely, so a source that does not
-   * name a call cannot be cited for it. `observedVersions` and this field must agree in practice:
-   * a build is observed by running something.
+   * Absent means the source executed nothing — the product's documentation — which makes it
+   * supplementary and never establishing.
    */
-  readonly establishedMethods?: readonly string[];
+  readonly establishedCalls?: readonly { readonly version: SyncMeasuredVersion; readonly method: string }[];
 }
 
 export const SYNC_EVIDENCE_SOURCES: Readonly<Record<SyncEvidenceSourceId, SyncEvidenceSource>> = {
@@ -151,14 +150,13 @@ export const SYNC_EVIDENCE_SOURCES: Readonly<Record<SyncEvidenceSourceId, SyncEv
     // `api.page.getCells`: that scope says the read call was never recorded, which is why the
     // operation was `unestablished` until #20 executed it. Listing it here would make the field
     // contradict the prose it is derived from.
-    establishedMethods: [
-      "api.page.setCells",
-      "api.app.listFrontendLibraries",
-      "api.app.checkProjectErrors",
-      "api.app.generatePageAsync",
-      "api.app.getProjectSaveStatus",
-    ],
-  },
+        establishedCalls: [
+        { version: "12.0.100.0", method: "api.page.setCells" },
+        { version: "12.0.100.0", method: "api.app.listFrontendLibraries" },
+        { version: "12.0.100.0", method: "api.app.checkProjectErrors" },
+        { version: "12.0.100.0", method: "api.app.generatePageAsync" },
+        { version: "12.0.100.0", method: "api.app.getProjectSaveStatus" },
+      ],  },
   "forguncy-library-guide": {
     id: "forguncy-library-guide",
     channel: "product-documentation",
@@ -179,16 +177,15 @@ export const SYNC_EVIDENCE_SOURCES: Readonly<Record<SyncEvidenceSourceId, SyncEv
     // to read and `api.app.saveProject` to persist — plus the rest of the flow it drove through the
     // port on the same build. `api.page.getCells` is here and is **not** in #5's list, which is the
     // whole point of the two rows differing.
-    establishedMethods: [
-      "api.page.getCells",
-      "api.page.getCellCodeContext",
-      "api.app.saveProject",
-      "api.app.listFrontendLibraries",
-      "api.app.checkProjectErrors",
-      "api.app.getProjectSaveStatus",
-      "api.app.generatePageAsync",
-    ],
-  },
+        establishedCalls: [
+        { version: "12.0.100.0", method: "api.page.getCells" },
+        { version: "12.0.100.0", method: "api.page.getCellCodeContext" },
+        { version: "12.0.100.0", method: "api.app.saveProject" },
+        { version: "12.0.100.0", method: "api.app.listFrontendLibraries" },
+        { version: "12.0.100.0", method: "api.app.checkProjectErrors" },
+        { version: "12.0.100.0", method: "api.app.getProjectSaveStatus" },
+        { version: "12.0.100.0", method: "api.app.generatePageAsync" },
+      ],  },
   "issue-115-designer-probe": {
     id: "issue-115-designer-probe",
     channel: "designer-api",
@@ -200,16 +197,15 @@ export const SYNC_EVIDENCE_SOURCES: Readonly<Record<SyncEvidenceSourceId, SyncEv
     // The seven port methods the adapter-level run drove on this build (write route 20/20,
     // unchanged route 13/13): every call in the flow, plus the generation call, which on this
     // build is `api.app.generateProject`.
-    establishedMethods: [
-      "api.app.listFrontendLibraries",
-      "api.page.getCells",
-      "api.page.setCells",
-      "api.app.getProjectSaveStatus",
-      "api.app.saveProject",
-      "api.app.checkProjectErrors",
-      "api.app.generateProject",
-    ],
-  },
+        establishedCalls: [
+        { version: "12.0.101.0", method: "api.app.listFrontendLibraries" },
+        { version: "12.0.101.0", method: "api.page.getCells" },
+        { version: "12.0.101.0", method: "api.page.setCells" },
+        { version: "12.0.101.0", method: "api.app.getProjectSaveStatus" },
+        { version: "12.0.101.0", method: "api.app.saveProject" },
+        { version: "12.0.101.0", method: "api.app.checkProjectErrors" },
+        { version: "12.0.101.0", method: "api.app.generateProject" },
+      ],  },
 };
 
 // ---------------------------------------------------------------------------
@@ -366,7 +362,7 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
   {
     id: "list-frontend-libraries",
     summary: "Read the project's installed frontend extensions, with their stable ids.",
-    evidenceSources: ["issue-5-designer-probe", "forguncy-library-guide"],
+    evidenceSources: ["issue-5-designer-probe", "forguncy-library-guide", "issue-115-designer-probe"],
     confirmation: "established",
     calls: [
       { method: "api.app.listFrontendLibraries", version: "12.0.100.0", evidenceSourceIds: ["issue-5-designer-probe", "forguncy-library-guide"] },
@@ -408,7 +404,7 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
   {
     id: "write-cell-source",
     summary: "Write one Cell's generated source and its `frontendLibraries` references.",
-    evidenceSources: ["issue-5-designer-probe", "forguncy-library-guide"],
+    evidenceSources: ["issue-5-designer-probe", "forguncy-library-guide", "issue-115-designer-probe"],
     confirmation: "established",
     calls: [
       { method: "api.page.setCells", version: "12.0.100.0", evidenceSourceIds: ["issue-5-designer-probe", "forguncy-library-guide"] },
@@ -424,7 +420,7 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
   {
     id: "save-project",
     summary: "Persist the project after a mutation.",
-    evidenceSources: ["forguncy-library-guide", "issue-20-designer-execution"],
+    evidenceSources: ["forguncy-library-guide", "issue-20-designer-execution", "issue-115-designer-probe"],
     confirmation: "established",
     calls: [
       { method: "api.app.saveProject", version: "12.0.100.0", evidenceSourceIds: ["forguncy-library-guide", "issue-20-designer-execution"] },
@@ -440,7 +436,7 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
   {
     id: "check-project-errors",
     summary: "Read the project's error count after a mutation.",
-    evidenceSources: ["issue-5-designer-probe", "forguncy-library-guide"],
+    evidenceSources: ["issue-5-designer-probe", "forguncy-library-guide", "issue-115-designer-probe"],
     confirmation: "established",
     calls: [
       { method: "api.app.checkProjectErrors", version: "12.0.100.0", evidenceSourceIds: ["issue-5-designer-probe", "forguncy-library-guide"] },
@@ -472,7 +468,7 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
   {
     id: "project-save-status",
     summary: "Read whether the project has unsaved changes.",
-    evidenceSources: ["issue-5-designer-probe", "issue-20-designer-execution"],
+    evidenceSources: ["issue-5-designer-probe", "issue-20-designer-execution", "issue-115-designer-probe"],
     confirmation: "established",
     calls: [
       { method: "api.app.getProjectSaveStatus", version: "12.0.100.0", evidenceSourceIds: ["issue-5-designer-probe", "issue-20-designer-execution"] },
@@ -776,23 +772,14 @@ export function assertMcpSyncStepCoherent(step: McpSyncStep, index: number): voi
  * call cannot have established it, however well matched the build is.
  */
 function evidenceEstablishesCall(sourceId: SyncEvidenceSourceId, method: string, version: SyncMeasuredVersion): boolean {
-  const source = findSyncEvidenceSource(sourceId);
+  // One lookup over *paired* records, so a source cannot establish a call on a build it did not
+  // run it on. Reading `observedVersions` and `establishedMethods` separately would take the
+  // Cartesian product of the two — #116's sixth review.
   return (
-    evidenceObservedBuild(sourceId, version) &&
-    source.establishedMethods !== undefined &&
-    source.establishedMethods.includes(method)
+    findSyncEvidenceSource(sourceId).establishedCalls?.some(
+      (call) => call.method === method && call.version === version,
+    ) === true
   );
-}
-
-/**
- * Did this source run anything at all on `version`?
- *
- * The weaker half, kept as its own function because "observed this build" and "ran *this call*
- * there" are the two questions the fifth review separated, and only the second establishes a call.
- */
-function evidenceObservedBuild(sourceId: SyncEvidenceSourceId, version: SyncMeasuredVersion): boolean {
-  const observed = findSyncEvidenceSource(sourceId).observedVersions;
-  return observed !== undefined && observed.includes(version);
 }
 
 /**
@@ -895,12 +882,25 @@ export function assertSyncCapabilityCoherent(capability: SyncCapability): void {
     // records able to disagree: `read-cell-source` listed the product's guide at capability level
     // while neither of its calls cited it, which asserts provenance the per-call record denies.
     // Deriving is the fix, so it is checked rather than described.
+    // **Set equality**, in both directions. #116's sixth review caught the first version of this
+    // guard checking one side only: a capability whose calls cite a source the capability-level
+    // list omits passed, which is the *same* drift as the orphan it fixed — five shipped entries
+    // carried a 12.0.101.0 call citing #115 while their top-level list did not. The field's
+    // comment says the list is "which sources describe this operation at all", so anything its
+    // calls cite describes it, and nothing else does.
     const citedByCalls = new Set(calls.flatMap(call => call.evidenceSourceIds));
-    for (const sourceId of capability.evidenceSources) {
-      if (citedByCalls.has(sourceId)) continue;
+    const missing = [...citedByCalls].filter(sourceId => !capability.evidenceSources.includes(sourceId));
+    const orphaned = capability.evidenceSources.filter(sourceId => !citedByCalls.has(sourceId));
+    if (orphaned.length > 0) {
       throw new SyncCapabilityContractError(
         "capability-not-coherent",
-        `Capability "${id}" lists "${sourceId}" as evidence, but none of its recorded calls cites it. A capability-level source is provenance for the calls below it, so it has to appear in at least one of them.`,
+        `Capability "${id}" lists ${orphaned.map(s => `"${s}"`).join(", ")} as evidence, but none of its recorded calls cites ${orphaned.length === 1 ? "it" : "them"}. A capability-level source is provenance for the calls below it, so it has to appear in at least one of them.`,
+      );
+    }
+    if (missing.length > 0) {
+      throw new SyncCapabilityContractError(
+        "capability-not-coherent",
+        `Capability "${id}" omits ${missing.map(s => `"${s}"`).join(", ")} from its capability-level evidence although ${missing.length === 1 ? "a call cites it" : "calls cite them"}. The list is the union of the calls' evidence, not a subset of it.`,
       );
     }
     if (capability.method !== preferredCallOf(calls)) {

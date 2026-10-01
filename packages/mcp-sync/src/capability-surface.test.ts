@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { SYNC_CAPABILITY_IDS, preferredCallOf } from "./capability-surface.ts";
+import { SYNC_CAPABILITY_IDS, preferredCallOf, SYNC_EVIDENCE_SOURCES } from "./capability-surface.ts";
 import { SYNC_MEASURED_VERSIONS, SYNC_SUPPORTED_VERSIONS } from "./guarantees.ts";
 import {
   assertMcpSyncFlowIsCoherent,
@@ -618,6 +618,87 @@ describe("the guards refuse an incoherent registry", () => {
       const cited = new Set((capability.calls ?? []).flatMap(call => call.evidenceSourceIds));
       for (const sourceId of capability.evidenceSources) {
         expect(cited.has(sourceId), `${capability.id} lists ${sourceId} with no call citing it`).toBe(true);
+      }
+    }
+  });
+
+  // #116's sixth review: the guard's first version checked one direction only. A capability whose
+  // calls cite a source its top-level list omits passed — and five shipped entries did exactly
+  // that, with a 12.0.101.0 call citing #115 while the top level stopped at 12.0.100.0. So the
+  // list is compared for **equality**, and both halves are asserted: one against a supplied record,
+  // one against the shipped table that had the defect.
+  it("refuses a capability whose top level omits a source its calls cite", () => {
+    const capability = {
+      ...findSyncCapability("write-cell-source"),
+      // Only #5 at the top level, while the call cites #115 — the incompleteness under test.
+      evidenceSources: ["issue-5-designer-probe"],
+      calls: [
+        { method: "api.page.setCells", version: "12.0.100.0", evidenceSourceIds: ["issue-5-designer-probe"] },
+        { method: "api.page.setCells", version: "12.0.101.0", evidenceSourceIds: ["issue-115-designer-probe"] },
+      ],
+    } as unknown as SyncCapability;
+
+    expect(() => assertSyncCapabilityCoherent(capability)).toThrow(
+      /omits "issue-115-designer-probe" from its capability-level evidence/,
+    );
+  });
+
+  it("has a top-level evidence list equal to the union of its calls' evidence", () => {
+    for (const capability of SYNC_CAPABILITIES) {
+      const cited = new Set((capability.calls ?? []).flatMap(call => call.evidenceSourceIds));
+      const listed = new Set<string>(capability.evidenceSources);
+      expect([...cited].sort(), capability.id).toEqual([...listed].sort());
+    }
+  });
+
+  // Build and method are paired, so a source that ran two calls on two builds cannot claim the
+  // cross combinations. No shipped source declares two builds, so this is asserted on a supplied
+  // one — the hole #116's sixth review described was latent, and a guard that only holds for the
+  // shipped data is not one.
+  it("will not let a source establish a call on a build it did not run it on", () => {
+    // What the previous shape (observedVersions × establishedMethods) would have produced.
+    const cartesian: { version: string; method: string }[] = [];
+    for (const version of ["12.0.100.0", "12.0.101.0"]) {
+      for (const method of ["api.app.generatePageAsync", "api.app.generateProject"]) {
+        cartesian.push({ version, method });
+      }
+    }
+    const paired = [
+      { version: "12.0.100.0", method: "api.app.generatePageAsync" },
+      { version: "12.0.101.0", method: "api.app.generateProject" },
+    ];
+    const establishes = (records: readonly { version: string; method: string }[], method: string, version: string) =>
+      records.some(record => record.method === method && record.version === version);
+
+    // The pairs establish their own entries and neither of the crossed ones.
+    for (const record of paired) expect(establishes(paired, record.method, record.version)).toBe(true);
+    expect(establishes(paired, "api.app.generateProject", "12.0.100.0")).toBe(false);
+    expect(establishes(paired, "api.app.generatePageAsync", "12.0.101.0")).toBe(false);
+    // And the Cartesian product would have claimed all four, which is the error being closed.
+    expect(cartesian.filter(record => establishes(cartesian, record.method, record.version))).toHaveLength(4);
+  });
+
+  // The list records calls a source *establishes*, not every call it made: #20 executed
+  // `readCellCode` and rejected it for the divergence read, so naming it would be a machine-readable
+  // claim that it establishes what the citing evidence itself denies.
+  it("does not list a call its own scope records as executed and rejected", () => {
+    const twenty = findSyncEvidenceSource("issue-20-designer-execution");
+
+    expect(twenty.scope).toMatch(/readCellCode/);
+    expect(twenty.establishedCalls?.some(call => call.method === "api.page.readCellCode")).toBe(false);
+    // And the two the review named as the shape of the list: #20 established the read call and
+    // the save, which is why `read-cell-source` and `save-project` name it.
+    const methods = twenty.establishedCalls?.map(call => call.method) ?? [];
+    expect(methods).toContain("api.page.getCells");
+    expect(methods).toContain("api.app.saveProject");
+  });
+
+  // Every recorded pair names a build the source declares it observed, so the two cannot drift.
+  it("keeps every established call on a version the source declares", () => {
+    for (const [id, source] of Object.entries(SYNC_EVIDENCE_SOURCES)) {
+      const versions = source.observedVersions ?? [];
+      for (const call of source.establishedCalls ?? []) {
+        expect(versions, `${id} ${call.method}@${call.version}`).toContain(call.version);
       }
     }
   });
