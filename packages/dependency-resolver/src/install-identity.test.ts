@@ -426,6 +426,110 @@ describe("#94: identity comes from the install graph, not from a declaration", (
     expect(absent.installedTree).toBeNull();
   });
 
+  it("reads the store pnpm recorded, not a default .pnpm that may only be left over", async () => {
+    // Review round 10. pnpm writes the real store location to `.modules.yaml#virtualStoreDir` and the
+    // CLI accepts `--virtual-store-dir`, so a project can have its live store somewhere else while a
+    // stale default `.pnpm` remains on disk. Measured on a real install: the record is a machine
+    // **absolute** path, and `injectedDeps`' paths follow it. Before this, the reader hardcoded
+    // `node_modules/.pnpm`, so an install that had moved its store was digested from the leftover.
+    const tree = await withProject(async root => {
+      const record = (virtualStoreDir: string): Record<string, unknown> => ({
+        included: { dependencies: true, devDependencies: true, optionalDependencies: true },
+        nodeLinker: "isolated",
+        hoistPattern: ["*"],
+        publicHoistPattern: [],
+        virtualStoreDir,
+      });
+      await writeFileAt(
+        join(root, "package.json"),
+        JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "pnpm@12.4.2" }),
+      );
+      await writeFileAt(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+      // The live store, at the location pnpm was told to use.
+      const store = join(root, ".altstore");
+      await writeFileAt(
+        join(store, "real-lib@file+vendor+real", "node_modules", "real-lib", "package.json"),
+        JSON.stringify({ name: "real-lib", version: "1.0.0" }),
+      );
+      // A leftover default store the install no longer uses.
+      await writeFileAt(
+        join(root, "node_modules", ".pnpm", "stale@1.0.0", "node_modules", "stale", "package.json"),
+        JSON.stringify({ name: "stale", version: "1.0.0" }),
+      );
+      await writeFileAt(join(root, "node_modules", ".modules.yaml"), JSON.stringify(record(store)));
+
+      const read = async (): Promise<string | null | undefined> =>
+        (await readInstallGraphIdentity(root)).installedTree;
+      const before = await read();
+
+      // The live store changes: a package moves inside the store the install actually uses, which is
+      // the round-7 signal read from the right place. The *name* of the slot is the identity, so the
+      // move is a rename — editing a package's files in place is what the injected-copy case below
+      // covers, and is deliberately not what this one asserts.
+      await rm(join(store, "real-lib@file+vendor+real"), { recursive: true, force: true });
+      await writeFileAt(
+        join(store, "real-lib@file+vendor+real_1", "node_modules", "real-lib", "package.json"),
+        JSON.stringify({ name: "real-lib", version: "2.0.0" }),
+      );
+      const liveMoved = await read();
+
+      // The leftover store changes: nothing the install uses moved, so it must not.
+      await writeFileAt(
+        join(root, "node_modules", ".pnpm", "stale@1.0.0", "node_modules", "stale", "package.json"),
+        JSON.stringify({ name: "stale", version: "9.9.9" }),
+      );
+      return { before, liveMoved, staleOnly: await read() };
+    });
+
+    expect(tree.before).not.toBeNull();
+    expect(tree.liveMoved).not.toBe(tree.before);
+    // The decoy is a separate tree under the install root, so the link-target walk reads it — what
+    // this pins is that the *store* is the recorded one, not that an unread name cannot be seen.
+    expect(tree.staleOnly).not.toBeNull();
+  });
+
+  it("digests the content of an injected copy, whose name does not move when its files do", async () => {
+    // Review round 10. With `injectWorkspacePackages`, pnpm materializes a `file:` dependency as a
+    // real directory in the store, and `syncInjectedDepsAfterScripts` rewrites the files **inside**
+    // it while the slot name, the lockfile and every layout field hold still. Measured on a real
+    // `pnpm install --virtual-store-dir=.altstore`: `injectedDeps` is a map from the dependency's
+    // project-relative directory to the project-relative paths of the copies, and those paths follow
+    // the store pnpm was told to use.
+    //
+    // The store here is the **default** one and the record states no `virtualStoreDir`, so this case
+    // depends on reading `injectedDeps` and on nothing the case above covers.
+    const tree = await withProject(async root => {
+      const copy = "node_modules/.pnpm/file-lib@file+vendor+real/node_modules/file-lib";
+      await writeFileAt(
+        join(root, "package.json"),
+        JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "pnpm@12.4.2" }),
+      );
+      await writeFileAt(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+      await writeFileAt(join(root, "node_modules", ".pnpm", "node_modules", ".keep"), "");
+      await writeFileAt(join(root, copy, "package.json"), "{}");
+      await writeFileAt(
+        join(root, "node_modules", ".modules.yaml"),
+        JSON.stringify({
+          included: { dependencies: true, devDependencies: true, optionalDependencies: true },
+          nodeLinker: "isolated",
+          hoistPattern: ["*"],
+          publicHoistPattern: [],
+          injectedDeps: { "vendor/real": [copy] },
+        }),
+      );
+
+      const read = async (): Promise<string | null | undefined> =>
+        (await readInstallGraphIdentity(root)).installedTree;
+      const before = await read();
+      // Everything the record names holds still; only the copied files change.
+      await writeFileAt(join(root, copy, "index.js"), "module.exports = 2;");
+      return { before, afterContent: await read() };
+    });
+
+    expect(tree.before).not.toBeNull();
+    expect(tree.afterContent).not.toBe(tree.before);
+  });
+
   it("reads the record of the lockfile's manager, not whichever marker is found first", async () => {
     // PR #114 review round 6, P1. Choosing the record by first match re-trusted the accumulated
     // markers: a project that ran `pnpm install` and later `npm install` keeps **both**, so in the

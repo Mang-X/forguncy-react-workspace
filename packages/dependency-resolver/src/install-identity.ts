@@ -66,8 +66,8 @@
 
 import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { lstat, readFile, readdir, realpath, stat } from "node:fs/promises";
-import { dirname, join, relative as relativePath, resolve } from "node:path";
+import { lstat, readFile, readdir, readlink, realpath, stat } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative as relativePath, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { InstallGraphIdentity, ToolchainIdentity } from "@forguncy-react-workspace/core";
@@ -1007,20 +1007,104 @@ async function pnpmInstalledTreeDigest(installRoot: string): Promise<string | nu
   // `name@version` (plus a peer hash), with no machine path. Platform-specific *binaries* do appear
   // when the platform's own binding is installed — measured, `@rolldown/binding-win32-x64-msvc@…` —
   // and those really are different installs, the same reasoning the npm side records deliberately.
-  const storeDirectory = join(installRoot, "node_modules", ".pnpm");
-  let storeEntries: string[] = [];
+  // **Where the store is, comes from the record rather than from a hardcoded `.pnpm`.** Review
+  // round 11: pnpm writes the real location to `.modules.yaml#virtualStoreDir` and the CLI accepts
+  // `--virtual-store-dir`, so a project can legitimately have its live store somewhere else while a
+  // stale default `.pnpm` remains on disk. Measured: a live store at `node_modules/.alt` with a
+  // leftover `.pnpm`, a fixed lockfile and identical layout fields — moving a package inside the
+  // live store left this digest byte-identical, because the hardcoded path named a store the
+  // install no longer used.
+  //
+  // The recorded value is a **machine absolute path**, so it is used only to *locate* the store and
+  // never enters the digest; a relative value is resolved against `node_modules`, which is what
+  // pnpm's own reader does. A value this module cannot read as a path is `unknown` rather than a
+  // fall back to `.pnpm` — guessing the default is the defect this replaces.
+  const storeDirectory = await pnpmStoreDirectory(installRoot, parsed["virtualStoreDir"]);
+  if (storeDirectory === null) {
+    return null;
+  }
+  // Every slot, described by the **identities** it holds: the store's own directory names for what it
+  // installed, and its link graph for how those resolve against each other.
+  //
+  // Measured shape of a real store (this repository, pnpm 11): 111 slots, of which 99 entries are
+  // symlinks into another slot — pnpm's deduplication — and 111 are the slot's own package as a real
+  // directory. A registry package's identity **is** the `name@version` directory it lives in, which is
+  // what round 7 established and what this round's `digests what the manager installed` test pins: a
+  // transitive that moves `b@1` → `b@2` renames a slot while every layout field and the lockfile digest
+  // hold still. Digesting the 8 509 files behind those directories measured **5.6 s** per read and
+  // could not answer a question the names already answer.
+  //
+  // So each slot contributes:
+  //
+  // - a line for **itself**, named by the directory it lives in.
+  // - a line per **link**, by the store-relative slot it points at — a real link is written absolute,
+  //   and a digest carrying one would not survive a checkout elsewhere.
+  //
+  // Two shapes make that naming necessary rather than incidental:
+  //
+  // - a **scoped** package sits inside a `@scope` container directory, which is a namespace and not a
+  //   package. Descending through it is not optional: reading `@babel` as a package walks into the
+  //   symlinks beside it and fails, which is how a perfectly readable install came to answer
+  //   `unknown`.
+  // - a `file:`/injected **copy** is also a real directory, and its name does *not* move when its
+  //   files do — that is `injectedDepsDigest` below, driven by the paths pnpm records.
+  const store: string[] = [];
+  let slots: Dirent[];
   try {
     // `withFileTypes` avoids a stat per entry, and the `node_modules` subdirectory inside the store
     // is the shared root the links point into rather than a package, so it is excluded by name.
-    storeEntries = (await readdir(storeDirectory, { withFileTypes: true }))
-      .filter(entry => entry.isDirectory() && entry.name !== "node_modules")
-      .map(entry => entry.name)
-      .sort();
+    slots = (await readdir(storeDirectory, { withFileTypes: true })).filter(
+      entry => entry.isDirectory() && entry.name !== "node_modules",
+    );
   } catch {
     // No store on disk: `nodeLinker: hoisted` or an incomplete install. The layout fields above are
     // still a partial answer, but a partial answer to "what did this install" is the unknown the
     // third criterion asks for rather than a value pretending to be complete.
     return null;
+  }
+
+  for (const slot of slots.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+    const slotRoot = join(storeDirectory, slot.name, "node_modules");
+    let names: string[];
+    try {
+      names = await readdir(slotRoot);
+    } catch {
+      return null;
+    }
+    // The slot is the record of one package identity, and it is recorded even when nothing below it
+    // is a link — otherwise a slot that holds only its own package contributes nothing, and two
+    // installs differing by exactly such a slot would digest alike.
+    store.push(slot.name);
+    for (const name of names.sort()) {
+      // A `@scope` entry is a namespace directory holding this slot's package and links to its
+      // dependencies; it is descended into rather than described, and its entries follow the same two
+      // rules one level down.
+      if (name.startsWith("@")) {
+        const scopeRoot = join(slotRoot, name);
+        let members: string[];
+        try {
+          members = await readdir(scopeRoot);
+        } catch {
+          return null;
+        }
+        for (const member of members.sort()) {
+          const described = await describeStoreEntry(
+            join(scopeRoot, member),
+            `${slot.name}/${name}/${member}`,
+            storeDirectory,
+            store,
+          );
+          if (!described) {
+            return null;
+          }
+        }
+        continue;
+      }
+      const described = await describeStoreEntry(join(slotRoot, name), `${slot.name}/${name}`, storeDirectory, store);
+      if (!described) {
+        return null;
+      }
+    }
   }
 
   // Link targets last, because they are the one part of the result no manager's own record
@@ -1030,7 +1114,124 @@ async function pnpmInstalledTreeDigest(installRoot: string): Promise<string | nu
   if (links === null) {
     return null;
   }
-  return digestOf(canonicalJson({ ...fields, store: storeEntries, links }));
+
+  // `injectedDeps` next, because a slot **name** is not the artifact it names. Review round 11: with
+  // `injectWorkspacePackages`, a workspace dependency is materialized as a real directory
+  // `node_modules/.pnpm/<name>@file+<name>/node_modules/<name>`, and `syncInjectedDepsAfterScripts`
+  // rewrites the files *inside* it while the slot name, the lockfile and every layout field hold
+  // still. Measured: syncing that copy moved nothing. So the copy's own content is digested; if a
+  // recorded injected dependency cannot be read, the answer is `unknown` rather than a slot name.
+  const injected = await injectedDepsDigest(installRoot, parsed["injectedDeps"]);
+  if (injected === null) {
+    return null;
+  }
+
+  return digestOf(canonicalJson({ ...fields, store: store, links, injected }));
+}
+
+/**
+ * One entry inside a slot's `node_modules`, appended to the store description.
+ *
+ * A **link** is the store's deduplication: its identity is the slot it points at, recorded relative
+ * to the store so a checkout in another directory composes the same digest. A **real directory** is
+ * the slot's own package — the enclosing `name@version` directory is its identity, and a `file:`/
+ * injected copy is covered by `injectedDepsDigest` from the path pnpm records — so the name already
+ * says what the files would say, at a measured 5.6 s per read for the whole store instead.
+ *
+ * `false` when a link points outside the store, or when its target cannot be resolved: content this
+ * module cannot describe by name, which the caller answers as `unknown` rather than a partial value.
+ */
+async function describeStoreEntry(
+  path: string,
+  slotRelativeName: string,
+  storeDirectory: string,
+  described: string[],
+): Promise<boolean> {
+  const link = await readlink(path).catch(() => null);
+  if (link === null) {
+    return true;
+  }
+  const resolved = await realpath(path).catch(() => null);
+  if (resolved === null) {
+    return false;
+  }
+  const target = relativePath(storeDirectory, resolved).split(/[\\/]/).join("/");
+  if (target.startsWith("..")) {
+    return false;
+  }
+  described.push(`${slotRelativeName} -> ${target}`);
+  return true;
+}
+
+/**
+ * Where pnpm's virtual store actually is, from the record it writes.
+ *
+ * `virtualStoreDir` is a **machine absolute path** on a real install (measured), and may be relative
+ * when the CLI was given one, which pnpm's own reader resolves against the modules directory. Either
+ * way it is used only to *locate* the store — it never enters a digest, so a lock recorded on one
+ * machine still matches on another.
+ *
+ * `null` when the record states a value this module cannot read as a path, or when the value is
+ * absent and the default is not usable. Falling back to the default unconditionally is the defect
+ * round 11 removed: a project whose live store is elsewhere would then be digested from a stale one.
+ */
+async function pnpmStoreDirectory(installRoot: string, recorded: unknown): Promise<string | null> {
+  const modulesDirectory = join(installRoot, "node_modules");
+  if (recorded === undefined) {
+    // No location recorded. A default store that exists is the install; one that does not means this
+    // record describes an install this module cannot find.
+    return (await directoryExists(join(modulesDirectory, ".pnpm"))) ? join(modulesDirectory, ".pnpm") : null;
+  }
+  if (typeof recorded !== "string" || recorded.trim().length === 0) {
+    return null;
+  }
+  const value = recorded.trim();
+  return isAbsolute(value) ? value : join(modulesDirectory, value);
+}
+
+/**
+ * The content of every injected dependency copy pnpm materialized, or `null` when one cannot be read.
+ *
+ * `injectedDeps` maps a `file:`/injected dependency's **project-relative directory** to the
+ * **project-relative paths** of the copies pnpm wrote for it. Measured on a real
+ * `pnpm install --virtual-store-dir=.altstore`: the key stayed `vendor/real` and the value became
+ * `.altstore/file-lib@file+vendor+real/node_modules/file-lib` — that is, the paths follow the store
+ * pnpm was told to use, which is why they are read from the record rather than composed from the
+ * store location.
+ *
+ * Both halves are used verbatim, so the digest carries no machine path, and the **content** of each
+ * copy is what gets digested: with `injectWorkspacePackages`, `syncInjectedDepsAfterScripts` rewrites
+ * the files inside a copy while the slot name, the lockfile and every layout field hold still.
+ */
+async function injectedDepsDigest(installRoot: string, recorded: unknown): Promise<readonly string[] | null> {
+  if (recorded === undefined || recorded === null) {
+    return [];
+  }
+  const declared = asPlainObject(recorded);
+  if (declared === null) {
+    return null;
+  }
+
+  const digests: string[] = [];
+  for (const source of Object.keys(declared).sort()) {
+    const copies = declared[source];
+    if (!Array.isArray(copies)) {
+      return null;
+    }
+    for (const copy of [...copies].sort()) {
+      if (typeof copy !== "string") {
+        return null;
+      }
+      const copyRoot = isAbsolute(copy) ? copy : join(installRoot, copy);
+      const files = await collectPackageFiles(copyRoot, copyRoot);
+      if (files === null) {
+        return null;
+      }
+      // Keyed by the recorded path, which is project-relative and therefore portable.
+      digests.push(`${source}:${copy}:${digestOf(canonicalJson(files))}`);
+    }
+  }
+  return digests;
 }
 
 /** npm's `node_modules/.package-lock.json`, as the materialized entry set. */
