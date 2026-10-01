@@ -382,16 +382,21 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
   {
     id: "read-cell-source",
     summary: "Read the source and library references a target Cell currently holds.",
-    evidenceSources: [
-      "issue-5-designer-probe",
-      "forguncy-library-guide",
-      "issue-20-designer-execution",
-      "issue-115-designer-probe",
-    ],
+    evidenceSources: ["forguncy-library-guide", "issue-20-designer-execution", "issue-115-designer-probe"],
     confirmation: "established",
     calls: [
-      { method: "api.page.getCells", version: "12.0.100.0", evidenceSourceIds: ["issue-5-designer-probe", "issue-20-designer-execution"] },
-      { method: "api.page.getCells", version: "12.0.101.0", evidenceSourceIds: ["issue-115-designer-probe"] },
+      {
+        method: "api.page.getCells",
+        version: "12.0.100.0",
+        // The guide documents the call's shape and is cited alongside the run that established it;
+        // #5 is **not** here, because its own scope says it never recorded the read call.
+        evidenceSourceIds: ["forguncy-library-guide", "issue-20-designer-execution"],
+      },
+      {
+        method: "api.page.getCells",
+        version: "12.0.101.0",
+        evidenceSourceIds: ["forguncy-library-guide", "issue-115-designer-probe"],
+      },
     ],
     get method() {
       return preferredCallOf(this.calls);
@@ -884,6 +889,19 @@ export function assertSyncCapabilityCoherent(capability: SyncCapability): void {
           `Capability "${id}" records "${call.method}" as established on ${call.version}, but no cited source (${cited.join(", ")}) both observed that build and executed that call. A call is established by executing it on that build; a run of some other operation, and documentation of a call's shape, cannot establish it.`,
         );
       }
+    }
+    // The capability-level list is provenance — "why this operation's evidence is on file" — and
+    // it can only mean that if it *describes the calls*. #116's fifth review found the two
+    // records able to disagree: `read-cell-source` listed the product's guide at capability level
+    // while neither of its calls cited it, which asserts provenance the per-call record denies.
+    // Deriving is the fix, so it is checked rather than described.
+    const citedByCalls = new Set(calls.flatMap(call => call.evidenceSourceIds));
+    for (const sourceId of capability.evidenceSources) {
+      if (citedByCalls.has(sourceId)) continue;
+      throw new SyncCapabilityContractError(
+        "capability-not-coherent",
+        `Capability "${id}" lists "${sourceId}" as evidence, but none of its recorded calls cites it. A capability-level source is provenance for the calls below it, so it has to appear in at least one of them.`,
+      );
     }
     if (capability.method !== preferredCallOf(calls)) {
       throw new SyncCapabilityContractError(

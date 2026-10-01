@@ -231,6 +231,7 @@ describe("what the evidence establishes", () => {
       ] as const) {
         const capability = {
           ...findSyncCapability("write-cell-source"),
+          evidenceSources: [sourceId[0]],
           calls: [{ method: "api.page.setCells", version: "12.0.101.0", evidenceSourceIds: [sourceId[0]] }],
         } as unknown as SyncCapability;
 
@@ -247,6 +248,10 @@ describe("what the evidence establishes", () => {
       const capability = (id: string, method: string, version: string, evidenceSourceIds: readonly string[]) =>
         ({
           ...findSyncCapability(id as never),
+          // The top-level list is derived from the calls below it, so a fixture that replaces
+          // `calls` has to restate it — which is the point: the two records cannot drift
+          // because the guard refuses a capability-level source no call cites.
+          evidenceSources: [...evidenceSourceIds],
           calls: [{ method, version, evidenceSourceIds }],
         }) as unknown as SyncCapability;
       const accepted = (c: unknown) => {
@@ -277,6 +282,7 @@ describe("what the evidence establishes", () => {
     it("accepts a source from another build alongside one that observed this build", () => {
       const capability = {
         ...findSyncCapability("write-cell-source"),
+        evidenceSources: ["forguncy-library-guide", "issue-115-designer-probe"],
         calls: [
           {
             method: "api.page.setCells",
@@ -588,5 +594,31 @@ describe("the guards refuse an incoherent registry", () => {
     expect(() =>
       assertSyncCapabilityCoherent({ ...findSyncCapability("write-cell-source"), evidenceSources: [] } as SyncCapability),
     ).toThrow(/cites no evidence source/);
+  });
+
+  // The drift the review found, from the other direction: a capability-level source no call cites.
+  // `read-cell-source` carried one, asserting provenance the per-call record denies — and a
+  // paragraph saying the two must agree is not a check. The guard refuses it; these assert it.
+  it("refuses a capability-level source no call cites", () => {
+    const capability = {
+      ...findSyncCapability("read-cell-source"),
+      evidenceSources: ["issue-5-designer-probe", "issue-20-designer-execution"],
+      calls: [
+        { method: "api.page.getCells", version: "12.0.100.0", evidenceSourceIds: ["issue-20-designer-execution"] },
+      ],
+    } as unknown as SyncCapability;
+
+    expect(() => assertSyncCapabilityCoherent(capability)).toThrow(
+      /lists "issue-5-designer-probe" as evidence, but none of its recorded calls cites it/,
+    );
+  });
+
+  it("has no orphaned capability-level source in the shipped table", () => {
+    for (const capability of SYNC_CAPABILITIES) {
+      const cited = new Set((capability.calls ?? []).flatMap(call => call.evidenceSourceIds));
+      for (const sourceId of capability.evidenceSources) {
+        expect(cited.has(sourceId), `${capability.id} lists ${sourceId} with no call citing it`).toBe(true);
+      }
+    }
   });
 });
