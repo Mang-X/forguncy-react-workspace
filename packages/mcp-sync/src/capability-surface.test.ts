@@ -208,27 +208,51 @@ describe("what the evidence establishes", () => {
       }
     });
 
-    // The review's own case, built as a supplied record: a 12.0.101.0 call whose only evidence is
-    // #20's 12.0.100.0 run. The shipped table cannot reach it now, so without this the guard's
-    // failure branch would never run.
-    it("refuses a call whose evidence is entirely from another build", () => {
-      const capability = {
-        ...findSyncCapability("write-cell-source"),
-        calls: [
-          { method: "api.page.setCells", version: "12.0.101.0", evidenceSourceIds: ["issue-20-designer-execution"] },
-        ],
-      } as unknown as SyncCapability;
-
-      expect(() => assertSyncCapabilityCoherent(capability)).toThrow(/tied to a different build/);
-    });
-
     // And the other half: a version-neutral source is a stated property, not an omission, so the
     // 12.0.100.0 calls #5 and the product guide establish are not refused by the rule above.
-    it("accepts a version-neutral source alongside any version", () => {
-      expect(findSyncEvidenceSource("issue-5-designer-probe").observedVersions).toBeUndefined();
+    // Which sources are tied to a build is the whole basis of the rule, and #116's fourth review
+    // corrected my reading of two of them: #5 is a *probe record executed against 12.0.100.0*
+    // (its own citation says so), not a version-neutral fact, and only the product's
+    // documentation carries no build at all.
+    it("records which build each source observed", () => {
+      expect(findSyncEvidenceSource("issue-5-designer-probe").observedVersions).toEqual(["12.0.100.0"]);
       expect(findSyncEvidenceSource("forguncy-library-guide").observedVersions).toBeUndefined();
       expect(findSyncEvidenceSource("issue-20-designer-execution").observedVersions).toEqual(["12.0.100.0"]);
       expect(findSyncEvidenceSource("issue-115-designer-probe").observedVersions).toEqual(["12.0.101.0"]);
+    });
+
+    // The counter-examples the review named, asserted so the wildcard cannot come back. Each is a
+    // real 12.0.101.0 call backed only by evidence from another build, or by documentation.
+    it("refuses a call established only by a source from another build", () => {
+      for (const sourceId of [
+        ["issue-5-designer-probe", "a 12.0.100.0 probe record"],
+        ["forguncy-library-guide", "the product's documentation"],
+        ["issue-20-designer-execution", "a 12.0.100.0 run"],
+      ] as const) {
+        const capability = {
+          ...findSyncCapability("write-cell-source"),
+          calls: [{ method: "api.page.setCells", version: "12.0.101.0", evidenceSourceIds: [sourceId[0]] }],
+        } as unknown as SyncCapability;
+
+        expect(() => assertSyncCapabilityCoherent(capability), sourceId[1]).toThrow(/no cited source .* observed that build/);
+      }
+    });
+
+    // And the complement: supplementary sources are still welcome beside one that establishes the
+    // call, so the rule does not drive them out of the registry.
+    it("accepts a source from another build alongside one that observed this build", () => {
+      const capability = {
+        ...findSyncCapability("write-cell-source"),
+        calls: [
+          {
+            method: "api.page.setCells",
+            version: "12.0.101.0",
+            evidenceSourceIds: ["forguncy-library-guide", "issue-115-designer-probe"],
+          },
+        ],
+      } as unknown as SyncCapability;
+
+      expect(() => assertSyncCapabilityCoherent(capability)).not.toThrow();
     });
 
     it("refuses a call that cites nothing", () => {

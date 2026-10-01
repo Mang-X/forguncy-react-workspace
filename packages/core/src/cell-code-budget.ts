@@ -413,9 +413,11 @@ export const CELL_CODE_PROJECT_VOLUME_OBSERVATION = {
  *   published per-point values with these would be replacing one single-sample series with
  *   another.
  * - **The browser entry series was not re-measured at all.** It needs the generated page open in
- *   a browser, and this build's generated runtime site cannot deliver one: its login succeeds but
- *   the runtime bundle throws in `loginByRSA` when the RSA public key request comes back empty.
- *   is not available. So the `browserEntryMsPerKilobyte` figure has no 101 counterpart.
+ *   a browser, and this build's generated runtime site cannot deliver one: the login request is
+ *   accepted, but the runtime bundle then throws in `loginByRSA` when the RSA public key request
+ *   comes back empty (`GET` answers 405; a body-carrying POST answers 411 Length Required), so
+ *   the runtime's scripts never load and `window.React` stays undefined. The
+ *   `browserEntryMsPerKilobyte` figure therefore has no 101 counterpart.
  * - **A write at 4,193,986 characters was observed rejected** on 101 with
  *   `代码验证失败：AI 校验 WebView 执行超时（20 秒）`, where #21 recorded that size writing
  *   successfully. This is the one finding that may be more than sampling noise, and it is **not

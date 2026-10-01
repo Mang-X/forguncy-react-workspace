@@ -89,22 +89,25 @@ export interface SyncEvidenceSource {
   /** What this source can and cannot establish. */
   readonly scope: string;
   /**
-   * The product builds this source observed something on.
+   * The product builds this source **observed something on** — that is, executed a call against.
    *
-   * Absent means **version-neutral**: the source is a probe record or product documentation that
-   * was not tied to one build, so it can be cited alongside a versioned call without claiming a
-   * run on it. `issue-5-designer-probe` and `forguncy-library-guide` are in that position, and
-   * saying so is more honest than forcing them into one.
+   * Present for every source that ran anything: `issue-5-designer-probe` and
+   * `issue-20-designer-execution` on `12.0.100.0`, `issue-115-designer-probe` on `12.0.101.0`. #5 is
+   * here rather than treated as neutral because its own citation records
+   * `serverInfo = Forguncy 12.0.100.0` and its `[DT]` rows are calls made against that session — a
+   * probe record is authoritative about the build it probed, and reading it as evidence for any
+   * build is how #116's fourth review found a 12.0.101.0 call backed by nothing but 12.0.100.0 work.
    *
-   * Present and explicit for the sources that *are* tied to a build — `issue-20-designer-execution`
-   * to 12.0.100.0, `issue-115-designer-probe` to 12.0.101.0 — which is what lets
-   * {@link assertSyncCapabilityCoherent} require a versioned call to cite something that observed
-   * *that* version, or to cite a neutral source explicitly by leaving the field absent.
+   * Absent means the source is **documentation**, not an execution: only
+   * `forguncy-library-guide` is in that position. It may be cited beside a versioned call, because
+   * it documents the call's shape, but it can never *establish* one — which
+   * {@link evidenceEstablishesVersion} enforces with an explicit `includes` rather than treating
+   * absence as a wildcard. The distinction is the one that matters: "this source says nothing
+   * about any build" and "this source can back a call on any build" are opposites.
    *
-   * A field rather than a text match over `citation`/`scope`, because #116's review's check
-   * cannot be done by reading prose: matching a version string rejects a correct 12.0.100.0
-   * call whose establishing evidence is #5's neutral probe, and accepts a source that merely
-   * mentions a version in passing.
+   * A field rather than a text match over `citation`/`scope`, because the check cannot be done by
+   * reading prose: matching a version string accepts a source that merely mentions one in passing,
+   * and rejects a correct call whose evidence is a different build's run.
    */
   readonly observedVersions?: readonly SyncMeasuredVersion[];
 }
@@ -117,6 +120,11 @@ export const SYNC_EVIDENCE_SOURCES: Readonly<Record<SyncEvidenceSourceId, SyncEv
       "#5's executed evidence, labelled `[DT]` in that Issue's comment \"Runtime contract evidence — ReactCellType on Forguncy 12.0.100\" (https://github.com/Mang-X/forguncy-react-workspace/issues/5).",
     scope:
       "The calls actually made against a real designer session: `api.page.setCells`, `api.app.listFrontendLibraries`, `api.app.checkProjectErrors`, `api.app.generatePageAsync`, and `api.app.getProjectSaveStatus`. It also records the *results* of some of them (the persisted `cellTypeProps`, `errorCount: 0`, the generated runtime URL). It does not record the call #5 used to read persisted cell state back, which is why that operation is `unestablished` below.",
+    // #5 is not version-neutral: its own citation says the session was `serverInfo = Forguncy 12.0.100.0`,
+    // and its `[DT]` rows are calls executed against that build. #116's fourth review caught it being
+    // read as a wildcard that could establish a call on any build; a probe record is authoritative
+    // about the build it probed.
+    observedVersions: ["12.0.100.0"],
   },
   "forguncy-library-guide": {
     id: "forguncy-library-guide",
@@ -684,18 +692,30 @@ export function assertMcpSyncStepCoherent(step: McpSyncStep, index: number): voi
 }
 
 /**
- * Can this evidence source establish a call on `version`?
+ * Did this evidence source execute something on `version`?
  *
- * Either the source is tied to that build, or it is version-neutral — #5's probe record and the
- * product's own documentation are not runs against any one build, and a 12.0.100.0 call is
- * legitimately established by them plus a run that names it. What is **not** acceptable is a
- * source tied to a *different* build, which is the case #116's review found: five capabilities
- * carrying a 12.0.101.0 call whose cited evidence was entirely 12.0.100.0 work.
+ * An explicit `includes`, so a source that declares no build establishes nothing. #116's third
+ * review is why absence is not a wildcard: with `undefined` read as "matches any version", the
+ * product's documentation — and a 12.0.100.0 probe record, before that record declared its build —
+ * could each alone back a 12.0.101.0 call. A source establishes a call by having *run* on that
+ * build, which it has to say.
  */
-function evidenceCoversVersion(sourceId: SyncEvidenceSourceId, version: SyncMeasuredVersion): boolean {
+function evidenceEstablishesVersion(sourceId: SyncEvidenceSourceId, version: SyncMeasuredVersion): boolean {
   const observed = findSyncEvidenceSource(sourceId).observedVersions;
-  // Absent is version-neutral, which is a stated property and not an absence of one.
-  return observed === undefined || observed.includes(version);
+  return observed !== undefined && observed.includes(version);
+}
+
+/**
+ * May this source be cited alongside a versioned call at all?
+ *
+ * The weaker question, and the one that keeps the product's documentation usable: it documents a
+ * call's shape, which is a real contribution beside a call, without being evidence that the call
+ * ran on any build. Distinct from {@link evidenceEstablishesVersion} on purpose — the two were
+ * conflated, and conflating them is what let documentation satisfy an execution requirement.
+ */
+function evidenceCanBeCitedFor(sourceId: SyncEvidenceSourceId, _version: SyncMeasuredVersion): boolean {
+  void findSyncEvidenceSource(sourceId);
+  return true;
 }
 
 /**
@@ -749,14 +769,11 @@ export function assertSyncCapabilityCoherent(capability: SyncCapability): void {
           `Capability "${id}" records the call "${call.method}" as established on ${call.version}, which is not a version this repository tracks. An unprobed build cannot be named as evidence.`,
         );
       }
-      // Every call must cite the evidence that established *it*, and at least one of those
-      // sources must actually name this call's version. #116's review is the reason this is a
-      // check and not a convention: five capabilities carried a `12.0.101.0` call whose only
-      // sources were `12.0.100.0` ones, which the previous guard could not see because a
-      // capability-level list cannot say which source established which version. The version is
-      // matched against the source's own `citation`/`scope` text rather than a field, because the
-      // sources are prose records and adding a version field to all of them would be a second
-      // place for the same fact to drift.
+      // Every call must cite the evidence that established *it*, and at least one cited source
+      // must say it observed *this* build. #116's review is the reason this is a check and not a
+      // convention: five capabilities carried a `12.0.101.0` call whose only sources were
+      // `12.0.100.0` ones, which a capability-level list cannot see because it cannot say which
+      // source established which version.
       const cited = call.evidenceSourceIds ?? [];
       if (cited.length === 0) {
         throw new SyncCapabilityContractError(
@@ -764,13 +781,22 @@ export function assertSyncCapabilityCoherent(capability: SyncCapability): void {
           `Capability "${id}" records "${call.method}" on ${call.version} with no evidence source. A versioned call must name what executed it on that version.`,
         );
       }
+      // Every cited source must at least exist, and may be *supplementary* — the product's
+      // documentation, or a probe record from another build. What no source may be is the only
+      // evidence: one that does not name this build cannot establish the call, however
+      // authoritative its channel looks.
       for (const sourceId of cited) {
-        findSyncEvidenceSource(sourceId);
+        if (!evidenceCanBeCitedFor(sourceId, call.version)) {
+          throw new SyncCapabilityContractError(
+            "capability-not-coherent",
+            `Capability "${id}" cites "${sourceId}" for "${call.method}", and that is not an evidence source.`,
+          );
+        }
       }
-      if (!cited.some(sourceId => evidenceCoversVersion(sourceId, call.version))) {
+      if (!cited.some(sourceId => evidenceEstablishesVersion(sourceId, call.version))) {
         throw new SyncCapabilityContractError(
           "capability-not-coherent",
-          `Capability "${id}" records "${call.method}" as established on ${call.version}, but every one of its cited sources (${cited.join(", ")}) is tied to a different build. A call is established by execution on its own build; a run against another build cannot establish it.`,
+          `Capability "${id}" records "${call.method}" as established on ${call.version}, but no cited source (${cited.join(", ")}) observed that build. A call is established by execution on its own build; a run against another build, and documentation of a call's shape, cannot establish it.`,
         );
       }
     }
