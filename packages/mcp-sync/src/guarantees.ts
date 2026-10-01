@@ -96,9 +96,15 @@ export type SyncMeasuredVersion = (typeof SYNC_MEASURED_VERSIONS)[number];
  * *because* of — the pinned build's read-back spelling was never measured, which is why the
  * adapter recognises both names. Keeping the evidence and narrowing the claim are two edits.
  *
- * Order matters here rather than being alphabetical: `preferredCallOf` in `capability-surface.ts`
- * reads the *last* entry as newest, so this list is the single place "which build is current" is
- * decided. Adding a version is an edit against a run, never against a release note.
+ * Order is not what decides "which build is current" here, and the comment that used to say so
+ * was describing an invariant that does not exist. `preferredCallOf` in
+ * `capability-surface.ts` uses this list for **membership** — a call on a supported version wins
+ * over one on a version that is only measured — and takes "newest" from `SYNC_MEASURED_VERSIONS`'s
+ * own order. With one supported version the two agree, which is why the distinction only shows
+ * up when someone adds a second; the lists are stated separately so that day is boring.
+ *
+ * What this list *is* for: it is the answer to "which versions may this repository claim", and it
+ * only changes with a run. Adding a version is an edit against a run, never against a release note.
  */
 export const SYNC_SUPPORTED_VERSIONS = ["12.0.101.0"] as const satisfies readonly SyncMeasuredVersion[];
 
@@ -559,15 +565,20 @@ export interface UnexecutedVersionCoverage {
 }
 
 /**
- * The per-version coverage gaps: every version the repository claims support for, together with
- * the cells no execution has covered on it.
+ * The per-version coverage gaps: every version asked about, together with the cells no
+ * execution has covered on it.
  *
- * Version `12.0.100.0` is a gap on purpose and cannot be closed from the machine #115 ran on —
- * one `12.0.101.0` install, no installer, no second designer session. Reporting it is the honest
- * state; inheriting #115's result would be the "a different version is a re-run rather than an
- * inheritance" rule broken in the one direction that matters. Adding `12.0.101.0` to
- * {@link SYNC_MEASURED_VERSIONS} without executing on it would be the same error, which is why
- * that list is only extended with a run.
+ * **Defaults to the versions support is claimed for** ({@link SYNC_SUPPORTED_VERSIONS}), so the
+ * default report answers "is any version this repository claims still missing evidence?" — and
+ * with #120's re-base that is 12.0.101.0 alone, which is complete. Passing
+ * {@link SYNC_MEASURED_VERSIONS} instead asks the historical question, and *that* is where
+ * `12.0.100.0`'s three open `unchanged` cells appear.
+ *
+ * The distinction matters because the two answers are different claims and only one of them is a
+ * work item. 12.0.100.0 is out of use, so its uncovered cells are a fact about what was measured
+ * rather than something outstanding — reporting it as a gap by default would keep a retired build
+ * on the board indefinitely, and *not* reporting it would hide what the evidence does and does not
+ * cover. Hence: reported when asked for, never in the default answer.
  */
 export function unexecutedRuntimeVersionCoverage(
   guarantees: readonly SyncGuarantee[] = SYNC_GUARANTEES,
@@ -618,8 +629,8 @@ export function unexecutedRuntimeVersionCoverage(
  */
 export const SYNC_MEASURED_VERSION_CONTEXT: Readonly<Record<SyncMeasuredVersion, string>> = {
   "12.0.100.0":
-    "This is the version the repository pins; #20's run on it predates the read-back recognition #115 corrected, and that build's read-back cell-type name is still unmeasured — which is why the adapter recognises both spellings.",
-  "12.0.101.0": "This is the build #115 probed and drove both routes through, with the shipped adapter.",
+    "A build this repository was measured against and no longer supports: it was the pinned target for #5 and #20, and was retired when the contract re-based on 12.0.101.0 (#120). #20's run predates the read-back recognition #115 corrected, and that build's read-back cell-type name was never measured — which is why the adapter recognises both spellings rather than narrowing to one.",
+  "12.0.101.0": "The build the repository targets, and the one #115 probed and drove both routes through.",
 };
 
 /** Why the given version's cells are open, and what would close them. */

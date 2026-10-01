@@ -161,8 +161,12 @@ describe("what the evidence establishes", () => {
     // would leave the capability claiming `generateProject` as a fact about the pinned build —
     // the promotion #116's review found, and the one thing a flat `method` field cannot prevent.
     expect(generation.calls).toEqual([
-      { method: "api.app.generatePageAsync", version: "12.0.100.0" },
-      { method: "api.app.generateProject", version: "12.0.101.0" },
+      {
+        method: "api.app.generatePageAsync",
+        version: "12.0.100.0",
+        evidenceSourceIds: ["issue-5-designer-probe", "forguncy-library-guide"],
+      },
+      { method: "api.app.generateProject", version: "12.0.101.0", evidenceSourceIds: ["issue-115-designer-probe"] },
     ]);
 
     // The note and the adapter have to describe the same fail-closed set, or a reader learns the
@@ -181,6 +185,60 @@ describe("what the evidence establishes", () => {
     // pinned build, so it cannot be read as discharging #20's 12.0.100.0 evidence.
     expect(source.scope).toContain("not");
     expect(source.scope).toContain("12.0.100.0");
+  });
+
+  // #116's third review: five capabilities carried a `12.0.101.0` call whose evidence sources
+  // were all `12.0.100.0` work, and the guard could not see it because `evidenceSources` sits on
+  // the capability and cannot say which source established which version. The evidence is now on
+  // the call, and this is what makes it a check rather than a convention.
+  describe("a versioned call is bound to the evidence for that version", () => {
+    it("cites a source that can establish that version, for every call", () => {
+      for (const capability of SYNC_CAPABILITIES) {
+        for (const call of capability.calls ?? []) {
+          expect(call.evidenceSourceIds.length, `${capability.id} ${call.method}`).toBeGreaterThan(0);
+          for (const sourceId of call.evidenceSourceIds) {
+            // Resolvable, and not tied to a *different* build: `observedVersions` absent means the
+            // source is version-neutral (#5's probe record, the product's documentation), which
+            // can stand alongside any version; present means it is tied to one.
+            const observed = findSyncEvidenceSource(sourceId).observedVersions;
+            if (observed === undefined) continue;
+            expect(observed, `${capability.id} ${call.method} cites ${sourceId}`).toContain(call.version);
+          }
+        }
+      }
+    });
+
+    // The review's own case, built as a supplied record: a 12.0.101.0 call whose only evidence is
+    // #20's 12.0.100.0 run. The shipped table cannot reach it now, so without this the guard's
+    // failure branch would never run.
+    it("refuses a call whose evidence is entirely from another build", () => {
+      const capability = {
+        ...findSyncCapability("write-cell-source"),
+        calls: [
+          { method: "api.page.setCells", version: "12.0.101.0", evidenceSourceIds: ["issue-20-designer-execution"] },
+        ],
+      } as unknown as SyncCapability;
+
+      expect(() => assertSyncCapabilityCoherent(capability)).toThrow(/tied to a different build/);
+    });
+
+    // And the other half: a version-neutral source is a stated property, not an omission, so the
+    // 12.0.100.0 calls #5 and the product guide establish are not refused by the rule above.
+    it("accepts a version-neutral source alongside any version", () => {
+      expect(findSyncEvidenceSource("issue-5-designer-probe").observedVersions).toBeUndefined();
+      expect(findSyncEvidenceSource("forguncy-library-guide").observedVersions).toBeUndefined();
+      expect(findSyncEvidenceSource("issue-20-designer-execution").observedVersions).toEqual(["12.0.100.0"]);
+      expect(findSyncEvidenceSource("issue-115-designer-probe").observedVersions).toEqual(["12.0.101.0"]);
+    });
+
+    it("refuses a call that cites nothing", () => {
+      const capability = {
+        ...findSyncCapability("write-cell-source"),
+        calls: [{ method: "api.page.setCells", version: "12.0.101.0", evidenceSourceIds: [] }],
+      } as unknown as SyncCapability;
+
+      expect(() => assertSyncCapabilityCoherent(capability)).toThrow(/no evidence source/);
+    });
   });
 
   it("keeps the save status as the step's own reason for saving", () => {

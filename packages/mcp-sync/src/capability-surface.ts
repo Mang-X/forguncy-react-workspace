@@ -88,6 +88,25 @@ export interface SyncEvidenceSource {
   readonly citation: string;
   /** What this source can and cannot establish. */
   readonly scope: string;
+  /**
+   * The product builds this source observed something on.
+   *
+   * Absent means **version-neutral**: the source is a probe record or product documentation that
+   * was not tied to one build, so it can be cited alongside a versioned call without claiming a
+   * run on it. `issue-5-designer-probe` and `forguncy-library-guide` are in that position, and
+   * saying so is more honest than forcing them into one.
+   *
+   * Present and explicit for the sources that *are* tied to a build — `issue-20-designer-execution`
+   * to 12.0.100.0, `issue-115-designer-probe` to 12.0.101.0 — which is what lets
+   * {@link assertSyncCapabilityCoherent} require a versioned call to cite something that observed
+   * *that* version, or to cite a neutral source explicitly by leaving the field absent.
+   *
+   * A field rather than a text match over `citation`/`scope`, because #116's review's check
+   * cannot be done by reading prose: matching a version string rejects a correct 12.0.100.0
+   * call whose establishing evidence is #5's neutral probe, and accepts a source that merely
+   * mentions a version in passing.
+   */
+  readonly observedVersions?: readonly SyncMeasuredVersion[];
 }
 
 export const SYNC_EVIDENCE_SOURCES: Readonly<Record<SyncEvidenceSourceId, SyncEvidenceSource>> = {
@@ -114,6 +133,7 @@ export const SYNC_EVIDENCE_SOURCES: Readonly<Record<SyncEvidenceSourceId, SyncEv
       "#20's own executed evidence against a real designer session — recorded on the Issue (https://github.com/Mang-X/forguncy-react-workspace/issues/20). Environment: MCP `http://localhost:11234/mcp`, `serverInfo = Forguncy 12.0.100.0`, designer assembly `12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623`; project `前端拓展包集成示例.fgcc`; the product's own API reference, which the designer serves over MCP VFS at `/apis/**`.",
     scope:
       "The two operations #5 left unnamed, *performed* (this source is an execution, not a reading of one) and the product reference that documents them: `api.page.getCells` and `api.page.getCellCodeContext` (both read a Cell's persisted state) and `api.app.saveProject` (persists it). It also records what `api.page.readCellCode` does — the segmented reader — and the measurement that decides which of the two readers the divergence check uses: `readCellCode` returned exactly 12,000 characters with `hasMore: true` for a 17,125-character cell, while `getCells` returned all 17,125 characters of the same `cellTypeProps.code`. It records the designer's own `baseHash` equals `sha256` of the stored code string byte-for-byte (LF line endings, trailing newline preserved). What it does **not** record: any claim that these calls are stable across Forguncy versions other than 12.0.100.0, or that `getCells` has no size budget — only that none was observed at 17,125 characters.",
+    observedVersions: ["12.0.100.0"],
   },
   "issue-115-designer-probe": {
     id: "issue-115-designer-probe",
@@ -121,7 +141,8 @@ export const SYNC_EVIDENCE_SOURCES: Readonly<Record<SyncEvidenceSourceId, SyncEv
     citation:
       "#115's own executed evidence against a live designer session (https://github.com/Mang-X/forguncy-react-workspace/issues/115). Environment: MCP `http://localhost:11234/mcp`, `serverInfo = Forguncy 12.0.101.0`, designer assembly `12.0.101.0+92cefba44ce06dc75c2633bf5f6c6771e4ee41f0`; project `前端拓展包集成示例.fgcc`; the product's own API reference served over MCP VFS at `/apis/**`.",
     scope:
-      "The two shapes #115 found to be version-sensitive between the pinned 12.0.100.0 and this 12.0.101.0 build. (1) **The read-back cell-type name.** `api.page.setCells` accepted `ReactCellTypeCellType`, `ReactCellType` and the display name `React AI 单元格` for the same cell type — which the `setCells` reference states as 内置别名、类型名或显示名 — and all three read back through `api.page.getCells` as `cellType: \"ReactCellType\"`, with the same `cellTypeProps.code` byte for byte. The product's own reference (`/apis/cellTypes/ReactCellType.md`, `/apis/cellTypes/index.md`) also calls the type `ReactCellType`; `ReactCellTypeCellType` appears in neither. `UserControlPageCellType` wrote and read back as itself with `cellTypeProps: { overflowMode }` and no `code`. (2) **The generation call.** `api.app.generatePageAsync` is not an own property of `api.app` on this build and calling it throws; `api.app.generateProject` exists, is documented at `/apis/app/generateProject.md` (permission `read/safe`, request `{ skipCheckProjectError? }`, response `{ url, message, checkResult, success? }`), and was executed: with `{}` and with `{ skipCheckProjectError: true }` it resolved `success: true` with `url = \"http://localhost:63982/Forguncy\"` and `checkResult.errorCount: 0` — the same runtime *base* #20 measured, so the page-route mapping is unchanged. What it does **not** record: any re-measurement of `12.0.100.0`. That build is not installed on this machine, so neither shape is claimed for it, and nothing here narrows or widens #20's own findings.",
+      "The two shapes #115 found to be version-sensitive between the pinned 12.0.100.0 and this 12.0.101.0 build. (1) **The read-back cell-type name.** `api.page.setCells` accepted `ReactCellTypeCellType`, `ReactCellType` and the display name `React AI 单元格` for the same cell type — which the `setCells` reference states as 内置别名、类型名或显示名 — and all three read back through `api.page.getCells` as `cellType: \"ReactCellType\"`, with the same `cellTypeProps.code` byte for byte. The product's own reference (`/apis/cellTypes/ReactCellType.md`, `/apis/cellTypes/index.md`) also calls the type `ReactCellType`; `ReactCellTypeCellType` appears in neither. `UserControlPageCellType` wrote and read back as itself with `cellTypeProps: { overflowMode }` and no `code`. (2) **The generation call.** `api.app.generatePageAsync` is not an own property of `api.app` on this build and calling it throws; `api.app.generateProject` exists, is documented at `/apis/app/generateProject.md` (permission `read/safe`, request `{ skipCheckProjectError? }`, response `{ url, message, checkResult, success? }`), and was executed: with `{}` and with `{ skipCheckProjectError: true }` it resolved `success: true` with `url = \"http://localhost:63982/Forguncy\"` and `checkResult.errorCount: 0` — the same runtime *base* #20 measured, so the page-route mapping is unchanged. What it does **not** record: any re-measurement of `12.0.100.0`. That build is not installed on this machine, so neither shape is claimed for it, and nothing here narrows or widens #20's own findings. **(3) The adapter-level end-to-end run, which is the execution evidence for every `12.0.101.0` call in `SYNC_CAPABILITIES`.** After fixing those two shapes, #115 re-ran the flow through the shipped adapter with the two port corrections #92's script used to carry removed: `validate-sync-against-designer.mjs` 20/20 (write route) and `validate-unchanged-against-designer.mjs` 13/13 (unchanged route), on this build, against a disposable page. That run drove `api.app.listFrontendLibraries`, `api.page.getCells`, `api.page.setCells`, `api.app.getProjectSaveStatus`, `api.app.saveProject`, `api.app.checkProjectErrors` and the generation call — all seven port methods — so it is what establishes each of those calls on `12.0.101.0`, not only the two drift findings. What it does **not** record: any browser-side observation, and any `12.0.100.0` re-measurement.",
+    observedVersions: ["12.0.101.0"],
   },
 };
 
@@ -176,6 +197,22 @@ export interface SyncCapabilityCall {
   readonly method: string;
   /** The product version this call was executed on. */
   readonly version: SyncMeasuredVersion;
+  /**
+   * The evidence that established **this** call, by source id.
+   *
+   * Per call rather than on the capability, and that placement is load-bearing. #116's review
+   * found five capabilities carrying a `12.0.101.0` call whose only evidence sources were
+   * `12.0.100.0` ones: the calls were true — an adapter-level run executed them on that build —
+   * but the registry could not point at what established them, and a capability-level list
+   * cannot express "this source established *that* entry" because the ids are the same
+   * regardless of version. With the ids here, {@link assertSyncCapabilityCoherent} can require
+   * every versioned call to cite at least one source that mentions that version, which is the
+   * check that makes a version bump and its evidence one edit instead of two.
+   *
+   * Must be non-empty; the guard enforces it rather than the type being the only barrier, for the
+   * same reason `executions` is checked at runtime as well as typed.
+   */
+  readonly evidenceSourceIds: readonly SyncEvidenceSourceId[];
 }
 
 export interface SyncCapability {
@@ -255,8 +292,8 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
     evidenceSources: ["issue-5-designer-probe", "forguncy-library-guide"],
     confirmation: "established",
     calls: [
-      { method: "api.app.listFrontendLibraries", version: "12.0.100.0" },
-      { method: "api.app.listFrontendLibraries", version: "12.0.101.0" },
+      { method: "api.app.listFrontendLibraries", version: "12.0.100.0", evidenceSourceIds: ["issue-5-designer-probe", "forguncy-library-guide"] },
+      { method: "api.app.listFrontendLibraries", version: "12.0.101.0", evidenceSourceIds: ["issue-115-designer-probe"] },
     ],
     get method() {
       return preferredCallOf(this.calls);
@@ -276,8 +313,8 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
     ],
     confirmation: "established",
     calls: [
-      { method: "api.page.getCells", version: "12.0.100.0" },
-      { method: "api.page.getCells", version: "12.0.101.0" },
+      { method: "api.page.getCells", version: "12.0.100.0", evidenceSourceIds: ["issue-5-designer-probe", "issue-20-designer-execution"] },
+      { method: "api.page.getCells", version: "12.0.101.0", evidenceSourceIds: ["issue-115-designer-probe"] },
     ],
     get method() {
       return preferredCallOf(this.calls);
@@ -292,8 +329,8 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
     evidenceSources: ["issue-5-designer-probe", "forguncy-library-guide"],
     confirmation: "established",
     calls: [
-      { method: "api.page.setCells", version: "12.0.100.0" },
-      { method: "api.page.setCells", version: "12.0.101.0" },
+      { method: "api.page.setCells", version: "12.0.100.0", evidenceSourceIds: ["issue-5-designer-probe", "forguncy-library-guide"] },
+      { method: "api.page.setCells", version: "12.0.101.0", evidenceSourceIds: ["issue-115-designer-probe"] },
     ],
     get method() {
       return preferredCallOf(this.calls);
@@ -308,8 +345,8 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
     evidenceSources: ["forguncy-library-guide", "issue-20-designer-execution"],
     confirmation: "established",
     calls: [
-      { method: "api.app.saveProject", version: "12.0.100.0" },
-      { method: "api.app.saveProject", version: "12.0.101.0" },
+      { method: "api.app.saveProject", version: "12.0.100.0", evidenceSourceIds: ["forguncy-library-guide", "issue-20-designer-execution"] },
+      { method: "api.app.saveProject", version: "12.0.101.0", evidenceSourceIds: ["issue-115-designer-probe"] },
     ],
     get method() {
       return preferredCallOf(this.calls);
@@ -324,8 +361,8 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
     evidenceSources: ["issue-5-designer-probe", "forguncy-library-guide"],
     confirmation: "established",
     calls: [
-      { method: "api.app.checkProjectErrors", version: "12.0.100.0" },
-      { method: "api.app.checkProjectErrors", version: "12.0.101.0" },
+      { method: "api.app.checkProjectErrors", version: "12.0.100.0", evidenceSourceIds: ["issue-5-designer-probe", "forguncy-library-guide"] },
+      { method: "api.app.checkProjectErrors", version: "12.0.101.0", evidenceSourceIds: ["issue-115-designer-probe"] },
     ],
     get method() {
       return preferredCallOf(this.calls);
@@ -340,8 +377,8 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
     evidenceSources: ["issue-5-designer-probe", "forguncy-library-guide", "issue-115-designer-probe"],
     confirmation: "established",
     calls: [
-      { method: "api.app.generatePageAsync", version: "12.0.100.0" },
-      { method: "api.app.generateProject", version: "12.0.101.0" },
+      { method: "api.app.generatePageAsync", version: "12.0.100.0", evidenceSourceIds: ["issue-5-designer-probe", "forguncy-library-guide"] },
+      { method: "api.app.generateProject", version: "12.0.101.0", evidenceSourceIds: ["issue-115-designer-probe"] },
     ],
     get method() {
       return preferredCallOf(this.calls);
@@ -356,8 +393,8 @@ export const SYNC_CAPABILITIES: readonly SyncCapability[] = [
     evidenceSources: ["issue-5-designer-probe", "issue-20-designer-execution"],
     confirmation: "established",
     calls: [
-      { method: "api.app.getProjectSaveStatus", version: "12.0.100.0" },
-      { method: "api.app.getProjectSaveStatus", version: "12.0.101.0" },
+      { method: "api.app.getProjectSaveStatus", version: "12.0.100.0", evidenceSourceIds: ["issue-5-designer-probe", "issue-20-designer-execution"] },
+      { method: "api.app.getProjectSaveStatus", version: "12.0.101.0", evidenceSourceIds: ["issue-115-designer-probe"] },
     ],
     get method() {
       return preferredCallOf(this.calls);
@@ -646,7 +683,24 @@ export function assertMcpSyncStepCoherent(step: McpSyncStep, index: number): voi
   }
 }
 
-/** Refuse a capability that claims more than its evidence supports. See the guard below. */
+/**
+ * Can this evidence source establish a call on `version`?
+ *
+ * Either the source is tied to that build, or it is version-neutral — #5's probe record and the
+ * product's own documentation are not runs against any one build, and a 12.0.100.0 call is
+ * legitimately established by them plus a run that names it. What is **not** acceptable is a
+ * source tied to a *different* build, which is the case #116's review found: five capabilities
+ * carrying a 12.0.101.0 call whose cited evidence was entirely 12.0.100.0 work.
+ */
+function evidenceCoversVersion(sourceId: SyncEvidenceSourceId, version: SyncMeasuredVersion): boolean {
+  const observed = findSyncEvidenceSource(sourceId).observedVersions;
+  // Absent is version-neutral, which is a stated property and not an absence of one.
+  return observed === undefined || observed.includes(version);
+}
+
+/**
+ * Refuse a capability that claims more than its evidence supports. See the guard below.
+ */
 export function assertSyncCapabilityCoherent(capability: SyncCapability): void {
   const id = capability.id;
 
@@ -693,6 +747,30 @@ export function assertSyncCapabilityCoherent(capability: SyncCapability): void {
         throw new SyncCapabilityContractError(
           "capability-not-coherent",
           `Capability "${id}" records the call "${call.method}" as established on ${call.version}, which is not a version this repository tracks. An unprobed build cannot be named as evidence.`,
+        );
+      }
+      // Every call must cite the evidence that established *it*, and at least one of those
+      // sources must actually name this call's version. #116's review is the reason this is a
+      // check and not a convention: five capabilities carried a `12.0.101.0` call whose only
+      // sources were `12.0.100.0` ones, which the previous guard could not see because a
+      // capability-level list cannot say which source established which version. The version is
+      // matched against the source's own `citation`/`scope` text rather than a field, because the
+      // sources are prose records and adding a version field to all of them would be a second
+      // place for the same fact to drift.
+      const cited = call.evidenceSourceIds ?? [];
+      if (cited.length === 0) {
+        throw new SyncCapabilityContractError(
+          "capability-not-coherent",
+          `Capability "${id}" records "${call.method}" on ${call.version} with no evidence source. A versioned call must name what executed it on that version.`,
+        );
+      }
+      for (const sourceId of cited) {
+        findSyncEvidenceSource(sourceId);
+      }
+      if (!cited.some(sourceId => evidenceCoversVersion(sourceId, call.version))) {
+        throw new SyncCapabilityContractError(
+          "capability-not-coherent",
+          `Capability "${id}" records "${call.method}" as established on ${call.version}, but every one of its cited sources (${cited.join(", ")}) is tied to a different build. A call is established by execution on its own build; a run against another build cannot establish it.`,
         );
       }
     }

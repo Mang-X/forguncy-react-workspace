@@ -10,6 +10,7 @@ import {
   locallyCheckableSyncGuarantees,
   realRuntimeSyncGuarantees,
   SYNC_EXECUTIONS,
+  SYNC_MEASURED_VERSION_CONTEXT,
   SYNC_MEASURED_VERSIONS,
   SYNC_SUPPORTED_VERSIONS,
   SYNC_GUARANTEE_IDS,
@@ -530,8 +531,22 @@ describe("what has been executed on each product version", () => {
     }
   });
 
-  // The other branch of the same derivation, so the note is not simply "always partial": a version
-  // nothing has run on must still say so.
+  // #116's third review: after support narrowed to 12.0.101.0, this context still told a
+  // caller that 12.0.100.0 "is the version the repository pins" — and it is returned inside
+  // `whatARunWouldEstablish`, so it was not a stale comment but a wrong sentence in a report.
+  it("does not describe a retired build as the one the repository pins", () => {
+    const retired = SYNC_MEASURED_VERSION_CONTEXT["12.0.100.0"];
+
+    expect(retired).not.toMatch(/the version the repository pins/i);
+    expect(retired).toMatch(/no longer supports|retired/i);
+    expect(retired).toMatch(/12\.0\.101\.0/);
+
+    // And the same words must not reappear by being generated: the note a caller gets for that
+    // version has to carry the corrected context, not a hand-written variant of it.
+    const [entry] = unexecutedRuntimeVersionCoverage(SYNC_GUARANTEES, SYNC_MEASURED_VERSIONS);
+    expect(entry?.whatARunWouldEstablish).toContain(retired);
+  });
+
   it("still says nothing has run when nothing has", () => {
     const versions = ["12.0.100.0", "12.0.101.0"] as const;
     const unrun = [
