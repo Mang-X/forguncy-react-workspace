@@ -530,6 +530,140 @@ describe("#94: identity comes from the install graph, not from a declaration", (
     expect(tree.afterContent).not.toBe(tree.before);
   });
 
+  it("digests a built slot's content, which its name does not describe", async () => {
+    // PR #114 review round 11, P1. A lifecycle script adds or rewrites files **inside** the same
+    // `name@version` slot, so naming the slot names nothing about the result. Measured on a real
+    // `esbuild@0.25.0` install whose postinstall writes `bin/esbuild`: removing that file left
+    // `installedTree` byte-identical, and for a package whose `main` points at generated source that
+    // is the difference between buildable and missing.
+    //
+    // pnpm records *who may build* but not what a build produced, so the record decides whether to
+    // read and the files decide what it is. `allowBuilds` alone cannot separate the two installs —
+    // measured, both write `{"bscript@file:vendor/b": true}` and differ only in `pendingBuilds`.
+    const tree = await withProject(async root => {
+      const slot = join(root, "node_modules", ".pnpm", "buildy@1.0.0", "node_modules", "buildy");
+      await writeFileAt(
+        join(root, "package.json"),
+        JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "pnpm@12.4.2" }),
+      );
+      await writeFileAt(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+      await writeFileAt(join(root, "node_modules", ".pnpm", "node_modules", ".keep"), "");
+      await writeFileAt(join(slot, "package.json"), JSON.stringify({ name: "buildy", version: "1.0.0" }));
+      const record = (pendingBuilds: readonly string[]): Record<string, unknown> => ({
+        included: { dependencies: true, devDependencies: true, optionalDependencies: true },
+        nodeLinker: "isolated",
+        hoistPattern: ["*"],
+        publicHoistPattern: [],
+        allowBuilds: { buildy: true },
+        pendingBuilds,
+      });
+      // The build ran: the script's output is in the slot and nothing is pending.
+      await writeFileAt(join(root, "node_modules", ".modules.yaml"), JSON.stringify(record([])));
+      await writeFileAt(join(slot, "bin", "buildy"), "#!/bin/sh\n");
+
+      const read = async (): Promise<string | null | undefined> =>
+        (await readInstallGraphIdentity(root)).installedTree;
+      const built = await read();
+      // The same install deferred the build: the output is gone and the record says so.
+      await rm(join(slot, "bin", "buildy"), { force: true });
+      await writeFileAt(
+        join(root, "node_modules", ".modules.yaml"),
+        JSON.stringify(record(["buildy@1.0.0"])),
+      );
+      const deferred = await read();
+      return { built, deferred };
+    });
+
+    expect(tree.built).not.toBeNull();
+    expect(tree.deferred).not.toBe(tree.built);
+  });
+
+  it("records a build approval whose package this store does not hold", async () => {
+    // The counterpart of the case above, and it is the ordinary one: pnpm keeps an approval in
+    // `package.json` and carries it in `allowBuilds` across installs that never installed the
+    // package. Measured: this repository approves `esbuild` and holds no `esbuild` slot at all.
+    // Answering `unknown` for a stale approval would make such a project unverifiable, so the key is
+    // recorded as named while the slots that do exist are still read.
+    const tree = await withProject(async root => {
+      const slot = join(root, "node_modules", ".pnpm", "kept@1.0.0", "node_modules", "kept");
+      await writeFileAt(
+        join(root, "package.json"),
+        JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "pnpm@12.4.2" }),
+      );
+      await writeFileAt(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+      await writeFileAt(join(root, "node_modules", ".pnpm", "node_modules", ".keep"), "");
+      await writeFileAt(join(slot, "package.json"), JSON.stringify({ name: "kept", version: "1.0.0" }));
+      const record = (): Record<string, unknown> => ({
+        included: { dependencies: true, devDependencies: true, optionalDependencies: true },
+        nodeLinker: "isolated",
+        hoistPattern: ["*"],
+        publicHoistPattern: [],
+        // `@swc/core` matches `@swc+core@…` by pnpm's scope encoding; `esbuild` matches nothing.
+        allowBuilds: { "@swc/core": true, esbuild: true },
+      });
+      await writeFileAt(join(root, "node_modules", ".modules.yaml"), JSON.stringify(record()));
+      await writeFileAt(
+        join(root, "node_modules", ".pnpm", "@swc+core@1.16.2", "node_modules", "@swc", "core", "package.json"),
+        JSON.stringify({ name: "@swc/core", version: "1.16.2" }),
+      );
+
+      const read = async (): Promise<string | null | undefined> =>
+        (await readInstallGraphIdentity(root)).installedTree;
+      const before = await read();
+      // The matched slot's content moves; the stale approval stays absent either way.
+      await writeFileAt(
+        join(root, "node_modules", ".pnpm", "@swc+core@1.16.2", "node_modules", "@swc", "core", "index.js"),
+        "// built\n",
+      );
+      return { before, afterContent: await read() };
+    });
+
+    expect(tree.before).not.toBeNull();
+    expect(tree.afterContent).not.toBe(tree.before);
+  });
+
+  it("names an injected copy by its store-relative location, not the absolute path pnpm recorded", async () => {
+    // PR #114 review round 11, P1. pnpm records an injected copy **relative to the project** when
+    // the store is inside it, and **absolute** when a global virtual store puts the slot outside —
+    // measured, `--virtual-store-dir` inside the project gave `node_modules/.pnpm/…` and
+    // `--virtual-store-dir=/tmp/gvs/globalstore` gave `C:/…/globalstore/gvslib@…`. Serializing that
+    // verbatim made two checkouts of one tree disagree (`0481eb99c048` vs `726bfcec6956`), which is
+    // the false stale #94's portability criterion forbids.
+    const storeRelative = async (root: string, copy: string): Promise<string | null | undefined> =>
+      withProject(async project => {
+        const store = join(project, "gstore");
+        await writeFileAt(
+          join(project, "package.json"),
+          JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "pnpm@12.4.2" }),
+        );
+        await writeFileAt(join(project, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+        await writeFileAt(join(store, "node_modules", ".keep"), "");
+        const copyRoot = join(store, copy);
+        await writeFileAt(join(copyRoot, "package.json"), JSON.stringify({ name: "gvslib", version: "1.0.0" }));
+        await writeFileAt(join(copyRoot, "index.js"), "module.exports = 1;");
+        await writeFileAt(
+          join(project, "node_modules", ".modules.yaml"),
+          JSON.stringify({
+            included: { dependencies: true, devDependencies: true, optionalDependencies: true },
+            nodeLinker: "isolated",
+            hoistPattern: ["*"],
+            publicHoistPattern: [],
+            // The absolute form pnpm writes for a store outside the project. `root` is a different
+            // absolute directory per checkout and the content is identical.
+            virtualStoreDir: store,
+            injectedDeps: { "vendor/x": [copyRoot] },
+          }),
+        );
+        return (await readInstallGraphIdentity(project)).installedTree;
+      });
+
+    // The same tree, materialized under two different absolute directories.
+    const first = await storeRelative("C:\\checkout-one", "gvslib@file+vendor+x\\node_modules\\gvslib");
+    const second = await storeRelative("C:\\checkout-two", "gvslib@file+vendor+x\\node_modules\\gvslib");
+    expect(first).not.toBeNull();
+    expect(second).toBe(first);
+  });
+
   it("reads the record of the lockfile's manager, not whichever marker is found first", async () => {
     // PR #114 review round 6, P1. Choosing the record by first match re-trusted the accumulated
     // markers: a project that ran `pnpm install` and later `npm install` keeps **both**, so in the

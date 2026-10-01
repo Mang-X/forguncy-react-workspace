@@ -1121,12 +1121,181 @@ async function pnpmInstalledTreeDigest(installRoot: string): Promise<string | nu
   // rewrites the files *inside* it while the slot name, the lockfile and every layout field hold
   // still. Measured: syncing that copy moved nothing. So the copy's own content is digested; if a
   // recorded injected dependency cannot be read, the answer is `unknown` rather than a slot name.
-  const injected = await injectedDepsDigest(installRoot, parsed["injectedDeps"]);
+  const injected = await injectedDepsDigest(installRoot, storeDirectory, parsed["injectedDeps"]);
   if (injected === null) {
     return null;
   }
 
-  return digestOf(canonicalJson({ ...fields, store: store, links, injected }));
+  // Build state last, because it is the one manager field that describes something this module then
+  // has to read off disk itself. Review round 11: a slot's **name** does not cover what a lifecycle
+  // script left behind in it. Measured on a real registry package — `esbuild@0.25.0`, whose postinstall
+  // writes `bin/esbuild` — removing that generated file left `installedTree` byte-identical, so a
+  // package whose `main`/`exports` points at it could switch from buildable to missing with a warm
+  // cache answering from the old probe.
+  //
+  // pnpm records who may build and who has not yet, but **not** what the build produced:
+  //
+  // | install | `allowBuilds` | `pendingBuilds` | `out.js` on disk |
+  // | --- | --- | --- | --- |
+  // | build ran | `{"bscript@file:vendor/b": true}` | `[]` | present |
+  // | `--ignore-scripts` | `{"bscript@file:vendor/b": true}` | `["bscript@file:vendor/b"]` | absent |
+  //
+  // `allowBuilds` alone cannot tell those apart, which is why the record decides *whether to read*
+  // and the files decide *what it is*: every slot the record implicates is digested by content.
+  //
+  // **What this does not cover, measured rather than assumed.** A package pnpm never approved has no
+  // record naming it — an `is-odd@3.0.1` install writes `"allowBuilds": {}` and nothing else — so its
+  // slot is read by name only. The alternative was to find such slots by reading each package's
+  // manifest and looking for an install script: that measured **391 ms** for 292 manifests, and it is
+  // not a sound signal either, because a script that exists is not a script that ran. An unapproved
+  // package's build output is therefore still invisible here, and the honest report is that this axis
+  // covers the builds the manager recorded rather than every build a script could have performed.
+  const builds = await builtSlotsDigest(storeDirectory, parsed, slots);
+  if (builds === null) {
+    return null;
+  }
+
+  return digestOf(canonicalJson({ ...fields, store: store, links, injected, builds }));
+}
+
+/**
+ * The content of every slot pnpm's record says may have been built by a lifecycle script, or `null`
+ * when one of them cannot be read.
+ *
+ * The store walk names slots; this reads the ones whose **content** a script produced. It is
+ * deliberately scoped to the slots the record implicates rather than applied to the whole store:
+ * digesting every slot measured **5.6 s** per read across 8 509 files, and the names already answer
+ * the question for a package nothing built.
+ *
+ * Two key shapes occur, both measured, and both are matched to a slot by prefix rather than by being
+ * composed: `allowBuilds` wrote `{"esbuild": true}` for a registry package and
+ * `{"buildy@file:vendor/buildy": true}` for a `file:` one, while `pendingBuilds`/`ignoredBuilds`
+ * wrote `name@version`. pnpm encodes a scope in a slot directory as `+` (`@esbuild+win32-x64@0.25.0`),
+ * so a scoped key matches its slot only after that substitution.
+ *
+ * The three fields are also three **shapes**: `allowBuilds` is an object keyed by package, while
+ * `pendingBuilds` and `ignoredBuilds` are **arrays** of keys (measured: `"pendingBuilds": []`,
+ * `"ignoredBuilds": ["esbuild@0.25.0"]`). Reading an array as an object is not a near-miss — it reads
+ * as a shape this module cannot interpret and answers `unknown`, which is how one field's container
+ * would have made every install unverifiable.
+ */
+async function builtSlotsDigest(
+  storeDirectory: string,
+  parsed: Record<string, unknown>,
+  slots: readonly Dirent[],
+): Promise<readonly string[] | null> {
+  const implicated = new Set<string>();
+  for (const field of ["allowBuilds", "pendingBuilds", "ignoredBuilds"]) {
+    const value = parsed[field];
+    if (value === undefined || value === null) {
+      continue;
+    }
+    const declared = asPlainObject(value);
+    if (declared !== null) {
+      for (const key of Object.keys(declared)) {
+        implicated.add(key);
+      }
+      continue;
+    }
+    if (Array.isArray(value)) {
+      for (const key of value) {
+        if (typeof key !== "string") {
+          return null;
+        }
+        implicated.add(key);
+      }
+      continue;
+    }
+    // Present but neither object nor array is a shape this module cannot interpret, so it cannot
+    // claim to know which slots were built.
+    return null;
+  }
+  if (implicated.size === 0) {
+    return [];
+  }
+
+  const digests: string[] = [];
+  for (const key of [...implicated].sort()) {
+    // A key is `name` or `name@version`; a slot directory is `name@version`, with `+` for a scope.
+    const slotName = key.replace("/", "+");
+    const matching = slots.filter(slot => slot.name === slotName || slot.name.startsWith(`${slotName}@`));
+    if (matching.length === 0) {
+      // A key naming no slot here is an ordinary fact, not a gap: pnpm records an approval in
+      // `package.json` and keeps it in `allowBuilds` across installs that never installed the
+      // package. Measured: this repository approves `esbuild` and holds no `esbuild` slot at all,
+      // while `{"@swc/core": true}` does match `@swc+core@1.16.2`. Answering `unknown` here would
+      // make every project carrying a stale approval unverifiable, so the key is recorded as named
+      // and the slots that do exist are read.
+      digests.push(`${slotName}:absent`);
+      continue;
+    }
+    for (const slot of matching) {
+      const files = await storeSlotContentDigest(storeDirectory, slot.name);
+      if (files === null) {
+        return null;
+      }
+      digests.push(`${slot.name}:${files}`);
+    }
+  }
+  return digests;
+}
+
+/**
+ * The content of one slot's own package, or `null` when it cannot be read.
+ *
+ * Deliberately the slot's own package and not everything under it: the dependency links beside it are
+ * the store walk's business, and following them would re-digest the store through every slot.
+ */
+async function storeSlotContentDigest(storeDirectory: string, slotName: string): Promise<string | null> {
+  const slotRoot = join(storeDirectory, slotName, "node_modules");
+  let entries: { readonly name: string; readonly isSymbolicLink: () => boolean }[];
+  try {
+    entries = await readdir(slotRoot, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  for (const entry of entries) {
+    if (entry.isSymbolicLink()) {
+      continue;
+    }
+    // A `@scope` directory is a namespace, so the package is inside it.
+    const packageRoots = entry.name.startsWith("@")
+      ? await scopeMembers(slotRoot, entry.name)
+      : [join(slotRoot, entry.name)];
+    if (packageRoots === null) {
+      return null;
+    }
+    const collected: string[] = [];
+    for (const root of packageRoots) {
+      const files = await collectPackageFiles(root, root);
+      if (files === null) {
+        return null;
+      }
+      collected.push(...files);
+    }
+    if (collected.length === 0) {
+      continue;
+    }
+    return digestOf(canonicalJson(collected.sort()));
+  }
+  return null;
+}
+
+/** The real package directories inside a `@scope` container, or `null` when it cannot be read. */
+async function scopeMembers(slotRoot: string, scope: string): Promise<string[] | null> {
+  let members: Dirent[];
+  try {
+    members = await readdir(join(slotRoot, scope), { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  const roots: string[] = [];
+  for (const member of members) {
+    if (!member.isSymbolicLink() && member.isDirectory()) {
+      roots.push(join(slotRoot, scope, member.name));
+    }
+  }
+  return roots;
 }
 
 /**
@@ -1192,18 +1361,30 @@ async function pnpmStoreDirectory(installRoot: string, recorded: unknown): Promi
 /**
  * The content of every injected dependency copy pnpm materialized, or `null` when one cannot be read.
  *
- * `injectedDeps` maps a `file:`/injected dependency's **project-relative directory** to the
- * **project-relative paths** of the copies pnpm wrote for it. Measured on a real
- * `pnpm install --virtual-store-dir=.altstore`: the key stayed `vendor/real` and the value became
- * `.altstore/file-lib@file+vendor+real/node_modules/file-lib` — that is, the paths follow the store
- * pnpm was told to use, which is why they are read from the record rather than composed from the
- * store location.
+ * `injectedDeps` maps a `file:`/injected dependency's **project-relative directory** to the paths of
+ * the copies pnpm wrote for it, and **which** form those paths take follows the store. Measured on two
+ * real installs of the same tree:
  *
- * Both halves are used verbatim, so the digest carries no machine path, and the **content** of each
- * copy is what gets digested: with `injectWorkspacePackages`, `syncInjectedDepsAfterScripts` rewrites
- * the files inside a copy while the slot name, the lockfile and every layout field hold still.
+ * - `--virtual-store-dir=.altstore` (inside the project) recorded `.altstore/…/file-lib`, relative to
+ *   the project.
+ * - `--virtual-store-dir=/tmp/gvs/globalstore` (outside it) recorded
+ *   `C:/…/globalstore/gvslib@file+vendor+x/node_modules/gvslib` — **absolute**, because a global
+ *   virtual store's slot is outside the project and there is no project-relative way to name it.
+ *
+ * So a recorded absolute path is used to *locate* the copy and is then recorded **relative to the
+ * store**, exactly as `virtualStoreDir` itself is. Serializing it verbatim made two checkouts of one
+ * tree disagree: measured, `0481eb99c048` versus `726bfcec6956` for identical content in two
+ * directories, which is the false stale #94's portability criterion forbids.
+ *
+ * The **content** of each copy is what gets digested, keyed by the normalized location: with
+ * `injectWorkspacePackages`, `syncInjectedDepsAfterScripts` rewrites the files inside a copy while the
+ * slot name, the lockfile and every layout field hold still.
  */
-async function injectedDepsDigest(installRoot: string, recorded: unknown): Promise<readonly string[] | null> {
+async function injectedDepsDigest(
+  installRoot: string,
+  storeDirectory: string,
+  recorded: unknown,
+): Promise<readonly string[] | null> {
   if (recorded === undefined || recorded === null) {
     return [];
   }
@@ -1223,12 +1404,22 @@ async function injectedDepsDigest(installRoot: string, recorded: unknown): Promi
         return null;
       }
       const copyRoot = isAbsolute(copy) ? copy : join(installRoot, copy);
+      // A relative path is already project-relative and portable. An absolute one names a slot in
+      // *some* store, so it is recorded relative to the store this install uses — the same
+      // normalization `virtualStoreDir` gets, and the reason two checkouts compose one identity.
+      const location = isAbsolute(copy)
+        ? relativePath(storeDirectory, copy).split(/[\\/]/).join("/")
+        : copy.split(/[\\/]/).join("/");
+      // An absolute path outside both the project and the store is content this module cannot name
+      // portably, so it is `unknown` rather than a value carrying a machine directory.
+      if (location.startsWith("..")) {
+        return null;
+      }
       const files = await collectPackageFiles(copyRoot, copyRoot);
       if (files === null) {
         return null;
       }
-      // Keyed by the recorded path, which is project-relative and therefore portable.
-      digests.push(`${source}:${copy}:${digestOf(canonicalJson(files))}`);
+      digests.push(`${source}:${location}:${digestOf(canonicalJson(files))}`);
     }
   }
   return digests;
