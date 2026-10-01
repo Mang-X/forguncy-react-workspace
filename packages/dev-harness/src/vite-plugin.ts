@@ -555,7 +555,16 @@ interface AliasEntry {
   readonly replacement: string | undefined;
 }
 
-function readAliasEntries(userAlias: unknown): readonly AliasEntry[] {
+function readAliasEntries(
+  userAlias: unknown,
+  options: { readonly normalize: boolean } = { normalize: true },
+): readonly AliasEntry[] {
+  // Two inputs, and conflating them is what let round 11 through. The **declaration** is raw and must
+  // be carried to the form Vite merges it into; the **final list is already Vite's output** and
+  // normalizing it again applies the rule a second time. `normalize: false` for the latter.
+  const pair = (find: string, replacement: string): { find: string; replacement: string } =>
+    options.normalize ? normalizeAliasEntryPair(find, replacement) : { find, replacement };
+
   // Both branches go through the same pair normalization, and the object form needs it as much as
   // the array form: `normalizeAliasFind` strips a trailing `/` from the key only, so reading
   // `{ "react/": "/patched-react/" }` as `find: "react"` with the *unstripped* value leaves a pair
@@ -573,7 +582,7 @@ function readAliasEntries(userAlias: unknown): readonly AliasEntry[] {
           // The pair rule produces the normalized halves; the raw spelling is deliberately not kept
           // alongside, because comparing against a Vite-merged entry can only ever succeed on the
           // normalized form.
-          return { ...normalizeAliasEntryPair(find, replacement) };
+          return { ...pair(find, replacement) };
         }
         return { find, replacement: typeof replacement === "string" ? replacement : undefined };
       })
@@ -585,7 +594,7 @@ function readAliasEntries(userAlias: unknown): readonly AliasEntry[] {
       .filter(([key]) => key.length > 0)
       .map(([key, value]) =>
         typeof value === "string"
-          ? { ...normalizeAliasEntryPair(key, value) }
+          ? { ...pair(key, value) }
           : { find: normalizeAliasFind(key, value), replacement: undefined },
       );
   }
@@ -631,7 +640,7 @@ function undeclaredAliasPatterns(
   const declaredEntries = readAliasEntries(declared);
 
   const undeclared: string[] = [];
-  for (const entry of readAliasEntries(finalAlias)) {
+  for (const entry of readAliasEntries(finalAlias, { normalize: false })) {
     const { find, replacement } = entry;
 
     if (typeof find === "string") {
@@ -725,9 +734,7 @@ function isSameStringAlias(known: AliasEntry, find: string, replacement: string 
   if (typeof known.find !== "string" || known.replacement === undefined || replacement === undefined) {
     return false;
   }
-  const a = normalizeAliasEntryPair(known.find, known.replacement);
-  const b = normalizeAliasEntryPair(find, replacement);
-  return a.find === b.find && a.replacement === b.replacement;
+  return known.find === find && known.replacement === replacement;
 }
 
 /**
@@ -751,7 +758,7 @@ function isSameStringAlias(known: AliasEntry, find: string, replacement: string 
  */
 function normalizeAliasEntryPair(find: string, replacement: string): { find: string; replacement: string } {
   if (find.endsWith("/") && replacement.endsWith("/")) {
-    return { find: find.replace(/\/+$/, ""), replacement: replacement.replace(/\/+$/, "") };
+    return { find: find.slice(0, -1), replacement: replacement.slice(0, -1) };
   }
   return { find, replacement };
 }

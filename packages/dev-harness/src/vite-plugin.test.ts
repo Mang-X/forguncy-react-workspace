@@ -1287,3 +1287,188 @@ describe("the alias comparison follows Vite's pair-wise slash rule", () => {
     ).resolves.toBeUndefined();
   });
 });
+
+/**
+ * A declaration reaches the final alias list through **two** normalizations, not one.
+ *
+ * `normalizeSingleAlias` removes a *single* trailing `/` from each side — Vite's rule, copied in
+ * `normalizeAliasFind`. But a declaration is normalized once when Vite reads the config and again
+ * when `normalizeAlias` normalizes the **merged** array, so a `//` loses both. Measured against
+ * Vite 8.3.0:
+ *
+ * | declaration | appears in `config.resolve.alias` as |
+ * | --- | --- |
+ * | `{ "nm//": "/x//" }` | `nm -> /x` |
+ * | `{ "nm///": "/x///" }` | `nm/ -> /x/` |
+ * | `{ "nm//": "/x/" }` | `nm/ -> /x/` |
+ * | `{ "nm//": "/x" }` | unchanged — one side has no slash, so neither is stripped |
+ *
+ * Comparing against a single normalization makes the project's declaration disagree with Vite's own
+ * output for it, which is how a later plugin's genuinely different entry gets accepted as the
+ * project's own.
+ *
+ * The **final list is read unnormalized** for the mirror-image reason: Vite already produced it, and
+ * normalizing again would move it one step further from what the resolver actually uses.
+ */
+describe("the declaration is normalized to Vite's merged form, not once", () => {
+  const reRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "tests", "fixtures", "project-alias");
+
+  function registry() {
+    return createCellRegistry(
+      {
+        cells: { probe: { entry: "./cells/probe/src/index.ts", target: { pageName: "探针", cell: "A1" } } },
+        resolve: { alias: { "@app/shared": "./shared" } },
+      },
+      { root: reRoot },
+    );
+  }
+
+  async function start(extra: readonly unknown[], userAlias?: unknown): Promise<void> {
+    const server = await createServer({
+      root: reRoot,
+      configFile: false,
+      logLevel: "error",
+      appType: "spa",
+      ...(userAlias === undefined ? {} : { resolve: { alias: userAlias as never } }),
+      plugins: [devHarness({ config: registry() }) as never, ...(extra as never[])],
+      server: { middlewareMode: true, hmr: false, watch: null },
+    });
+    await server.close();
+  }
+
+  it("accepts a repeated-slash declaration when the later plugin adds nothing new", async () => {
+    // Measured, and this is the finding's counter-example **not** being a divergence after all.
+    // The project's own `{ find: "some-unrelated//", replacement: "/local-copy//" }` already
+    // resolves `some-unrelated/thing` to `/local-copy/thing` in Vite — with or without the plugin
+    // (both measured to the same id). So a plugin contributing that entry changes nothing, and
+    // refusing it would be an over-refusal.
+    //
+    // It is asserted rather than left implicit because it looks like a bypass and is not: Vite
+    // normalizes a declaration twice on its way into the merged list, so `//` is reduced to nothing
+    // and the project's entry becomes the same `some-unrelated -> /local-copy` the plugin adds.
+    const lateNoop = {
+      name: "late-noop-alias",
+      config() {
+        return { resolve: { alias: { "some-unrelated": "/local-copy" } } };
+      },
+    };
+
+    await expect(
+      start([lateNoop], [{ find: "some-unrelated//", replacement: "/local-copy//" }]),
+    ).resolves.toBeUndefined();
+  });
+
+  it("still refuses the single-slash declaration beside an active plugin alias", async () => {
+    // The contrast that makes the previous test meaningful: with one slash the project's own entry
+    // matches nothing, so the plugin's entry *is* the thing that changes dev resolution.
+    const lateActive = {
+      name: "late-active-alias",
+      config() {
+        return { resolve: { alias: { "some-unrelated": "/local-copy" } } };
+      },
+    };
+
+    await expect(
+      start([lateActive], [{ find: "some-unrelated/", replacement: "/local-copy" }]),
+    ).rejects.toThrowError(/refused to start/);
+  });
+});
+
+/**
+ * The single-slash rule is distinguishable from a trim-all rule only at **three or more** slashes.
+ *
+ * Vite removes exactly one trailing `/` per normalization pass, and a declaration is normalized
+ * twice on its way into the merged list, so the two rules converge for one and two slashes — which
+ * is why an earlier version of this fix could not be told apart from the wrong one by those cases.
+ * They diverge from three:
+ *
+ * | declaration | after Vite's two passes |
+ * | --- | --- |
+ * | `{ "nm/": "/x/" }` | `nm -> /x` |
+ * | `{ "nm//": "/x//" }` | `nm -> /x` |
+ * | `{ "nm///": "/x///" }` | `nm/ -> /x/` (measured) |
+ * | `{ "nm////": "/x////" }` | `nm// -> /x//` (measured) |
+ *
+ * A trim-all rule collapses the last two to `nm -> /x`, which Vite does not produce — and once the
+ * project's entry is collapsed that far it can coincide with a later plugin's genuinely different
+ * entry, which is the class of false negative the subtraction exists to prevent.
+ */
+describe("the alias rule removes exactly one trailing slash, as Vite does", () => {
+  const reRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "tests", "fixtures", "project-alias");
+
+  function registry() {
+    return createCellRegistry(
+      {
+        cells: { probe: { entry: "./cells/probe/src/index.ts", target: { pageName: "探针", cell: "A1" } } },
+        resolve: { alias: { "@app/shared": "./shared" } },
+      },
+      { root: reRoot },
+    );
+  }
+
+  async function start(userAlias: unknown, extra: readonly unknown[] = []): Promise<void> {
+    const server = await createServer({
+      root: reRoot,
+      configFile: false,
+      logLevel: "error",
+      appType: "spa",
+      resolve: { alias: userAlias as never },
+      plugins: [devHarness({ config: registry() }) as never, ...(extra as never[])],
+      server: { middlewareMode: true, hmr: false, watch: null },
+    });
+    await server.close();
+  }
+
+  it("refuses a later plugin beside a three-slash declaration, which Vite keeps distinct", async () => {
+    // The case that separates the two rules. Vite keeps one slash here (`some-unrelated/ ->
+    // /local-copy/`), while a trim-all rule would collapse it to `some-unrelated -> /local-copy` —
+    // indistinguishable from the plugin's entry, so the plugin's contribution would be accepted as
+    // the project's own.
+    const lateSameKey = {
+      name: "late-same-key",
+      config() {
+        return { resolve: { alias: { "some-unrelated": "/local-copy" } } };
+      },
+    };
+
+    // `createServer` itself is where the refusal happens, so the expectation is on that call and
+    // there is no server to close — which is also why every other test in this file closes in a
+    // `finally` and this one cannot.
+    await expect(
+      createServer({
+        root: reRoot,
+        configFile: false,
+        logLevel: "error",
+        appType: "spa",
+        resolve: { alias: [{ find: "some-unrelated///", replacement: "/local-copy///" }] as never },
+        plugins: [devHarness({ config: registry() }) as never, lateSameKey as never],
+        server: { middlewareMode: true, hmr: false, watch: null },
+      }),
+    ).rejects.toThrowError(/refused to start/);
+  });
+
+  it("accepts one- and two-slash declarations, where the two rules agree", async () => {
+    // The cases that cannot tell the rules apart, pinned so a future simplification to trim-all
+    // is not mistaken for a behaviour change.
+    await expect(start([{ find: "react/", replacement: "/project-owned/react/" }])).resolves.toBeUndefined();
+    await expect(start([{ find: "react//", replacement: "/project-owned/react//" }])).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * A declaration reaches the final alias list through **two** normalizations, and getting that
+ * count wrong is what round 11 turned on.
+ *
+ * Vite's `normalizeSingleAlias` removes a single trailing `/` from each side, only when both carry
+ * one — and it runs on the config's own alias *and* again on the merged array
+ * (`normalizeAlias(mergeAlias(...))`). Measured against Vite 8.3.0:
+ *
+ * | declaration | appears in `config.resolve.alias` as |
+ * | --- | --- |
+ * | `{ "nm/": "/x/" }` | `nm -> /x` |
+ * | `{ "nm//": "/x//" }` | `nm -> /x` |
+ * | `{ "nm///": "/x///" }` | `nm/ -> /x/` |
+ * | `{ "nm//": "/x" }` | unchanged — one side has no slash, so neither is stripped |
+ *
+ * The last row is the rule that round 10 was about and is unchanged: a one-sided slash is inert.
+ */
