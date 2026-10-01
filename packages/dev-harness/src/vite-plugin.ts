@@ -539,15 +539,46 @@ function unclaimedHostAliases(userAlias: unknown): Record<string, string> {
  * comparison still matches exactly — one value, correct in both roles.
  */
 /**
- * A pattern's source with backslash escapes resolved, so a literal separator reads as itself.
+ * One alias entry with its `replacement` kept, which `readAliasPatterns` throws away.
  *
- * Vite writes its injected client entries as `@vite\/env`, for which a plain
- * `source.includes("@vite/")` is **false** (measured). Unescaping first is what makes the scope test
- * match them — and is the whole reason this is a named function rather than an inline regex that
- * could be simplified away into a test that passes vacuously.
+ * The subtraction in {@link undeclaredAliasEntries} has to answer "is this final entry still the
+ * contribution we know?", and a key cannot answer it: Vite's merge keeps the last value for a
+ * repeated key, so a later plugin that rewrites `react -> /local-copy/react` produces a final entry
+ * whose `find` is one the harness owns and whose `replacement` is not the one the harness emitted
+ * (measured — dev resolved `react` to `/local-copy/react` while the harness's own alias was skipped
+ * on key alone). Keeping the pair is what makes the comparison an identity check on the whole
+ * contribution rather than a name check.
  */
-function unescapesPatternSource(source: string): string {
-  return source.replace(/\\(.)/g, "$1");
+interface AliasEntry {
+  readonly find: string | RegExp;
+  /** The value as authored, or `undefined` when the entry shape carried none. */
+  readonly replacement: string | undefined;
+}
+
+function readAliasEntries(userAlias: unknown): readonly AliasEntry[] {
+  if (Array.isArray(userAlias)) {
+    return userAlias
+      .filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
+      .map(entry => {
+        const { find, replacement } = entry;
+        if (typeof find !== "string" && !(find instanceof RegExp)) {
+          return undefined;
+        }
+        return { find, replacement: typeof replacement === "string" ? replacement : undefined };
+      })
+      .filter((entry): entry is AliasEntry => entry !== undefined);
+  }
+
+  if (typeof userAlias === "object" && userAlias !== null) {
+    return Object.entries(userAlias as Record<string, unknown>)
+      .filter(([key]) => key.length > 0)
+      .map(([key, value]) => ({
+        find: normalizeAliasFind(key, value),
+        replacement: typeof value === "string" ? value : undefined,
+      }));
+  }
+
+  return [];
 }
 
 /**
@@ -582,42 +613,120 @@ function undeclaredAliasPatterns(
   declared: readonly unknown[],
 ): readonly string[] {
   const harnessOwned = hostModuleAliases();
-  const declaredStrings = new Set(
-    declared.filter((pattern): pattern is string => typeof pattern === "string").map(normalizeAliasKeyForCompare),
-  );
+  // The project's own contributions, as whole entries rather than keys: a later plugin that
+  // rewrites a key the project declared must not inherit its approval, and only the value can
+  // tell the two apart.
+  const declaredEntries = readAliasEntries(declared);
 
   const undeclared: string[] = [];
-  for (const pattern of readAliasPatterns(finalAlias)) {
-    if (typeof pattern === "string") {
-      // The harness's own entries, keyed the same way `config()` emitted them.
-      if (Object.prototype.hasOwnProperty.call(harnessOwned, pattern)) {
+  for (const entry of readAliasEntries(finalAlias)) {
+    const { find, replacement } = entry;
+
+    if (typeof find === "string") {
+      // This harness's own entries: both halves must match, so a later plugin rewriting
+      // `react -> /local-copy/react` is not accepted on the strength of the key alone (measured: dev
+      // resolved `react` to the plugin's copy while the harness's was skipped). Compared through the
+      // same normalization as the project's, because Vite strips the slashes off whichever entry it
+      // merged — so the harness's own emitted spelling is not what the final list carries.
+      if (
+        Object.prototype.hasOwnProperty.call(harnessOwned, find) &&
+        normalizeAliasKeyForCompare(harnessOwned[find] ?? "") === normalizeAliasKeyForCompare(replacement ?? "")
+      ) {
         continue;
       }
-      // Compared **normalized**, on both sides: `declaredStrings` is built from the project's
-      // snapshot, and a project writing `"react/"` and a plugin contributing `"react"` name one
-      // alias. Comparing the raw key instead made a project that declared an alias also be refused
-      // for the plugin's identical copy — measured, and the fix is the comparison, not the rule.
-      if (declaredStrings.has(normalizeAliasKeyForCompare(pattern))) {
+      if (declaredEntries.some(known => isSameStringAlias(known, find, replacement))) {
         continue;
       }
-      undeclared.push(pattern);
+      undeclared.push(find);
       continue;
     }
 
-    if (pattern instanceof RegExp) {
-      // Vite injects its client entries as patterns; anything else in the `@vite/` scope is
-      // likewise not the project's business.
-      if (unescapesPatternSource(pattern.source).includes("@vite/")) {
-        continue;
-      }
-      if (declared.includes(pattern)) {
-        continue;
-      }
-      undeclared.push(String(pattern));
+    // A `RegExp`. Identity is source **and flags**, and Vite's own client entries are recognised by
+    // the exact shape they arrive in — so a project pattern that merely mentions `@vite/` cannot
+    // claim to be one of them (measured: such a pattern, contributed by a later plugin, resolved
+    // `@app/shared/thing` to `/local-copy/thing` and was skipped on content alone).
+    if (isViteInjectedClientPattern(entry)) {
+      continue;
     }
+    if (declaredEntries.some(known => isSamePatternAlias(known, find, replacement))) {
+      continue;
+    }
+    undeclared.push(String(find));
   }
 
   return undeclared;
+}
+
+/**
+ * Vite's own injected client entries, recognised by the exact form they arrive in.
+ *
+ * Deliberately not a `@vite/` substring test. That is the judgement that produced the two previous
+ * bypasses: a string test cannot distinguish *who wrote an alias*, and both times a project's own
+ * pattern or a later plugin's pattern was let through by containing the marker. Matching the whole
+ * entry — the source **and** the flag set **and** the replacement — means only Vite's own two
+ * entries match, and anything else must be accounted for by the project.
+ */
+/**
+ * The two alias patterns Vite injects into every resolved config for its dev client.
+ *
+ * Named as data rather than matched by a marker, because "contains `@vite/`" cannot say *who
+ * wrote an alias* — that mistake is what let two bypasses through in a row (a project pattern and,
+ * later, a plugin pattern, each naming the scope and each being accepted as Vite's own).
+ */
+const VITE_INJECTED_CLIENT_PATTERNS: readonly RegExp[] = [/^\/?@vite\/env/, /^\/?@vite\/client/];
+
+function isViteInjectedClientPattern(entry: AliasEntry): boolean {
+  const { find } = entry;
+  if (typeof find !== "object" || find === null) {
+    return false;
+  }
+  return VITE_INJECTED_CLIENT_PATTERNS.some(
+    known => find.source === known.source && find.flags === known.flags && isViteClientReplacement(entry),
+  );
+}
+
+/**
+ * The replacement Vite points its client entries at.
+ *
+ * A shape test rather than a literal: the path ends in Vite's own client module and is a version-
+ * and install-specific path, so pinning the exact string would break on every upgrade. Both a
+ * forward-slash and a backslash spelling are accepted, since a Windows path arrives escaped.
+ */
+function isViteClientReplacement(entry: { readonly replacement: string | undefined }): boolean {
+  return entry.replacement !== undefined && /(client[\\/])?client\.mjs$|env\.mjs$/.test(entry.replacement);
+}
+
+/**
+ * Two string aliases are the same contribution when both the key and the value agree.
+ *
+ * The **value** is compared through {@link normalizeAliasFind} as well, and that is Vite's own
+ * rule rather than a convenience: `{ find: "react/", replacement: "/patched-react/" }` is normalized
+ * by Vite to `find: "react"` with both slashes stripped, so the final entry carries the *stripped*
+ * spelling while the project's declaration carries the slashed one (measured — comparing them raw
+ * refused a project that had declared its alias correctly, in both the array and the object form).
+ */
+function isSameStringAlias(known: AliasEntry, find: string, replacement: string | undefined): boolean {
+  if (typeof known.find !== "string" || replacement === undefined) {
+    return false;
+  }
+  return (
+    normalizeAliasKeyForCompare(known.find) === normalizeAliasKeyForCompare(find) &&
+    normalizeAliasKeyForCompare(known.replacement ?? "") === normalizeAliasKeyForCompare(replacement)
+  );
+}
+
+/** Two pattern aliases are the same contribution when source, flags and value all agree. */
+function isSamePatternAlias(
+  known: AliasEntry,
+  find: RegExp,
+  replacement: string | undefined,
+): boolean {
+  return (
+    known.find instanceof RegExp &&
+    known.find.source === find.source &&
+    known.find.flags === find.flags &&
+    known.replacement === replacement
+  );
 }
 
 /** A key as the audit compares it, so a project's `react/` and the harness's `react` are one id. */
@@ -1001,7 +1110,7 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
    * mentioning `@vite/` that also matches its own id and opt itself out of the audit (review's
    * round-7 counter-example, reproduced).
    */
-  let declaredAliasPatterns: readonly unknown[] | undefined;
+  let declaredAliasEntries: readonly AliasEntry[] | undefined;
 
   return {
     name: DEV_HARNESS_PLUGIN_NAME,
@@ -1062,7 +1171,10 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
       // survive into the callback, and a non-null assertion here would be the same lie the guard
       // above exists to prevent.
       const projectAlias = registry.resolve.alias;
-      const declared = declaredAliasPatterns ?? [];
+      const declaredEntriesForSubtraction = declaredAliasEntries ?? [];
+      // The shadow audit compares *keys and patterns*, which are the `find` half of these entries;
+      // the `replacement` half is what the subtraction below needs and is kept there.
+      const declared = declaredEntriesForSubtraction.map(entry => entry.find);
       userAliasKeys = [];
       userAliasPatterns = [];
       for (const pattern of declared) {
@@ -1094,7 +1206,7 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
       // injected `@vite/` entries. What is left is a later plugin's, and it is refused rather than
       // ignored because a plugin that silently changes local resolution is precisely the
       // unsupported-Vite-plugin behaviour #97 asks to be reported.
-      const latePluginAliases = undeclaredAliasPatterns(config.resolve?.alias, declared);
+      const latePluginAliases = undeclaredAliasPatterns(config.resolve?.alias, declaredEntriesForSubtraction);
       if (latePluginAliases.length > 0) {
         // Refused whatever they overlap, not only a project alias. The overlap case is the
         // correctness problem, but an alias this audit cannot account for is a plugin changing
@@ -1287,7 +1399,7 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
       // one alias that mentions `@vite/` and also matches its own project id, and the check would
       // skip it (review's round-7 counter-example, reproduced). Here the list contains only what
       // the project declared, so no inference is needed at all.
-      declaredAliasPatterns = readAliasPatterns(userConfig.resolve?.alias);
+      declaredAliasEntries = readAliasEntries(userConfig.resolve?.alias);
 
       // No `plugins` here, and that is the whole point of `formatFastRefreshWarning`: Vite
       // ignores plugins returned from a `config()` hook, so a `react()` returned here would be a

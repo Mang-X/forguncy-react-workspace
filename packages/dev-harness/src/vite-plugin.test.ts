@@ -1116,3 +1116,94 @@ describe("an alias added by a later Vite plugin is refused", () => {
     await expect(start([], { "@unrelated-id": "/x" })).resolves.toBeUndefined();
   });
 });
+
+/**
+ * Two bypasses of the final-alias subtraction, both because it identified entries by **key or
+ * source** rather than by the whole contribution.
+ *
+ * ## 1. A later plugin rewriting a key this harness owns
+ *
+ * `hostModuleAliases()` is a complete `find → replacement` map, but the check consulted only
+ * `hasOwnProperty(key)`. Measured: a plugin returning
+ * `{ resolve: { alias: { react: "/local-copy/react" } } }` makes Vite resolve `react` to
+ * `/local-copy/react` — the plugin's value, because a later value wins — while the artifact keeps
+ * the host bridge's `React`; the entry was skipped on its key and nothing was reported.
+ *
+ * ## 2. A later plugin whose pattern merely *mentions* `@vite/`
+ *
+ * The subtraction re-introduced exactly the content judgement that produced the two previous
+ * bypasses. Measured: a plugin contributing
+ * `{ find: /^\/?@vite\/env|^@app\/shared(?=\/|$)/, replacement: "/local-copy" }` had Vite resolve
+ * `@app/shared/thing` to `/local-copy/thing` and was accepted as one of Vite's own entries.
+ *
+ * Both are the same shape as rounds 5–8: a property decided by looking at part of a value when the
+ * whole value was available. The fix compares the complete entry — key *and* value for a string,
+ * source *and* flags *and* value for a pattern.
+ */
+describe("the final-alias subtraction compares whole entries, not keys", () => {
+  const reRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "tests", "fixtures", "project-alias");
+
+  function registry() {
+    return createCellRegistry(
+      {
+        cells: { probe: { entry: "./cells/probe/src/index.ts", target: { pageName: "探针", cell: "A1" } } },
+        resolve: { alias: { "@app/shared": "./shared" } },
+      },
+      { root: reRoot },
+    );
+  }
+
+  async function start(extra: readonly unknown[], userAlias?: readonly unknown[]): Promise<void> {
+    const server = await createServer({
+      root: reRoot,
+      configFile: false,
+      logLevel: "error",
+      appType: "spa",
+      ...(userAlias === undefined ? {} : { resolve: { alias: userAlias as never } }),
+      plugins: [devHarness({ config: registry() }) as never, ...(extra as never[])],
+      server: { middlewareMode: true, hmr: false, watch: null },
+    });
+    await server.close();
+  }
+
+  it("refuses a later plugin that rewrites a host alias the harness owns", async () => {
+    const lateReact = {
+      name: "late-react-alias",
+      config() {
+        return { resolve: { alias: { react: "/local-copy/react" } } };
+      },
+    };
+
+    await expect(start([lateReact])).rejects.toThrowError(/refused to start/);
+  });
+
+  it("refuses a later plugin whose pattern only mentions `@vite/`", async () => {
+    const lateRegex = {
+      name: "late-regexp-alias",
+      config() {
+        return {
+          resolve: {
+            alias: [{ find: /^\/?@vite\/env|^@app\/shared(?=\/|$)/, replacement: "/local-copy" }],
+          },
+        };
+      },
+    };
+
+    await expect(start([lateRegex])).rejects.toThrowError(/refused to start/);
+  });
+
+  it("still accepts a project alias that writes a trailing slash on both sides", async () => {
+    // Vite normalizes `find: "react/"` with `replacement: "/x/"` to the stripped spelling, so the
+    // final entry does not carry the project's authored text. Comparing values raw refused a
+    // correctly-declared project alias in both alias forms (measured, in the two pre-existing
+    // trailing-slash tests), so both halves go through the same normalization.
+    await expect(
+      start([], [{ find: "react/", replacement: "/project-owned/react/" }]),
+    ).resolves.toBeUndefined();
+  });
+
+  it("still accepts a project alias that overlaps nothing", async () => {
+    await expect(start([], [{ find: "@nope", replacement: "/x" }])).resolves.toBeUndefined();
+    await expect(start([])).resolves.toBeUndefined();
+  });
+});
