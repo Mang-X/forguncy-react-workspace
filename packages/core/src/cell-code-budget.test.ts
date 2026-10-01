@@ -415,7 +415,10 @@ describe("what the measurement does and does not establish", () => {
     });
 
     it("names the series it could not re-measure rather than leaving it implied", () => {
-      expect(rebase.notReMeasured.browserEntry).toMatch(/two-step|browser/i);
+      // Same correction as the runtime-contract record: the blocker is the runtime bundle, not a
+      // credential. Asserted negatively so the wrong reason cannot come back.
+      expect(rebase.notReMeasured.browserEntry).toMatch(/loginByRSA|public key|browser/i);
+      expect(rebase.notReMeasured.browserEntry).not.toMatch(/two-step|2FA|credential/i);
       // And the published browser figure is therefore still the 100 one, unreplaced.
       expect(CELL_CODE_BUDGET_MEASUREMENT.browserEntryMsPerKilobyte).toBeGreaterThan(0);
     });

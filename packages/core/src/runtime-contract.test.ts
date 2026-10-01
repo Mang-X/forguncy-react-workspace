@@ -348,7 +348,12 @@ describe("runtime contract target", () => {
       const open = openRuntimeContractQuestions("#120");
 
       expect(open.map(question => question.id)).toContain("host-versions-not-browser-observed-101");
-      expect(open[0]?.whyOpen).toMatch(/two-step verification|browser/);
+      // It must name the real blocker, and must not name a credential or a second factor: an
+      // earlier version of this record said "two-step verification" on the strength of a page
+      // the reviewer of #116 had simply left open, and that wrong sentence would otherwise have
+      // been pinned by this assertion.
+      expect(open[0]?.whyOpen).toMatch(/loginByRSA|public key/);
+      expect(open[0]?.whyOpen).not.toMatch(/two-step|2FA|credential/i);
     });
   });
 });

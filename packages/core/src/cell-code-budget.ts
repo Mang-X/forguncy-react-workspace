@@ -413,7 +413,8 @@ export const CELL_CODE_PROJECT_VOLUME_OBSERVATION = {
  *   published per-point values with these would be replacing one single-sample series with
  *   another.
  * - **The browser entry series was not re-measured at all.** It needs the generated page open in
- *   a browser, and on this machine the runtime site's login requires two-step verification that
+ *   a browser, and this build's generated runtime site cannot deliver one: its login succeeds but
+ *   the runtime bundle throws in `loginByRSA` when the RSA public key request comes back empty.
  *   is not available. So the `browserEntryMsPerKilobyte` figure has no 101 counterpart.
  * - **A write at 4,193,986 characters was observed rejected** on 101 with
  *   `代码验证失败：AI 校验 WebView 执行超时（20 秒）`, where #21 recorded that size writing
@@ -455,7 +456,7 @@ export const CELL_CODE_BUDGET_REBASE_101 = {
   replacedPublishedFigures: false,
   /** Series the re-measurement could not cover, and why. */
   notReMeasured: {
-    browserEntry: "Needs the generated page open in a browser; this machine's runtime site requires two-step verification, so no page could be reached.",
+    browserEntry: "Needs the generated page open in a browser. The login itself works on this build, but the runtime bundle then throws in `loginByRSA` because the RSA public key request is answered 405/411 and never yields a key, so the runtime scripts do not load.",
   },
   /** The one finding that may exceed sampling noise, stated as observed rather than decided. */
   validationTimeoutObservation: {
