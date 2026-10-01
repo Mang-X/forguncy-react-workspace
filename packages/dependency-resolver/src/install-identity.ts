@@ -66,7 +66,7 @@
 
 import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { lstat, readFile, readdir, realpath } from "node:fs/promises";
+import { lstat, readFile, readdir, realpath, stat } from "node:fs/promises";
 import { dirname, join, relative as relativePath, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -133,6 +133,15 @@ const TOOLCHAIN_ARTIFACT_NAMES: ReadonlySet<string> = new Set([".fgc", "fgc-evid
 /** Whether an entry of a link target is one of this toolchain's own artifacts. */
 function isToolchainArtifact(name: string): boolean {
   return TOOLCHAIN_ARTIFACT_NAMES.has(name);
+}
+
+/** Whether `path` is a readable directory. */
+async function directoryExists(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1134,32 +1143,56 @@ async function linkTargetsDigest(installRoot: string): Promise<string | null> {
   // enumerated from the materialized tree, which is what the manager built, rather than guessed from
   // a directory shape that only holds for hoisted installs.
   const locations: string[] = [];
-  const collectLocations = async (directory: string, depth: number): Promise<void> => {
+  // Whether the walk saw the **whole** tree. Review round 10: hitting the depth bound or failing to
+  // read a subtree is not the same as "there was nothing there", and treating them alike is how a
+  // false fresh returns — a link below the bound stays unseen and its target's source edits move
+  // nothing. So an incomplete walk propagates as `unknown` rather than as an empty result.
+  //
+  // The budget counts **`node_modules` locations, not ordinary directories**, and that distinction is
+  // the difference between usable and useless. Review measured 200 directories past a bound of 6
+  // counted that way — `node_modules/.pnpm/@babel+parser@7.29.8/node_modules/@babel/parser/lib` and
+  // a skills template's `.github/workflows` alike — so a bound on ordinary depth reports `unknown` for
+  // a perfectly readable install. Only the nesting of installs is a bound worth having: each one is a
+  // graph this walk has to descend into again, and that is both the cost and the cycle risk.
+  const collectLocations = async (directory: string, depth: number): Promise<boolean> => {
     if (depth > MAX_LINK_SEARCH_DEPTH) {
-      return;
+      return false;
     }
     let dirents: Dirent[];
     try {
       dirents = await readdir(directory, { withFileTypes: true });
-    } catch {
-      return;
+    } catch (error) {
+      // A directory that is absent is not an incomplete view of one that exists; anything else is.
+      const code = (error as { readonly code?: unknown } | null)?.code;
+      return code === "ENOENT" || code === "ENOTDIR";
     }
     for (const entry of dirents) {
       if (!entry.isDirectory()) {
         continue;
       }
       const path = join(directory, entry.name);
+      let complete: boolean;
       if (entry.name === "node_modules") {
         locations.push(path);
         // A `node_modules` inside the tree can itself contain one (npm's nested install), and pnpm's
-        // virtual store puts each package's own `node_modules` under `.pnpm/<name>@<version>/`.
-        await collectLocations(path, depth + 1);
-        continue;
+        // virtual store puts each package's own `node_modules` under `.pnpm/<name>@<version>/` — so
+        // nesting an install is what consumes the budget.
+        complete = await collectLocations(path, depth + 1);
+      } else {
+        // An ordinary directory costs nothing: a long workspace path or a deep `lib/` inside a store
+        // entry is still the same install, and charging for it would report `unknown` for every
+        // ordinary project (measured: 200 directories past the bound that way).
+        complete = await collectLocations(path, depth);
       }
-      await collectLocations(path, depth + 1);
+      if (!complete) {
+        return false;
+      }
     }
+    return true;
   };
-  await collectLocations(installRoot, 0);
+  if (!(await collectLocations(installRoot, 0))) {
+    return null;
+  }
 
   for (const location of locations) {
     let entries: string[];
@@ -1216,6 +1249,21 @@ async function linkTargetsDigest(installRoot: string): Promise<string | null> {
           continue;
         }
         seenTargets.add(resolved);
+
+        // A target that escapes the install root carries **its own** resolution: `package-locator`
+        // realpaths into it and Node and Rolldown resolve its `node_modules` first. So that tree is
+        // part of what the probe will read, while this walk covers only the install root — skipping it
+        // silently would leave a real dependency tree outside every identity. Review round 10,
+        // measured: a `file:`/`link:` target whose `shared/node_modules/dep` moved v1 → v2 left the
+        // digest byte-identical.
+        //
+        // Composing that tree's verifiable identity would be the precise answer; **composing it here
+        // is not possible**, because the install graph it names is described by a lockfile this module
+        // never reads. So an external target that brings its own `node_modules` is `unknown` — the
+        // conservative side of the same requirement, and the one the third criterion asks for.
+        if (!isInside(installRoot, resolved) && (await directoryExists(join(resolved, "node_modules")))) {
+          return null;
+        }
 
         const files = await collectPackageFiles(resolved, resolved);
         if (files === null) {

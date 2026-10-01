@@ -485,6 +485,107 @@ describe("#94: identity comes from the install graph, not from a declaration", (
     expect(after.installedTree).not.toBe(before.installedTree);
   });
 
+  it("is unknown when the link walk cannot prove it saw the whole tree", async () => {
+    // PR #114 review round 10, P1. Hitting the bound is not the same as "there was nothing there",
+    // and treating them alike is how the false fresh returns: a link below the bound stays unseen,
+    // so editing its target's source moves nothing.
+    //
+    // **The budget counts nested `node_modules`, not ordinary directories** — charging for a long
+    // workspace path instead would report `unknown` for every ordinary project (measured: 200
+    // directories past a bound of 6 that way, store entries and a skills template alike). So the
+    // case below nests installs past the bound and puts the link in the deepest one.
+    const deep = await withProject(async root => {
+      await writeFileAt(
+        join(root, "package.json"),
+        JSON.stringify({ name: "root", version: "0.0.0", packageManager: "npm@11.0.0" }),
+      );
+      await writeFileAt(
+        join(root, "package-lock.json"),
+        JSON.stringify({ name: "root", dependencies: { a: "1.0.0" } }),
+      );
+      await writeFileAt(
+        join(root, "vendor", "shared", "package.json"),
+        JSON.stringify({ name: "shared", version: "1.0.0" }),
+      );
+      await writeFileAt(join(root, "vendor", "shared", "index.js"), "module.exports = 1;\n");
+
+      // A chain of installs deeper than the bound, with the link in the last one.
+      let inner = join(root, "node_modules");
+      for (let level = 0; level < 8; level += 1) {
+        const pkg = join(inner, `lvl-${String(level)}`);
+        await writeFileAt(join(pkg, "package.json"), JSON.stringify({ name: `lvl-${String(level)}`, version: "1.0.0" }));
+        inner = join(pkg, "node_modules");
+      }
+      await mkdir(inner, { recursive: true });
+      await symlink(join(root, "vendor", "shared"), join(inner, "shared"), "junction");
+
+      await writeFileAt(
+        join(root, "node_modules", ".package-lock.json"),
+        JSON.stringify({
+          name: "root",
+          lockfileVersion: 3,
+          packages: { "node_modules/shared": { resolved: "vendor/shared", link: true } },
+        }),
+      );
+      return readInstallGraphIdentity(root);
+    });
+
+    // The premise: the walk did not finish, so the answer is `unknown` rather than a value that
+    // happens to be stable because the unseen link's target never changed.
+    expect(deep.installedTree).toBeNull();
+  });
+
+  it("is unknown when an escaping link target brings its own dependency tree", async () => {
+    // PR #114 review round 10, P1. "A link target's `node_modules` is a different install graph" only
+    // holds while that target is inside this install root — a `file:`/`link:` dependency pointing
+    // outside it is resolved through its *own* `node_modules`, and this walk covers only the install
+    // root. Measured: a `shared/node_modules/dep` moving v1 → v2, with `shared`'s manifest, version
+    // and link path all fixed, left the digest byte-identical.
+    //
+    // Composing that tree's identity would need the lockfile that describes it, which this module
+    // never reads, so the answer here is `unknown` — the conservative side of the same requirement.
+    const external = async (depVersion: string): Promise<string | null | undefined> =>
+      withProject(async root => {
+        // The target lives outside the install root, as a real `file:` dependency would.
+        const shared = join(root, "shared");
+        await writeFileAt(join(shared, "package.json"), JSON.stringify({ name: "shared", version: "1.0.0" }));
+        await writeFileAt(join(shared, "index.js"), "module.exports = 1;\n");
+        await writeFileAt(
+          join(shared, "node_modules", "dep", "package.json"),
+          JSON.stringify({ name: "dep", version: depVersion }),
+        );
+        await writeFileAt(join(shared, "node_modules", "dep", "index.js"), "module.exports = 1;\n");
+
+        const installRoot = join(root, "root");
+        await writeFileAt(
+          join(installRoot, "package.json"),
+          JSON.stringify({ name: "root", version: "0.0.0", packageManager: "npm@11.0.0" }),
+        );
+        await writeFileAt(
+          join(installRoot, "package-lock.json"),
+          JSON.stringify({ name: "root", dependencies: { shared: "file:../shared" } }),
+        );
+        await mkdir(join(installRoot, "node_modules"), { recursive: true });
+        await symlink(shared, join(installRoot, "node_modules", "shared"), "junction");
+        await writeFileAt(
+          join(installRoot, "node_modules", ".package-lock.json"),
+          JSON.stringify({
+            name: "root",
+            lockfileVersion: 3,
+            packages: {
+              "node_modules/shared": { resolved: "../shared", link: true },
+              "../shared": { version: "1.0.0" },
+            },
+          }),
+        );
+        return (await readInstallGraphIdentity(installRoot)).installedTree;
+      });
+
+    // Unknown, and specifically *not* a stable value that would keep a warm cache answering.
+    expect(await external("1.0.0")).toBeNull();
+    expect(await external("2.0.0")).toBeNull();
+  });
+
   it("digests a transitive link reached below the root, not only a hoisted one", async () => {
     // PR #114 review round 9, P1. `linkTargetsDigest` walked the install root's *top level*
     // `node_modules`, so it only ever saw the links a manager had hoisted — and both managers
