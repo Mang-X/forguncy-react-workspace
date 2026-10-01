@@ -136,11 +136,27 @@ function isToolchainArtifact(name: string): boolean {
 }
 
 /** Whether `path` is a readable directory. */
-async function directoryExists(path: string): Promise<boolean> {
+/**
+ * Whether `path` is a directory, or `undefined` when that could not be established.
+ *
+ * Three states, because the caller reads this as a *fact about the install graph*: only `ENOENT` and
+ * `ENOTDIR` say the entry is genuinely absent, and a readable path that is not a directory says it is
+ * present and is something else. Every other error says **nothing**, and folding it into "absent"
+ * turns "could not read" into "confirmed not there" — the false-fresh shape #94's third criterion
+ * rules out. Review round 12: measured, `stat` of a `node_modules` inside a mode-`000` directory
+ * returns `EACCES` for a non-root user (CI runs non-root), and that guard answers whether an external
+ * link target carries its own install graph.
+ *
+ * A symlink **loop** does not reach here: `stat` follows a link without descending through it, so a
+ * self-referential `node_modules` still reports a directory on both Windows and Linux (measured), and
+ * a dangling one reports `ENOENT`, which is the absent case.
+ */
+async function directoryExists(path: string): Promise<boolean | undefined> {
   try {
     return (await stat(path)).isDirectory();
-  } catch {
-    return false;
+  } catch (error) {
+    const code = (error as { readonly code?: unknown } | null)?.code;
+    return code === "ENOENT" || code === "ENOTDIR" ? false : undefined;
   }
 }
 
@@ -1150,7 +1166,7 @@ async function pnpmInstalledTreeDigest(installRoot: string): Promise<string | nu
   // not a sound signal either, because a script that exists is not a script that ran. An unapproved
   // package's build output is therefore still invisible here, and the honest report is that this axis
   // covers the builds the manager recorded rather than every build a script could have performed.
-  const builds = await builtSlotsDigest(storeDirectory, parsed, slots);
+  const builds = await builtSlotsDigest(installRoot, storeDirectory, parsed, slots);
   if (builds === null) {
     return null;
   }
@@ -1180,6 +1196,7 @@ async function pnpmInstalledTreeDigest(installRoot: string): Promise<string | nu
  * would have made every install unverifiable.
  */
 async function builtSlotsDigest(
+  installRoot: string,
   storeDirectory: string,
   parsed: Record<string, unknown>,
   slots: readonly Dirent[],
@@ -1210,8 +1227,36 @@ async function builtSlotsDigest(
     // claim to know which slots were built.
     return null;
   }
+
+  // An empty set does **not** mean "no slot was built". Review round 12: pnpm's
+  // `dangerouslyAllowAllBuilds` runs every lifecycle script regardless of `allowBuilds`, and writes
+  // nothing about it — `ModulesRaw` has no such field and `build_modules_manifest` only records
+  // `config.allow_builds`. Measured: a real install with `dangerously-allow-all-builds=true` wrote
+  // `allowBuilds: {}`, `pendingBuilds: []` and no `ignoredBuilds`, and the setting appears in
+  // neither `.modules.yaml` nor `pnpm-lock.yaml`. Treating that as "nothing built" is the false
+  // fresh this axis exists to remove, so the **config** decides whether an empty set is complete:
+  //
+  // - blanket builds demonstrably off → an empty set means nothing was built, which is the cheap path.
+  // - blanket builds demonstrably on → no slot can be trusted by name, so every slot is digested.
+  // - cannot tell → `unknown`. Content-digesting the whole store instead measured **9.0 s** for
+  //   14 281 files, which is not a cost this read can carry on every probe.
   if (implicated.size === 0) {
-    return [];
+    const blanket = await blanketBuildsConfigured(installRoot);
+    if (blanket === false) {
+      return [];
+    }
+    if (blanket === undefined) {
+      return null;
+    }
+    const all: string[] = [];
+    for (const slot of slots) {
+      const files = await storeSlotContentDigest(storeDirectory, slot.name);
+      if (files === null) {
+        return null;
+      }
+      all.push(`${slot.name}:${files}`);
+    }
+    return all;
   }
 
   const digests: string[] = [];
@@ -1238,6 +1283,61 @@ async function builtSlotsDigest(
     }
   }
   return digests;
+}
+
+/**
+ * Whether this project configures pnpm to run **every** dependency's lifecycle scripts, or
+ * `undefined` when that cannot be established.
+ *
+ * pnpm's `dangerouslyAllowAllBuilds` is a config setting and nothing more: measured, an install with
+ * `dangerously-allow-all-builds=true` wrote `allowBuilds: {}` and recorded the setting in neither
+ * `.modules.yaml` nor `pnpm-lock.yaml`, so the install graph alone cannot answer this. It therefore
+ * has to be read from the project's own configuration, in every form pnpm accepts it — which are the
+ * `config` key in `pnpm-workspace.yaml`, a `.npmrc` line, and `pnpm` in `package.json`.
+ *
+ * `undefined` on an unreadable file rather than on an absent one. Returning `false` — no project
+ * configuration enables blanket builds — is a statement about **this project**, and that is the
+ * boundary: a user-level or global `.npmrc` is not part of the install graph this module reads, so
+ * setting it there is outside what any of these components can see. The alternative, treating
+ * "not configured locally" as unknown, would make every project without the setting unverifiable.
+ *
+ * What that does buy is real: a **project** that turns the setting on is caught, and the setting is
+ * a line in one of the files whose bytes `configuration` already digests, so the flip between the
+ * two modes moves that component even when it does not move this one.
+ */
+async function blanketBuildsConfigured(installRoot: string): Promise<boolean | undefined> {
+  const npmrc = await readTextFile(join(installRoot, ".npmrc"));
+  if (npmrc.kind === "unreadable") {
+    return undefined;
+  }
+  if (npmrc.kind === "read" && /^\s*dangerously-allow-all-builds\s*=\s*true\s*$/im.test(npmrc.text)) {
+    return true;
+  }
+
+  const workspace = await readTextFile(join(installRoot, WORKSPACE_CONFIG_FILE));
+  if (workspace.kind === "unreadable") {
+    return undefined;
+  }
+  if (workspace.kind === "read" && /^\s*dangerouslyAllowAllBuilds\s*:\s*true\s*$/m.test(workspace.text)) {
+    return true;
+  }
+
+  const manifest = await readTextFile(join(installRoot, "package.json"));
+  if (manifest.kind === "unreadable") {
+    return undefined;
+  }
+  if (manifest.kind === "read") {
+    try {
+      const parsed = asPlainObject(JSON.parse(manifest.text));
+      const pnpm = parsed === null ? null : asPlainObject(parsed["pnpm"]);
+      if (pnpm?.["dangerouslyAllowAllBuilds"] === true) {
+        return true;
+      }
+    } catch {
+      return undefined;
+    }
+  }
+  return false;
 }
 
 /**
@@ -1349,7 +1449,10 @@ async function pnpmStoreDirectory(installRoot: string, recorded: unknown): Promi
   if (recorded === undefined) {
     // No location recorded. A default store that exists is the install; one that does not means this
     // record describes an install this module cannot find.
-    return (await directoryExists(join(modulesDirectory, ".pnpm"))) ? join(modulesDirectory, ".pnpm") : null;
+    const defaultStore = await directoryExists(join(modulesDirectory, ".pnpm"));
+    // `undefined` means the store could not be read, which is not the same as "there is no default
+    // store": guessing either way is what round 11 removed.
+    return defaultStore === true ? join(modulesDirectory, ".pnpm") : null;
   }
   if (typeof recorded !== "string" || recorded.trim().length === 0) {
     return null;
@@ -1653,8 +1756,17 @@ async function linkTargetsDigest(installRoot: string): Promise<string | null> {
         // is not possible**, because the install graph it names is described by a lockfile this module
         // never reads. So an external target that brings its own `node_modules` is `unknown` — the
         // conservative side of the same requirement, and the one the third criterion asks for.
-        if (!isInside(installRoot, resolved) && (await directoryExists(join(resolved, "node_modules")))) {
-          return null;
+        if (!isInside(installRoot, resolved)) {
+          // Present → `unknown`, because that tree is a separate install graph this module cannot
+          // describe. **Unreadable** → `unknown` too, and for a different reason: the guard cannot
+          // tell whether the target brings its own `node_modules`, and answering "no" would be the
+          // claim it could not establish. Review round 12, measured on Linux as a non-root user:
+          // `stat` of a `node_modules` inside a mode-`000` directory returns `EACCES`, which used to
+          // fold into "absent" and produce a digest that read as complete.
+          const ownsTree = await directoryExists(join(resolved, "node_modules"));
+          if (ownsTree !== false) {
+            return null;
+          }
         }
 
         const files = await collectPackageFiles(resolved, resolved);

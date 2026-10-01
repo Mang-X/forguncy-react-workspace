@@ -36,6 +36,7 @@ import { describe, expect, it } from "vitest";
 
 import { readInstallGraphIdentity, readToolchainIdentity } from "./install-identity.ts";
 
+
 /** Removes a temp tree even when a case throws, so a failure cannot leak a directory. */
 async function withProject<T>(body: (root: string) => Promise<T>): Promise<T> {
   const root = await mkdtemp(join(tmpdir(), "fgc-identity-"));
@@ -629,16 +630,24 @@ describe("#94: identity comes from the install graph, not from a declaration", (
     // `--virtual-store-dir=/tmp/gvs/globalstore` gave `C:/…/globalstore/gvslib@…`. Serializing that
     // verbatim made two checkouts of one tree disagree (`0481eb99c048` vs `726bfcec6956`), which is
     // the false stale #94's portability criterion forbids.
-    const storeRelative = async (root: string, copy: string): Promise<string | null | undefined> =>
+    //
+    // The variable is the **absolute** root and nothing else: `withProject` already gives each call
+    // its own temporary directory, so those two roots differ on every platform without the test
+    // naming a path. The slot path is built from separate `join` segments — review round 12 caught a
+    // fixture here that spelled the separator as `\` inside one segment, which is an ordinary
+    // filename character on POSIX, so the copy was never at the `<slot>/node_modules/<pkg>` the
+    // reader expects and Linux reported `unknown` while Windows passed. A Windows-shaped string is
+    // not a portable fixture.
+    const inAbsoluteStore = async (): Promise<string | null | undefined> =>
       withProject(async project => {
         const store = join(project, "gstore");
+        const copyRoot = join(store, "gvslib@file+vendor+x", "node_modules", "gvslib");
         await writeFileAt(
           join(project, "package.json"),
           JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "pnpm@12.4.2" }),
         );
         await writeFileAt(join(project, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
         await writeFileAt(join(store, "node_modules", ".keep"), "");
-        const copyRoot = join(store, copy);
         await writeFileAt(join(copyRoot, "package.json"), JSON.stringify({ name: "gvslib", version: "1.0.0" }));
         await writeFileAt(join(copyRoot, "index.js"), "module.exports = 1;");
         await writeFileAt(
@@ -648,8 +657,8 @@ describe("#94: identity comes from the install graph, not from a declaration", (
             nodeLinker: "isolated",
             hoistPattern: ["*"],
             publicHoistPattern: [],
-            // The absolute form pnpm writes for a store outside the project. `root` is a different
-            // absolute directory per checkout and the content is identical.
+            // The absolute form pnpm writes for a store outside the project. Two calls differ only in
+            // where that absolute directory is, and the content is identical.
             virtualStoreDir: store,
             injectedDeps: { "vendor/x": [copyRoot] },
           }),
@@ -657,11 +666,59 @@ describe("#94: identity comes from the install graph, not from a declaration", (
         return (await readInstallGraphIdentity(project)).installedTree;
       });
 
-    // The same tree, materialized under two different absolute directories.
-    const first = await storeRelative("C:\\checkout-one", "gvslib@file+vendor+x\\node_modules\\gvslib");
-    const second = await storeRelative("C:\\checkout-two", "gvslib@file+vendor+x\\node_modules\\gvslib");
+    const first = await inAbsoluteStore();
+    const second = await inAbsoluteStore();
     expect(first).not.toBeNull();
     expect(second).toBe(first);
+  });
+
+  it("digests every slot when blanket builds make an empty build record mean nothing", async () => {
+    // PR #114 review round 12, P1. `implicated.size === 0` does not mean "no slot was built": pnpm's
+    // `dangerouslyAllowAllBuilds` runs every lifecycle script regardless of `allowBuilds` and records
+    // nothing about it. Measured on a real install with `dangerously-allow-all-builds=true`:
+    // `allowBuilds: {}`, `pendingBuilds: []`, no `ignoredBuilds`, and the setting appears in neither
+    // `.modules.yaml` nor `pnpm-lock.yaml`. Content-digesting the whole store as the fallback measured
+    // **9.0 s** for 14 281 files, so the fallback is only taken when the setting is present.
+    const tree = await withProject(async root => {
+      const slot = join(root, "node_modules", ".pnpm", "built@1.0.0", "node_modules", "built");
+      await writeFileAt(
+        join(root, "package.json"),
+        JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "pnpm@12.4.2" }),
+      );
+      await writeFileAt(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+      await writeFileAt(join(root, ".npmrc"), "dangerously-allow-all-builds=true\n");
+      await writeFileAt(join(root, "node_modules", ".pnpm", "node_modules", ".keep"), "");
+      await writeFileAt(join(slot, "package.json"), JSON.stringify({ name: "built", version: "1.0.0" }));
+      await writeFileAt(
+        join(root, "node_modules", ".modules.yaml"),
+        JSON.stringify({
+          included: { dependencies: true, devDependencies: true, optionalDependencies: true },
+          nodeLinker: "isolated",
+          hoistPattern: ["*"],
+          publicHoistPattern: [],
+          // Exactly what blanket mode leaves behind: nothing naming a built slot.
+          allowBuilds: {},
+          pendingBuilds: [],
+        }),
+      );
+
+      const read = async (): Promise<string | null | undefined> =>
+        (await readInstallGraphIdentity(root)).installedTree;
+      const artifact = join(slot, "build-output.js");
+      await writeFileAt(artifact, "// built by the first environment\n");
+      const before = await read();
+      // `pnpm rebuild` under a different environment: same slot, same lock, different artifact.
+      await writeFileAt(artifact, "// built by a different environment\n");
+      const rebuilt = await read();
+      // And with the setting off, the same record no longer implicates the slot, so the artifact is
+      // outside what this component claims — which is what makes the two modes distinguishable.
+      await writeFileAt(join(root, ".npmrc"), "dangerously-allow-all-builds=false\n");
+      return { before, rebuilt, off: await read() };
+    });
+
+    expect(tree.before).not.toBeNull();
+    expect(tree.rebuilt).not.toBe(tree.before);
+    expect(tree.off).not.toBe(tree.rebuilt);
   });
 
   it("reads the record of the lockfile's manager, not whichever marker is found first", async () => {
