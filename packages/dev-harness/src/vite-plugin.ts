@@ -537,34 +537,6 @@ function unclaimedHostAliases(userAlias: unknown): Record<string, string> {
  * key it shadows. The audit's message then names a string that *is* in the config file, and the
  * comparison still matches exactly — one value, correct in both roles.
  */
-/**
- * An alias entry this harness must not audit as if the project had written it.
- *
- * `config.resolve.alias` at `configResolved` is the **merged** list: Vite has already folded in its
- * own entries, and this plugin's `config()` hook has already added the host substitutions. Auditing
- * the merged list therefore audits two sets of aliases nobody put in `vite.config.ts` — and the
- * fail-closed branch then refuses a project for a pattern it never declared.
- *
- * Measured: Vite injects `/^\/?@vite\/env/` and `/^\/?@vite\/client/`, so a project declaring no
- * `RegExp` alias at all was refused with a finding quoting `/^\/?@vite\/env/`. The harness's own
- * aliases are strings rather than patterns, so they cannot reach this branch, but the ids are
- * excluded too — the filter states its scope rather than relying on a shape that could change.
- *
- * The test is on the **`@vite/` scope** rather than on a fixed list, so a Vite version that injects
- * another internal entry stays excluded rather than becoming a new false positive.
- */
-function isHarnessOrViteOwnAlias(pattern: string | RegExp): boolean {
-  const rendered = typeof pattern === "string" ? pattern : pattern.source;
-  // A backslash before the separator is dropped before comparing, and that is the whole reason
-  // this predicate exists in this form: Vite writes its injected patterns as `^\/?@vite\/env`, so
-  // `source` contains `@vite\/env` and **`source.includes("@vite/")` is false** (measured). A plain
-  // substring test therefore matches nothing at all and the false positive survives — which is how
-  // this exclusion was written, reviewed by reading, and still let a project be refused for an alias
-  // it never declared.
-  const normalized = rendered.replace(/\\(.)/g, "$1");
-  return normalized.includes("@vite/");
-}
-
 function projectAliasShadowKeys(
   pattern: RegExp,
   projectAlias: Readonly<Record<string, string>>,
@@ -931,6 +903,18 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
    */
   let userAliasPatterns: { key: string; pattern: string }[] | undefined;
 
+  /**
+   * The patterns the *project itself* declared, captured in `config()` before anything is merged.
+   *
+   * A separate slot from {@link userAliasPatterns} because the two hold different things: this is
+   * the raw `readAliasPatterns` output as the project wrote it, and it is what proves an entry's
+   * origin. Reading origin from the merged list instead means reading it from the **text** — and a
+   * pattern that names `@vite/` is indistinguishable that way, so a project could write one alias
+   * mentioning `@vite/` that also matches its own id and opt itself out of the audit (review's
+   * round-7 counter-example, reproduced).
+   */
+  let declaredAliasPatterns: readonly unknown[] | undefined;
+
   return {
     name: DEV_HARNESS_PLUGIN_NAME,
     enforce: "pre",
@@ -990,13 +974,11 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
       // survive into the callback, and a non-null assertion here would be the same lie the guard
       // above exists to prevent.
       const projectAlias = registry.resolve.alias;
+      const declared = declaredAliasPatterns ?? [];
       userAliasKeys = [];
       userAliasPatterns = [];
-      for (const pattern of readAliasPatterns(config.resolve?.alias)) {
+      for (const pattern of declared) {
         if (typeof pattern !== "string" && !(pattern instanceof RegExp)) {
-          continue;
-        }
-        if (isHarnessOrViteOwnAlias(pattern)) {
           continue;
         }
         if (typeof pattern === "string") {
@@ -1162,6 +1144,18 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
     },
 
     config(userConfig) {
+      // The project's own alias patterns, captured **here** — the one hook that sees them before
+      // anything is merged into them.
+      //
+      // By `configResolved` the list is a merge of three sources: what the project wrote, what Vite
+      // injects (`/^\/?@vite\/env/`), and what this plugin returns below. The shadow audit needs
+      // the first and must not judge the other two, and reading the origin from the *text* cannot
+      // do it: a pattern naming `@vite/` is indistinguishable by content, so a project could write
+      // one alias that mentions `@vite/` and also matches its own project id, and the check would
+      // skip it (review's round-7 counter-example, reproduced). Here the list contains only what
+      // the project declared, so no inference is needed at all.
+      declaredAliasPatterns = readAliasPatterns(userConfig.resolve?.alias);
+
       // No `plugins` here, and that is the whole point of `formatFastRefreshWarning`: Vite
       // ignores plugins returned from a `config()` hook, so a `react()` returned here would be a
       // line that reads as Fast Refresh and does nothing. See `reactFastRefresh` for the

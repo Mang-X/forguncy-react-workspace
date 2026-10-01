@@ -971,3 +971,60 @@ describe("no RegExp form evades the shadow check", () => {
     await expect(startsWith({ "@something-else": "/x" })).resolves.toBeUndefined();
   });
 });
+
+/**
+ * A project pattern that names `@vite/` must not be able to exempt itself.
+ *
+ * An earlier version identified Vite's own injected entries by asking whether the alias *text*
+ * mentioned `@vite/`, so it could tell Vite's `/^\/?@vite\/env/` from something the project wrote.
+ * That is inferring origin from content, and the inference is the attack surface: a project alias
+ * can mention `@vite/` and match its own project id in the same pattern. Measured before the fix:
+ *
+ * | `vite.config.ts` alias | Vite resolves `@app/shared/thing` to | old check |
+ * | --- | --- | --- |
+ * | `{ find: /^\/?@vite\/env\|^@app\/shared(?=\/|$)/ }` | `/local-copy/thing` | **allowed** |
+ *
+ * The fix is not a better heuristic but the removal of the question. This plugin's `config()` hook
+ * sees the user's aliases **before** Vite's and its own are merged in, so the audit reads the
+ * project's own declarations and no origin has to be inferred from anything.
+ */
+describe("a project alias cannot opt itself out by naming `@vite/`", () => {
+  const reRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "tests", "fixtures", "project-alias");
+
+  function registry() {
+    return createCellRegistry(
+      {
+        cells: { probe: { entry: "./cells/probe/src/index.ts", target: { pageName: "探针", cell: "A1" } } },
+        resolve: { alias: { "@app/shared": "./shared" } },
+      },
+      { root: reRoot },
+    );
+  }
+
+  async function startsWith(userAlias: unknown): Promise<void> {
+    const server = await createServer({
+      root: reRoot,
+      configFile: false,
+      logLevel: "error",
+      appType: "spa",
+      resolve: { alias: userAlias as Record<string, string> },
+      plugins: [devHarness({ config: registry() }) as never],
+      server: { middlewareMode: true, hmr: false, watch: null },
+    });
+    await server.close();
+  }
+
+  it("refuses a pattern that names `@vite/` and also matches the project alias", async () => {
+    await expect(
+      startsWith([{ find: /^\/?@vite\/env|^@app\/shared(?=\/|$)/, replacement: "/local-copy" }]),
+    ).rejects.toThrowError(/refused to start/);
+  });
+
+  it("still starts for a project with no alias at all, so Vite's own entries are not audited", async () => {
+    // The case the content heuristic existed for, and the one it broke: Vite injects
+    // `/^\/?@vite\/env/` and `/^\/?@vite\/client/`, which are undecidable and so fail closed. Reading
+    // the project's own declarations in `config()` means they are never candidates at all.
+    await expect(startsWith(undefined)).resolves.toBeUndefined();
+    await expect(startsWith({ "@something-else": "/x" })).resolves.toBeUndefined();
+  });
+});
