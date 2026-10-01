@@ -30,11 +30,38 @@
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative as relativePath } from "node:path";
+import { basename, dirname, isAbsolute, join, relative as relativePath } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { readInstallGraphIdentity, readToolchainIdentity } from "./install-identity.ts";
+
+/**
+ * A `stat` that can be told to fail on one path, for the "cannot establish" case below.
+ *
+ * The failure is injected at this seam because it cannot be produced portably: `ELOOP` is unreachable
+ * through `stat` (it follows a link without descending into it), and `EACCES` needs a mode-`000`
+ * directory and a non-root user — true on CI's Linux, unavailable on Windows. The module imports
+ * `stat` as a named ESM binding, so `vi.spyOn` cannot redefine it (measured: `Cannot redefine
+ * property: stat`); a hoisted `vi.mock` above the module under test is the seam that intercepts it.
+ */
+const statFailure: { value: string | null } = { value: null };
+const deniedPath: { value: string | null } = { value: null };
+
+vi.mock("node:fs/promises", async importOriginal => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    stat: async (target: Parameters<typeof actual.stat>[0], options?: Parameters<typeof actual.stat>[1]) => {
+      if (statFailure.value !== null && String(target) === deniedPath.value) {
+        const error = new Error(`EACCES: permission denied, stat '${String(target)}'`) as NodeJS.ErrnoException;
+        error.code = statFailure.value;
+        throw error;
+      }
+      return actual.stat(target, options);
+    },
+  };
+});
 
 
 /** Removes a temp tree even when a case throws, so a failure cannot leak a directory. */
@@ -724,6 +751,70 @@ describe("#94: identity comes from the install graph, not from a declaration", (
 
     expect(tree.before).not.toBeNull();
     expect(tree.rebuilt).not.toBe(tree.before);
+  });
+
+  it("reports unknown when an external link target's own tree cannot be established", async () => {
+    // PR #114 review round 12, P1 — and the test I could not write then. The guard read `stat` as a
+    // boolean, so every error became "no `node_modules` there" and "could not read" was reported as
+    // "confirmed absent", producing a digest that claimed to cover a tree it had not looked at.
+    //
+    // Two things this had to get right, both learned by writing it wrong first:
+    //
+    // - The target must be **outside** the install root. A `link:` dependency points at a sibling
+    //   directory, and the guard asks `isInside(installRoot, resolved)`. A fixture that puts the
+    //   "external" target under the install root is genuinely inside it, the walk does cover that
+    //   tree, and the guard correctly does not fire — which makes the test pass for the wrong reason.
+    // - It needs a **real install record**, or `installedTree` is `null` for an unrelated reason (no
+    //   manager record at all) and the case answers `null` under both behaviours.
+    //
+    // The failure is injected at the `stat` seam: `ELOOP` is unreachable here because `stat` follows
+    // a link without descending through it, so a self-referential `node_modules` reports a directory
+    // on both Windows and Linux, and `EACCES` needs a mode-`000` directory and a non-root user —
+    // reproducible on CI's Linux but not portably, and Windows has no equivalent. `vi.spyOn` cannot
+    // patch an ESM namespace (measured: `Cannot redefine property: stat`), so this is a `vi.mock`.
+    const digestWithExternalTarget = async (layout: "own-tree" | "none" | "denied"): Promise<
+      string | null | undefined
+    > =>
+      withProject(async root => {
+        // A sibling of the project, not a child of it.
+        const external = join(dirname(root), `${basename(root)}-shared`, "dependency");
+        await writeFileAt(
+          join(root, "package.json"),
+          JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "npm@11.0.0" }),
+        );
+        await writeFileAt(join(root, "package-lock.json"), JSON.stringify({ name: "consumer", lockfileVersion: 3, packages: {} }));
+        await writeFileAt(
+          join(root, "node_modules", ".package-lock.json"),
+          JSON.stringify({ name: "consumer", lockfileVersion: 3, packages: {} }),
+        );
+        await writeFileAt(join(external, "package.json"), JSON.stringify({ name: "dep", version: "1.0.0" }));
+        await writeFileAt(join(external, "index.js"), "module.exports = 1;");
+        if (layout === "own-tree") {
+          await writeFileAt(join(external, "node_modules", "inner", "package.json"), "{}");
+        }
+        await symlink(external, join(root, "node_modules", "dep"), "junction");
+        if (layout === "denied") {
+          deniedPath.value = join(external, "node_modules");
+          statFailure.value = "EACCES";
+        }
+        try {
+          return (await readInstallGraphIdentity(root)).installedTree;
+        } finally {
+          statFailure.value = null;
+          deniedPath.value = null;
+          await rm(dirname(external), { recursive: true, force: true });
+        }
+      });
+
+    // A target with its own install graph: `unknown`, because that tree is described by a lockfile
+    // this module never reads. The boolean guard got this right.
+    expect(await digestWithExternalTarget("own-tree")).toBeNull();
+    // A target with none: a digest, because this walk does cover it. Without this the case above
+    // could pass for an unrelated reason.
+    expect(await digestWithExternalTarget("none")).not.toBeNull();
+    // A target whose own tree cannot be **established**: the same `unknown`, and the one the boolean
+    // guard got wrong by reading the failure as absence.
+    expect(await digestWithExternalTarget("denied")).toBeNull();
   });
   it("reads the record of the lockfile's manager, not whichever marker is found first", async () => {
     // PR #114 review round 6, P1. Choosing the record by first match re-trusted the accumulated
