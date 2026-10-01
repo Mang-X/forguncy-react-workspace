@@ -110,6 +110,25 @@ export interface SyncEvidenceSource {
    * and rejects a correct call whose evidence is a different build's run.
    */
   readonly observedVersions?: readonly SyncMeasuredVersion[];
+  /**
+   * The exact calls this source executed, as the product spells them.
+   *
+   * The second half of "established by execution on its own build": a source observes a *build*
+   * and runs *calls* on it, and a call established by one build's probe of a different operation
+   * is not established at all. #116's fifth review is what made it a field: the version check
+   * alone let `read-cell-source`'s `api.page.getCells` be attributed to `issue-5-designer-probe`,
+   * whose own `scope` states it *did not record the call it used to read persisted cell state
+   * back* — the operation was `unestablished` until #20 executed it. A registry that can contradict
+   * its own evidence source's scope is not evidence.
+   *
+   * Absent means the source executed no call on any build — the product's documentation — which
+ * makes it supplementary and never establishing.
+   *
+   * Derived from each source's own record rather than restated freely, so a source that does not
+   * name a call cannot be cited for it. `observedVersions` and this field must agree in practice:
+   * a build is observed by running something.
+   */
+  readonly establishedMethods?: readonly string[];
 }
 
 export const SYNC_EVIDENCE_SOURCES: Readonly<Record<SyncEvidenceSourceId, SyncEvidenceSource>> = {
@@ -125,6 +144,20 @@ export const SYNC_EVIDENCE_SOURCES: Readonly<Record<SyncEvidenceSourceId, SyncEv
     // read as a wildcard that could establish a call on any build; a probe record is authoritative
     // about the build it probed.
     observedVersions: ["12.0.100.0"],
+    // The two calls #116's earlier review recorded this source as establishing — `api.page.getCells`
+    // to read and `api.app.saveProject` to persist — plus the others its flow exercised end to end
+    // through the port.
+    // Exactly the calls #5's `scope` above enumerates, and deliberately **not**
+    // `api.page.getCells`: that scope says the read call was never recorded, which is why the
+    // operation was `unestablished` until #20 executed it. Listing it here would make the field
+    // contradict the prose it is derived from.
+    establishedMethods: [
+      "api.page.setCells",
+      "api.app.listFrontendLibraries",
+      "api.app.checkProjectErrors",
+      "api.app.generatePageAsync",
+      "api.app.getProjectSaveStatus",
+    ],
   },
   "forguncy-library-guide": {
     id: "forguncy-library-guide",
@@ -142,6 +175,19 @@ export const SYNC_EVIDENCE_SOURCES: Readonly<Record<SyncEvidenceSourceId, SyncEv
     scope:
       "The two operations #5 left unnamed, *performed* (this source is an execution, not a reading of one) and the product reference that documents them: `api.page.getCells` and `api.page.getCellCodeContext` (both read a Cell's persisted state) and `api.app.saveProject` (persists it). It also records what `api.page.readCellCode` does — the segmented reader — and the measurement that decides which of the two readers the divergence check uses: `readCellCode` returned exactly 12,000 characters with `hasMore: true` for a 17,125-character cell, while `getCells` returned all 17,125 characters of the same `cellTypeProps.code`. It records the designer's own `baseHash` equals `sha256` of the stored code string byte-for-byte (LF line endings, trailing newline preserved). What it does **not** record: any claim that these calls are stable across Forguncy versions other than 12.0.100.0, or that `getCells` has no size budget — only that none was observed at 17,125 characters.",
     observedVersions: ["12.0.100.0"],
+    // The two calls #116's earlier review recorded this source as establishing — `api.page.getCells`
+    // to read and `api.app.saveProject` to persist — plus the rest of the flow it drove through the
+    // port on the same build. `api.page.getCells` is here and is **not** in #5's list, which is the
+    // whole point of the two rows differing.
+    establishedMethods: [
+      "api.page.getCells",
+      "api.page.getCellCodeContext",
+      "api.app.saveProject",
+      "api.app.listFrontendLibraries",
+      "api.app.checkProjectErrors",
+      "api.app.getProjectSaveStatus",
+      "api.app.generatePageAsync",
+    ],
   },
   "issue-115-designer-probe": {
     id: "issue-115-designer-probe",
@@ -151,6 +197,18 @@ export const SYNC_EVIDENCE_SOURCES: Readonly<Record<SyncEvidenceSourceId, SyncEv
     scope:
       "The two shapes #115 found to be version-sensitive between the pinned 12.0.100.0 and this 12.0.101.0 build. (1) **The read-back cell-type name.** `api.page.setCells` accepted `ReactCellTypeCellType`, `ReactCellType` and the display name `React AI 单元格` for the same cell type — which the `setCells` reference states as 内置别名、类型名或显示名 — and all three read back through `api.page.getCells` as `cellType: \"ReactCellType\"`, with the same `cellTypeProps.code` byte for byte. The product's own reference (`/apis/cellTypes/ReactCellType.md`, `/apis/cellTypes/index.md`) also calls the type `ReactCellType`; `ReactCellTypeCellType` appears in neither. `UserControlPageCellType` wrote and read back as itself with `cellTypeProps: { overflowMode }` and no `code`. (2) **The generation call.** `api.app.generatePageAsync` is not an own property of `api.app` on this build and calling it throws; `api.app.generateProject` exists, is documented at `/apis/app/generateProject.md` (permission `read/safe`, request `{ skipCheckProjectError? }`, response `{ url, message, checkResult, success? }`), and was executed: with `{}` and with `{ skipCheckProjectError: true }` it resolved `success: true` with `url = \"http://localhost:63982/Forguncy\"` and `checkResult.errorCount: 0` — the same runtime *base* #20 measured, so the page-route mapping is unchanged. What it does **not** record: any re-measurement of `12.0.100.0`. That build is not installed on this machine, so neither shape is claimed for it, and nothing here narrows or widens #20's own findings. **(3) The adapter-level end-to-end run, which is the execution evidence for every `12.0.101.0` call in `SYNC_CAPABILITIES`.** After fixing those two shapes, #115 re-ran the flow through the shipped adapter with the two port corrections #92's script used to carry removed: `validate-sync-against-designer.mjs` 20/20 (write route) and `validate-unchanged-against-designer.mjs` 13/13 (unchanged route), on this build, against a disposable page. That run drove `api.app.listFrontendLibraries`, `api.page.getCells`, `api.page.setCells`, `api.app.getProjectSaveStatus`, `api.app.saveProject`, `api.app.checkProjectErrors` and the generation call — all seven port methods — so it is what establishes each of those calls on `12.0.101.0`, not only the two drift findings. What it does **not** record: any browser-side observation, and any `12.0.100.0` re-measurement.",
     observedVersions: ["12.0.101.0"],
+    // The seven port methods the adapter-level run drove on this build (write route 20/20,
+    // unchanged route 13/13): every call in the flow, plus the generation call, which on this
+    // build is `api.app.generateProject`.
+    establishedMethods: [
+      "api.app.listFrontendLibraries",
+      "api.page.getCells",
+      "api.page.setCells",
+      "api.app.getProjectSaveStatus",
+      "api.app.saveProject",
+      "api.app.checkProjectErrors",
+      "api.app.generateProject",
+    ],
   },
 };
 
@@ -226,6 +284,17 @@ export interface SyncCapabilityCall {
 export interface SyncCapability {
   readonly id: SyncCapabilityId;
   readonly summary: string;
+  /**
+   * Why this capability's evidence is on file at all — the record's provenance, not its proof.
+   *
+   * Deliberately weaker than {@link SyncCapability.calls}, which is where "which source
+   * established *this* call" lives. #116's fifth review found the two drifting: `issue-115-designer-probe`
+   * says its adapter-level run drove all seven port methods, while this list had it on two
+   * capabilities, maintained by hand, asserting a claim the source itself contradicts. A
+   * capability-level list cannot carry per-version or per-method provenance — that is what the
+   * per-call record is for — so this one says what a reader needs before the calls: which sources
+   * describe this operation at all.
+   */
   readonly evidenceSources: readonly SyncEvidenceSourceId[];
   readonly confirmation: SyncCapabilityConfirmation;
   /**
@@ -692,15 +761,31 @@ export function assertMcpSyncStepCoherent(step: McpSyncStep, index: number): voi
 }
 
 /**
- * Did this evidence source execute something on `version`?
+ * Did this source execute *this call* on `version`?
  *
- * An explicit `includes`, so a source that declares no build establishes nothing. #116's third
- * review is why absence is not a wildcard: with `undefined` read as "matches any version", the
- * product's documentation — and a 12.0.100.0 probe record, before that record declared its build —
- * could each alone back a 12.0.101.0 call. A source establishes a call by having *run* on that
- * build, which it has to say.
+ * Both halves, and one source has to satisfy both: the build has to match, and the call has to be
+ * among the ones the source actually ran on it. #116's fifth review is the case — with only the
+ * build checked, `api.page.getCells` on 12.0.100.0 was accepted against `issue-5-designer-probe`,
+ * whose own `scope` states it never recorded the call it read persisted cell state with. Evidence
+ * from a real session is evidence *about what that session ran*, so a source that did not run the
+ * call cannot have established it, however well matched the build is.
  */
-function evidenceEstablishesVersion(sourceId: SyncEvidenceSourceId, version: SyncMeasuredVersion): boolean {
+function evidenceEstablishesCall(sourceId: SyncEvidenceSourceId, method: string, version: SyncMeasuredVersion): boolean {
+  const source = findSyncEvidenceSource(sourceId);
+  return (
+    evidenceObservedBuild(sourceId, version) &&
+    source.establishedMethods !== undefined &&
+    source.establishedMethods.includes(method)
+  );
+}
+
+/**
+ * Did this source run anything at all on `version`?
+ *
+ * The weaker half, kept as its own function because "observed this build" and "ran *this call*
+ * there" are the two questions the fifth review separated, and only the second establishes a call.
+ */
+function evidenceObservedBuild(sourceId: SyncEvidenceSourceId, version: SyncMeasuredVersion): boolean {
   const observed = findSyncEvidenceSource(sourceId).observedVersions;
   return observed !== undefined && observed.includes(version);
 }
@@ -793,10 +878,10 @@ export function assertSyncCapabilityCoherent(capability: SyncCapability): void {
           );
         }
       }
-      if (!cited.some(sourceId => evidenceEstablishesVersion(sourceId, call.version))) {
+      if (!cited.some(sourceId => evidenceEstablishesCall(sourceId, call.method, call.version))) {
         throw new SyncCapabilityContractError(
           "capability-not-coherent",
-          `Capability "${id}" records "${call.method}" as established on ${call.version}, but no cited source (${cited.join(", ")}) observed that build. A call is established by execution on its own build; a run against another build, and documentation of a call's shape, cannot establish it.`,
+          `Capability "${id}" records "${call.method}" as established on ${call.version}, but no cited source (${cited.join(", ")}) both observed that build and executed that call. A call is established by executing it on that build; a run of some other operation, and documentation of a call's shape, cannot establish it.`,
         );
       }
     }

@@ -238,6 +238,40 @@ describe("what the evidence establishes", () => {
       }
     });
 
+    // The build is not the whole of "established by execution": the source must have run *this
+    // call* there. #116's fifth review is the case — `api.page.getCells` on 12.0.100.0 was
+    // accepted against `issue-5-designer-probe`, whose own `scope` states it never recorded the
+    // call it read persisted cell state with. The whole table is asserted so the two halves stay
+    // distinguishable rather than one being quietly enough.
+    it("requires a source that both observed the build and executed that call", () => {
+      const capability = (id: string, method: string, version: string, evidenceSourceIds: readonly string[]) =>
+        ({
+          ...findSyncCapability(id as never),
+          calls: [{ method, version, evidenceSourceIds }],
+        }) as unknown as SyncCapability;
+      const accepted = (c: unknown) => {
+        expect(() => assertSyncCapabilityCoherent(c as SyncCapability)).not.toThrow();
+      };
+      const refused = (c: unknown) => {
+        expect(() => assertSyncCapabilityCoherent(c as SyncCapability)).toThrow(
+          /both observed that build and executed that call/,
+        );
+      };
+
+      // #5 ran these on 12.0.100.0 — its own scope enumerates them.
+      accepted(capability("write-cell-source", "api.page.setCells", "12.0.100.0", ["issue-5-designer-probe"]));
+      // #5's scope says it did **not** record the read call, which is why the operation was
+      // `unestablished` until #20 executed it. So the same source must be refused here.
+      refused(capability("read-cell-source", "api.page.getCells", "12.0.100.0", ["issue-5-designer-probe"]));
+      accepted(capability("read-cell-source", "api.page.getCells", "12.0.100.0", ["issue-20-designer-execution"]));
+      // The generation call on 100 was `generatePageAsync`; `generateProject` on 100 is unmeasured.
+      refused(capability("generate-page", "api.app.generateProject", "12.0.100.0", ["issue-5-designer-probe"]));
+      // #115 drove the whole flow on 12.0.101.0.
+      accepted(capability("write-cell-source", "api.page.setCells", "12.0.101.0", ["issue-115-designer-probe"]));
+      // A call no source mentions is not established by any of them.
+      refused(capability("write-cell-source", "api.app.someFutureCall", "12.0.100.0", ["issue-5-designer-probe"]));
+    });
+
     // And the complement: supplementary sources are still welcome beside one that establishes the
     // call, so the rule does not drive them out of the registry.
     it("accepts a source from another build alongside one that observed this build", () => {
@@ -302,9 +336,26 @@ describe("what the evidence establishes", () => {
       capability.evidenceSources.includes("issue-115-designer-probe"),
     ).map(capability => capability.id);
 
-    // Exactly the two shapes #115 measured, and no third: evidence spread by habit over
-    // capabilities it says nothing about is how a citation stops meaning anything.
-    expect(cited.sort()).toEqual(["generate-page", "read-cell-source"]);
+    // The top-level list is the record's *provenance* — why this capability's evidence is on file
+    // at all — not which source established which call; that is per-call (`evidenceSourceIds`).
+    // #115's scope now says its adapter-level run drove all seven port methods, so asserting that
+    // this source appears on only two capabilities is asserting the *drift* the review named: two
+    // provenance semantics, each restated by hand, free to disagree.
+    //
+    // So the check is the one that must hold: every capability with a 12.0.101.0 call cites
+    // #115, and every capability whose calls it established is recorded there.
+    const with101 = SYNC_CAPABILITIES.filter(capability =>
+      (capability.calls ?? []).some(call => call.version === "12.0.101.0"),
+    );
+    expect(with101.length).toBeGreaterThan(0);
+    for (const capability of with101) {
+      for (const call of capability.calls ?? []) {
+        if (call.version !== "12.0.101.0") continue;
+        expect(call.evidenceSourceIds, `${capability.id} ${call.method}`).toContain("issue-115-designer-probe");
+      }
+    }
+    // And a capability may not claim a 12.0.101.0 call at all without that source behind it.
+    expect(cited.every(id => with101.some(capability => capability.id === id))).toBe(true);
 
     // And the generation capability's name is the one that source *established* — asserting the
     // pair, because citing #115 while keeping the call name it found absent would be a claim the
