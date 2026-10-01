@@ -227,6 +227,14 @@ export interface HarnessAuditInput {
    * does not decide what they mean.
    */
   readonly userAliasKeys?: readonly string[];
+  /**
+   * Project keys a `RegExp` alias shadows, with the pattern that does it.
+   *
+   * Forwarded for the same reason as {@link userAliasKeys} and not merged into it: a pattern cannot
+   * be compared as a string without losing its meaning, so the audit needs the harness's verdict and
+   * the pattern text, not a key.
+   */
+  readonly userAliasPatterns?: readonly { readonly key: string; readonly pattern: string }[];
   readonly projectAlias?: Readonly<Record<string, string>>;
 }
 
@@ -253,6 +261,7 @@ export function auditHarnessConfiguration(input: HarnessAuditInput): LocalDevAud
     decisions: input.decisions,
     extensionChoices: input.extensionChoices,
     ...(input.userAliasKeys === undefined ? {} : { userAliasKeys: input.userAliasKeys }),
+    ...(input.userAliasPatterns === undefined ? {} : { userAliasPatterns: input.userAliasPatterns }),
     ...(input.projectAlias === undefined ? {} : { projectAlias: input.projectAlias }),
   });
 }

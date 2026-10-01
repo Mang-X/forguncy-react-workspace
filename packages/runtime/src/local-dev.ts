@@ -1959,6 +1959,18 @@ export interface LocalDevAuditInput {
    */
   readonly userAliasKeys?: readonly string[];
   /**
+   * Project keys a `RegExp` alias in `vite.config.ts` was measured to shadow, with the pattern that
+   * did it.
+   *
+   * Separate from {@link LocalDevAuditInput.userAliasKeys} because a pattern cannot be compared as a
+   * string without losing its meaning: `^@APP\/SHARED(?=\/|$)/i`, `^other|@app\/shared/` and
+   * `^@app\/\x73hared` all match `@app/shared/thing` and none of them reads as `@app/shared`. The
+   * caller therefore runs the pattern against the specifiers the alias can match and reports the
+   * verdict; this audit only names it, which is why `pattern` is carried verbatim — the message
+   * has to quote something the developer can find in their own file.
+   */
+  readonly userAliasPatterns?: readonly { readonly key: string; readonly pattern: string }[];
+  /**
    * The project's own aliases, as `registry.resolve.alias` carries them (#97).
    *
    * Only the keys matter to this audit; the values are for the report.
@@ -2221,6 +2233,27 @@ export function auditLocalDevConfiguration(input: LocalDevAuditInput = {}): Loca
   // three review rounds to get right in the harness.
   const projectAlias = input.projectAlias ?? {};
   for (const [moduleId, target] of Object.entries(projectAlias)) {
+    // Two inputs, two questions. A **string** key is compared here, because reproducing Vite's
+    // prefix rule is what `runtime` may not do (three review rounds went into the harness's copy of
+    // it), so the harness hands over strings and this comparison is plain string work.
+    //
+    // A **RegExp** cannot be reduced to a string that keeps its meaning — `^@APP\/SHARED(?=\/|$)/i`
+    // and `^other|@app\/shared/` both evade any literal or prefix comparison — so the harness runs
+    // the pattern itself against the specifiers this alias can match and hands over only the keys it
+    // actually shadows. That answer is a fact rather than a re-derivation, and this audit only has to
+    // report it, naming the pattern the way the developer wrote it.
+    const overlappingPattern = (input.userAliasPatterns ?? []).find(entry => entry.key === moduleId);
+    if (overlappingPattern !== undefined) {
+      diagnostics.push(
+        createLocalDevDiagnostic(
+          "local-dev-project-alias-shadowed",
+          moduleId,
+          `\`vite.config.ts\` declares a pattern alias ${JSON.stringify(overlappingPattern.pattern)} that matches "${moduleId}", which \`forguncy.config.ts\` already resolves to ${JSON.stringify(target)}. Vite applies its own aliases before the harness resolver, so the local loop would use the Vite target while the Cell build uses ${JSON.stringify(target)}. Remove the overlapping entry, or replace it with a plain string alias if that is what it means.`,
+        ),
+      );
+      continue;
+    }
+
     const overlapping = (input.userAliasKeys ?? []).find(
       key => key === moduleId || key.startsWith(`${moduleId}/`) || moduleId.startsWith(`${key}/`),
     );

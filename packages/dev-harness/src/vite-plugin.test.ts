@@ -860,12 +860,20 @@ describe("a `RegExp` `vite.config.ts` alias cannot evade the shadow check", () =
     );
   });
 
-  it("allows an anchored pattern whose forced prefix cannot match the project key", async () => {
-    // The exemption has to be a *proof* or it is a second approximation: `^` makes
-    // `some-other-lib` mandatory on every match, so no string beginning `@app/shared` can match it.
+  it("refuses an anchored pattern it cannot prove disjoint, rather than exempting it", async () => {
+    // This was the exemption review removed. The reasoning it rested on — "`^` makes the leading
+    // run mandatory on every match" — is false in three independent ways (flags, alternation,
+    // escapes), each reproduced against a real server before the exemption was deleted. So an
+    // anchored pattern carrying metacharacters now fails closed: `/^some-other-lib(\/|$)/` overlaps
+    // nothing, and is refused anyway.
+    //
+    // The cost is deliberate and the remedy is stated: the same declaration as a plain string alias
+    // is checked exactly and allowed. That is what a project writes for an id it means literally.
     await expect(
       startsWith([{ find: /^some-other-lib(\/|$)/, replacement: "/x" }]),
-    ).resolves.toBeUndefined();
+    ).rejects.toThrowError(/refused to start/);
+
+    await expect(startsWith({ "some-other-lib": "/x" })).resolves.toBeUndefined();
   });
 
   it("still allows a RegExp that overlaps nothing at all, in the unanchored form too", async () => {
@@ -873,5 +881,93 @@ describe("a `RegExp` `vite.config.ts` alias cannot evade the shadow check", () =
     // argument, so this one is allowed because the probes actually miss it *and* its source is
     // a literal with no metacharacters — the only case where a probe miss is a true miss.
     await expect(startsWith([{ find: /totally-unrelated-package/, replacement: "/x" }])).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * The three ways the removed prefix exemption was unsound, each reproduced against a real server.
+ *
+ * All three apply to `@app/shared/thing` and all three were let through by the exemption, which
+ * treated a `^`-anchored pattern's leading literal run as mandatory on **every** match. That premise
+ * is false whenever flags, alternation or an escape changes what the run means — and each of these is
+ * ordinary regex usage rather than an exotic input. Measured against Vite before the exemption was
+ * removed: all three resolved `@app/shared/thing` to the local copy while production used the
+ * project alias, so each is a silent dev/build split, not a missed warning.
+ */
+describe("no RegExp form evades the shadow check", () => {
+  const reRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "tests", "fixtures", "project-alias");
+
+  function registry() {
+    return createCellRegistry(
+      {
+        cells: { probe: { entry: "./cells/probe/src/index.ts", target: { pageName: "探针", cell: "A1" } } },
+        resolve: { alias: { "@app/shared": "./shared" } },
+      },
+      { root: reRoot },
+    );
+  }
+
+  async function startsWith(userAlias: unknown): Promise<void> {
+    const server = await createServer({
+      root: reRoot,
+      configFile: false,
+      logLevel: "error",
+      appType: "spa",
+      resolve: { alias: userAlias as Record<string, string> },
+      plugins: [devHarness({ config: registry() }) as never],
+      server: { middlewareMode: true, hmr: false, watch: null },
+    });
+    await server.close();
+  }
+
+  it("refuses a case-insensitive pattern, which `startsWith` read as disjoint", async () => {
+    // `/i` makes matching case-insensitive; the extracted prefix was `@APP/SHARED` and the
+    // comparison was case-sensitive, so the key looked unreachable.
+    await expect(startsWith([{ find: /^@APP\/SHARED(?=\/|$)/i, replacement: "/local-copy" }])).rejects.toThrowError(
+      /refused to start/,
+    );
+  });
+
+  it("refuses a pattern whose `^` binds only the first alternative", async () => {
+    // The extractor took `other` as a prefix required of every match; the second branch matches the
+    // project alias without containing it at all.
+    await expect(startsWith([{ find: /^other|@app\/shared(?=\/|$)/, replacement: "/local-copy" }])).rejects.toThrowError(
+      /refused to start/,
+    );
+  });
+
+  it("refuses a pattern whose separator is written as a hex escape", async () => {
+    // `\x73` is the character `s`. The extractor built the wrong prefix from it, which is the same
+    // defect class as reading a `/`-escape as two characters.
+    await expect(startsWith([{ find: /^@app\/\x73hared(?=\/|$)/, replacement: "/local-copy" }])).rejects.toThrowError(
+      /refused to start/,
+    );
+  });
+
+  it("names the offending pattern in the diagnostic, not the project key", async () => {
+    // The audit quotes its `find` input verbatim, so reporting the project key instead would tell a
+    // developer their `vite.config.ts` declares an alias it does not — measured before
+    // `userAliasPatterns` existed, where an undecidable pattern produced exactly that message.
+    let thrown: unknown;
+    try {
+      await startsWith([{ find: /^@APP\/SHARED(?=\/|$)/i, replacement: "/local-copy" }]);
+    } catch (error) {
+      thrown = error;
+    }
+
+    const message = String(thrown);
+    expect(message).toContain("local-dev-project-alias-shadowed");
+    expect(message).toContain("@APP");
+    expect(message).toContain("pattern alias");
+  });
+
+  it("does not audit Vite's own injected aliases as if the project had written them", async () => {
+    // `config.resolve.alias` at `configResolved` is the **merged** list — Vite has already folded in
+    // `/^\/?@vite\/env/` and `/^\/?@vite\/client/`. Measured: a project that declared no RegExp alias
+    // at all was refused with a finding quoting `/^\/?@vite\/env/`, because that pattern is
+    // undecidable and so fails closed. A gate that blames Vite's internals on the developer is worse
+    // than no gate, so entries in the `@vite/` scope are excluded.
+    await expect(startsWith(undefined)).resolves.toBeUndefined();
+    await expect(startsWith({ "@something-else": "/x" })).resolves.toBeUndefined();
   });
 });

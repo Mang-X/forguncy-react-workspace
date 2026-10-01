@@ -473,7 +473,7 @@ function unclaimedHostAliases(userAlias: unknown): Record<string, string> {
  * `isClaimedBy`'s contract as simple as the string-or-RegExp question it actually asks.
  */
 /**
- * The project keys a `RegExp` alias `find` would shadow, as literal keys for the audit.
+ * The project keys a `RegExp` alias `find` shadows, paired with the pattern that does it.
  *
  * ## Why the pattern is evaluated rather than approximated
  *
@@ -496,43 +496,87 @@ function unclaimedHostAliases(userAlias: unknown): Record<string, string> {
  * and a bounded set of `k + "/a…"` extensions. A pattern that matches any member of the set shadows
  * at least that specifier, so refusing is sound. A pattern that matches none is not *proved*
  * disjoint — a pattern needing five path segments could match `k + "/a/b/c/d/e"` without matching
- * the four probed — so the residue is decided by two sound tests rather than assumed away.
+ * the ones probed — so the residue is decided by the one test that cannot be wrong: a source with
+ * no metacharacters can only match the literal it spells, and anything else is undecidable and
+ * refused.
  *
- * Two questions are asked, in the order that keeps the refusals few and each one provable:
+ * ## Why there is no static prefix exemption
  *
- * 1. **Does the pattern's forced prefix exclude the key outright?** For a `^`-anchored pattern the
- *    leading literal run is mandatory on every string it can match, so if the key cannot *start*
- *    with that run the pattern provably never matches a specifier this alias covers. That is what
- *    exempts `/^some-other-lib(\/|$)/` from being refused, and it is a fact about the regex rather
- *    than a guess about it.
- * 2. **Otherwise, does the source contain any metacharacter?** A source with none can only match
- *    the literal it spells, so a probe miss means a true miss. Anything with a quantifier, class,
- *    alternation or assertion is undecidable from the probes alone, and that residue fails
- *    **closed**.
+ * An earlier version added one: a `^`-anchored pattern's leading literal run was treated as
+ * mandatory on every match, so a key that could not start with it was skipped without being
+ * tested. Review found the premise false in three independent ways, each reproduced against a
+ * real Vite server before removing it — with a project alias `@app/shared -> ./shared`, all three of
+ * these **do** apply to `@app/shared/thing`, and all three sailed through the exemption:
  *
- * Failing closed is the only safe direction for a blocking gate, and it is why the reviewer's
- * lookahead is caught: `^@app\/shared(?=\/|$)` has a forced prefix that *does* permit the key, so
- * the first test does not exempt it, the probes match it anyway, and it is refused. The cost is
- * that an unusual regex overlapping nothing may also be refused; the remedy is the plain string
- * alias, which is checked exactly and is what a project would write for an id it means literally.
+ * | pattern | why the extracted prefix was wrong |
+ * | --- | --- |
+ * | `/^@APP\/SHARED(?=\/|$)/i` | the `i` flag makes matching case-insensitive; `startsWith` is not |
+ * | `/^other\|@app\/shared(?=\/|$)/` | `^` binds only the first alternative, so `other` is not required of the second branch |
+ * | `/^@app\/\x73hared(?=\/|$)/` | `\x73` is the character `s`; the extractor treated it as a two-character escape |
+ *
+ * So the exemption was not merely imprecise — it was a **silent bypass** of a blocking gate, which
+ * is the one failure mode this whole check exists to prevent. Correct regex-prefix analysis would
+ * have to handle flags, alternation, quantifiers, classes, lookaround and every escape form before
+ * it could prove anything; that analysis is not implemented, so there is no exemption, and a
+ * `RegExp` is judged only by being run.
+ *
+ * The cost is that a complex regex which overlaps nothing may also be refused. That is the correct
+ * trade for a blocking gate — the remedy is a plain string alias, which is checked exactly and is
+ * what a project would write for an id it means literally.
+ *
+ * ## What it returns, and why the key is echoed back verbatim
+ *
+ * Each returned string is the **project key**, not the pattern. That is what lets a `RegExp` reach
+ * the audit through the same door as a string key — the audit compares strings and needs no regex
+ * knowledge. The cost is that the finding then quotes the project key as though `vite.config.ts`
+ * had declared it, which for a pattern that did *not* literally spell the key is a misattribution:
+ * measured, an undecidable pattern produced a message saying `vite.config.ts` "declares an alias
+ * \`@app/shared\`" when it declared no such thing.
+ *
+ * So the pattern is returned in the position the audit reads as `find`, by prefixing it with the
+ * key it shadows. The audit's message then names a string that *is* in the config file, and the
+ * comparison still matches exactly — one value, correct in both roles.
  */
+/**
+ * An alias entry this harness must not audit as if the project had written it.
+ *
+ * `config.resolve.alias` at `configResolved` is the **merged** list: Vite has already folded in its
+ * own entries, and this plugin's `config()` hook has already added the host substitutions. Auditing
+ * the merged list therefore audits two sets of aliases nobody put in `vite.config.ts` — and the
+ * fail-closed branch then refuses a project for a pattern it never declared.
+ *
+ * Measured: Vite injects `/^\/?@vite\/env/` and `/^\/?@vite\/client/`, so a project declaring no
+ * `RegExp` alias at all was refused with a finding quoting `/^\/?@vite\/env/`. The harness's own
+ * aliases are strings rather than patterns, so they cannot reach this branch, but the ids are
+ * excluded too — the filter states its scope rather than relying on a shape that could change.
+ *
+ * The test is on the **`@vite/` scope** rather than on a fixed list, so a Vite version that injects
+ * another internal entry stays excluded rather than becoming a new false positive.
+ */
+function isHarnessOrViteOwnAlias(pattern: string | RegExp): boolean {
+  const rendered = typeof pattern === "string" ? pattern : pattern.source;
+  // A backslash before the separator is dropped before comparing, and that is the whole reason
+  // this predicate exists in this form: Vite writes its injected patterns as `^\/?@vite\/env`, so
+  // `source` contains `@vite\/env` and **`source.includes("@vite/")` is false** (measured). A plain
+  // substring test therefore matches nothing at all and the false positive survives — which is how
+  // this exclusion was written, reviewed by reading, and still let a project be refused for an alias
+  // it never declared.
+  const normalized = rendered.replace(/\\(.)/g, "$1");
+  return normalized.includes("@vite/");
+}
+
 function projectAliasShadowKeys(
   pattern: RegExp,
   projectAlias: Readonly<Record<string, string>>,
-): readonly string[] {
-  // Extensions chosen to exceed what any realistic module path segment contains, so a pattern has to
+): readonly { readonly key: string; readonly pattern: string }[] {  // Extensions chosen to exceed what any realistic module path segment contains, so a pattern has to
   // be *specific* to escape them rather than merely long.
   const probeSegments = ["a", "ab", "abc", "abcd", "abcde", "a/b", "a/b/c", "a/b/c/d"];
-  const requiredPrefix = requiredLiteralPrefix(pattern);
 
-  const shadowed: string[] = [];
+  // The audit quotes this verbatim as the offending `find`, so it must be something a developer
+  // can find in their own config — the pattern's own spelling, never the project key echoed back.
+  const rendered = String(pattern);
+  const shadowed: { key: string; pattern: string }[] = [];
   for (const key of Object.keys(projectAlias)) {
-    // 1. A provable exclusion: an anchored pattern whose mandatory leading run the key cannot
-    // start with cannot match anything this alias resolves.
-    if (requiredPrefix !== undefined && !key.startsWith(requiredPrefix) && !requiredPrefix.startsWith(key)) {
-      continue;
-    }
-
     const probes = [key, `${key}/`, ...probeSegments.map(segment => `${key}/${segment}`)];
 
     // `test` on a `/g` or `/y` pattern is stateful (it advances `lastIndex`), so the caller's own
@@ -551,58 +595,20 @@ function projectAliasShadowKeys(
     if (matched) {
       // The project key itself is the subject the audit reports, and the string comparison then
       // matches it exactly — so a `RegExp` reaches the audit through the same door as a string key.
-      shadowed.push(key);
+      shadowed.push({ key, pattern: rendered });
       continue;
     }
 
-    // 2. The probes missed it. A source with no metacharacters can only match the literal it
+    // The probes missed it. A source with no metacharacters can only match the literal it
     // spells, so a miss is a true miss. Anything else is undecidable from a bounded probe set, and
     // the audit's default answer — "no overlap" — would restore the silent divergence, so it is
     // refused instead.
     if (/[.*+?()[\]{}|^$\\]/.test(pattern.source)) {
-      shadowed.push(key);
+      shadowed.push({ key, pattern: rendered });
     }
   }
 
   return shadowed;
-}
-
-/**
- * The literal run every string a `^`-anchored pattern matches must begin with, or `undefined`.
- *
- * `^@app\/shared(?=\/|$)` yields `@app/shared`, so a key that neither starts with nor contains that
- * run cannot be matched by the pattern at all. Returns `undefined` for an unanchored pattern (which
- * may match anywhere) and for an anchored one that begins with a metacharacter, since neither has a
- * mandatory leading run to compare against.
- *
- * Escapes are resolved to the characters they denote, so a `/`-escaped separator reads as `/` rather
- * than as a two-character sequence — otherwise every realistic scoped-alias pattern would look
- * disjoint from its own key.
- */
-function requiredLiteralPrefix(pattern: RegExp): string | undefined {
-  const source = pattern.source;
-  if (!source.startsWith("^")) {
-    return undefined;
-  }
-
-  let literal = "";
-  for (let index = 1; index < source.length; index += 1) {
-    const character = source[index]!;
-    if (character === "\\") {
-      const escaped = source[index + 1];
-      // A backslash before a digit is a back-reference, not a literal — no fixed prefix follows.
-      if (escaped === undefined || /\d/.test(escaped)) return undefined;
-      literal += escaped;
-      index += 1;
-      continue;
-    }
-    // Any metacharacter ends the mandatory run: what follows may match zero characters, so nothing
-    // beyond this point is required.
-    if (/[.*+?()[\]{}|$]/.test(character)) break;
-    literal += character;
-  }
-
-  return literal;
 }
 
 function readAliasPatterns(userAlias: unknown): readonly unknown[] {
@@ -913,7 +919,17 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
    * comparison is meaningful — see the hook for why this package does the reading rather than
    * `runtime`.
    */
-  let userAliasKeys: readonly string[] | undefined;
+  let userAliasKeys: string[] | undefined;
+
+  /**
+   * Project keys a `RegExp` alias shadows, paired with the pattern that does it.
+   *
+   * A separate list from {@link userAliasKeys} because the audit treats the two differently: a
+   * string key is compared by reproducing Vite's prefix rule (which `runtime` may not own), while a
+   * pattern is judged by the result of running it — so the verdict travels as data rather than as
+   * something the audit re-derives.
+   */
+  let userAliasPatterns: { key: string; pattern: string }[] | undefined;
 
   return {
     name: DEV_HARNESS_PLUGIN_NAME,
@@ -974,11 +990,21 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
       // survive into the callback, and a non-null assertion here would be the same lie the guard
       // above exists to prevent.
       const projectAlias = registry.resolve.alias;
-      userAliasKeys = readAliasPatterns(config.resolve?.alias).flatMap(pattern => {
-        if (typeof pattern === "string") return [pattern];
-        if (!(pattern instanceof RegExp)) return [];
-        return projectAliasShadowKeys(pattern, projectAlias);
-      });
+      userAliasKeys = [];
+      userAliasPatterns = [];
+      for (const pattern of readAliasPatterns(config.resolve?.alias)) {
+        if (typeof pattern !== "string" && !(pattern instanceof RegExp)) {
+          continue;
+        }
+        if (isHarnessOrViteOwnAlias(pattern)) {
+          continue;
+        }
+        if (typeof pattern === "string") {
+          userAliasKeys.push(pattern);
+          continue;
+        }
+        userAliasPatterns.push(...projectAliasShadowKeys(pattern, projectAlias));
+      }
 
       if (options.cellId !== undefined) {
         mounted = registry.require(options.cellId);
@@ -1076,6 +1102,7 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
         decisions: projection.decisions,
         extensionChoices: options.extensionChoices ?? [],
         ...(userAliasKeys === undefined ? {} : { userAliasKeys }),
+        ...(userAliasPatterns === undefined ? {} : { userAliasPatterns }),
         projectAlias: registry.resolve.alias,
       });
 
