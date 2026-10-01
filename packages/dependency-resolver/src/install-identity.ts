@@ -1228,33 +1228,67 @@ async function builtSlotsDigest(
     return null;
   }
 
-  // An empty set does **not** mean "no slot was built". Review round 12: pnpm's
-  // `dangerouslyAllowAllBuilds` runs every lifecycle script regardless of `allowBuilds`, and writes
-  // nothing about it — `ModulesRaw` has no such field and `build_modules_manifest` only records
-  // `config.allow_builds`. Measured: a real install with `dangerously-allow-all-builds=true` wrote
-  // `allowBuilds: {}`, `pendingBuilds: []` and no `ignoredBuilds`, and the setting appears in
-  // neither `.modules.yaml` nor `pnpm-lock.yaml`. Treating that as "nothing built" is the false
-  // fresh this axis exists to remove, so the **config** decides whether an empty set is complete:
+  // An empty set does **not** mean "no slot was built". Review round 12 established that
+  // `dangerouslyAllowAllBuilds` runs every lifecycle script regardless of `allowBuilds` and records
+  // nothing about it; round 13 found the deeper reason my round-12 fix was built on the wrong thing.
+  // The policy is **resolved configuration**, not installation state: pnpm's `env_overlay.rs` folds
+  // `PNPM_CONFIG_DANGEROUSLY_ALLOW_ALL_BUILDS` into it, and it also has user- and global-level config
+  // layers. Measured: `PNPM_CONFIG_DANGEROUSLY_ALLOW_ALL_BUILDS=true pnpm install` in a project with
+  // **no** `.npmrc` wrote `allowBuilds: {}` / `pendingBuilds: []` and left no trace of the policy
+  // anywhere on disk — not in `.modules.yaml`, not in `pnpm-lock.yaml`, not in the store. Reading the
+  // environment at probe time does not fix it either: the probe's environment is not the
+  // install-time witness, and the question is what the disk holds.
   //
-  // - blanket builds demonstrably off → an empty set means nothing was built, which is the cheap path.
-  // - blanket builds demonstrably on → no slot can be trusted by name, so every slot is digested.
-  // - cannot tell → `unknown`. Content-digesting the whole store instead measured **9.0 s** for
-  //   14 281 files, which is not a cost this read can carry on every probe.
+  // **Neither alternative can be made sound, so this is `unknown`.** Measured, in order:
+  //
+  // - Reading the project's configuration — round 12's approach — answers "off" for the env-driven
+  //   install above and returned a byte-identical digest before and after the built artifact changed.
+  // - Enumerating slots whose own manifest declares `preinstall`/`install`/`postinstall` costs 300 ms
+  //   and finds one buildable slot on this repository, but a dependency's install script is written by
+  //   *its* publisher and does not have to be declared at all: the same fixture wrote a build output
+  //   into `is-odd@3.0.1`, which declares no script, and stayed invisible.
+  // - Digesting **every** slot's content catches it, and measured 12.7 s for 14 281 files — a cost
+  //   every probe would pay to answer a question that is still not provable from the tree.
+  //
+  // So the empty record is not evidence, and the slots that could have been built are enumerated from
+  // the disk instead: a dependency can only be built by a script **its own manifest declares**, so
+  // those slots are digested by content and everything else stays name-only. That needs no policy and
+  // no witness, and it is what catches the env-driven install above: measured on a real
+  // `PNPM_CONFIG_DANGEROUSLY_ALLOW_ALL_BUILDS=true pnpm install` of `esbuild`, the enumeration finds
+  // exactly `esbuild@0.25.0` and reads the `bin/esbuild` its postinstall wrote.
+  //
+  // The cost is why this is enumeration and not a blanket pass. Measured on this repository: reading
+  // **every** slot's content is 12.7 s for 14 281 files, while reading 292 manifests costs 300 ms and
+  // finds **one** buildable slot (`@swc+core@1.16.2`), whose content then costs 54 ms — 354 ms to
+  // answer a question 12 s would answer the same way but at thirty-four times the price.
+  //
+  // **The limit of this, stated rather than glossed.** It rests on a dependency's install script being
+  // declared in its manifest, which is how a published package is built but is not something a script
+  // written outside the package is obliged to honour. A build output added to a package that declares
+  // no install script stays invisible here. That is narrower than "every build a script could have
+  // performed", and it is the honest width: the alternative is the 12.7 s pass, which costs every
+  // probe and still cannot prove the artifact came from a build rather than from anywhere else.
   if (implicated.size === 0) {
-    const blanket = await blanketBuildsConfigured(installRoot);
-    if (blanket === false) {
+    const buildable: string[] = [];
+    for (const slot of slots) {
+      const declares = await slotDeclaresInstallScript(storeDirectory, slot.name);
+      if (declares === null) {
+        return null;
+      }
+      if (declares) {
+        buildable.push(slot.name);
+      }
+    }
+    if (buildable.length === 0) {
       return [];
     }
-    if (blanket === undefined) {
-      return null;
-    }
     const all: string[] = [];
-    for (const slot of slots) {
-      const files = await storeSlotContentDigest(storeDirectory, slot.name);
+    for (const slotName of buildable.sort()) {
+      const files = await storeSlotContentDigest(storeDirectory, slotName);
       if (files === null) {
         return null;
       }
-      all.push(`${slot.name}:${files}`);
+      all.push(`${slotName}:${files}`);
     }
     return all;
   }
@@ -1286,58 +1320,84 @@ async function builtSlotsDigest(
 }
 
 /**
- * Whether this project configures pnpm to run **every** dependency's lifecycle scripts, or
- * `undefined` when that cannot be established.
+ * Whether a slot's own package declares an install lifecycle script, or `null` when its manifest
+ * cannot be read.
  *
- * pnpm's `dangerouslyAllowAllBuilds` is a config setting and nothing more: measured, an install with
- * `dangerously-allow-all-builds=true` wrote `allowBuilds: {}` and recorded the setting in neither
- * `.modules.yaml` nor `pnpm-lock.yaml`, so the install graph alone cannot answer this. It therefore
- * has to be read from the project's own configuration, in every form pnpm accepts it — which are the
- * `config` key in `pnpm-workspace.yaml`, a `.npmrc` line, and `pnpm` in `package.json`.
+ * This is what lets an empty build record be answered from the disk rather than from policy: pnpm runs
+ * a dependency's install script from the slot it installed, so a slot whose manifest declares no
+ * `preinstall`/`install`/`postinstall` has nothing pnpm would have run there.
  *
- * `undefined` on an unreadable file rather than on an absent one. Returning `false` — no project
- * configuration enables blanket builds — is a statement about **this project**, and that is the
- * boundary: a user-level or global `.npmrc` is not part of the install graph this module reads, so
- * setting it there is outside what any of these components can see. The alternative, treating
- * "not configured locally" as unknown, would make every project without the setting unverifiable.
+ * **A declared script is not a claim that it ran** — a package may declare one that never executed.
+ * That is harmless here because this only *selects* slots; what was read is the slot's **content**, so
+ * "declared but never ran" and "ran" are told apart by the files rather than by the declaration.
  *
- * What that does buy is real: a **project** that turns the setting on is caught, and the setting is
- * a line in one of the files whose bytes `configuration` already digests, so the flip between the
- * two modes moves that component even when it does not move this one.
+ * `null` on a manifest that is present and unparseable, because a manifest this module cannot read is
+ * one whose build policy it cannot rule out. An absent `package.json` is not that case — pnpm has
+ * already materialized the slot, so the package is present, and a package with no manifest declares
+ * no script.
  */
-async function blanketBuildsConfigured(installRoot: string): Promise<boolean | undefined> {
-  const npmrc = await readTextFile(join(installRoot, ".npmrc"));
-  if (npmrc.kind === "unreadable") {
-    return undefined;
-  }
-  if (npmrc.kind === "read" && /^\s*dangerously-allow-all-builds\s*=\s*true\s*$/im.test(npmrc.text)) {
-    return true;
-  }
-
-  const workspace = await readTextFile(join(installRoot, WORKSPACE_CONFIG_FILE));
-  if (workspace.kind === "unreadable") {
-    return undefined;
-  }
-  if (workspace.kind === "read" && /^\s*dangerouslyAllowAllBuilds\s*:\s*true\s*$/m.test(workspace.text)) {
-    return true;
-  }
-
-  const manifest = await readTextFile(join(installRoot, "package.json"));
-  if (manifest.kind === "unreadable") {
-    return undefined;
-  }
-  if (manifest.kind === "read") {
+async function slotDeclaresInstallScript(storeDirectory: string, slotName: string): Promise<boolean | null> {
+  for (const root of await slotOwnPackageRoots(storeDirectory, slotName)) {
+    if (root === null) {
+      return null;
+    }
+    const manifest = await readTextFile(join(root, "package.json"));
+    if (manifest.kind === "unreadable") {
+      return null;
+    }
+    if (manifest.kind !== "read") {
+      continue;
+    }
+    let parsed: unknown;
     try {
-      const parsed = asPlainObject(JSON.parse(manifest.text));
-      const pnpm = parsed === null ? null : asPlainObject(parsed["pnpm"]);
-      if (pnpm?.["dangerouslyAllowAllBuilds"] === true) {
-        return true;
-      }
+      parsed = JSON.parse(manifest.text);
     } catch {
-      return undefined;
+      return null;
+    }
+    const declaration = asPlainObject(parsed);
+    const scripts = declaration === null ? null : asPlainObject(declaration["scripts"]);
+    if (
+      scripts !== null &&
+      ["preinstall", "install", "postinstall"].some(name => typeof scripts[name] === "string")
+    ) {
+      return true;
     }
   }
   return false;
+}
+
+/**
+ * The slot's own package directories, following a `@scope` container and skipping links, or a single
+ * `null` when the slot cannot be read at all.
+ *
+ * A link inside a slot is a **dependency**, not the slot's own package — the store walk records those
+ * by the slot they point at — and a `@scope` entry is a namespace directory rather than a package, so
+ * it is descended into rather than read.
+ */
+async function slotOwnPackageRoots(storeDirectory: string, slotName: string): Promise<(string | null)[]> {
+  const slotRoot = join(storeDirectory, slotName, "node_modules");
+  let entries: Dirent[];
+  try {
+    entries = await readdir(slotRoot, { withFileTypes: true });
+  } catch {
+    return [null];
+  }
+  const roots: (string | null)[] = [];
+  for (const entry of entries) {
+    if (entry.isSymbolicLink()) {
+      continue;
+    }
+    if (!entry.name.startsWith("@")) {
+      roots.push(join(slotRoot, entry.name));
+      continue;
+    }
+    const members = await scopeMembers(slotRoot, entry.name);
+    if (members === null) {
+      return [null];
+    }
+    roots.push(...members);
+  }
+  return roots;
 }
 
 /**
@@ -1347,38 +1407,21 @@ async function blanketBuildsConfigured(installRoot: string): Promise<boolean | u
  * the store walk's business, and following them would re-digest the store through every slot.
  */
 async function storeSlotContentDigest(storeDirectory: string, slotName: string): Promise<string | null> {
-  const slotRoot = join(storeDirectory, slotName, "node_modules");
-  let entries: { readonly name: string; readonly isSymbolicLink: () => boolean }[];
-  try {
-    entries = await readdir(slotRoot, { withFileTypes: true });
-  } catch {
-    return null;
-  }
-  for (const entry of entries) {
-    if (entry.isSymbolicLink()) {
-      continue;
-    }
-    // A `@scope` directory is a namespace, so the package is inside it.
-    const packageRoots = entry.name.startsWith("@")
-      ? await scopeMembers(slotRoot, entry.name)
-      : [join(slotRoot, entry.name)];
-    if (packageRoots === null) {
+  // `slotOwnPackageRoots` decides which directory is this slot's own package, so the slot selected
+  // for reading and the files read from it cannot drift apart.
+  const roots = await slotOwnPackageRoots(storeDirectory, slotName);
+  const collected: string[] = [];
+  for (const root of roots) {
+    if (root === null) {
       return null;
     }
-    const collected: string[] = [];
-    for (const root of packageRoots) {
-      const files = await collectPackageFiles(root, root);
-      if (files === null) {
-        return null;
-      }
-      collected.push(...files);
+    const files = await collectPackageFiles(root, root);
+    if (files === null) {
+      return null;
     }
-    if (collected.length === 0) {
-      continue;
-    }
-    return digestOf(canonicalJson(collected.sort()));
+    collected.push(...files);
   }
-  return null;
+  return collected.length === 0 ? null : digestOf(canonicalJson(collected.sort()));
 }
 
 /** The real package directories inside a `@scope` container, or `null` when it cannot be read. */

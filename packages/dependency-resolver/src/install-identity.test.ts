@@ -672,23 +672,33 @@ describe("#94: identity comes from the install graph, not from a declaration", (
     expect(second).toBe(first);
   });
 
-  it("digests every slot when blanket builds make an empty build record mean nothing", async () => {
-    // PR #114 review round 12, P1. `implicated.size === 0` does not mean "no slot was built": pnpm's
-    // `dangerouslyAllowAllBuilds` runs every lifecycle script regardless of `allowBuilds` and records
-    // nothing about it. Measured on a real install with `dangerously-allow-all-builds=true`:
-    // `allowBuilds: {}`, `pendingBuilds: []`, no `ignoredBuilds`, and the setting appears in neither
-    // `.modules.yaml` nor `pnpm-lock.yaml`. Content-digesting the whole store as the fallback measured
-    // **9.0 s** for 14 281 files, so the fallback is only taken when the setting is present.
+  it("reads a built slot when the build policy left no record of it", async () => {
+    // PR #114 rounds 12 and 13. The record cannot be trusted to be complete: pnpm's
+    // `dangerouslyAllowAllBuilds` runs every lifecycle script and persists nothing, and its **resolved
+    // config** accepts an environment overlay — measured,
+    // `PNPM_CONFIG_DANGEROUSLY_ALLOW_ALL_BUILDS=true pnpm install` in a project with **no** `.npmrc`
+    // wrote `allowBuilds: {}` and `pendingBuilds: []` and left no trace of the policy in
+    // `.modules.yaml`, in `pnpm-lock.yaml`, or in the store. Reading the project's own configuration,
+    // which is what round 12 did, answers "off" for that install.
+    //
+    // So the slots that could have been built are enumerated from the disk instead — a dependency is
+    // built by a script **its own manifest declares** — and those are read by content. The fixture is
+    // the measured real one: `esbuild@0.25.0`, whose `postinstall` writes `bin/esbuild`, installed
+    // under an env-driven blanket policy with an empty record.
     const tree = await withProject(async root => {
-      const slot = join(root, "node_modules", ".pnpm", "built@1.0.0", "node_modules", "built");
+      const slot = join(root, "node_modules", ".pnpm", "esbuild@0.25.0", "node_modules", "esbuild");
+      const artifact = join(slot, "bin", "esbuild");
       await writeFileAt(
         join(root, "package.json"),
         JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "pnpm@12.4.2" }),
       );
       await writeFileAt(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
-      await writeFileAt(join(root, ".npmrc"), "dangerously-allow-all-builds=true\n");
+      // No `.npmrc`: the policy came from the environment, so nothing in this project states it.
       await writeFileAt(join(root, "node_modules", ".pnpm", "node_modules", ".keep"), "");
-      await writeFileAt(join(slot, "package.json"), JSON.stringify({ name: "built", version: "1.0.0" }));
+      await writeFileAt(
+        join(slot, "package.json"),
+        JSON.stringify({ name: "esbuild", version: "0.25.0", scripts: { postinstall: "node install.js" } }),
+      );
       await writeFileAt(
         join(root, "node_modules", ".modules.yaml"),
         JSON.stringify({
@@ -696,7 +706,7 @@ describe("#94: identity comes from the install graph, not from a declaration", (
           nodeLinker: "isolated",
           hoistPattern: ["*"],
           publicHoistPattern: [],
-          // Exactly what blanket mode leaves behind: nothing naming a built slot.
+          // Exactly what a blanket install leaves behind: nothing naming a built slot.
           allowBuilds: {},
           pendingBuilds: [],
         }),
@@ -704,23 +714,17 @@ describe("#94: identity comes from the install graph, not from a declaration", (
 
       const read = async (): Promise<string | null | undefined> =>
         (await readInstallGraphIdentity(root)).installedTree;
-      const artifact = join(slot, "build-output.js");
-      await writeFileAt(artifact, "// built by the first environment\n");
+      await writeFileAt(artifact, "#!/bin/sh\n");
       const before = await read();
-      // `pnpm rebuild` under a different environment: same slot, same lock, different artifact.
-      await writeFileAt(artifact, "// built by a different environment\n");
+      // `pnpm rebuild` in another environment: same slot, same lock, same empty record.
+      await writeFileAt(artifact, "#!/bin/sh\n# rebuilt elsewhere\n");
       const rebuilt = await read();
-      // And with the setting off, the same record no longer implicates the slot, so the artifact is
-      // outside what this component claims — which is what makes the two modes distinguishable.
-      await writeFileAt(join(root, ".npmrc"), "dangerously-allow-all-builds=false\n");
-      return { before, rebuilt, off: await read() };
+      return { before, rebuilt };
     });
 
     expect(tree.before).not.toBeNull();
     expect(tree.rebuilt).not.toBe(tree.before);
-    expect(tree.off).not.toBe(tree.rebuilt);
   });
-
   it("reads the record of the lockfile's manager, not whichever marker is found first", async () => {
     // PR #114 review round 6, P1. Choosing the record by first match re-trusted the accumulated
     // markers: a project that ran `pnpm install` and later `npm install` keeps **both**, so in the
