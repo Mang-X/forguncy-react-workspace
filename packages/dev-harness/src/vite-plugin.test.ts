@@ -1028,3 +1028,91 @@ describe("a project alias cannot opt itself out by naming `@vite/`", () => {
     await expect(startsWith({ "@something-else": "/x" })).resolves.toBeUndefined();
   });
 });
+
+/**
+ * A **later** Vite plugin's `config()` can add an alias after this harness read the project's own.
+ *
+ * ## Why the `config()` snapshot alone is not enough
+ *
+ * This plugin declares `enforce: "pre"`, and Vite runs `config` hooks sequentially — an ordinary or
+ * `post` user plugin still merges into `resolve.alias` **after** the snapshot was taken. Measured
+ * with no RegExp involved, using exactly the reviewer's construction:
+ *
+ * ```ts
+ * const lateAlias = { name: "late-project-alias", config() {
+ *   return { resolve: { alias: { "@app/shared/thing": "/local-copy" } } };
+ * } };
+ * plugins: [devHarness({ config: forguncyConfig }), lateAlias]
+ * ```
+ *
+ * Vite resolves `@app/shared/thing` to `/local-copy/thing`, the Cell build keeps using
+ * `./shared/thing`, and the snapshot-based audit had nothing to refuse.
+ *
+ * So the **final** alias set is compared against the contributions that are known — the project's
+ * declaration, {@link hostModuleAliases} for this harness's own entries, and Vite's `@vite/` scope —
+ * and whatever is left is refused. A plugin that changes local resolution by a route the artifact
+ * never sees is the unsupported-Vite-plugin behaviour #97 asks to be reported.
+ */
+describe("an alias added by a later Vite plugin is refused", () => {
+  const reRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "tests", "fixtures", "project-alias");
+
+  function registry() {
+    return createCellRegistry(
+      {
+        cells: { probe: { entry: "./cells/probe/src/index.ts", target: { pageName: "探针", cell: "A1" } } },
+        resolve: { alias: { "@app/shared": "./shared" } },
+      },
+      { root: reRoot },
+    );
+  }
+
+  const lateShadow = {
+    name: "late-project-alias",
+    config() {
+      return { resolve: { alias: { "@app/shared/thing": "/local-copy" } } };
+    },
+  };
+
+  async function start(extra: readonly unknown[], userAlias?: Record<string, string>): Promise<void> {
+    const server = await createServer({
+      root: reRoot,
+      configFile: false,
+      logLevel: "error",
+      appType: "spa",
+      ...(userAlias === undefined ? {} : { resolve: { alias: userAlias } }),
+      plugins: [devHarness({ config: registry() }) as never, ...(extra as never[])],
+      server: { middlewareMode: true, hmr: false, watch: null },
+    });
+    await server.close();
+  }
+
+  it("refuses a later plugin whose alias shadows the project alias", async () => {
+    await expect(start([lateShadow])).rejects.toThrowError(/refused to start/);
+  });
+
+  it("refuses a later plugin's alias even when it overlaps nothing", async () => {
+    // Not just the overlap case. The audit cannot account for where the alias came from, and an
+    // unaccounted alias is a plugin moving local resolution by a route the artifact never sees.
+    const unrelated = {
+      name: "late-unrelated",
+      config() {
+        return { resolve: { alias: { "some-unrelated-id": "/x" } } };
+      },
+    };
+
+    await expect(start([unrelated])).rejects.toThrowError(/refused to start/);
+  });
+
+  it("refuses even when the project declared the same key, because the plugin's target won", async () => {
+    // The merge collapses both contributions to one entry, so key identity cannot distinguish them
+    // — but the merged **value** can: measured, a plugin contributing the same key with a different
+    // target makes Vite resolve to the plugin's, so local resolution really did change and the
+    // refusal is right rather than over-cautious.
+    await expect(start([lateShadow], { "@app/shared/thing": "/x" })).rejects.toThrowError(/refused to start/);
+  });
+
+  it("still starts when only the project and this harness contribute", async () => {
+    await expect(start([])).resolves.toBeUndefined();
+    await expect(start([], { "@unrelated-id": "/x" })).resolves.toBeUndefined();
+  });
+});

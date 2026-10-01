@@ -194,6 +194,10 @@ export default defineForguncyConfig({
 
 误拒的确存在：一个与项目别名毫无关系的复杂正则（例如 `/^some-other-lib(\/|$)/`）也会被拒。改写成等价的普通字符串别名即可精确通过 —— 这也是「真的想要某个 id」时本来该写的形式。
 
+**由 Vite 插件注入的别名同样被拒绝。** harness 自身是 `enforce: "pre"`，而 Vite 的 `config` hook 是顺序执行的 —— 普通/`post` 用户插件会在 harness 读完之后继续 merge 进 `resolve.alias`。一个这样的插件若注入 `@app/shared/thing -> /local-copy`，Vite 会在 harness 的 `resolveId` 之前命中它，而 Cell 构建只认 `forguncy.config.ts`，于是 dev 与产物对同一个 import 给出不同文件。
+
+因此 harness 会在启动时对比**最终**的 alias 集合：项目自己声明的、harness 自己注入的（`hostModuleAliases()`）、以及 Vite 内置的 `@vite/` 条目三者之外，任何多出来的条目一律拒绝 —— 不要求它与项目别名重叠，因为「本 harness 无法解释的别名」本身就已经是本票要求报告的「未支持的 Vite plugin 行为」。需要某个别名就写在 `vite.config.ts` 里，那份声明会被正确记账。
+
 ## 依赖策略
 
 第三方依赖不会简单地分成“支持 / 不支持”，而是根据实际运行方式选择以下策略：

@@ -58,6 +58,7 @@ import react from "@vitejs/plugin-react-swc";
 import { ForguncyConfigError, RUNTIME_CONTRACT_TARGET } from "@forguncy-react-workspace/core";
 import type { CellRegistry, ForguncyConfig, RegisteredCell } from "@forguncy-react-workspace/core";
 import type { LocalDevExtensionChoice } from "@forguncy-react-workspace/runtime";
+import { createLocalDevDiagnostic } from "@forguncy-react-workspace/runtime";
 import { resolveInstalledVersions } from "@forguncy-react-workspace/dependency-resolver/local";
 import { cellVirtualModuleId, forguncy } from "@forguncy-react-workspace/vite-plugin-fgc";
 
@@ -537,6 +538,93 @@ function unclaimedHostAliases(userAlias: unknown): Record<string, string> {
  * key it shadows. The audit's message then names a string that *is* in the config file, and the
  * comparison still matches exactly — one value, correct in both roles.
  */
+/**
+ * A pattern's source with backslash escapes resolved, so a literal separator reads as itself.
+ *
+ * Vite writes its injected client entries as `@vite\/env`, for which a plain
+ * `source.includes("@vite/")` is **false** (measured). Unescaping first is what makes the scope test
+ * match them — and is the whole reason this is a named function rather than an inline regex that
+ * could be simplified away into a test that passes vacuously.
+ */
+function unescapesPatternSource(source: string): string {
+  return source.replace(/\\(.)/g, "$1");
+}
+
+/**
+ * Final alias entries that neither the project nor this harness declared, as string keys.
+ *
+ * ## Why the `config()` snapshot is not enough on its own
+ *
+ * This plugin declares `enforce: "pre"` and Vite runs `config` hooks sequentially, so a normal or
+ * `post` user plugin still merges into the config **after** the snapshot was captured. Measured
+ * before this existed, with no RegExp involved: a plugin returning
+ * `{ resolve: { alias: { "@app/shared/thing": "/local-copy" } } }` made Vite resolve
+ * `@app/shared/thing` to `/local-copy/thing` while the Cell build used `./shared/thing` — and the
+ * snapshot-based audit had nothing to refuse.
+ *
+ * So the final set is compared against the contributions that are *known*, and the remainder is
+ * reported. "Known" is assembled from three sources rather than matched by looking for markers in
+ * the alias text, which is the mistake that produced the two previous bypasses:
+ *
+ * - what the project declared (the `config()` snapshot);
+ * - what this harness emits, which is {@link hostModuleAliases} — the very map `config()` returns,
+ *   so it is compared as a value rather than re-derived;
+ * - Vite's own injected entries, which are the `@vite/` scope.
+ *
+ * Only a **string** `find` is returned, and the reason is not convenience: a string is what the
+ * audit compares, and a `RegExp` arriving from a plugin this harness did not write has already
+ * been judged by {@link projectAliasShadowKeys} if the project declared it. An undeclared pattern is
+ * reported here by its source text so the message quotes something findable in the plugin rather
+ * than pretending to have run it.
+ */
+function undeclaredAliasPatterns(
+  finalAlias: unknown,
+  declared: readonly unknown[],
+): readonly string[] {
+  const harnessOwned = hostModuleAliases();
+  const declaredStrings = new Set(
+    declared.filter((pattern): pattern is string => typeof pattern === "string").map(normalizeAliasKeyForCompare),
+  );
+
+  const undeclared: string[] = [];
+  for (const pattern of readAliasPatterns(finalAlias)) {
+    if (typeof pattern === "string") {
+      // The harness's own entries, keyed the same way `config()` emitted them.
+      if (Object.prototype.hasOwnProperty.call(harnessOwned, pattern)) {
+        continue;
+      }
+      // Compared **normalized**, on both sides: `declaredStrings` is built from the project's
+      // snapshot, and a project writing `"react/"` and a plugin contributing `"react"` name one
+      // alias. Comparing the raw key instead made a project that declared an alias also be refused
+      // for the plugin's identical copy — measured, and the fix is the comparison, not the rule.
+      if (declaredStrings.has(normalizeAliasKeyForCompare(pattern))) {
+        continue;
+      }
+      undeclared.push(pattern);
+      continue;
+    }
+
+    if (pattern instanceof RegExp) {
+      // Vite injects its client entries as patterns; anything else in the `@vite/` scope is
+      // likewise not the project's business.
+      if (unescapesPatternSource(pattern.source).includes("@vite/")) {
+        continue;
+      }
+      if (declared.includes(pattern)) {
+        continue;
+      }
+      undeclared.push(String(pattern));
+    }
+  }
+
+  return undeclared;
+}
+
+/** A key as the audit compares it, so a project's `react/` and the harness's `react` are one id. */
+function normalizeAliasKeyForCompare(key: string): string {
+  return key.endsWith("/") ? key.replace(/\/+$/, "") : key;
+}
+
 function projectAliasShadowKeys(
   pattern: RegExp,
   projectAlias: Readonly<Record<string, string>>,
@@ -986,6 +1074,51 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
           continue;
         }
         userAliasPatterns.push(...projectAliasShadowKeys(pattern, projectAlias));
+      }
+
+      // Anything in the **final** alias set that this harness did not declare is a contribution
+      // from somewhere the snapshot cannot see, and Vite's resolver will use it before the
+      // harness's own `resolveId`.
+      //
+      // The snapshot in `config()` is necessary but not sufficient, and the reason is ordering:
+      // this plugin declares `enforce: "pre"`, Vite's `config` hooks run sequentially, and an
+      // ordinary or `post` user plugin still merges into the config *after* the snapshot was
+      // taken. Measured before this check, with no RegExp involved — a plugin whose `config()`
+      // returns `{ resolve: { alias: { "@app/shared/thing": "/local-copy" } } }` made Vite resolve
+      // `@app/shared/thing` to `/local-copy/thing` while production used `./shared/thing`, and the
+      // audit saw nothing to refuse.
+      //
+      // The subtraction is by **identity of contribution**, not by text: everything the project
+      // declared, everything this harness's own host aliases are (which is `hostModuleAliases()`
+      // — the same source `config()` emits, so it is known rather than guessed), and Vite's
+      // injected `@vite/` entries. What is left is a later plugin's, and it is refused rather than
+      // ignored because a plugin that silently changes local resolution is precisely the
+      // unsupported-Vite-plugin behaviour #97 asks to be reported.
+      const latePluginAliases = undeclaredAliasPatterns(config.resolve?.alias, declared);
+      if (latePluginAliases.length > 0) {
+        // Refused whatever they overlap, not only a project alias. The overlap case is the
+        // correctness problem, but an alias this audit cannot account for is a plugin changing
+        // local resolution by a route the artifact never sees — and #97 asks for unsupported Vite
+        // plugin behaviour to be *reported* rather than silently accepted. Declaring the alias in
+        // `vite.config.ts` is the supported way to have one, and that declaration is in the snapshot.
+        const report = [
+          `The local dev harness refused to start: ${latePluginAliases.length} alias(es) reached \`resolve.alias\` from a Vite plugin, which this harness cannot account for.`,
+          ...latePluginAliases.map(
+            entry =>
+              `  ${entry}: a plugin added this after the harness read the project's own aliases, so it can change what a Cell resolves locally while the Cell build keeps using \`forguncy.config.ts\`. Declare it in \`vite.config.ts\` if the project means it, or remove the plugin.`,
+          ),
+        ].join("\n");
+
+        throw new BlockingLocalDevFindingError(
+          latePluginAliases.map(entry =>
+            createLocalDevDiagnostic(
+              "local-dev-project-alias-shadowed",
+              entry,
+              `A Vite plugin added the alias ${JSON.stringify(entry)} to \`resolve.alias\` after this harness read the project's own aliases, and neither Vite nor this harness contributed it.`,
+            ),
+          ),
+          report,
+        );
       }
 
       if (options.cellId !== undefined) {
