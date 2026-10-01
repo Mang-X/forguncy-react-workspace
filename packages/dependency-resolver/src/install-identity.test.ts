@@ -485,6 +485,171 @@ describe("#94: identity comes from the install graph, not from a declaration", (
     expect(after.installedTree).not.toBe(before.installedTree);
   });
 
+  it("digests a transitive link reached below the root, not only a hoisted one", async () => {
+    // PR #114 review round 9, P1. `linkTargetsDigest` walked the install root's *top level*
+    // `node_modules`, so it only ever saw the links a manager had hoisted — and both managers
+    // legitimately place a transitive workspace dependency lower down. Measured on a real pnpm
+    // isolated install: `b` is linked only from `packages/a/node_modules` (a's dependency
+    // position), is absent from the root `node_modules` entirely, and still resolves from `a`;
+    // editing its source moved no digest. npm's hidden lock records the same shape
+    // (`node_modules/a/node_modules/b`), which is why the walk enumerates the materialized tree
+    // rather than guessing a directory shape that only holds for hoisted installs.
+    //
+    // The layout is built here rather than by running pnpm, because a test that shells out to a
+    // package manager depends on the network and on that manager's version. The shape is the one
+    // measured: the target is linked from a nested `node_modules`, and the root has no such entry.
+    const withNestedLink = async (source: string): Promise<string | null | undefined> =>
+      withProject(async root => {
+        await writeFileAt(
+          join(root, "package.json"),
+          JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "pnpm@11.18.0" }),
+        );
+        await writeFileAt(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+        // The workspace package `b`, which nothing links at the root.
+        await writeFileAt(
+          join(root, "packages", "b", "package.json"),
+          JSON.stringify({ name: "b", version: "1.0.0" }),
+        );
+        await writeFileAt(join(root, "packages", "b", "src", "index.js"), source);
+        // `a` is a registry package in the root store, and `b` is linked from **its** node_modules.
+        const aModules = join(root, "node_modules", ".pnpm", "a@1.0.0", "node_modules", "a", "node_modules");
+        await writeFileAt(
+          join(root, "node_modules", ".pnpm", "a@1.0.0", "node_modules", "a", "package.json"),
+          JSON.stringify({ name: "a", version: "1.0.0", dependencies: { b: "file:packages/b" } }),
+        );
+        await mkdir(aModules, { recursive: true });
+        await symlink(join(root, "packages", "b"), join(aModules, "b"), "junction");
+        await writeFileAt(
+          join(root, "node_modules", ".modules.yaml"),
+          JSON.stringify({
+            included: { dependencies: true, devDependencies: true, optionalDependencies: true },
+            nodeLinker: "isolated",
+            hoistPattern: ["*"],
+            publicHoistPattern: [],
+          }),
+        );
+        await writeFileAt(join(root, "node_modules", ".pnpm", "node_modules", ".keep"), "");
+        return (await readInstallGraphIdentity(root)).installedTree;
+      });
+
+    const before = await withNestedLink("export const VERSION = 1;\n");
+    const after = await withNestedLink("export const VERSION = 2; // nested target edited\n");
+
+    expect(before).not.toBeNull();
+    expect(after).not.toBe(before);
+    expect(await withNestedLink("export const VERSION = 1;\n")).toBe(before);
+  });
+
+  it("excludes this toolchain's own scratch from a link target, so the identity is stable", async () => {
+    // Found while implementing round 9, and it is worse than the gap the digest exists to close: a
+    // workspace member that carries a `.fgc/` directory — the probe cache and synthetic build
+    // entries, gitignored and rewritten by every probe run — had its **identity change on every
+    // consecutive read** of an unchanged tree, because the scratch sat inside the very target being
+    // digested. A moving identity can never match a recorded one, so every run re-probes and the
+    // axis carries no information at all.
+    //
+    // So `.fgc` is excluded for the same structural reason `node_modules` is: it is not the
+    // package's content. The two exclusions are enumerated by name rather than applied as "every dot
+    // entry", which is what keeps `exports: "./.generated/index.js"` covered.
+    const readTwice = async (): Promise<readonly (string | null | undefined)[]> =>
+      withProject(async root => {
+        await writeFileAt(
+          join(root, "package.json"),
+          JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "pnpm@11.18.0" }),
+        );
+        await writeFileAt(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+        await writeFileAt(
+          join(root, "packages", "bar", "package.json"),
+          JSON.stringify({ name: "bar", version: "1.0.0", exports: { ".": "./.generated/index.js" } }),
+        );
+        await writeFileAt(join(root, "packages", "bar", ".generated", "index.js"), "export const V = 1;\n");
+        await mkdir(join(root, "node_modules"), { recursive: true });
+        await symlink(join(root, "packages", "bar"), join(root, "node_modules", "bar"), "junction");
+        // The scratch a probe run leaves in the member it probed. Written once per read below, the
+        // way a real probe run rewrites it — writing it once here would make the two reads agree
+        // for the wrong reason and the case would pass even with the scratch digested.
+        const writeScratch = (run: number): Promise<void> =>
+          writeFileAt(join(root, "packages", "bar", ".fgc", "probe-cache", `run-${run}.json`), `{"run":${String(run)}}\n`);
+        await writeScratch(1);
+        await writeFileAt(
+          join(root, "node_modules", ".modules.yaml"),
+          JSON.stringify({
+            included: { dependencies: true, devDependencies: true, optionalDependencies: true },
+            nodeLinker: "isolated",
+            hoistPattern: ["*"],
+            publicHoistPattern: [],
+          }),
+        );
+        await writeFileAt(join(root, "node_modules", ".pnpm", "node_modules", ".keep"), "");
+        const first = (await readInstallGraphIdentity(root)).installedTree;
+        // A second probe run: the package's own files are untouched, only the scratch moved.
+        await writeScratch(2);
+        await rm(join(root, "packages", "bar", ".fgc", "probe-cache", "run-1.json"), { force: true });
+        const second = (await readInstallGraphIdentity(root)).installedTree;
+
+        // **Self-reference**, found while implementing this: the toolchain's *evidence* lives in the
+        // same target — `fgc.lock.json` and `fgc-evidence/` sit beside `package.json`. Reading the
+        // identity, recording the lock, and reading it again in one process gave two different
+        // values, because the first write had become an input to the second read. So the evidence is
+        // excluded by name alongside the scratch, and this asserts the property that actually
+        // matters: an identity that cannot survive recording itself carries no information.
+        await writeFileAt(join(root, "packages", "bar", "fgc.lock.json"), '{"recorded":true}');
+        await writeFileAt(join(root, "packages", "bar", "fgc-evidence", "probe-1.json"), '{"run":1}');
+        return [first, second, (await readInstallGraphIdentity(root)).installedTree];
+      });
+
+    const [first, second, afterRecording] = await readTwice();
+
+    // The premise of the case: two reads of an unchanged tree must agree, or nothing downstream can
+    // compare them.
+    expect(first).not.toBeNull();
+    expect(second).toBe(first);
+    expect(afterRecording).toBe(first);
+  });
+
+  it("digests a dot-named file a package's `exports` points at", async () => {
+    // PR #114 review round 9, P1. `collectPackageFiles` skipped every entry whose name began with
+    // a dot, justified as "manager bookkeeping" — but only `node_modules` is manager bookkeeping. A
+    // workspace package whose `package.json` says `exports: { ".": "./.generated/index.js" }` is
+    // ordinary, and editing that file moved nothing while the next build read the new source.
+    const withDotExport = async (generated: string): Promise<string | null | undefined> =>
+      withProject(async root => {
+        await writeFileAt(
+          join(root, "package.json"),
+          JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "pnpm@11.18.0" }),
+        );
+        await writeFileAt(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+        await writeFileAt(
+          join(root, "packages", "bar", "package.json"),
+          JSON.stringify({ name: "bar", version: "1.0.0", exports: { ".": "./.generated/index.js" } }),
+        );
+        await writeFileAt(join(root, "packages", "bar", ".generated", "index.js"), generated);
+        await mkdir(join(root, "node_modules"), { recursive: true });
+        await symlink(join(root, "packages", "bar"), join(root, "node_modules", "bar"), "junction");
+        await writeFileAt(
+          join(root, "node_modules", ".modules.yaml"),
+          JSON.stringify({
+            included: { dependencies: true, devDependencies: true, optionalDependencies: true },
+            nodeLinker: "isolated",
+            hoistPattern: ["*"],
+            publicHoistPattern: [],
+          }),
+        );
+        await writeFileAt(join(root, "node_modules", ".pnpm", "node_modules", ".keep"), "");
+        await writeFileAt(
+          join(root, "node_modules", ".pnpm", "consumer@1.0.0", "node_modules", "consumer", "package.json"),
+          "{}",
+        );
+        return (await readInstallGraphIdentity(root)).installedTree;
+      });
+
+    const before = await withDotExport("export const VERSION = 1;\n");
+    const after = await withDotExport("export const VERSION = 2; // dot file edited\n");
+
+    expect(before).not.toBeNull();
+    expect(after).not.toBe(before);
+  });
+
   it("digests a workspace link's target contents, not only the link path", async () => {
     // PR #114 review round 8, P1. A workspace dependency is a symlink **out of** the install tree —
     // measured, pnpm links `node_modules/bar` to `packages/bar` and npm records

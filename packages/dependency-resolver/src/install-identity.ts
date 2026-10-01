@@ -65,11 +65,13 @@
  */
 
 import { createHash } from "node:crypto";
-import { readFile, readdir, realpath } from "node:fs/promises";
+import type { Dirent } from "node:fs";
+import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { dirname, join, relative as relativePath, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { InstallGraphIdentity, ToolchainIdentity } from "@forguncy-react-workspace/core";
+import { FGC_LOCK_FILE_NAME } from "@forguncy-react-workspace/core";
 import { parse as parseYaml } from "yaml";
 
 import { locatePackage } from "./package-locator.ts";
@@ -110,6 +112,28 @@ const BINARY_LOCKFILE_NAMES: ReadonlySet<string> = new Set(["bun.lockb"]);
 
 /** The workspace configuration file pnpm reads, which is where overrides and patches are declared. */
 export const WORKSPACE_CONFIG_FILE = "pnpm-workspace.yaml";
+
+/**
+ * Artifacts **this toolchain** writes into a project, which are not the project's content.
+ *
+ * Excluded from a link target's digest for the same structural reason `node_modules` is, and
+ * excluding them is not tidiness — two of the three made the identity self-referential:
+ *
+ * - `.fgc/` — the probe cache and synthetic build entries. Measured: including it made a workspace
+ *   member's identity change on every read of an unchanged tree.
+ * - `fgc.lock.json` and `fgc-evidence/` — the recorded evidence. These are this toolchain's
+ *   *output* about the project, and a project that carries them has them inside the very target
+ *   being digested. Measured: reading the identity, writing the lock, and reading it again in the
+ *   same process produced two different values, because the first write had become part of the input
+ *   to the second read. An identity that cannot survive recording its own evidence carries no
+ *   information, and it would re-measure for ever.
+ */
+const TOOLCHAIN_ARTIFACT_NAMES: ReadonlySet<string> = new Set([".fgc", "fgc-evidence", FGC_LOCK_FILE_NAME]);
+
+/** Whether an entry of a link target is one of this toolchain's own artifacts. */
+function isToolchainArtifact(name: string): boolean {
+  return TOOLCHAIN_ARTIFACT_NAMES.has(name);
+}
 
 /**
  * The install records the package managers write into their own `node_modules`.
@@ -1099,44 +1123,109 @@ async function linkTargetsDigest(installRoot: string): Promise<string | null> {
   }
 
   const links: { readonly name: string; readonly files: readonly string[] }[] = [];
-  let entries: string[];
-  try {
-    entries = await readdir(nodeModules);
-  } catch {
-    return null;
-  }
+  const seenTargets = new Set<string>();
 
-  for (const entry of entries) {
-    // Dot entries are the manager's own bookkeeping (`.bin`, `.pnpm`, `.modules.yaml`), never a link.
-    if (entry.startsWith(".")) {
-      continue;
+  // Every `node_modules` location under the install root, not just the top one. Review round 9: a
+  // root-only walk finds only the links a manager *hoisted*, and both managers legitimately place a
+  // transitive workspace dependency below that. Measured on a real pnpm isolated install — `b` is
+  // linked only from `packages/a/node_modules` (a's dependency position), is absent from the root
+  // `node_modules` entirely, and is still resolvable from `a`; editing its source moved no digest.
+  // npm's hidden lock records the same shape (`node_modules/a/node_modules/b`). So the link set is
+  // enumerated from the materialized tree, which is what the manager built, rather than guessed from
+  // a directory shape that only holds for hoisted installs.
+  const locations: string[] = [];
+  const collectLocations = async (directory: string, depth: number): Promise<void> => {
+    if (depth > MAX_LINK_SEARCH_DEPTH) {
+      return;
     }
-    const names = entry.startsWith("@")
-      ? await readdir(join(nodeModules, entry)).then(scoped => scoped.map(name => `${entry}/${name}`)).catch(() => null)
-      : [entry];
-    if (names === null) {
+    let dirents: Dirent[];
+    try {
+      dirents = await readdir(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of dirents) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      const path = join(directory, entry.name);
+      if (entry.name === "node_modules") {
+        locations.push(path);
+        // A `node_modules` inside the tree can itself contain one (npm's nested install), and pnpm's
+        // virtual store puts each package's own `node_modules` under `.pnpm/<name>@<version>/`.
+        await collectLocations(path, depth + 1);
+        continue;
+      }
+      await collectLocations(path, depth + 1);
+    }
+  };
+  await collectLocations(installRoot, 0);
+
+  for (const location of locations) {
+    let entries: string[];
+    try {
+      entries = await readdir(location);
+    } catch {
       return null;
     }
 
-    for (const name of names) {
-      const path = join(nodeModules, ...name.split("/"));
-      let resolved: string;
-      try {
-        // `realpath` follows the link; an entry that is *not* a link resolves to itself and so lands
-        // inside the tree, which is how a registry package is told apart from a workspace one.
-        resolved = await realpath(path);
-      } catch {
-        return null;
-      }
-      if (isInside(canonicalTree, resolved)) {
+    for (const entry of entries) {
+      // A package name never starts with a dot, so this cannot skip a link — and it avoids
+      // descending into `.pnpm`'s bookkeeping on a name that is not a package.
+      if (entry.startsWith(".")) {
         continue;
       }
-
-      const files = await collectPackageFiles(resolved, resolved);
-      if (files === null) {
+      const names = entry.startsWith("@")
+        ? await readdir(join(location, entry)).then(scoped => scoped.map(name => `${entry}/${name}`)).catch(() => null)
+        : [entry];
+      if (names === null) {
         return null;
       }
-      links.push({ name, files });
+
+      for (const name of names) {
+        const path = join(location, ...name.split("/"));
+        // `lstat` first, and that is a measured requirement rather than a micro-optimization.
+        // Resolving *every* entry cost 10.5 s on this repository's own install, because
+        // `realpath` on a Windows junction is ~20 ms and the walk visits hundreds of them; gating on
+        // `lstat` brought it to 776 ms. `lstat` does not follow the link, so it reports a junction as
+        // a link (verified on this platform) while a real directory inside the tree is not one — and
+        // a real directory inside the tree cannot escape it, so skipping it costs no coverage.
+        let isLink: boolean;
+        try {
+          isLink = (await lstat(path)).isSymbolicLink();
+        } catch {
+          return null;
+        }
+        if (!isLink) {
+          continue;
+        }
+
+        let resolved: string;
+        try {
+          // `realpath` follows the link, so this is the tree resolution would actually reach.
+          resolved = await realpath(path);
+        } catch {
+          return null;
+        }
+        if (isInside(canonicalTree, resolved)) {
+          continue;
+        }
+        // The same target linked from two dependency positions is one package installed once; digesting
+        // it twice would make the identity depend on how many places a manager happened to record it.
+        if (seenTargets.has(resolved)) {
+          continue;
+        }
+        seenTargets.add(resolved);
+
+        const files = await collectPackageFiles(resolved, resolved);
+        if (files === null) {
+          return null;
+        }
+        // Keyed by the link's *package name*, not by the location that found it: the identity is
+        // about which package was installed, and a dependency position is an install-manager detail
+        // that differs between pnpm's isolated layout and npm's hoisted one.
+        links.push({ name, files });
+      }
     }
   }
 
@@ -1145,12 +1234,36 @@ async function linkTargetsDigest(installRoot: string): Promise<string | null> {
 }
 
 /**
+ * How deep the link search descends below the install root.
+ *
+ * A bound rather than an unbounded walk, because the tree contains `node_modules` inside
+ * `node_modules` and a dependency cycle among links would otherwise never terminate. Measured depths
+ * in this repository's own installs: pnpm's isolated layout nests one level under
+ * `.pnpm/<name>@<version>/`, npm's nested install one under the dependent package.
+ *
+ * **What this walk costs, measured.** Enumerating the link set reads this repository's whole install
+ * (169 `node_modules` locations) and takes about **900 ms** on Windows, against 68 ms for the
+ * root-only walk this replaced — so covering the transitive links costs ~13× on this axis, on a path
+ * reached once per probe run and once per `vp dev` start. That is the conservative direction paying
+ * for itself: without it, a transitive workspace dependency's source edit is invisible (review round
+ * 9, measured).
+ *
+ * The 10.5 s it cost *before* the `lstat` gate in the scan loop was not this walk but
+ * `realpath` on Windows junctions — see the note there. If this ever needs to get cheaper, the
+ * honest lever is a manager's own materialized record rather than a shorter bound: a depth cut would
+ * drop exactly the deep store layouts this walk exists to cover.
+ */
+const MAX_LINK_SEARCH_DEPTH = 6;
+
+/**
  * Sorted `"<relative path>:<content digest>"` for every file under `directory`, or `null` when one
  * cannot be read.
  *
- * `node_modules` and dot directories are skipped: a workspace package's own install is a different
- * install graph with its own identity, and following it would make this digest depend on a tree the
- * link does not own.
+ * **`node_modules` is the only exclusion**, because it is the only name whose exclusion has a
+ * reason that holds — it is a different install graph, so following it would make this digest depend
+ * on a tree the link does not own. Dot-named entries are *not* excluded: `exports: { ".":
+ * "./.generated/index.js" }` is an ordinary way to publish a workspace package, and treating a dot
+ * as "manager bookkeeping" left that file invisible (review round 9, measured).
  */
 async function collectPackageFiles(directory: string, root: string): Promise<readonly string[] | null> {
   let entries: { readonly name: string; readonly isDirectory: () => boolean; readonly isFile: () => boolean }[];
@@ -1162,7 +1275,29 @@ async function collectPackageFiles(directory: string, root: string): Promise<rea
 
   const files: string[] = [];
   for (const entry of entries) {
-    if (entry.name.startsWith(".") || entry.name === "node_modules") {
+    // Only `node_modules` is excluded, and it is excluded for a reason that holds: it is a *different
+    // install graph* with its own identity, so following it would make this digest depend on a tree
+    // the link does not own. Every other entry is included — including dot-named ones. Review round 9
+    // measured the false fresh that blanket dot-exclusion bought: a workspace package whose
+    // `package.json` points `exports` (or `main`) at `./.generated/index.js` is entirely ordinary, and
+    // editing that file moved nothing while the next build read the new source. A dot name is not
+    // evidence of manager bookkeeping; only the names below are.
+    // Exclusions are **enumerated**, not "every dot name". The two that exist have separate, specific
+    // reasons, and a blanket rule gets one of them wrong:
+    //
+    // - `node_modules` is a *different install graph*, so following it would make this digest depend
+    //   on a tree the link does not own.
+    // - this toolchain's own artifacts (`.fgc/`, `fgc.lock.json`, `fgc-evidence/`) are its *output*
+    //   about the project, and a project carrying them has them inside the target being digested.
+    //   Measured: including them made the identity change on every read of an unchanged tree, and
+    //   made it self-referential — read the identity, write the lock, read it again in one process and
+    //   the two values differed. An identity that cannot survive recording its own evidence carries
+    //   no information, and it would re-measure for ever.
+    //
+    // Everything else is included, dot-named or not: `exports: { ".": "./.generated/index.js" }` is
+    // an ordinary way to publish a package, and excluding it on the grounds that a dot implies
+    // "manager bookkeeping" left that file invisible (review round 9, measured).
+    if (entry.name === "node_modules" || isToolchainArtifact(entry.name)) {
       continue;
     }
     const path = join(directory, entry.name);
