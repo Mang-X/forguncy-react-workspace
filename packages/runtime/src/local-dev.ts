@@ -2255,7 +2255,7 @@ export function formatLocalDevAudit(audit: LocalDevAudit): string {
       ? "No version check is available."
       : `Version checks: ${audit.alignment.map(entry => `${entry.localPackage}===${entry.expected}`).join(", ")}`,
     audit.realRuntimeOnly.length === 0
-      ? "No extension dependency is left to real-runtime validation."
+      ? "No dependency is recorded as real-runtime-only."
       : `Left to real-runtime validation by decision: ${audit.realRuntimeOnly.join(", ")}`,
     audit.diagnostics.length === 0
       ? "No local dev diagnostics."

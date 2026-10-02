@@ -78,14 +78,13 @@ export const RUNTIME_EVIDENCE_CHANNELS = [
  * the **shipped runtime source** the plugin serves.
  *
  * **What was not done, and is therefore absent from `evidence`:** no browser observation on
- * `12.0.101.0`. The generated page could not be *observed* — see
- * `RUNTIME_CONTRACT_UNKNOWNS` for what stops it, which is a defect in this build's generated
- * runtime site rather than a missing credential — so `generated-runtime-browser` was
- * **removed from `evidence`** rather than left over from #5's run on `12.0.100.0`. That matters
- * because `evidence` is machine-readable and this object is read as the *current* contract:
- * leaving that channel there would claim a browser observation of this build that nobody made.
- * #5's browser observation is where the version numbers *originate*; it is not evidence that
- * they still read the same here, and {@link RUNTIME_CONTRACT_UNKNOWNS} carries that as open.
+ * `12.0.101.0`. The measurement was simply not made — see {@link RUNTIME_CONTRACT_UNKNOWNS} for
+ * the question that leaves open — so `generated-runtime-browser` was **removed from `evidence`**
+ * rather than left over from #5's run on `12.0.100.0`. That matters because `evidence` is
+ * machine-readable and this object is read as the *current* contract: leaving that channel there
+ * would claim a browser observation of this build that nobody made. #5's browser observation is
+ * where the version numbers *originate*; it is not evidence that they still read the same here,
+ * and {@link RUNTIME_CONTRACT_UNKNOWNS} carries that as open.
  */
 export interface RuntimeContractTarget {
   readonly product: string;
@@ -1398,7 +1397,7 @@ export const RUNTIME_CONTRACT_UNKNOWNS: readonly RuntimeContractUnknown[] = [
     question:
       "Do `React.version` and `ReactDOM.version` still read 19.2.7 in a running page on 12.0.101.0?",
     whyOpen:
-      "The rebase read the version from the plugin's shipped `react-vendor.production.min.js` on 12.0.101.0, which establishes the version the product ships, and did not observe a running page. Measured: the login itself succeeds (`POST /Account/Login` returns and the page navigates), but the runtime bundle then throws in `loginByRSA` because `GET /Forguncy/Account/GetRSAPublicKey` answers 405 while a body-carrying POST answers 411 Length Required — the public key never arrives, so `e.Value` is null and the runtime's scripts never load. That is a defect in the runtime site this project generates, and it is why this is recorded as a product defect rather than an access problem: the login request is accepted and no second factor is involved. `RUNTIME_CONTRACT_TARGET.evidence` therefore no longer lists `generated-runtime-browser`, and `RUNTIME_CONTRACT_TARGET_FIELDS_NOT_BROWSER_OBSERVED` names the fields so a machine consumer can tell the difference. Nothing observed disagrees with the carried values; nothing observed confirms them on this build.",
+      "The rebase read the version from the plugin's shipped `react-vendor.production.min.js` on 12.0.101.0, which establishes the version the product ships, and did not observe a running page. No browser session was completed on this build, so what is missing is the observation itself; this record states that absence and does not attribute it to any page, service or account. `RUNTIME_CONTRACT_TARGET.evidence` therefore no longer lists `generated-runtime-browser`, and `RUNTIME_CONTRACT_TARGET_FIELDS_NOT_BROWSER_OBSERVED` names the fields so a machine consumer can tell the difference. Nothing observed disagrees with the carried values; nothing observed confirms them on this build.",
     ownedBy: "#120",
   },
 ];

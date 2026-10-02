@@ -413,10 +413,8 @@ export const CELL_CODE_PROJECT_VOLUME_OBSERVATION = {
  *   published per-point values with these would be replacing one single-sample series with
  *   another.
  * - **The browser entry series was not re-measured at all.** It needs the generated page open in
- *   a browser, and this build's generated runtime site cannot deliver one: the login request is
- *   accepted, but the runtime bundle then throws in `loginByRSA` when the RSA public key request
- *   comes back empty (`GET` answers 405; a body-carrying POST answers 411 Length Required), so
- *   the runtime's scripts never load and `window.React` stays undefined. The
+ *   a browser, and no browser session was completed on `12.0.101.0`, so the reason is simply
+ *   that the measurement was not made — not a claim about what any page does or does not do. The
  *   `browserEntryMsPerKilobyte` figure therefore has no 101 counterpart.
  * - **A write at 4,193,986 characters was observed rejected** on 101 with
  *   `代码验证失败：AI 校验 WebView 执行超时（20 秒）`, where #21 recorded that size writing
@@ -458,7 +456,7 @@ export const CELL_CODE_BUDGET_REBASE_101 = {
   replacedPublishedFigures: false,
   /** Series the re-measurement could not cover, and why. */
   notReMeasured: {
-    browserEntry: "Needs the generated page open in a browser. The login itself works on this build, but the runtime bundle then throws in `loginByRSA` because the RSA public key request is answered 405/411 and never yields a key, so the runtime scripts do not load.",
+    browserEntry: "Needs the generated page open in a browser. No browser session was completed on 12.0.101.0, so this series was not measured on that build; this records an absence, not a finding about any page.",
   },
   /** The one finding that may exceed sampling noise, stated as observed rather than decided. */
   validationTimeoutObservation: {

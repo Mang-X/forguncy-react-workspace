@@ -36,9 +36,15 @@
  * ## The two Cells
  *
  * `capped` declares `codeBudgetCharacters: 8000`, which this Cell's composed source genuinely
- * exceeds (~15k characters, ~10.6k of them `es-toolkit`'s) — so the compiler files its own
- * `cell-code-budget-exceeded` diagnostic and the oversize rejection has a real measurement
- * behind it. `uncapped` declares no `output` block, which is the state a project that has
+ * exceeds — most of the excess is `es-toolkit`, which the enclosing example installs so the
+ * ancestor walk resolves it. So the compiler files its own `cell-code-budget-exceeded` diagnostic
+ * and the oversize rejection has a real measurement behind it: the walkthrough test compiles the
+ * Cell through the CLI and asserts `artifactEvidence.codeCharacters > 8000` on the lock record
+ * that compile wrote. That bound is what the fixture pins, and it is stated as a bound on
+ * purpose — the exact composed length shifts with the toolchain, so quoting a specific character
+ * count here would be a number nothing recomputes, which is the failure this fixture (#91)
+ * exists to make impossible.
+ * `uncapped` declares no `output` block, which is the state a project that has
  * adopted the contract but set no ceiling is in; the same rejection is refused there, and
  * that refusal is a case in the walkthrough test rather than an omission.
  */

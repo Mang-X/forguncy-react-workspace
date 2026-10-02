@@ -415,10 +415,16 @@ describe("what the measurement does and does not establish", () => {
     });
 
     it("names the series it could not re-measure rather than leaving it implied", () => {
-      // Same correction as the runtime-contract record: the blocker is the runtime bundle, not a
-      // credential. Asserted negatively so the wrong reason cannot come back.
-      expect(rebase.notReMeasured.browserEntry).toMatch(/loginByRSA|public key|browser/i);
-      expect(rebase.notReMeasured.browserEntry).not.toMatch(/two-step|2FA|credential/i);
+      // The record is an *absence*, so it is asserted as one: it says the series was not measured
+      // on this build, and it quotes no HTTP-level observation — no method, no URL, no status
+      // class — because none was made. An absence record carrying a status code asserts something
+      // about a system the measurement never examined, which is how a probe artifact became a
+      // recorded product defect here. The classes are asserted rather than the past wording, so
+      // the next account to reach for an observation fails on the same property.
+      expect(rebase.notReMeasured.browserEntry).toMatch(/not measured|no browser session/i);
+      expect(rebase.notReMeasured.browserEntry).not.toMatch(/\b(?:GET|POST|PUT|DELETE)\b/);
+      expect(rebase.notReMeasured.browserEntry).not.toMatch(/https?:\/\//);
+      expect(rebase.notReMeasured.browserEntry).not.toMatch(/\b4\d{2}\b/);
       // And the published browser figure is therefore still the 100 one, unreplaced.
       expect(CELL_CODE_BUDGET_MEASUREMENT.browserEntryMsPerKilobyte).toBeGreaterThan(0);
     });
