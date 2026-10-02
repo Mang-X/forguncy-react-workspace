@@ -1472,3 +1472,70 @@ describe("the alias rule removes exactly one trailing slash, as Vite does", () =
  *
  * The last row is the rule that round 10 was about and is unchanged: a one-sided slash is inert.
  */
+
+/**
+ * "This key is not one of ours" must not be spelled the same way as "ours, with an empty target".
+ *
+ * The harness-owned comparison reads `harnessOwned[find]` to build the entry it expects. An earlier
+ * version wrote `harnessOwned[find] ?? ""`, so a key that is **not** in the map produced a
+ * well-formed entry with an empty replacement — and any later plugin whose entry had the same empty
+ * replacement matched it exactly and was accepted.
+ *
+ * The case is not a no-op alias. `@rollup/plugin-alias` applies `importee.replace(find, replacement)`
+ * to a match, so `{ "@app/shared": "" }` rewrites `@app/shared/thing` to `/thing` (measured) before
+ * the harness's own project-alias `resolveId` runs, while the Cell build keeps `./shared/thing`.
+ */
+describe("an unknown key is absent, not an empty replacement", () => {
+  const reRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "tests", "fixtures", "project-alias");
+
+  function registry() {
+    return createCellRegistry(
+      {
+        cells: { probe: { entry: "./cells/probe/src/index.ts", target: { pageName: "探针", cell: "A1" } } },
+        resolve: { alias: { "@app/shared": "./shared" } },
+      },
+      { root: reRoot },
+    );
+  }
+
+  async function startWith(extra: readonly unknown[]): Promise<void> {
+    const server = await createServer({
+      root: reRoot,
+      configFile: false,
+      logLevel: "error",
+      appType: "spa",
+      plugins: [devHarness({ config: registry() }) as never, ...(extra as never[])],
+      server: { middlewareMode: true, hmr: false, watch: null },
+    });
+    await server.close();
+  }
+
+  it("refuses a later plugin that adds an empty replacement for a project alias", async () => {
+    const lateEmpty = {
+      name: "late-empty-alias",
+      config() {
+        return { resolve: { alias: { "@app/shared": "" } } };
+      },
+    };
+
+    await expect(startWith([lateEmpty])).rejects.toThrowError(/refused to start/);
+  });
+
+  it("refuses an empty replacement for a key the harness does not own either", async () => {
+    // Neither Vite's own entries nor the harness's produce an empty replacement, so there is no
+    // legitimate contribution this could be — the check must not depend on the key being a *project*
+    // alias to reject it.
+    const lateUnrelated = {
+      name: "late-empty-unrelated",
+      config() {
+        return { resolve: { alias: { "never-declared-anywhere": "" } } };
+      },
+    };
+
+    await expect(startWith([lateUnrelated])).rejects.toThrowError(/refused to start/);
+  });
+
+  it("still accepts the harness's own and the project's own entries", async () => {
+    await expect(startWith([])).resolves.toBeUndefined();
+  });
+});

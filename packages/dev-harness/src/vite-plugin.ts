@@ -649,9 +649,16 @@ function undeclaredAliasPatterns(
       // resolved `react` to the plugin's copy while the harness's was skipped). Compared through the
       // same normalization as the project's, because Vite strips the slashes off whichever entry it
       // merged — so the harness's own emitted spelling is not what the final list carries.
+      // The key must **belong** to the harness before its value is worth comparing. A `?? ""` here
+      // would turn "this key is not one of ours" into "ours, with an empty replacement", and a
+      // later plugin's `{ "@app/shared": "" }` would then match it exactly and be accepted (measured:
+      // Vite rewrites `@app/shared/thing` to `/thing` for that entry, while the artifact keeps
+      // `./shared/thing`). An empty replacement is a real value a project can write — it is not a
+      // stand-in for "absent", and the two must not be conflated.
       if (
+        Object.prototype.hasOwnProperty.call(harnessOwned, find) &&
         replacement !== undefined &&
-        isSameStringAlias({ find: find, replacement: harnessOwned[find] ?? "" }, find, replacement)
+        isSameStringAlias({ find, replacement: harnessOwned[find] }, find, replacement)
       ) {
         continue;
       }
