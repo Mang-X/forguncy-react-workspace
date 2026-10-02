@@ -1,3 +1,7 @@
+import {
+  CELL_CODE_BUDGET_MEASUREMENT,
+  RUNTIME_CONTRACT_TARGET,
+} from "@forguncy-react-workspace/core";
 import { describe, expect, it } from "vitest";
 
 import { compileCell } from "./artifact.ts";
@@ -51,6 +55,28 @@ describe("the cell code budget diagnostic names the measured band", () => {
     // they are two *different* artifacts, which is the point of splitting them.
     expect(diagnostic.message).toMatch(/the 2 MiB generated-toolkit artifact\)/);
     expect(diagnostic.message).toMatch(/the real `three` addons\+postprocessing build\)/);
+  });
+
+  /**
+   * #122: the figures above are `12.0.100.0`'s, and this diagnostic is the one a developer reads
+   * when a compile is rejected. `core` states the rule in so many words — "Naming this field 101
+   * while the figures came from 100 is the exact mislabelling #120 exists to prevent" — and this
+   * projection dropped it: `artifact.ts` contained no version string at all, so the numbers were
+   * presented in the present tense as this target's cost while the project targets 101.
+   *
+   * Asserted against `CELL_CODE_BUDGET_MEASUREMENT.target` rather than a literal, so the pin
+   * survives the next re-base: when the measurement moves, this fails until the diagnostic is
+   * re-read, which is the moment the attribution has to be reconsidered anyway.
+   */
+  it("names the build the figures were taken against, and that it is not this target", async () => {
+    const diagnostic = await budgetDiagnostic(700_000, 512 * 1024);
+
+    expect(diagnostic.message).toContain(CELL_CODE_BUDGET_MEASUREMENT.target);
+    // Carried forward, and said to be carried forward rather than presented as this build's cost.
+    expect(diagnostic.message).toMatch(/carried-forward reference rather than a measurement of this target/);
+    // The premise this rests on: the measurement really is a different build from the contract
+    // target. If a future re-base makes them equal, the hedge is wrong and this fails.
+    expect(CELL_CODE_BUDGET_MEASUREMENT.target).not.toBe(RUNTIME_CONTRACT_TARGET.productVersion);
   });
 
   it("reports the extension-recommended band for a multi-megabyte artifact", async () => {

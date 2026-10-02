@@ -208,6 +208,7 @@ export {
   localDevResolvableModuleIds,
   localDevResolvedBridgeRows,
   localDevUnsupportedModuleIds,
+  localDevVersionFieldIsBrowserObserved,
 } from "./local-dev.ts";
 export type {
   LocalDevAlignmentExpectation,

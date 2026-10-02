@@ -32,6 +32,7 @@
  */
 
 import {
+  CELL_CODE_BUDGET_MEASUREMENT,
   CELL_USER_SCOPE_BINDINGS,
   assertCellCodeBudget,
   classifyCellCodeSize,
@@ -936,9 +937,11 @@ function auditCodeBudget(code: string, budget: number | undefined): readonly Cel
       detail:
         `The composed artifact is ${code.length} characters against a configured budget of ${budget}. ` +
         `The measurement is taken on the composed artifact because that is what is written into the cell. ` +
-        `Measured band: ${verdict.band} (#21). At this band's own measured points the designer write took ` +
-        `${String(write.ms)} ms at ${String(write.characters)} characters (${write.artifact}) and the ` +
-        `browser's first cell entry took ${String(browserEntry.ms)} ms at ` +
+        `Measured band: ${verdict.band} (#21). Those figures were taken against ` +
+        `${CELL_CODE_BUDGET_MEASUREMENT.target}, which is not the build this project targets, so they are ` +
+        `a carried-forward reference rather than a measurement of this target: at this band's own measured ` +
+        `points the designer write took ${String(write.ms)} ms at ${String(write.characters)} characters ` +
+        `(${write.artifact}) and the browser's first cell entry took ${String(browserEntry.ms)} ms at ` +
         `${String(browserEntry.characters)} characters (${browserEntry.artifact}). ${guidance}`,
       // The measurement travels with the diagnostic so it has exactly one producer (#77 round 5).
       // A caller that wants to record this rejection has to take these numbers — it cannot type its

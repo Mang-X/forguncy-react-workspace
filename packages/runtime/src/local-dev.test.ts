@@ -738,6 +738,40 @@ describe("dependency decisions under local development", () => {
     expect(audit.realRuntimeOnly).toEqual([]);
   });
 
+  // #122, and the fourth member of this family: the claim line has to be one the audit can
+  // actually assert, read through the *report* rather than the audit. `realRuntimeOnly` is empty
+  // on the omission branch above, and the old sentence ("No extension dependency is left to
+  // real-runtime validation") therefore printed directly underneath a blocking finding saying
+  // that extension dependency cannot be exercised locally — the report denying the exact fact it
+  // was carrying. `dev-harness` corrected this sentence and recorded why; this package kept the
+  // original. Asserted on the pair, not on the sentence, so either half breaking is caught: an
+  // omission must not be reported as "nothing is outstanding", and a real acknowledgement must
+  // still be printed by name.
+  it("does not print a clean claim beside a finding that denies it", () => {
+    const omitted = auditLocalDevConfiguration({ decisions: [extensionDecision] });
+    const omittedReport = formatLocalDevAudit(omitted);
+
+    expect(omitted.diagnostics.map(diagnostic => diagnostic.code)).toContain(
+      "local-dev-extension-needs-substitute",
+    );
+    expect(omittedReport).toMatch(/No dependency is recorded as real-runtime-only\./);
+    expect(omittedReport).not.toMatch(/No extension dependency is left to real-runtime validation/);
+
+    // And the branch that *does* have an acknowledgement still prints it by name, so the fix is
+    // not a way of making the line silent.
+    const acknowledged = auditLocalDevConfiguration({
+      decisions: [extensionDecision],
+      extensionChoices: [tanstackRealRuntimeOnly],
+    });
+    const acknowledgedReport = formatLocalDevAudit(acknowledged);
+
+    expect(acknowledged.realRuntimeOnly).toEqual(["@tanstack/react-query"]);
+    expect(acknowledgedReport).toMatch(
+      /Left to real-runtime validation by decision: @tanstack\/react-query/,
+    );
+    expect(acknowledgedReport).not.toMatch(/No dependency is recorded as real-runtime-only\./);
+  });
+
   it("records both modes, and only two", () => {
     expect([...LOCAL_DEV_EXTENSION_CHOICE_MODES]).toEqual(["substitute", "real-runtime-only"]);
   });

@@ -348,12 +348,18 @@ describe("runtime contract target", () => {
       const open = openRuntimeContractQuestions("#120");
 
       expect(open.map(question => question.id)).toContain("host-versions-not-browser-observed-101");
-      // It must name the real blocker, and must not name a credential or a second factor: an
-      // earlier version of this record said "two-step verification" on the strength of a page
-      // the reviewer of #116 had simply left open, and that wrong sentence would otherwise have
-      // been pinned by this assertion.
-      expect(open[0]?.whyOpen).toMatch(/loginByRSA|public key/);
-      expect(open[0]?.whyOpen).not.toMatch(/two-step|2FA|credential/i);
+      // Asserted as a property of an absence record rather than as wording. Two earlier
+      // revisions each named a blocker that was never established — "two-step verification", then
+      // a login page's RSA endpoint — and both were pinned here by a `toMatch` on the phrase,
+      // which is what let a probe artifact survive as a recorded finding. The property is instead:
+      // the record states that the observation was not made, and quotes no HTTP-level
+      // observation, because none was made. Asserting the classes rather than either past
+      // sentence means the next account to reach for a status code fails here instead of
+      // needing this test rewritten first.
+      expect(open[0]?.whyOpen).toMatch(/not observe|not measured|no browser session|did not observe/i);
+      expect(open[0]?.whyOpen).not.toMatch(/\b(?:GET|POST|PUT|DELETE)\b/);
+      expect(open[0]?.whyOpen).not.toMatch(/https?:\/\//);
+      expect(open[0]?.whyOpen).not.toMatch(/\b4\d{2}\b/);
     });
   });
 });

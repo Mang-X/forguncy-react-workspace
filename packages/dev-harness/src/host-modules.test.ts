@@ -30,7 +30,12 @@
  */
 
 import { HOST_BRIDGE_MAPPINGS, hostBridgeModuleIds } from "@forguncy-react-workspace/core";
-import { findLocalDevModuleIdResolution, LOCAL_DEV_MODULE_RESOLUTIONS } from "@forguncy-react-workspace/runtime";
+import {
+  findLocalDevModuleIdResolution,
+  LOCAL_DEV_MODULE_RESOLUTIONS,
+  LOCAL_DEV_VERSION_FIELDS,
+  localDevVersionFieldIsBrowserObserved,
+} from "@forguncy-react-workspace/runtime";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -47,6 +52,7 @@ import {
   unavailableHostModuleSource,
   unavailableHostModules,
 } from "./host-modules.ts";
+import { formatHostVersionWarning } from "./vite-plugin.ts";
 
 /** Every module id the real bridge table intercepts, in table order. */
 const interceptedIds = HOST_BRIDGE_MAPPINGS.flatMap(hostBridgeModuleIds);
@@ -254,5 +260,49 @@ describe("the installed versions are checked against the recorded target", () =>
     }
     // `antd` is bridged but not installed, so it must not be asked for as a copy to keep.
     expect(hostModuleDedupePackages()).not.toContain("antd");
+  });
+
+  /**
+   * #122: the warning a developer actually reads must not present a carried-forward number as
+   * one this build observed. `runtime` went to the trouble of making that distinction
+   * machine-readable (`localDevVersionFieldIsBrowserObserved`, whose own doc comment says a
+   * consumer asking "is this verified for the build we ship against" should call it), and the
+   * harness both owned it and never called it — so the warning read "the version #5 recorded for
+   * this target" about fields that `RUNTIME_CONTRACT_TARGET_FIELDS_NOT_BROWSER_OBSERVED` lists as
+   * *not* browser-observed on this build.
+   *
+   * Asserted as a property of the message, not as its wording. The field list is
+   * `LOCAL_DEV_VERSION_FIELDS`, and on this build **both** of its members are unobserved, so the
+   * test states that relationship rather than assuming an observed control exists: if a future
+   * re-base observes one, the first assertion below stops holding and the message has to change
+   * with it. That is the guard — the hedge follows the predicate, so it cannot be applied
+   * blanket-wise without failing here.
+   */
+  it("marks a carried-forward version as carried forward, on every field it is asked about", () => {
+    // The premise, stated so a future reader knows why there is no observed case below.
+    for (const field of LOCAL_DEV_VERSION_FIELDS) {
+      expect(localDevVersionFieldIsBrowserObserved(field), field).toBe(false);
+    }
+
+    const warning = formatHostVersionWarning([
+      { packageName: "react", expected: "19.2.7", installed: "19.1.0", field: "hostReactVersion" },
+      { packageName: "react-dom", expected: "19.2.7", installed: "19.1.0", field: "hostReactDomVersion" },
+    ]);
+
+    expect(warning, "a mismatch must produce a warning").toBeDefined();
+    // Every reported line carries its own provenance, so no row reads as an observation.
+    expect(warning).toContain("hostReactVersion = 19.2.7");
+    expect(warning).toContain("hostReactDomVersion = 19.2.7");
+    expect(warning).toMatch(/not observed on this build/);
+    // And the message says what a mismatch against it actually means.
+    expect(warning).toMatch(/carried-forward number rather than a difference from an observation/);
+    expect(warning).toMatch(/hostReactVersion, hostReactDomVersion/);
+    // It must not claim the target "recorded" the value as this build's own finding.
+    expect(warning).not.toMatch(/#5 recorded/);
+    // And the local-vs-runtime half of the warning survives all of this.
+    expect(warning).toMatch(/not evidence about this target/);
+
+    // No mismatches is silence, not an empty report.
+    expect(formatHostVersionWarning([])).toBeUndefined();
   });
 });

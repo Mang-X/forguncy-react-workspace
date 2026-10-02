@@ -295,22 +295,34 @@ describe("what has been executed on each route through the flow", () => {
   });
 
   // The other half of the same position, pinned so the doc and the report cannot drift apart
-  // again: #20's **write**-route cells on the pinned build are counted as covered, and the
-  // reasoning is on the execution row (`SYNC_EXECUTIONS["issue-20-write-route"].evidence`).
+  // again: #20's **write**-route cells on the build it ran against are counted as covered, and
+  // the reasoning is on the execution row (`SYNC_EXECUTIONS["issue-20-write-route"].evidence`).
   // #116's second review found the comment claiming the opposite while this report and these
   // tests counted them covered — a reader-facing contradiction in evidence metadata, which this
   // assertion is what makes impossible to reintroduce silently.
-  it("counts the pinned build's write-route cells as covered by #20's run", () => {
-    const pinnedWrite = unexecutedRuntimeCoverage().filter(
+  //
+  // #122: this previously read `unexecutedRuntimeCoverage()` with no arguments and then filtered
+  // for `12.0.100.0`, which is the shape of an assertion that cannot fail — the omitted argument
+  // defaults to `SYNC_SUPPORTED_VERSIONS` (see `guarantees.ts`), so the filter could only ever
+  // see `12.0.101.0` and the result was unconditionally empty. The `toEqual([])` passed with
+  // #20's execution row deleted outright. It is spelled here with both arguments, and asserted
+  // as the *specific* cells that remain uncovered on that build rather than as an empty list, so
+  // deleting or re-scoping the row now moves a named cell instead of changing nothing.
+  it("counts the older build's write-route cells as covered by #20's run", () => {
+    const olderWrite = unexecutedRuntimeCoverage(SYNC_GUARANTEES, SYNC_MEASURED_VERSIONS).filter(
       gap => gap.version === "12.0.100.0" && gap.route === "write",
     );
 
-    expect(pinnedWrite).toEqual([]);
-    // Not vacuous: there *are* write-route cells owed on that version, or the assertion above
-    // would hold for a report that simply omits them.
-    const writeCells = syncCoverageCells().filter(cell => cell.route === "write");
-    expect(writeCells.length).toBeGreaterThan(0);
-    // And the run that covers them is #20's, with the caveat that it does not speak to the
+    // Every write-route guarantee is executed on that build, so the write half is fully covered
+    // and only the *unchanged* half is owed. Named rather than empty: the sibling test above
+    // already fixes the exact unchanged-route cells this must agree with.
+    expect(olderWrite).toEqual([]);
+    expect(
+      unexecutedRuntimeCoverage(SYNC_GUARANTEES, SYNC_MEASURED_VERSIONS).filter(
+        gap => gap.version === "12.0.100.0",
+      ),
+    ).not.toEqual([]);
+    // And the row that covers them is #20's, with the caveat that it does not speak to the
     // read-back recognition — recorded on the row rather than in prose here.
     const row = SYNC_EXECUTIONS["issue-20-write-route"];
     expect(row.version).toBe("12.0.100.0");
