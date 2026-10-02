@@ -1656,3 +1656,87 @@ describe("an alias carrying a `customResolver` is refused", () => {
     await expect(startWith([])).resolves.toBeUndefined();
   });
 });
+
+/**
+ * `customResolver` has **two** forms, and round 13 recognised only one.
+ *
+ * Vite 8.3.0 types the field as `ResolverFunction | ResolverObject | null` and its runtime agrees:
+ *
+ * ```js
+ * function resolveCustomResolver(customResolver) {
+ *   if (typeof customResolver === "function") return customResolver;
+ *   if (customResolver) return getHookFunction(customResolver.resolveId);
+ *   return null;
+ * }
+ * ```
+ *
+ * So `{ resolveId() { … } }` is a resolver too, and the round-13 bypass survived by writing the same
+ * entry with only the spelling changed. Measured: a later plugin repeating the harness's own `react`
+ * find *and* replacement with `customResolver: { resolveId }` added resolved `react` to
+ * `/local-copy/react`, while the artifact kept the host bridge's page `React`.
+ *
+ * Both forms are refused, and the two values Vite itself reduces to "no resolver" — `null` and a
+ * `customResolver` with no `resolveId` — stay accepted, because refusing them would be a false
+ * positive on a config Vite handles exactly as a plain entry.
+ */
+describe("both forms of `customResolver` are refused", () => {
+  const reRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "tests", "fixtures", "project-alias");
+
+  function registry() {
+    return createCellRegistry(
+      {
+        cells: { probe: { entry: "./cells/probe/src/index.ts", target: { pageName: "探针", cell: "A1" } } },
+        resolve: { alias: { "@app/shared": "./shared" } },
+      },
+      { root: reRoot },
+    );
+  }
+
+  /** A later plugin repeating the harness's own entry with `customResolver` in the given form. */
+  function laterResolver(customResolver: unknown) {
+    return {
+      name: "late-react-resolver",
+      config() {
+        return {
+          resolve: {
+            alias: [
+              { find: "react", replacement: hostModuleAliases().react, customResolver: customResolver },
+            ],
+          },
+        };
+      },
+    };
+  }
+
+  async function startWith(extra: readonly unknown[]): Promise<void> {
+    const server = await createServer({
+      root: reRoot,
+      configFile: false,
+      logLevel: "error",
+      appType: "spa",
+      plugins: [devHarness({ config: registry() }) as never, ...(extra as never[])],
+      server: { middlewareMode: true, hmr: false, watch: null },
+    });
+    await server.close();
+  }
+
+  it("refuses the object form, which the round-13 check read as absent", async () => {
+    await expect(
+      startWith([laterResolver({ resolveId: () => "/local-copy/react" })]),
+    ).rejects.toThrowError(/refused to start/);
+  });
+
+  it("refuses the function form, which round 13 already caught", async () => {
+    await expect(startWith([laterResolver(() => "/local-copy/react")])).rejects.toThrowError(
+      /refused to start/,
+    );
+  });
+
+  it("still accepts the two values Vite reduces to no resolver", async () => {
+    // `resolveCustomResolver` returns `null` for both, so treating them as a resolver would refuse
+    // a config Vite handles exactly as a plain entry.
+    await expect(startWith([laterResolver(null)])).resolves.toBeUndefined();
+    await expect(startWith([laterResolver({})])).resolves.toBeUndefined();
+    await expect(startWith([])).resolves.toBeUndefined();
+  });
+});

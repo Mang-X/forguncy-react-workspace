@@ -549,6 +549,41 @@ function unclaimedHostAliases(userAlias: unknown): Record<string, string> {
  * on key alone). Keeping the pair is what makes the comparison an identity check on the whole
  * contribution rather than a name check.
  */
+/**
+ * Whether a value is a resolver Vite will actually honour, in either of the two forms it accepts.
+ *
+ * Vite 8.3.0 (the version this repository pins) types the field as
+ * `ResolverFunction | ResolverObject | null`, and its runtime `resolveCustomResolver` follows the
+ * same two shapes:
+ *
+ * ```js
+ * function resolveCustomResolver(customResolver) {
+ *   if (typeof customResolver === "function") return customResolver;
+ *   if (customResolver) return getHookFunction(customResolver.resolveId);
+ *   return null;
+ * }
+ * ```
+ *
+ * So the object form — `{ resolveId() { … } }` — is a resolver too. Recognising only functions left
+ * the round-13 bypass open by a different spelling (measured: a later plugin repeating the
+ * harness's own `react` find *and* replacement with only `customResolver: { resolveId }` added
+ * resolved `react` to `/local-copy/react` while the artifact kept the host bridge's page `React`).
+ *
+ * What is deliberately not distinguished is *which* resolver: the policy is fail-closed, so the
+ * only question is whether one is present, never what it would do.
+ */
+function isViteHonouredResolver(value: unknown): boolean {
+  if (typeof value === "function") {
+    return true;
+  }
+  if (typeof value === "object" && value !== null) {
+    return typeof (value as { resolveId?: unknown }).resolveId === "function";
+  }
+  // `null` and `undefined` are the two values Vite's own `resolveCustomResolver` turns into "no
+  // resolver", so they are the two this treats as absent.
+  return false;
+}
+
 interface AliasEntry {
   readonly find: string | RegExp;
   /** The value as authored, or `undefined` when the entry shape carried none. */
@@ -591,7 +626,7 @@ function readAliasEntries(
         if (typeof find !== "string" && !(find instanceof RegExp)) {
           return undefined;
         }
-        const hasCustomResolver = typeof entry.customResolver === "function";
+        const hasCustomResolver = isViteHonouredResolver(entry.customResolver);
         if (typeof find === "string" && typeof replacement === "string") {
           // The pair rule produces the normalized halves; the raw spelling is deliberately not kept
           // alongside, because comparing against a Vite-merged entry can only ever succeed on the
@@ -612,7 +647,7 @@ function readAliasEntries(
         // with the resolver lost rather than honoured). Recording it means a *future* Vite that did
         // honour it here cannot slip past the check, and it costs one field.
         const hasCustomResolver =
-          typeof value === "object" && value !== null && typeof (value as { customResolver?: unknown }).customResolver === "function";
+          typeof value === "object" && value !== null && isViteHonouredResolver((value as { customResolver?: unknown }).customResolver);
         return typeof value === "string"
           ? { ...pair(key, value), hasCustomResolver }
           : { find: normalizeAliasFind(key, value), replacement: undefined, hasCustomResolver };
