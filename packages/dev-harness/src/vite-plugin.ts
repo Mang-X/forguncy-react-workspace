@@ -553,6 +553,19 @@ interface AliasEntry {
   readonly find: string | RegExp;
   /** The value as authored, or `undefined` when the entry shape carried none. */
   readonly replacement: string | undefined;
+  /**
+   * Whether the entry carried Vite's `customResolver` — a resolver *function*, which decides
+   * resolution instead of the `replacement` string.
+   *
+   * Recorded as a boolean rather than the function, deliberately. Two functions cannot be compared
+   * for behavioural equality, so an entry carrying one is **refused** rather than accepted as equal
+   * to a plain one (measured: a later plugin repeating the harness's own `react` find *and*
+   * replacement and adding only a `customResolver` made Vite resolve `react` to the resolver's
+   * `/local-copy/react`, while the artifact kept the host bridge's page `React`). Recording the fact
+   * and comparing it is what lets the check answer; keeping the function would only invite a
+   * comparison that cannot be sound.
+   */
+  readonly hasCustomResolver: boolean;
 }
 
 function readAliasEntries(
@@ -578,13 +591,14 @@ function readAliasEntries(
         if (typeof find !== "string" && !(find instanceof RegExp)) {
           return undefined;
         }
+        const hasCustomResolver = typeof entry.customResolver === "function";
         if (typeof find === "string" && typeof replacement === "string") {
           // The pair rule produces the normalized halves; the raw spelling is deliberately not kept
           // alongside, because comparing against a Vite-merged entry can only ever succeed on the
           // normalized form.
-          return { ...pair(find, replacement) };
+          return { ...pair(find, replacement), hasCustomResolver };
         }
-        return { find, replacement: typeof replacement === "string" ? replacement : undefined };
+        return { find, replacement: typeof replacement === "string" ? replacement : undefined, hasCustomResolver };
       })
       .filter((entry): entry is AliasEntry => entry !== undefined);
   }
@@ -592,11 +606,17 @@ function readAliasEntries(
   if (typeof userAlias === "object" && userAlias !== null) {
     return Object.entries(userAlias as Record<string, unknown>)
       .filter(([key]) => key.length > 0)
-      .map(([key, value]) =>
-        typeof value === "string"
-          ? { ...pair(key, value) }
-          : { find: normalizeAliasFind(key, value), replacement: undefined },
-      );
+      .map(([key, value]) => {
+        // Recorded for the object form too even though Vite 8.3.0 passes a non-string value through
+        // unchanged (measured: `{ nm: { replacement, customResolver } }` arrives as a literal object,
+        // with the resolver lost rather than honoured). Recording it means a *future* Vite that did
+        // honour it here cannot slip past the check, and it costs one field.
+        const hasCustomResolver =
+          typeof value === "object" && value !== null && typeof (value as { customResolver?: unknown }).customResolver === "function";
+        return typeof value === "string"
+          ? { ...pair(key, value), hasCustomResolver }
+          : { find: normalizeAliasFind(key, value), replacement: undefined, hasCustomResolver };
+      });
   }
 
   return [];
@@ -643,6 +663,17 @@ function undeclaredAliasPatterns(
   for (const entry of readAliasEntries(finalAlias, { normalize: false })) {
     const { find, replacement } = entry;
 
+    // A `customResolver` decides resolution instead of the `replacement` string, so an entry that
+    // carries one is **never** matched against a plain contribution. Two functions cannot be
+    // compared for behavioural equality, so the sound answer is to refuse rather than to guess
+    // (measured: a later plugin repeating this harness's own `react` find *and* replacement and
+    // adding only a resolver made Vite resolve `react` to `/local-copy/react`, while the artifact
+    // kept the host bridge's page `React`).
+    if (entry.hasCustomResolver) {
+      undeclared.push(typeof find === "string" ? find : String(find));
+      continue;
+    }
+
     if (typeof find === "string") {
       // This harness's own entries: both halves must match, so a later plugin rewriting
       // `react -> /local-copy/react` is not accepted on the strength of the key alone (measured: dev
@@ -658,7 +689,7 @@ function undeclaredAliasPatterns(
       if (
         Object.prototype.hasOwnProperty.call(harnessOwned, find) &&
         replacement !== undefined &&
-        isSameStringAlias({ find, replacement: harnessOwned[find] }, find, replacement)
+        isSameStringAlias({ find, replacement: harnessOwned[find], hasCustomResolver: false }, find, replacement)
       ) {
         continue;
       }

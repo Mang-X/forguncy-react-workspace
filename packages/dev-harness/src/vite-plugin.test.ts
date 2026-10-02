@@ -12,6 +12,7 @@ import {
   normalizeAliasFind,
   projectAliasTarget,
 } from "./vite-plugin.ts";
+import { hostModuleAliases } from "./host-modules.ts";
 
 /**
  * The harness plugin under a **real Vite dev server**, which is the only place two of its
@@ -1536,6 +1537,122 @@ describe("an unknown key is absent, not an empty replacement", () => {
   });
 
   it("still accepts the harness's own and the project's own entries", async () => {
+    await expect(startWith([])).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * `resolve.alias[].customResolver` is a resolver **function**, and `find + replacement` cannot
+ * describe it.
+ *
+ * Vite 8.3.0 (the version this repository pins) still honours it: its alias plugin reads the final
+ * `config.resolve.alias`, and an entry carrying a `customResolver` is dispatched to that resolver
+ * function instead of continuing through ordinary `replacement` resolution. So an entry is not
+ * identified by its two string halves alone.
+ *
+ * Measured construction — a later plugin repeating the harness's **own** `react` find *and*
+ * replacement and adding only a resolver:
+ *
+ * | | result |
+ * | --- | --- |
+ * | Vite resolves `react` to | `/local-copy/react` (the resolver's answer) |
+ * | the Cell artifact | the host bridge's page `React` |
+ * | harness before this change | started, reporting nothing |
+ *
+ * Two functions cannot be compared for behavioural equality, so the sound answer is to **refuse**
+ * rather than to guess — which is also the reviewer's second option and the first one's practical
+ * form. The `hasCustomResolver` flag is what lets the check answer; keeping the function would only
+ * invite a comparison that cannot be sound.
+ */
+describe("an alias carrying a `customResolver` is refused", () => {
+  const reRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "tests", "fixtures", "project-alias");
+
+  function registry() {
+    return createCellRegistry(
+      {
+        cells: { probe: { entry: "./cells/probe/src/index.ts", target: { pageName: "探针", cell: "A1" } } },
+        resolve: { alias: { "@app/shared": "./shared" } },
+      },
+      { root: reRoot },
+    );
+  }
+
+  async function startWith(extra: readonly unknown[]): Promise<void> {
+    const server = await createServer({
+      root: reRoot,
+      configFile: false,
+      logLevel: "error",
+      appType: "spa",
+      plugins: [devHarness({ config: registry() }) as never, ...(extra as never[])],
+      server: { middlewareMode: true, hmr: false, watch: null },
+    });
+    await server.close();
+  }
+
+  it("refuses a resolver that repeats the harness's own find and replacement", async () => {
+    // The sharpest form: nothing about the entry's text differs from a known contribution, so only
+    // recording that a resolver is present can tell the two apart.
+    const harnessReactTarget = hostModuleAliases().react;
+    const lateResolver = {
+      name: "late-react-resolver",
+      config() {
+        return {
+          resolve: {
+            alias: [
+              {
+                find: "react",
+                replacement: harnessReactTarget,
+                customResolver() {
+                  return "/local-copy/react";
+                },
+              },
+            ],
+          },
+        };
+      },
+    };
+
+    await expect(startWith([lateResolver])).rejects.toThrowError(/refused to start/);
+  });
+
+  it("refuses a resolver on a project alias too", async () => {
+    const lateProjectResolver = {
+      name: "late-project-resolver",
+      config() {
+        return {
+          resolve: {
+            alias: [
+              {
+                find: "@app/shared",
+                replacement: "/abs/shared",
+                customResolver() {
+                  return "/local-copy/shared";
+                },
+              },
+            ],
+          },
+        };
+      },
+    };
+
+    // `createServer` itself is where the refusal happens, so the expectation is on that call and
+    // there is no server left to close.
+    await expect(
+      createServer({
+        root: reRoot,
+        configFile: false,
+        logLevel: "error",
+        appType: "spa",
+        resolve: { alias: { "@app/shared": "./shared" } },
+        plugins: [devHarness({ config: registry() }) as never, lateProjectResolver as never],
+        server: { middlewareMode: true, hmr: false, watch: null },
+      }),
+    ).rejects.toThrowError(/refused to start/);
+  });
+
+  it("still starts for the harness's own entries, which carry no resolver", async () => {
+    // The control: `hostModuleAliases()` produces plain find/replacement pairs, and the check must
+    // not read "no resolver" as "not one of ours".
     await expect(startWith([])).resolves.toBeUndefined();
   });
 });
