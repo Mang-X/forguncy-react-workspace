@@ -56,7 +56,8 @@ import { readInstallGraphIdentity, readToolchainIdentity } from "./install-ident
  * case-folding Windows applies to a volume and to `realpath`'s output.
  */
 const statFailure: { value: string | null } = { value: null };
-const deniedTail: { value: string | null } = { value: null };
+/** The tail to match, and how many path segments of it — see `pathTail` for why not the whole path. */
+const deniedTail: { value: string | null; segments: number } = { value: null, segments: 2 };
 
 /** The last `count` segments of `path`, lowercased, with either separator normalized to `/`. */
 function pathTail(path: string, count: number): string {
@@ -68,11 +69,8 @@ vi.mock("node:fs/promises", async importOriginal => {
   return {
     ...actual,
     stat: async (target: Parameters<typeof actual.stat>[0], options?: Parameters<typeof actual.stat>[1]) => {
-      if (
-        statFailure.value !== null &&
-        deniedTail.value !== null &&
-        pathTail(String(target), 2) === deniedTail.value
-      ) {
+      const tail = pathTail(String(target), deniedTail.segments);
+      if (statFailure.value !== null && deniedTail.value !== null && tail === deniedTail.value) {
         const error = new Error(`EACCES: permission denied, stat '${String(target)}'`) as NodeJS.ErrnoException;
         error.code = statFailure.value;
         throw error;
@@ -772,6 +770,101 @@ describe("#94: identity comes from the install graph, not from a declaration", (
     expect(tree.rebuilt).not.toBe(tree.before);
   });
 
+  it("reads a slot whose build trigger is a file and whose manifest is missing", async () => {
+    // PR #114 review round 15. pnpm's `pkg_build_triggers()` reads `binding.gyp` / `.hooks/` from the
+    // file system and keeps those triggers whether or not the manifest was readable. The previous shape
+    // read the manifest first and `continue`d when it was absent, so it never reached the file triggers:
+    // a slot with a `binding.gyp` and **no** `package.json` was summarized by name alone. Measured, the
+    // build artifact inside such a slot changed and `installedTree` held at `f141bc04fdb0`.
+    const tree = await withProject(async root => {
+      const slot = join(root, "node_modules", ".pnpm", "noname@file+vendor+noname", "node_modules", "noname");
+      const artifact = join(slot, "build", "Release", "noname.node");
+      await writeFileAt(
+        join(root, "package.json"),
+        JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "pnpm@12.4.2" }),
+      );
+      await writeFileAt(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+      await writeFileAt(join(root, "node_modules", ".pnpm", "node_modules", ".keep"), "");
+      // No `package.json` in the slot at all — the file trigger is all there is.
+      await writeFileAt(join(slot, "binding.gyp"), '{ "targets": [] }');
+      await writeFileAt(
+        join(root, "node_modules", ".modules.yaml"),
+        JSON.stringify({
+          included: { dependencies: true, devDependencies: true, optionalDependencies: true },
+          nodeLinker: "isolated",
+          hoistPattern: ["*"],
+          publicHoistPattern: [],
+          allowBuilds: {},
+          pendingBuilds: [],
+        }),
+      );
+
+      const read = async (): Promise<string | null | undefined> =>
+        (await readInstallGraphIdentity(root)).installedTree;
+      await writeFileAt(artifact, "bin-v1");
+      const before = await read();
+      await writeFileAt(artifact, "bin-v2");
+      return { before, rebuilt: await read() };
+    });
+
+    expect(tree.before).not.toBeNull();
+    expect(tree.rebuilt).not.toBe(tree.before);
+  });
+
+  it("reports unknown when a build trigger's path cannot be read", async () => {
+    // PR #114 review round 15. `pathExists` is three-state — `false` is a confirmed absence, `undefined`
+    // is "could not establish" — but the trigger check tested only `=== true`, so an `EACCES`/`EIO` on
+    // `binding.gyp` fell through to "no trigger here" and the slot was summarized by name. That is the
+    // same laundering round 12 removed from the external-target guard, one function over: "cannot read"
+    // became "confirmed not there".
+    //
+    // `EACCES` is injected at the `stat` seam rather than produced, because it needs a mode-`000`
+    // directory and a non-root user — reproducible on CI's Linux, and Windows has no equivalent. The
+    // trigger path is **one** segment (`binding.gyp`), so the seam matches a one-segment tail; that is
+    // the same tail-matching that fixed the Windows runner failure in round 14, since the string reaching
+    // `stat` is a canonical spelling this test cannot predict.
+    const tree = await withProject(async root => {
+      const slot = join(root, "node_modules", ".pnpm", "trig@1.0.0", "node_modules", "trig");
+      await writeFileAt(
+        join(root, "package.json"),
+        JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "pnpm@12.4.2" }),
+      );
+      await writeFileAt(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+      await writeFileAt(join(root, "node_modules", ".pnpm", "node_modules", ".keep"), "");
+      // A readable slot first: with nothing wrong it produces a value, so the case cannot pass for an
+      // unrelated reason.
+      await writeFileAt(join(slot, "package.json"), JSON.stringify({ name: "trig", version: "1.0.0" }));
+      await writeFileAt(
+        join(root, "node_modules", ".modules.yaml"),
+        JSON.stringify({
+          included: { dependencies: true, devDependencies: true, optionalDependencies: true },
+          nodeLinker: "isolated",
+          hoistPattern: ["*"],
+          publicHoistPattern: [],
+          allowBuilds: {},
+          pendingBuilds: [],
+        }),
+      );
+
+      const read = async (): Promise<string | null | undefined> =>
+        (await readInstallGraphIdentity(root)).installedTree;
+      const control = await read();
+      deniedTail.value = "binding.gyp";
+      deniedTail.segments = 1;
+      statFailure.value = "EACCES";
+      try {
+        return { control, denied: await read() };
+      } finally {
+        statFailure.value = null;
+        deniedTail.value = null;
+      }
+    });
+
+    expect(tree.control).not.toBeNull();
+    // "Cannot establish whether this package has a build trigger" is `unknown`, not a value.
+    expect(tree.denied).toBeNull();
+  });
+
   it("reads a slot pnpm builds without an install script, because it ships a binding.gyp", async () => {
     // PR #114 review round 14, P1. pnpm's `BuildTriggers::requires_build()` is
     // `manifest_scripts || hooks || (binding_gyp && !gyp_build_opted_out)`, so an install script is only
@@ -875,6 +968,7 @@ describe("#94: identity comes from the install graph, not from a declaration", (
         await symlink(external, join(root, "node_modules", "dep"), "junction");
         if (layout === "denied") {
           deniedTail.value = pathTail(join(external, "node_modules"), 2);
+          deniedTail.segments = 2;
           statFailure.value = "EACCES";
         }
         try {

@@ -1342,6 +1342,33 @@ async function slotDeclaresInstallScript(storeDirectory: string, slotName: strin
     if (root === null) {
       return null;
     }
+
+    // **The file triggers come first and are unconditional**, which is what pnpm does and what two
+    // earlier shapes of this function got wrong. Review round 15: pnpm's `pkg_build_triggers()` reads
+    // `binding.gyp` / `.hooks/` from the file system and keeps those triggers whether or not the
+    // manifest was readable. Reading the manifest first and `continue`-ing when it was absent skipped
+    // this whole block, so a slot with a `binding.gyp` and **no** `package.json` was summarized by name
+    // alone. Measured: the build artifact in such a slot changed and `installedTree` held at
+    // `f141bc04fdb0`.
+    //
+    // **`gypfile: false` is deliberately not honoured**, and that is read rather than guessed. Out of
+    // pnpm 10.13.1's bundle, `pkgRequiresBuild` is
+    // `manifest_scripts || (filesIndex["binding.gyp"] != null || Object.keys(filesIndex).some(f => f.match(/^\.hooks[\/]/)))`
+    // -- `gypfile` appears nowhere in the trigger module -- which matches the measurement that
+    // `"gypfile": false` alongside a `binding.gyp` still ran `node-gyp rebuild`. Honouring the flag
+    // would under-select and reintroduce the false fresh this axis exists to prevent.
+    for (const marker of [".hooks", "binding.gyp"]) {
+      const present = await pathExists(join(root, marker));
+      if (present !== false) {
+        // **`true` selects; `undefined` is "cannot establish".** `pathExists` is three-state precisely
+        // so that an `EACCES`/`EIO` on the trigger path does not read as "there is no trigger here" --
+        // the same laundering round 12 removed from the external-target guard, one function over.
+        // Answering `unknown` is the only reading that failure supports.
+        return present === true ? true : null;
+      }
+    }
+
+    // The manifest answers only the **scripts** term; the two file triggers above cover the rest.
     const manifest = await readTextFile(join(root, "package.json"));
     if (manifest.kind === "unreadable") {
       return null;
@@ -1361,25 +1388,6 @@ async function slotDeclaresInstallScript(storeDirectory: string, slotName: strin
       scripts !== null &&
       ["preinstall", "install", "postinstall"].some(name => typeof scripts[name] === "string")
     ) {
-      return true;
-    }
-    // **A build is not only an install script.** Review round 14: pnpm's `BuildTriggers::requires_build()`
-    // is `manifest_scripts || hooks || (binding_gyp && !gyp_build_opted_out)`, and this function used to
-    // answer only the first term — so a native package with **no** install script was skipped, while
-    // pnpm synthesized and ran `install: node-gyp rebuild` for it under an ambient blanket policy.
-    // Measured on pnpm 12.4.2: a `file:` dependency declaring no `scripts` at all but shipping
-    // `binding.gyp` had pnpm run `native-addon@file:vendor/native install$ node-gyp rebuild`, and the
-    // same package with neither shipped cleanly with an empty record. So both extra terms are here:
-    //
-    // - `.hooks/` — pnpm runs a package's hooks as a build trigger.
-    // - `binding.gyp` — presence is the trigger, and `gypfile: false` does **not** switch it off in
-    //   this pnpm: measured, `"gypfile": false` alongside a `binding.gyp` still had pnpm run
-    //   `node-gyp rebuild`. Honouring the flag would under-select and reintroduce the same false fresh,
-    //   so this reads presence and the code says why the opt-out is not applied.
-    if ((await pathExists(join(root, ".hooks"))) === true) {
-      return true;
-    }
-    if ((await pathExists(join(root, "binding.gyp"))) === true) {
       return true;
     }
   }
