@@ -60,3 +60,10 @@ export * from "./lock-store.ts";
 export * from "./decision-conformance.ts";
 export * from "./install-graph.ts";
 export * from "./decision-recording.ts";
+// The identity a lock record's evidence is judged against (#94). Projected here rather than only
+// from the barrel because the dev harness needs it during `devHarness()` startup and imports this
+// entry for that reason: the freshness rules cannot run at all without a toolchain to compare
+// against, so a harness that could not read one would report every record as `toolchain-unknown`
+// and withhold decisions the compiler accepts. It reaches no bundler — that is what makes the edge
+// affordable, and `dependency-resolver-local.test.ts` asserts it.
+export * from "./install-identity.ts";

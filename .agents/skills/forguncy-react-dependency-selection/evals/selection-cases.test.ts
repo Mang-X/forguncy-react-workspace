@@ -57,6 +57,7 @@ import type {
   PlatformConflictAssessment,
   ProbeStepId,
   SelectionSignalId,
+  ToolchainIdentity,
 } from "../../../../packages/core/src/index.ts";
 import {
   ARCHITECTURAL_REJECTION_PROBE_STATUS,
@@ -125,8 +126,34 @@ function gate(packageName: string, role: DependencyRole): PlatformConflictAssess
 }
 
 /** Runs the probe every non-architectural case owes, uncached. */
-async function probe(projectRoot: string, packageName: string) {
-  return runDependencyProbe({ projectRoot, packageName, cache: false });
+/**
+ * A known toolchain identity for cases that run a probe against a **committed fixture**.
+ *
+ * A probe fixture is a mini-install whose packages its ancestor lock does not describe, so a derived
+ * install graph is `unknown` (#94) and every freshness assertion about such a record would report
+ * `stale` for a reason that is about the fixture's layout rather than about the case. Cases probing
+ * a real example (`PROVING_CASES_ROOT`) keep deriving their identity, and the axis itself is covered
+ * in `install-identity.test.ts`.
+ */
+const FIXTURE_TOOLCHAIN: ToolchainIdentity = {
+  vitePlus: null,
+  rolldown: "1.2.9",
+  node: "24",
+  installGraph: {
+    lockfile: "sha256:fixture-lockfile",
+    patches: "sha256:fixture-patches",
+    configuration: "sha256:fixture-configuration",
+    installedTree: "sha256:fixture-installed-tree",
+  },
+};
+
+async function probe(projectRoot: string, packageName: string, toolchain?: ToolchainIdentity) {
+  return runDependencyProbe({
+    projectRoot,
+    packageName,
+    cache: false,
+    ...(toolchain === undefined ? {} : { toolchain }),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -408,7 +435,7 @@ describe("#18 eval: a Node-only library request is replaced with evidence, not a
     // prevent.
     expect(isPlatformConflict(ownership)).toBe(false);
 
-    const ran = await probe(NODE_ONLY_FIXTURE, "config-from-disk");
+    const ran = await probe(NODE_ONLY_FIXTURE, "config-from-disk", FIXTURE_TOOLCHAIN);
     const codes = ran.report.rejectionFindings
       .map(finding => REPLACEMENT_SIGNAL_REJECTIONS.find(entry => entry.signal === finding.signal)?.code)
       .filter(code => code !== undefined);
@@ -419,7 +446,7 @@ describe("#18 eval: a Node-only library request is replaced with evidence, not a
 
   it("refuses a technical rejection whose stated reason is not the observed one", async () => {
     const ownership = gate("config-from-disk", "cell-local-data-access");
-    const ran = await probe(NODE_ONLY_FIXTURE, "config-from-disk");
+    const ran = await probe(NODE_ONLY_FIXTURE, "config-from-disk", FIXTURE_TOOLCHAIN);
 
     const wrongReason: DependencyDecision = {
       strategy: "replace",
@@ -442,7 +469,7 @@ describe("#18 eval: a Node-only library request is replaced with evidence, not a
 
   it("accepts the rejection once it names the observed finding, and records it fresh", async () => {
     const ownership = gate("config-from-disk", "cell-local-data-access");
-    const ran = await probe(NODE_ONLY_FIXTURE, "config-from-disk");
+    const ran = await probe(NODE_ONLY_FIXTURE, "config-from-disk", FIXTURE_TOOLCHAIN);
 
     const decision: DependencyDecision = {
       strategy: "replace",
@@ -492,7 +519,13 @@ describe("#18 eval: a Node-only library request is replaced with evidence, not a
       // the default is fail-closed (`{}`), which reports `probe-fingerprint-unknown` and
       // therefore `stale`. Passing the fingerprint this run composed is what makes the
       // assertion about the record rather than about the fail-closed default.
+      // The toolchain is supplied for the same reason the two roots above are stated: a probe
+      // fixture is a *committed* mini-install whose packages its ancestor lock does not describe, so
+      // a derived install graph is `unknown` (#94) — and an unknown strict component is stale by
+      // design, which would make this assertion about the fixture's layout rather than about the
+      // record. The identity axis has its own coverage in `install-identity.test.ts`.
       const environment = await probeLockEnvironment(NODE_ONLY_FIXTURE, {
+        toolchain: FIXTURE_TOOLCHAIN,
         lock,
         probeFingerprints: { "config-from-disk": ran.fingerprint },
       });

@@ -20,7 +20,7 @@ import { rm } from "node:fs/promises";
 
 import { describe, expect, it } from "vitest";
 
-import type { ProbeReport } from "@forguncy-react-workspace/core";
+import type { ProbeReport, ToolchainIdentity } from "@forguncy-react-workspace/core";
 import {
   assessDependencyRole,
   assessLockDecision,
@@ -52,6 +52,29 @@ const FIXTURES_ROOT = fileURLToPath(new URL("../__fixtures__/probe", import.meta
 
 function fixture(name: string): string {
   return join(FIXTURES_ROOT, name);
+}
+
+/**
+ * A known toolchain identity for the cases that must not depend on the fixture's install graph.
+ *
+ * A probe fixture is a **committed mini-install** — its own real `node_modules` whose packages the
+ * ancestor lock does not describe — so `readToolchainIdentity` reports the install graph as
+ * `unknown`, and an unknown strict component is a cache miss by design (#94). Cases about the cache
+ * or about lock freshness therefore supply an identity rather than deriving one, and the install
+ * graph axis keeps its own coverage in `install-identity.test.ts`.
+ */
+function fixtureIdentity(): ToolchainIdentity {
+  return {
+    vitePlus: null,
+    rolldown: "1.2.9",
+    node: "24",
+    installGraph: {
+      lockfile: "sha256:fixture-lockfile",
+      patches: "sha256:fixture-patches",
+      configuration: "sha256:fixture-configuration",
+      installedTree: "sha256:fixture-installed-tree",
+    },
+  };
 }
 
 async function probe(
@@ -929,10 +952,19 @@ describe("runDependencyProbe: cache", () => {
     const projectRoot = fixture("pure-esm-utility");
     await rm(join(projectRoot, ".fgc"), { recursive: true, force: true });
 
-    const first = await runDependencyProbe({ projectRoot, packageName: "tiny-math" });
+    // The identity is supplied rather than derived, and the reason is the same one
+    // `selection-proving-cases.test.ts` records for its two roots: a probe fixture is a *committed*
+    // mini-install whose packages the ancestor lock does not describe, so `readToolchainIdentity`
+    // reports the install graph as `unknown` for it — and an unknown strict component is a cache
+    // miss by design (#94), which would make `fromCache: true` below unreachable. Supplying a known
+    // identity keeps this an assertion about the *cache*, which is what the case is named for; the
+    // identity axis has its own coverage in `install-identity.test.ts`.
+    const identity = fixtureIdentity();
+
+    const first = await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: identity });
     expect(first.fromCache).toBe(false);
 
-    const second = await runDependencyProbe({ projectRoot, packageName: "tiny-math" });
+    const second = await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: identity });
     expect(second.fromCache).toBe(true);
     expect(second.fingerprint).toBe(first.fingerprint);
     expect(serializeProbeReport(second.report)).toBe(serializeProbeReport(first.report));
@@ -1072,6 +1104,179 @@ describe("runDependencyProbe: cache", () => {
     expect(second.fingerprint).toBe(first.fingerprint);
     expect(second.fromCache).toBe(false);
     expect(second.report.environment.toolchain.vitePlus).toBe("9.9.9");
+  });
+
+  // PR #114 review, P1. An identity where a strict component is `unknown` on *both* sides is not
+  // agreement: two identical silences cannot show that the stored report describes this run.
+  // Measured before the fix — a project with no recognizable lockfile recorded
+  // `{lockfile: null, patches: null, configuration: null}` on the first probe, and after a
+  // transitive dependency moved in `node_modules` (root package version unchanged) the second run
+  // compared equal and served the stale report, which is the exact defect #94 removes.
+  it("re-probes when a strict component is unknown on both sides", async () => {
+    const projectRoot = fixture("pure-esm-utility");
+    await rm(join(projectRoot, ".fgc"), { recursive: true, force: true });
+
+    const unknownGraph = { lockfile: null, patches: null, configuration: null } as const;
+    const identity = { vitePlus: "0.3.2", rolldown: "1.2.9", node: "24", installGraph: unknownGraph } as const;
+
+    const first = await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: identity });
+    expect(first.fromCache).toBe(false);
+
+    const second = await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: identity });
+
+    // Same fingerprint, same identity — and still a miss. "Cannot say" must never read as "agrees".
+    expect(second.fingerprint).toBe(first.fingerprint);
+    expect(second.fromCache).toBe(false);
+  });
+
+  it("re-probes when the install graph itself is absent from both the cache and this run", async () => {
+    const projectRoot = fixture("pure-esm-utility");
+    await rm(join(projectRoot, ".fgc"), { recursive: true, force: true });
+
+    const identity = { vitePlus: "0.3.2", rolldown: "1.2.9", node: "24" } as const;
+
+    await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: identity });
+    const second = await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: identity });
+
+    expect(second.fromCache).toBe(false);
+  });
+
+  it("still answers from cache when a strict component is known and equal", async () => {
+    // The control for the two cases above, so they cannot be satisfied by a comparison that always
+    // returns false — which would make every run re-probe and `--no-cache` the only way to avoid it.
+    const projectRoot = fixture("pure-esm-utility");
+    await rm(join(projectRoot, ".fgc"), { recursive: true, force: true });
+
+    const identity = {
+      vitePlus: "0.3.2",
+      rolldown: "1.2.9",
+      node: "24",
+      installGraph: { lockfile: "sha256:aaaa", patches: "sha256:bbbb", configuration: "sha256:cccc", installedTree: "sha256:dddd" },
+    } as const;
+
+    await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: identity });
+    const second = await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: identity });
+
+    expect(second.fromCache).toBe(true);
+  });
+
+  it("re-probes when only the installed tree differs from the cached report", async () => {
+    // PR #114 review round 6, P1. `installedTree` was added to the *record* but not to this
+    // comparison, and the warm cache is what actually answers a repeat run — so a component the
+    // comparison ignores is a component that cannot invalidate anything. Measured: with only
+    // `installedTree` differing (the real `npm install --omit=optional` shape), the second run
+    // returned the first run's report with `fromCache: true`, which is the original defect restored.
+    const projectRoot = fixture("pure-esm-utility");
+    await rm(join(projectRoot, ".fgc"), { recursive: true, force: true });
+
+    const identity = {
+      vitePlus: "0.3.2",
+      rolldown: "1.2.9",
+      node: "24",
+      installGraph: {
+        lockfile: "sha256:aaaa",
+        patches: "sha256:bbbb",
+        configuration: "sha256:cccc",
+        installedTree: "sha256:tree-one",
+      },
+    } as const;
+
+    const first = await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: identity });
+    expect(first.fromCache).toBe(false);
+
+    // Same everything else, and the same fingerprint — the install graph is not in it by design.
+    const moved = { ...identity, installGraph: { ...identity.installGraph, installedTree: "sha256:tree-two" } };
+    const second = await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: moved });
+
+    expect(second.fingerprint).toBe(first.fingerprint);
+    expect(second.fromCache).toBe(false);
+
+    // And the fail-closed half: `null` on either side is not "agrees", even when both are `null`.
+    const unknown = { ...identity, installGraph: { ...identity.installGraph, installedTree: null } };
+    await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: unknown });
+    const bothUnknown = await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: unknown });
+    expect(bothUnknown.fromCache).toBe(false);
+  });
+
+  // #94. The cache's own half of the defect: the fingerprint deliberately excludes the toolchain
+  // (the lock models it separately), so a hit under one fingerprint is trusted only when the stored
+  // report still describes *this* run. Comparing one component let a cached report answer a run
+  // that had installed a different transitive graph — the case that made a warm `.fgc/probe-cache/`
+  // serve evidence the install no longer supported.
+  it("re-probes when only the install graph differs from the cached report", async () => {
+    const projectRoot = fixture("pure-esm-utility");
+    await rm(join(projectRoot, ".fgc"), { recursive: true, force: true });
+
+    const base = {
+      vitePlus: null,
+      rolldown: "1.2.9",
+      node: "24",
+      installGraph: {
+        lockfile: "sha256:aaaa",
+        patches: "sha256:bbbb",
+        configuration: "sha256:cccc",
+        installedTree: "sha256:fixture-installed-tree",
+      },
+    } as const;
+
+    const first = await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: base });
+    expect(first.fromCache).toBe(false);
+
+    // Same fingerprint — `vitePlus`, `rolldown` and `node` are all identical, so only the install
+    // graph moved. Before this case was covered, the cache answered `fromCache: true` here.
+    const moved = await runDependencyProbe({
+      projectRoot,
+      packageName: "tiny-math",
+      toolchain: { ...base, installGraph: { ...base.installGraph, patches: "sha256:dddd" } },
+    });
+
+    expect(moved.fingerprint).toBe(first.fingerprint);
+    expect(moved.fromCache).toBe(false);
+  });
+
+  it("re-probes when only the bundler version differs from the cached report", async () => {
+    const projectRoot = fixture("pure-esm-utility");
+    await rm(join(projectRoot, ".fgc"), { recursive: true, force: true });
+
+    const base = {
+      vitePlus: "0.3.2",
+      rolldown: "1.2.9",
+      node: "24",
+      installGraph: { lockfile: "sha256:aaaa", patches: "sha256:bbbb", configuration: "sha256:cccc", installedTree: "sha256:dddd" },
+    } as const;
+
+    await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: base });
+
+    // A real Rolldown upgrade changes emitted bytes, so a cached measurement of the old bundler's
+    // output must not answer a run under the new one.
+    const upgraded = await runDependencyProbe({
+      projectRoot,
+      packageName: "tiny-math",
+      toolchain: { ...base, rolldown: "9.9.9" },
+    });
+
+    expect(upgraded.fromCache).toBe(false);
+  });
+
+  it("still answers from cache when the whole identity agrees", async () => {
+    // The control. Without it, a `sameToolchainIdentity` that always returned false would pass the
+    // two cases above while making the cache useless — and `--no-cache` would be the only way to
+    // avoid a re-probe on every run.
+    const projectRoot = fixture("pure-esm-utility");
+    await rm(join(projectRoot, ".fgc"), { recursive: true, force: true });
+
+    const identity = {
+      vitePlus: "0.3.2",
+      rolldown: "1.2.9",
+      node: "24",
+      installGraph: { lockfile: "sha256:aaaa", patches: "sha256:bbbb", configuration: "sha256:cccc", installedTree: "sha256:dddd" },
+    } as const;
+
+    const first = await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: identity });
+    const second = await runDependencyProbe({ projectRoot, packageName: "tiny-math", toolchain: identity });
+
+    expect(first.fromCache).toBe(false);
+    expect(second.fromCache).toBe(true);
   });
 
   it("re-probes when the target differs from the cached report", async () => {
@@ -1227,8 +1432,14 @@ describe("lock integration (#8)", () => {
   });
 
   it("builds a LockEnvironment whose probeFingerprints drive freshness", async () => {
-    const result = await probe("pure-esm-utility", "tiny-math");
+    // A supplied identity, as `fixtureIdentity()` documents: the fixture is a committed
+    // mini-install its ancestor lock does not describe, so a derived install graph is `unknown`
+    // and freshness would correctly report `stale`. This case is about the environment's
+    // fingerprint driving freshness, so both the record and the environment carry this identity.
+    const identity = fixtureIdentity();
+    const result = await probe("pure-esm-utility", "tiny-math", { toolchain: identity });
     const environment = await probeLockEnvironment(fixture("pure-esm-utility"), {
+      toolchain: identity,
       lock: {
         schemaVersion: 1,
         decisions: [
@@ -1239,7 +1450,7 @@ describe("lock integration (#8)", () => {
             resolvedVersion: "1.0.0",
             probe: probeRunLockEvidence(result)!,
             target: forguncyTargetIdentity(RUNTIME_CONTRACT_TARGET),
-            probedWith: { vitePlus: null },
+            probedWith: result.report.environment.toolchain,
             extension: null,
             rejectedCandidate: null,
             rationale: null,
@@ -1270,7 +1481,7 @@ describe("lock integration (#8)", () => {
             resolvedVersion: "1.0.0",
             probe: probeRunLockEvidence(result)!,
             target: forguncyTargetIdentity(RUNTIME_CONTRACT_TARGET),
-            probedWith: { vitePlus: null },
+            probedWith: result.report.environment.toolchain,
             extension: null,
             rejectedCandidate: null,
             rationale: null,
@@ -1290,6 +1501,7 @@ describe("lock integration (#8)", () => {
     expect(assessLockDecision(record!, environment).stalenessReasons).toEqual([]);
 
     const moved = await probeLockEnvironment(fixture("pure-esm-utility"), {
+      toolchain: identity,
       probeFingerprints: { "tiny-math": "probe=inline-bundle;entry=other" },
       lock: {
         schemaVersion: 1,
@@ -1301,7 +1513,7 @@ describe("lock integration (#8)", () => {
             resolvedVersion: "1.0.0",
             probe: probeRunLockEvidence(result)!,
             target: forguncyTargetIdentity(RUNTIME_CONTRACT_TARGET),
-            probedWith: { vitePlus: null },
+            probedWith: result.report.environment.toolchain,
             extension: null,
             rejectedCandidate: null,
             rationale: null,
@@ -1320,6 +1532,7 @@ describe("lock integration (#8)", () => {
     expect(changed.stalenessReasons).toContain("probe-fingerprint-changed");
 
     const unknown = await probeLockEnvironment(fixture("pure-esm-utility"), {
+      toolchain: identity,
       probeFingerprints: {},
       lock: {
         schemaVersion: 1,
@@ -1331,7 +1544,7 @@ describe("lock integration (#8)", () => {
             resolvedVersion: "1.0.0",
             probe: probeRunLockEvidence(result)!,
             target: forguncyTargetIdentity(RUNTIME_CONTRACT_TARGET),
-            probedWith: { vitePlus: null },
+            probedWith: result.report.environment.toolchain,
             extension: null,
             rejectedCandidate: null,
             rationale: null,

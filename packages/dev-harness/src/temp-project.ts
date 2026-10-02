@@ -26,7 +26,7 @@
  * into the directory any more", which a bounded retry establishes and a delay only guesses at.
  */
 
-import { mkdtempSync, realpathSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -134,5 +134,42 @@ export async function removeTempProject(root: string): Promise<void> {
 
   process.stderr.write(
     `removeTempProject could not remove ${root}: Vite's dependency optimizer kept writing into it. A directory under the OS temp root is left behind; no assertion was affected.\n`,
+  );
+}
+
+/**
+ * The pieces of a pnpm install result that the identity digests, written into a fixture's project.
+ *
+ * `install-identity.ts` reads two things from the install root: `node_modules/.modules.yaml` for the
+ * layout fields, and the `node_modules/.pnpm/` directory list for the installed package identities.
+ * A fixture that writes only the record now reports `install-graph-unknown` — the store half is
+ * required — so the fixtures that exercise the real projection path write both, in the shape a
+ * pnpm install produces (the record as JSON, the store as `name@version` directories plus the
+ * shared `node_modules` root the links point into).
+ */
+export function writePnpmInstallFixture(root: string): void {
+  const nodeModules = join(root, "node_modules");
+  mkdirSync(join(nodeModules, ".pnpm", "probe-package@1.0.0", "node_modules", "probe-package"), { recursive: true });
+  writeFileSync(
+    join(nodeModules, ".pnpm", "probe-package@1.0.0", "node_modules", "probe-package", "package.json"),
+    JSON.stringify({ name: "probe-package", version: "1.0.0" }),
+    "utf8",
+  );
+  // The store's shared link root, excluded by name when the identity reads the store.
+  mkdirSync(join(nodeModules, ".pnpm", "node_modules"), { recursive: true });
+  writeFileSync(
+    join(nodeModules, ".modules.yaml"),
+    [
+      "included:",
+      "  dependencies: true",
+      "  devDependencies: true",
+      "  optionalDependencies: true",
+      "nodeLinker: isolated",
+      "hoistPattern:",
+      '  - "*"',
+      "publicHoistPattern: []",
+      "",
+    ].join("\n"),
+    "utf8",
   );
 }

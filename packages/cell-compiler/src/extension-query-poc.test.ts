@@ -74,6 +74,7 @@ import {
   conformanceErrors,
   localCompilationDependencies,
   readFgcLock,
+  readToolchainIdentity,
   recordedPackageNames,
   resolveInstalledVersions,
 } from "@forguncy-react-workspace/dependency-resolver";
@@ -126,10 +127,29 @@ async function environmentFor(overrides: Partial<LockEnvironment> = {}): Promise
     }).fingerprint;
   }
 
+  // The example's identity, with the **install-graph** half taken from the record itself.
+  //
+  // `examples/extension-query` is a workspace member, so its install graph is the whole
+  // repository's `pnpm-lock.yaml` — and #94's digest is deliberately conservative, so any
+  // dependency change anywhere in the monorepo invalidates it. That is the accepted trade-off
+  // (#94: narrowing to the reachable subgraph is a later optimisation), but it makes the axis
+  // unsuitable as an assertion *here*: this file's subject is the deployment gate, and a case
+  // would fail whenever an unrelated PR merged — measured, a branch whose base had moved on
+  // reported `install-graph-changed` on CI for a graph that was perfectly valid for its own
+  // commit.
+  //
+  // So the axis is supplied rather than re-derived, and the other three components are still read
+  // live from the project, which is what keeps this an assertion about *this* toolchain. The
+  // install-graph axis has its own coverage: `install-identity.test.ts` for what it digests, and
+  // `lock-freshness.test.ts` for what a move and an absence each report.
+  const identity = await readToolchainIdentity(exampleRoot);
+  const recorded = (await readFgcLock(exampleRoot)).decisions[0]?.probedWith;
+  const installGraph = recorded?.installGraph ?? identity.installGraph;
+
   return {
     resolvedVersions: versions,
     target: RUNTIME_CONTRACT_TARGET,
-    toolchain: { vitePlus: "0.3.2" },
+    toolchain: { ...identity, installGraph },
     probeFingerprints,
     extensionVersions: { "tanstack-query": EXPECTED_VERSION },
     extensionIdentities: { "tanstack-query": EXPECTED_IDENTITY },
