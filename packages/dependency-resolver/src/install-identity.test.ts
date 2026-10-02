@@ -865,6 +865,64 @@ describe("#94: identity comes from the install graph, not from a declaration", (
     expect(tree.denied).toBeNull();
   });
 
+  it("unions the record's slots with the disk's, because a non-empty record is not the whole record", async () => {
+    // PR #114 review round 15 follow-up. Round 15 closed the case where `.modules.yaml` names **no**
+    // built slot, and left the ordinary combined state open: a project can persist
+    // `allowBuilds: { foo: true }` — an approval that outlives the package, which is what this
+    // repository's own `allowBuilds: {"esbuild": true}` is — *and* install once under an ambient
+    // blanket policy, whose `check()` returns "build everything" while the record still names only
+    // `foo`. Enumeration gated on `implicated.size === 0` therefore read `foo` alone.
+    //
+    // Measured before the fix: a record naming `foo` while an ambient blanket build had also written an
+    // artifact into `bar` held `installedTree` at `5b399ad50a20` when only `bar`'s artifact changed.
+    //
+    // The policy is not persistable, so no choice of branch can settle it: both sources are always
+    // enumerated and unioned. With blanket builds **off** the union's only cost is a false stale — a
+    // slot declaring `postinstall` that never ran is digested by content — which is the direction this
+    // axis has always taken.
+    const tree = await withProject(async root => {
+      const foo = join(root, "node_modules", ".pnpm", "foo@1.0.0", "node_modules", "foo");
+      const bar = join(root, "node_modules", ".pnpm", "bar@1.0.0", "node_modules", "bar");
+      await writeFileAt(
+        join(root, "package.json"),
+        JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "pnpm@12.4.2" }),
+      );
+      await writeFileAt(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+      await writeFileAt(join(root, "node_modules", ".pnpm", "node_modules", ".keep"), "");
+      // `foo` is named by the record and declares no trigger of its own.
+      await writeFileAt(join(foo, "package.json"), JSON.stringify({ name: "foo", version: "1.0.0" }));
+      await writeFileAt(join(foo, "out.js"), "foo-build-v1");
+      // `bar` declares a build trigger and was built by the ambient policy, which the record cannot show.
+      await writeFileAt(
+        join(bar, "package.json"),
+        JSON.stringify({ name: "bar", version: "1.0.0", scripts: { postinstall: "node b.js" } }),
+      );
+      await writeFileAt(join(bar, "b.js"), "1");
+      await writeFileAt(join(bar, "out.js"), "bar-build-v1");
+      await writeFileAt(
+        join(root, "node_modules", ".modules.yaml"),
+        JSON.stringify({
+          included: { dependencies: true, devDependencies: true, optionalDependencies: true },
+          nodeLinker: "isolated",
+          hoistPattern: ["*"],
+          publicHoistPattern: [],
+          allowBuilds: { foo: true },
+          pendingBuilds: [],
+        }),
+      );
+
+      const read = async (): Promise<string | null | undefined> =>
+        (await readInstallGraphIdentity(root)).installedTree;
+      const before = await read();
+      // Only the slot the record does not name changes.
+      await writeFileAt(join(bar, "out.js"), "bar-build-v2-rebuilt");
+      return { before, afterBar: await read() };
+    });
+
+    expect(tree.before).not.toBeNull();
+    expect(tree.afterBar).not.toBe(tree.before);
+  });
+
   it("reads a slot pnpm builds without an install script, because it ships a binding.gyp", async () => {
     // PR #114 review round 14, P1. pnpm's `BuildTriggers::requires_build()` is
     // `manifest_scripts || hooks || (binding_gyp && !gyp_build_opted_out)`, so an install script is only

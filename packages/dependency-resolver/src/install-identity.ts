@@ -1262,38 +1262,27 @@ async function builtSlotsDigest(
   // finds **one** buildable slot (`@swc+core@1.16.2`), whose content then costs 54 ms — 354 ms to
   // answer a question 12 s would answer the same way but at thirty-four times the price.
   //
-  // **The limit of this, stated rather than glossed.** It rests on a dependency's install script being
-  // declared in its manifest, which is how a published package is built but is not something a script
-  // written outside the package is obliged to honour. A build output added to a package that declares
-  // no install script stays invisible here. That is narrower than "every build a script could have
-  // performed", and it is the honest width: the alternative is the 12.7 s pass, which costs every
-  // probe and still cannot prove the artifact came from a build rather than from anywhere else.
-  if (implicated.size === 0) {
-    const buildable: string[] = [];
-    for (const slot of slots) {
-      const declares = await slotDeclaresInstallScript(storeDirectory, slot.name);
-      if (declares === null) {
-        return null;
-      }
-      if (declares) {
-        buildable.push(slot.name);
-      }
-    }
-    if (buildable.length === 0) {
-      return [];
-    }
-    const all: string[] = [];
-    for (const slotName of buildable.sort()) {
-      const files = await storeSlotContentDigest(storeDirectory, slotName);
-      if (files === null) {
-        return null;
-      }
-      all.push(`${slotName}:${files}`);
-    }
-    return all;
-  }
-
-  const digests: string[] = [];
+  // **The disk enumeration is not a fallback for an empty record — it is half of a union.** Review
+  // round 15 closed the case where the record names nothing, and left the ordinary combined state open:
+  // a project can persist `allowBuilds: { foo: true }` (an approval that outlives the package) *and*
+  // install once under an ambient blanket policy, and pnpm's `check()` returns `Some(true)` for
+  // everything when that policy is on. The record then still names `foo` while `esbuild` and every
+  // other buildable slot were actually built. Gating the enumeration on `implicated.size === 0` read
+  // only `foo`. Measured: a record naming `foo` while an ambient blanket build had also written an
+  // artifact into `bar` held `installedTree` at `5b399ad50a20` when `bar`'s artifact changed.
+  //
+  // The policy is not persistable — no record of it exists on disk — so the question cannot be settled
+  // by choosing a branch. Both sources are therefore always enumerated and **unioned**:
+  //
+  // - the slots the manager's record implicates, which is every build it knows about, and
+  // - the slots whose own files say they can be built, which is every build the record might not know.
+  //
+  // When blanket builds are off, the union costs a **false stale** and nothing else: a slot declaring
+  // `postinstall` that never ran is digested by content, so an edit to it reports staleness that did
+  // not happen. That is the direction this axis has always chosen, and it is bounded by measurement —
+  // the enumeration is 300 ms of manifests on this repository's 111 slots, plus 54 ms for the one
+  // buildable slot among them.
+  const byName = new Set<string>();
   for (const key of [...implicated].sort()) {
     // A key is `name` or `name@version`; a slot directory is `name@version`, with `+` for a scope.
     const slotName = key.replace("/", "+");
@@ -1305,16 +1294,38 @@ async function builtSlotsDigest(
       // while `{"@swc/core": true}` does match `@swc+core@1.16.2`. Answering `unknown` here would
       // make every project carrying a stale approval unverifiable, so the key is recorded as named
       // and the slots that do exist are read.
-      digests.push(`${slotName}:absent`);
+      byName.add(`${slotName}:absent`);
       continue;
     }
     for (const slot of matching) {
-      const files = await storeSlotContentDigest(storeDirectory, slot.name);
-      if (files === null) {
-        return null;
-      }
-      digests.push(`${slot.name}:${files}`);
+      byName.add(slot.name);
     }
+  }
+
+  const byTrigger = new Set<string>();
+  for (const slot of slots) {
+    const declares = await slotDeclaresInstallScript(storeDirectory, slot.name);
+    if (declares === null) {
+      return null;
+    }
+    if (declares) {
+      byTrigger.add(slot.name);
+    }
+  }
+
+  const digests: string[] = [];
+  for (const absent of [...byName].filter(name => name.endsWith(":absent")).sort()) {
+    digests.push(absent);
+  }
+  for (const slotName of [...new Set([...byName, ...byTrigger])].sort()) {
+    if (slotName.endsWith(":absent")) {
+      continue;
+    }
+    const files = await storeSlotContentDigest(storeDirectory, slotName);
+    if (files === null) {
+      return null;
+    }
+    digests.push(`${slotName}:${files}`);
   }
   return digests;
 }
