@@ -1325,9 +1325,10 @@ async function builtSlotsDigest(
  *
  * This is what lets an empty build record be answered from the disk rather than from policy: pnpm runs
  * a dependency's install script from the slot it installed, so a slot whose manifest declares no
- * `preinstall`/`install`/`postinstall` has nothing pnpm would have run there.
+ * `preinstall`/`install`/`postinstall` and ships neither `.hooks/` nor `binding.gyp` has nothing pnpm
+ * would have run there.
  *
- * **A declared script is not a claim that it ran** — a package may declare one that never executed.
+ * **A declared trigger is not a claim that it ran** — a package may declare one that never executed.
  * That is harmless here because this only *selects* slots; what was read is the slot's **content**, so
  * "declared but never ran" and "ran" are told apart by the files rather than by the declaration.
  *
@@ -1362,8 +1363,45 @@ async function slotDeclaresInstallScript(storeDirectory: string, slotName: strin
     ) {
       return true;
     }
+    // **A build is not only an install script.** Review round 14: pnpm's `BuildTriggers::requires_build()`
+    // is `manifest_scripts || hooks || (binding_gyp && !gyp_build_opted_out)`, and this function used to
+    // answer only the first term — so a native package with **no** install script was skipped, while
+    // pnpm synthesized and ran `install: node-gyp rebuild` for it under an ambient blanket policy.
+    // Measured on pnpm 12.4.2: a `file:` dependency declaring no `scripts` at all but shipping
+    // `binding.gyp` had pnpm run `native-addon@file:vendor/native install$ node-gyp rebuild`, and the
+    // same package with neither shipped cleanly with an empty record. So both extra terms are here:
+    //
+    // - `.hooks/` — pnpm runs a package's hooks as a build trigger.
+    // - `binding.gyp` — presence is the trigger, and `gypfile: false` does **not** switch it off in
+    //   this pnpm: measured, `"gypfile": false` alongside a `binding.gyp` still had pnpm run
+    //   `node-gyp rebuild`. Honouring the flag would under-select and reintroduce the same false fresh,
+    //   so this reads presence and the code says why the opt-out is not applied.
+    if ((await pathExists(join(root, ".hooks"))) === true) {
+      return true;
+    }
+    if ((await pathExists(join(root, "binding.gyp"))) === true) {
+      return true;
+    }
   }
   return false;
+}
+
+/**
+ * Whether `path` exists at all, or `undefined` when that could not be established.
+ *
+ * Separate from {@link directoryExists} because the two build triggers are named by **files**: a
+ * `binding.gyp` is a file, and asking `isDirectory()` of it answers `false` for every package that has
+ * one. Measured while writing that case — the trigger check reported "no `binding.gyp`" on a slot that
+ * shipped one, which is the under-selection this axis cannot afford.
+ */
+async function pathExists(path: string): Promise<boolean | undefined> {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    const code = (error as { readonly code?: unknown } | null)?.code;
+    return code === "ENOENT" || code === "ENOTDIR" ? false : undefined;
+  }
 }
 
 /**

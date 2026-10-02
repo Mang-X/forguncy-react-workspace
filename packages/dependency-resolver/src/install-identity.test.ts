@@ -37,23 +37,42 @@ import { describe, expect, it, vi } from "vitest";
 import { readInstallGraphIdentity, readToolchainIdentity } from "./install-identity.ts";
 
 /**
- * A `stat` that can be told to fail on one path, for the "cannot establish" case below.
+ * A `stat` that can be told to fail on one directory, for the "cannot establish" case below.
  *
  * The failure is injected at this seam because it cannot be produced portably: `ELOOP` is unreachable
  * through `stat` (it follows a link without descending into it), and `EACCES` needs a mode-`000`
  * directory and a non-root user — true on CI's Linux, unavailable on Windows. The module imports
  * `stat` as a named ESM binding, so `vi.spyOn` cannot redefine it (measured: `Cannot redefine
  * property: stat`); a hoisted `vi.mock` above the module under test is the seam that intercepts it.
+ *
+ * **Matching is on the tail of the path, not on the whole string**, and that is a measured fix rather
+ * than a precaution. Production calls `stat(join(realpath(linkTarget), "node_modules"))`, so the string
+ * it receives is the *canonical* spelling of a directory this test built from a raw one. Where those
+ * two differ — review round 14 caught exactly that on the Windows runner (run `36880559817`), where
+ * `os.tmpdir()` is the 8.3 `C:\Users\RUNNER~1\…` form and `realpath` expands it to `runneradmin` — a
+ * whole-string comparison silently misses, the seam falls through to the real `stat`, and the case
+ * reports a digest instead of `unknown` while passing on Linux. The last two segments identify the
+ * directory being asked about and are the same under either spelling; `toLowerCase` covers the
+ * case-folding Windows applies to a volume and to `realpath`'s output.
  */
 const statFailure: { value: string | null } = { value: null };
-const deniedPath: { value: string | null } = { value: null };
+const deniedTail: { value: string | null } = { value: null };
+
+/** The last `count` segments of `path`, lowercased, with either separator normalized to `/`. */
+function pathTail(path: string, count: number): string {
+  return path.split(/[\\/]/).filter(segment => segment.length > 0).slice(-count).join("/").toLowerCase();
+}
 
 vi.mock("node:fs/promises", async importOriginal => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return {
     ...actual,
     stat: async (target: Parameters<typeof actual.stat>[0], options?: Parameters<typeof actual.stat>[1]) => {
-      if (statFailure.value !== null && String(target) === deniedPath.value) {
+      if (
+        statFailure.value !== null &&
+        deniedTail.value !== null &&
+        pathTail(String(target), 2) === deniedTail.value
+      ) {
         const error = new Error(`EACCES: permission denied, stat '${String(target)}'`) as NodeJS.ErrnoException;
         error.code = statFailure.value;
         throw error;
@@ -753,6 +772,67 @@ describe("#94: identity comes from the install graph, not from a declaration", (
     expect(tree.rebuilt).not.toBe(tree.before);
   });
 
+  it("reads a slot pnpm builds without an install script, because it ships a binding.gyp", async () => {
+    // PR #114 review round 14, P1. pnpm's `BuildTriggers::requires_build()` is
+    // `manifest_scripts || hooks || (binding_gyp && !gyp_build_opted_out)`, so an install script is only
+    // the **first** of three triggers — and the selection this module used answered only that one.
+    //
+    // Measured on pnpm 12.4.2: a `file:` dependency declaring **no** `scripts` at all, but shipping a
+    // `binding.gyp`, had pnpm synthesize and run `native-addon@file+vendor+native install$ node-gyp
+    // rebuild` under an ambient blanket policy, while the same package with neither shipped cleanly and
+    // left an empty build record. So the artifacts differ while every trigger this module used to look
+    // for says "nothing to build".
+    //
+    // The fixture writes the `build/Release/*.node` an implicit `node-gyp rebuild` would leave, since
+    // node-gyp is not installable here. What is pinned is the **selection**: a slot that declares no
+    // install script but carries `binding.gyp` is read by content rather than by name.
+    const tree = await withProject(async root => {
+      const slot = join(
+        root,
+        "node_modules",
+        ".pnpm",
+        "native-addon@file+vendor+native",
+        "node_modules",
+        "native-addon",
+      );
+      const artifact = join(slot, "build", "Release", "addon.node");
+      await writeFileAt(
+        join(root, "package.json"),
+        JSON.stringify({ name: "consumer", version: "0.0.0", packageManager: "pnpm@12.4.2" }),
+      );
+      await writeFileAt(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+      await writeFileAt(join(root, "node_modules", ".pnpm", "node_modules", ".keep"), "");
+      // No `scripts` key at all. `gypfile: false` is deliberately present and deliberately **not**
+      // honoured, because the pnpm this was measured on does not honour it either — see the code.
+      await writeFileAt(
+        join(slot, "package.json"),
+        JSON.stringify({ name: "native-addon", version: "1.0.0", main: "index.js", gypfile: false }),
+      );
+      await writeFileAt(join(slot, "binding.gyp"), '{ "targets": [] }');
+      await writeFileAt(
+        join(root, "node_modules", ".modules.yaml"),
+        JSON.stringify({
+          included: { dependencies: true, devDependencies: true, optionalDependencies: true },
+          nodeLinker: "isolated",
+          hoistPattern: ["*"],
+          publicHoistPattern: [],
+          allowBuilds: {},
+          pendingBuilds: [],
+        }),
+      );
+
+      const read = async (): Promise<string | null | undefined> =>
+        (await readInstallGraphIdentity(root)).installedTree;
+      await writeFileAt(artifact, "binary-v1");
+      const before = await read();
+      await writeFileAt(artifact, "binary-v2-rebuilt");
+      return { before, rebuilt: await read() };
+    });
+
+    expect(tree.before).not.toBeNull();
+    expect(tree.rebuilt).not.toBe(tree.before);
+  });
+
   it("reports unknown when an external link target's own tree cannot be established", async () => {
     // PR #114 review round 12, P1 — and the test I could not write then. The guard read `stat` as a
     // boolean, so every error became "no `node_modules` there" and "could not read" was reported as
@@ -794,14 +874,14 @@ describe("#94: identity comes from the install graph, not from a declaration", (
         }
         await symlink(external, join(root, "node_modules", "dep"), "junction");
         if (layout === "denied") {
-          deniedPath.value = join(external, "node_modules");
+          deniedTail.value = pathTail(join(external, "node_modules"), 2);
           statFailure.value = "EACCES";
         }
         try {
           return (await readInstallGraphIdentity(root)).installedTree;
         } finally {
           statFailure.value = null;
-          deniedPath.value = null;
+          deniedTail.value = null;
           await rm(dirname(external), { recursive: true, force: true });
         }
       });
