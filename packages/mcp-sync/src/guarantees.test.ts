@@ -10,7 +10,9 @@ import {
   locallyCheckableSyncGuarantees,
   realRuntimeSyncGuarantees,
   SYNC_EXECUTIONS,
-  SYNC_EXPLORED_VERSIONS,
+  SYNC_MEASURED_VERSION_CONTEXT,
+  SYNC_MEASURED_VERSIONS,
+  SYNC_SUPPORTED_VERSIONS,
   SYNC_GUARANTEE_IDS,
   SYNC_GUARANTEES,
   SYNC_RUNTIME_ROUTE_MEANINGS,
@@ -199,7 +201,7 @@ describe("what has been executed against a real project", () => {
         // have, and one with no version cannot be checked against the build they have at all.
         for (const execution of guarantee.executions ?? []) {
           expect(execution.routes.length, `${guarantee.id} via ${execution.id}`).toBeGreaterThan(0);
-          expect(SYNC_EXPLORED_VERSIONS, execution.id).toContain(execution.version);
+          expect(SYNC_MEASURED_VERSIONS, execution.id).toContain(execution.version);
           expect(execution.environment.length, execution.id).toBeGreaterThan(0);
           expect(execution.evidence.length, execution.id).toBeGreaterThan(0);
         }
@@ -237,26 +239,59 @@ describe("what has been executed against a real project", () => {
 });
 
 // #92 gave two already-executed real-runtime promises a second route, and #20's run covered
-// one of them. #115 closed the *route* half of that by fixing the adapter and re-running both
-// routes through it — but only on 12.0.101.0, which is what the version half is about.
+// one of them. #115 closed the *route* half by fixing the adapter and re-running both routes
+// through it on 12.0.101.0.
 //
 // #116's review found that route and version were being reported as two independent booleans,
 // and these tests pin the fix: coverage is a set of (promise, route, version) cells, so a route
 // validated on one build is not credited on another and vice versa.
+//
+// #120 then narrowed *which* versions those cells are owed on. 12.0.100.0 is out of use, so the
+// gaps that used to be reported against it are no longer open items — but its execution row
+// stays, because the adapter's two-name read-back tolerance exists precisely because that
+// build's read-back spelling was never measured. These tests hold the evidence and the support
+// claim apart, which is the whole reason the two lists exist separately.
 describe("what has been executed on each route through the flow", () => {
-  // The refinement the triple forced, and the honest answer: the route work #92 added was
-  // executed, but only on the newer build. Reporting "no gap on any route" would have been true
-  // of the route axis and false of the flow, because 12.0.100.0 never reached the unchanged path.
-  it("does not credit the unchanged route on a build that never ran it", () => {
-    const unchanged = unexecutedRuntimeCoverage().filter(gap => gap.route === "unchanged");
+  // The claim side: coverage is owed on the *supported* versions only, and on 101 it is complete
+  // — #115's run reached both routes through the shipped adapter.
+  it("reports no open cell on the versions the flow is claimed to support", () => {
+    expect(unexecutedRuntimeCoverage()).toEqual([]);
+    expect(SYNC_SUPPORTED_VERSIONS).toContain("12.0.101.0");
+    // Not vacuous: cells are owed on that version, so an empty report means they are covered
+    // rather than that nothing was measured.
+    expect(syncCoverageCells().length).toBeGreaterThan(0);
+    expect(unexecutedRuntimeVersionCoverage()).toEqual([]);
+  });
 
-    expect(unchanged.map(gap => `${gap.guaranteeId}:${gap.version}`).sort()).toEqual([
-      "project-errors-checked-after-mutation:12.0.100.0",
-      "runtime-locator-returned:12.0.100.0",
-      "sync-is-idempotent:12.0.100.0",
+  // The evidence side: the older build's cells *are* uncovered, and that fact is still derivable
+  // — it is just no longer a gap, because nothing claims support for that build any more. Asking
+  // for 100 explicitly is what a reader checking the history does.
+  it("still shows the older build's uncovered cells when asked about that build", () => {
+    const overBoth = unexecutedRuntimeCoverage(SYNC_GUARANTEES, SYNC_MEASURED_VERSIONS).filter(
+      gap => gap.version === "12.0.100.0",
+    );
+
+    expect(overBoth.map(gap => `${gap.guaranteeId}:${gap.route}`).sort()).toEqual([
+      "project-errors-checked-after-mutation:unchanged",
+      "runtime-locator-returned:unchanged",
+      "sync-is-idempotent:unchanged",
     ]);
-    // And the other direction, so the check is not vacuous: nothing on 12.0.101.0 is reported.
-    expect(unexecutedRuntimeCoverage().some(gap => gap.version === "12.0.101.0")).toBe(false);
+    // And the supported version is *not* in that older-build gap set, so the two are genuinely
+    // different answers rather than one list reported twice.
+    expect(overBoth.every(gap => gap.version === "12.0.100.0")).toBe(true);
+  });
+
+  // Why the old version stays in the vocabulary at all: #20's run is the only record that the
+  // adapter had to learn a second read-back name, and deleting the row to make 100 "unsupported"
+  // would take that reason with it.
+  it("keeps the older build's execution row as the reason the adapter tolerates two names", () => {
+    const row = SYNC_EXECUTIONS["issue-20-write-route"];
+
+    expect(row.version).toBe("12.0.100.0");
+    // It is a *measured* version, so the vocabulary has to admit it even though support does not.
+    expect(SYNC_MEASURED_VERSIONS).toContain(row.version);
+    expect(SYNC_SUPPORTED_VERSIONS).not.toContain(row.version as never);
+    expect(row.evidence).toMatch(/read-back|recognition/i);
   });
 
   // The other half of the same position, pinned so the doc and the report cannot drift apart
@@ -284,35 +319,44 @@ describe("what has been executed on each route through the flow", () => {
   });
 
   // The property that makes the report meaningful rather than a hand-written list: every cell it
-  // reports is one no single execution covers.
+  // reports is one no single execution covers. Recomputed over both measured versions, because
+  // the default surface is the supported set and this check is about the computation itself.
   it("derives the report from the executions, so a reopened gap reappears", () => {
     const recomputed: string[] = [];
     for (const guarantee of SYNC_GUARANTEES) {
       const claim = guarantee.executions ?? [];
       if (claim.length === 0) continue;
       for (const route of guarantee.runtimeRoutes ?? []) {
-        for (const version of SYNC_EXPLORED_VERSIONS) {
+        for (const version of SYNC_MEASURED_VERSIONS) {
           const covered = claim.some(e => e.version === version && e.routes.includes(route));
           if (!covered) recomputed.push(`${guarantee.id}:${route}:${version}`);
         }
       }
     }
 
-    expect(unexecutedRuntimeCoverage().map(gap => `${gap.guaranteeId}:${gap.route}:${gap.version}`)).toEqual(
-      recomputed,
+    expect(
+      unexecutedRuntimeCoverage(SYNC_GUARANTEES, SYNC_MEASURED_VERSIONS).map(
+        gap => `${gap.guaranteeId}:${gap.route}:${gap.version}`,
+      ),
+    ).toEqual(recomputed);
+    // A cell spans every version asked about, so a version missing from the report entirely would
+    // be one nobody iterated rather than one that is covered.
+    const versions = new Set(
+      unexecutedRuntimeCoverage(SYNC_GUARANTEES, SYNC_MEASURED_VERSIONS).map(gap => gap.version),
     );
-    // A cell spans every version, so the report has one entry per version the flow claims — a
-    // version missing from it entirely would be an untracked build, not a covered one.
-    const versions = new Set(unexecutedRuntimeCoverage().map(gap => gap.version));
-    for (const version of versions) expect(SYNC_EXPLORED_VERSIONS, version).toContain(version);
+    for (const version of versions) expect(SYNC_MEASURED_VERSIONS, version).toContain(version);
   });
 
-  // The whole reason the finer report exists, kept as a live check: the promise-level list is
-  // empty while cells are open. Reading the empty list alone as "validated everywhere" is the
-  // overstatement this file exists to prevent, one level down.
-  it("is not implied by the promise-level list being empty", () => {
+  // The whole reason the finer report exists, kept as a live check rather than a comment: the
+  // promise-level list is empty while the default (support-scoped) report is too, and both being
+  // empty is what "the flow is validated on the versions it claims" means. Narrowing support in
+  // #120 is what made those two agree; a route or version added later re-splits them.
+  it("is not implied by the promise-level list being empty, and both are empty together", () => {
     expect(unexecutedRealRuntimeSyncGuarantees()).toEqual([]);
-    expect(unexecutedRuntimeCoverage().length).toBeGreaterThan(0);
+    expect(unexecutedRuntimeCoverage()).toEqual([]);
+    // But the older build is still short of cells, so "empty" is a statement about the supported
+    // set and not about every version the repository has ever measured.
+    expect(unexecutedRuntimeCoverage(SYNC_GUARANTEES, SYNC_MEASURED_VERSIONS).length).toBeGreaterThan(0);
   });
 
   // A route nothing spans is a gap nobody can close, so the vocabulary has to stay tied to
@@ -341,59 +385,71 @@ describe("what has been executed on each route through the flow", () => {
 // apart from the promise axis: a run on one build says nothing about another, and the two shapes
 // #115 found version-sensitive — the read-back cell-type name and the generation call — are
 // exactly what would be silently inherited if a version were folded into a route's prose.
+//
+// #120 narrowed this axis from "two versions" to "one supported, one kept as evidence". The
+// tests below are about that split: the support claim and the evidence vocabulary answer
+// different questions, and collapsing them either way loses something real.
 describe("what has been executed on each product version", () => {
-  // The gap this PR cannot close from here, and the one #116's review made expressible: the
-  // pinned build is not installed on this machine, so a reader who wants the flow validated on it
-  // has to run it there. Asserting the *cells* rather than a bare version is the fix — the
-  // previous shape reported a version as covered the moment any guarantee named it.
-  it("reports the pinned build's open cells, with what a run on it would establish", () => {
-    const gaps = unexecutedRuntimeVersionCoverage();
+  it("owes nothing on the supported version, and says which one that is", () => {
+    expect(unexecutedRuntimeVersionCoverage()).toEqual([]);
+    expect(SYNC_SUPPORTED_VERSIONS).toEqual(["12.0.101.0"]);
+    // And the evidence vocabulary is wider than the support claim, deliberately.
+    expect([...SYNC_MEASURED_VERSIONS].length).toBeGreaterThan(SYNC_SUPPORTED_VERSIONS.length);
+  });
+
+  // The older build's cells over the *measured* vocabulary, which is how a reader checks the
+  // history. This is the assertion that keeps "100 is unsupported" from quietly becoming "100's
+  // uncovered cells never existed".
+  it("reports the older build's open cells when asked over the measured vocabulary", () => {
+    const gaps = unexecutedRuntimeVersionCoverage(SYNC_GUARANTEES, SYNC_MEASURED_VERSIONS);
 
     expect(gaps.map(gap => gap.version)).toEqual(["12.0.100.0"]);
     expect(gaps[0].cells.length).toBe(3);
     expect(gaps[0].cells.every(cell => cell.version === "12.0.100.0")).toBe(true);
     expect(gaps[0].whatARunWouldEstablish).toContain("12.0.100.0");
-    expect(gaps[0].whatARunWouldEstablish).toMatch(/re-run/i);
-    // The note has to say why a *pinned and executed* build still has open cells, or the entry
+    // The note has to say why a build that *was* executed still has open cells, or the entry
     // reads as a contradiction.
     expect(gaps[0].whatARunWouldEstablish).toMatch(/predates|#20/i);
   });
 
-  // The complement, so the report is not simply "nothing is validated": the build the run that
-  // closed the route work actually happened on is not reported, and that is derived from the
-  // executions rather than listed by hand.
-  it("does not report the build the recorded executions ran on", () => {
-    const executed = new Set(Object.values(SYNC_EXECUTIONS).map(execution => execution.version));
-
-    expect(executed).toContain("12.0.101.0");
-    expect(unexecutedRuntimeVersionCoverage().map(gap => gap.version)).not.toContain("12.0.101.0");
-    for (const version of executed) expect(SYNC_EXPLORED_VERSIONS).toContain(version);
+  // The support claim is a strict subset of the evidence vocabulary, and the difference is the
+  // point: an execution row may name a version nobody supports.
+  it("keeps every supported version inside the measured vocabulary", () => {
+    for (const version of SYNC_SUPPORTED_VERSIONS) expect(SYNC_MEASURED_VERSIONS).toContain(version);
+    for (const execution of Object.values(SYNC_EXECUTIONS)) {
+      expect(SYNC_MEASURED_VERSIONS, execution.id).toContain(execution.version);
+    }
   });
 
-  // The rule that keeps the list from becoming a wish list: a version is tracked because it was
-  // run or because it is pinned, never because it exists. Two entries, and both are named in the
-  // file's own evidence — so a third version is an explicit edit against a run.
-  it("tracks exactly the versions the repository has evidence for", () => {
-    expect([...SYNC_EXPLORED_VERSIONS].sort()).toEqual(["12.0.100.0", "12.0.101.0"]);
+  // The rule that keeps the vocabulary from becoming a wish list: a version is in it because a
+  // run happened there. Two entries, both named by an execution row.
+  it("measures exactly the versions some execution ran on", () => {
+    const executed = new Set(Object.values(SYNC_EXECUTIONS).map(execution => execution.version));
+    // Every measured version has a run; nothing is listed without evidence.
+    for (const version of SYNC_MEASURED_VERSIONS) expect(executed, version).toContain(version);
     // Each is a concrete version, never a range or an empty value — a version that cannot be
     // compared to a designer's `serverInfo.version` is not a checkable claim.
-    for (const version of SYNC_EXPLORED_VERSIONS) expect(version, version).toMatch(/^\d+\.\d+\.\d+\.\d+$/);
+    for (const version of SYNC_MEASURED_VERSIONS) expect(version, version).toMatch(/^\d+\.\d+\.\d+\.\d+$/);
   });
 
   // The false negative #116's review reproduced, as a regression: with one promise executed on
   // each build, the *union* shape reported neither version as open. Each version is now short of
   // a full set of cells, and the report says so.
+  //
+  // Asked over the *measured* vocabulary, because the property under test is the shape of the
+  // computation — a version short of cells is reported as short — and the supported set is now
+  // complete on 101, which would make the check vacuous.
   it("does not round a per-promise result up to a per-version one", () => {
     const byVersion = new Map<string, number>();
     for (const cell of syncCoverageCells()) byVersion.set(cell.guaranteeId, 0);
 
-    // Both versions appear because both were executed, and both still have open cells — which is
-    // what a union of "some guarantee ran here" could not express.
-    const gaps = unexecutedRuntimeCoverage();
+    // The older build appears because it was executed and still has open cells — which is what a
+    // union of "some guarantee ran here" could not express.
+    const gaps = unexecutedRuntimeCoverage(SYNC_GUARANTEES, SYNC_MEASURED_VERSIONS);
     expect(new Set(gaps.map(gap => gap.version))).toEqual(new Set(["12.0.100.0"]));
     expect(gaps.every(gap => gap.version === "12.0.100.0")).toBe(true);
     // Sanity on the shape of the data the check rests on: more cells than versions.
-    expect(syncCoverageCells().length).toBeGreaterThan(new Set(SYNC_EXPLORED_VERSIONS).size);
+    expect(syncCoverageCells().length).toBeGreaterThan(new Set(SYNC_MEASURED_VERSIONS).size);
   });
 
   // The reviewer's scenario, built as data and run through the report — because the shipped table
@@ -475,8 +531,22 @@ describe("what has been executed on each product version", () => {
     }
   });
 
-  // The other branch of the same derivation, so the note is not simply "always partial": a version
-  // nothing has run on must still say so.
+  // #116's third review: after support narrowed to 12.0.101.0, this context still told a
+  // caller that 12.0.100.0 "is the version the repository pins" — and it is returned inside
+  // `whatARunWouldEstablish`, so it was not a stale comment but a wrong sentence in a report.
+  it("does not describe a retired build as the one the repository pins", () => {
+    const retired = SYNC_MEASURED_VERSION_CONTEXT["12.0.100.0"];
+
+    expect(retired).not.toMatch(/the version the repository pins/i);
+    expect(retired).toMatch(/no longer supports|retired/i);
+    expect(retired).toMatch(/12\.0\.101\.0/);
+
+    // And the same words must not reappear by being generated: the note a caller gets for that
+    // version has to carry the corrected context, not a hand-written variant of it.
+    const [entry] = unexecutedRuntimeVersionCoverage(SYNC_GUARANTEES, SYNC_MEASURED_VERSIONS);
+    expect(entry?.whatARunWouldEstablish).toContain(retired);
+  });
+
   it("still says nothing has run when nothing has", () => {
     const versions = ["12.0.100.0", "12.0.101.0"] as const;
     const unrun = [

@@ -196,6 +196,8 @@ export {
   persistedDefaultCellPreset,
   rejectedCellSourceConstructs,
   RUNTIME_CONTRACT_TARGET,
+  RUNTIME_CONTRACT_TARGET_FIELD_SOURCES,
+  RUNTIME_CONTRACT_TARGET_FIELDS_NOT_BROWSER_OBSERVED,
   RUNTIME_CONTRACT_UNKNOWNS,
   RUNTIME_EVIDENCE_CHANNELS,
 } from "./runtime-contract.ts";
@@ -214,6 +216,8 @@ export type {
   CellUserScopeBinding,
   FrontendLibraryReference,
   RuntimeContractTarget,
+  RuntimeContractTargetField,
+  RuntimeContractTargetFieldSource,
   RuntimeContractUnknown,
   RuntimeEvidenceChannel,
 } from "./runtime-contract.ts";
@@ -642,6 +646,7 @@ export {
   CELL_CODE_BUDGET_DECISION,
   CELL_CODE_BUDGET_GOVERNING_DECISIONS,
   CELL_CODE_BUDGET_MEASUREMENT,
+  CELL_CODE_BUDGET_REBASE_101,
   CELL_CODE_INLINE_CEILING_CHARACTERS,
   CELL_CODE_PROJECT_VOLUME_OBSERVATION,
   CELL_CODE_REVIEW_CEILING_CHARACTERS,

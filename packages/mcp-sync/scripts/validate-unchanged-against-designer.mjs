@@ -196,7 +196,7 @@ if ((await raw.getProjectSaveStatus({})).containsUnsavedChanges) {
   console.log("### settled the project before the batch:", JSON.stringify(await raw.getProjectSaveStatus({})));
 }
 const registry = createCellRegistry({
-  runtime: { forguncyVersion: "12.0.100", projectAlias: "issue92" },
+  runtime: { forguncyVersion: "12.0.101", projectAlias: "issue92" },
   cells: { probeA: { entry: "cells/probeA/App.tsx", target: { pageName: PAGE, cell: "A1" } } },
 }, { root: process.cwd(), requireEntryFiles: false });
 const batch = await executeCellSyncTargets(registry, [{ cellId: "probeA", artifact, decisions, port }]);

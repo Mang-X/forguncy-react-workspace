@@ -307,7 +307,16 @@ export const CELL_CODE_REVIEW_CEILING_CHARACTERS = CELL_CODE_BUDGET_BAND_DEFINIT
 
 /** The measurement's shape, as a machine-readable summary a consumer can cite. */
 export const CELL_CODE_BUDGET_MEASUREMENT = {
-  /** Designer MCP identity the figures were taken against. */
+  /**
+   * Designer MCP identity the figures below were taken against.
+   *
+   * `12.0.100.0`, and it stays that while the *contract* target has moved to `12.0.101.0`
+   * (#120): these numbers were measured on 100 and have not been replaced. See
+   * {@link CELL_CODE_BUDGET_REBASE_101} for what a 101 re-measurement found and what it did
+   * not cover. Naming this field 101 while the figures came from 100 is the exact mislabelling
+   * #120 exists to prevent, so the two are kept apart rather than reconciled by editing a
+   * string.
+   */
   target: "Forguncy 12.0.100.0",
   /** The unit the product reports and these bands are expressed in. */
   unit: "characters of generated artifact source",
@@ -384,6 +393,81 @@ export const CELL_CODE_PROJECT_VOLUME_OBSERVATION = {
     "With ~31 MB of Cell code across 40 extra pages, every ReactCellType write timed out at the designer's 60 s cap — including a 526-character artifact and writes to pages holding no cell code — while plain-value writes (7 ms) and cell reads (215 ms for an 8.4 MB cell) remained fast. Deleting those pages restored a ReactCellType write of the same 526-character artifact to 41 ms.",
   conclusion:
     "Cell-code cost is aggregated per project as well as per artifact. A per-cell budget cannot bound this, and no project-level ceiling is proposed here because the observation is a single point.",
+  evidence: ["designer-api"],
+} as const;
+
+/**
+ * What a `12.0.101.0` re-measurement found, and what it did **not** replace (#120).
+ *
+ * The figures in {@link CELL_CODE_BUDGET_MEASUREMENT} were measured on `12.0.100.0` and are
+ * still the published ones. This record is deliberately a *separate* fact rather than an edit of
+ * them, because the re-measurement was partial and the two series disagree in ways that have not
+ * been resolved:
+ *
+ * - **The write points came out the same order of magnitude, not the same numbers.** Measured on
+ *   a live `12.0.101.0` designer with the real generated-artifact shape (compiler banner + entry
+ *   IIFE + statement padding) and a fresh disposable page per point: 101,912 chars → 470 ms,
+ *   255,487 → 895 ms, 511,567 → 1,804 ms, 1,048,203 → 3,983 ms, 2,096,763 → 11,422 ms. #21
+ *   measured 625 / 959 / 1,691 / 4,113 / 9,440 ms for the same sizes. Per-point ratios from 0.75x
+ *   to 1.21x — a different draw from the same distribution, not a speed-up. Replacing the
+ *   published per-point values with these would be replacing one single-sample series with
+ *   another.
+ * - **The browser entry series was not re-measured at all.** It needs the generated page open in
+ *   a browser, and this build's generated runtime site cannot deliver one: the login request is
+ *   accepted, but the runtime bundle then throws in `loginByRSA` when the RSA public key request
+ *   comes back empty (`GET` answers 405; a body-carrying POST answers 411 Length Required), so
+ *   the runtime's scripts never load and `window.React` stays undefined. The
+ *   `browserEntryMsPerKilobyte` figure therefore has no 101 counterpart.
+ * - **A write at 4,193,986 characters was observed rejected** on 101 with
+ *   `代码验证失败：AI 校验 WebView 执行超时（20 秒）`, where #21 recorded that size writing
+ *   successfully. This is the one finding that may be more than sampling noise, and it is **not
+ *   resolved**: a control at 3,500,016 characters under the same project volume was rejected once
+ *   and accepted once (20,590 ms on the accepted run). A near-boundary time budget is the
+ *   reading that fits; it means the ceiling is a *duration*, not a size, and fixing a size
+ *   threshold from it would be inventing a number. Deciding it needs repeated runs to get a
+ *   distribution.
+ *
+ * **A measurement trap worth recording, because it produced a wrong answer here first.** The
+ * initial attempt padded the artifact with one long *comment*. That measured ~0.15 ms/KB —
+ * roughly 30x faster than the real shape — because Babel parses a comment far more cheaply than
+ * it parses thousands of statements. The product's own validator accepts comment padding (it is
+ * syntactically valid), so nothing rejects the sample; it simply measures something no compiled
+ * artifact looks like. `#21` warned that filler trips the syntax validator; the addition here is
+ * that filler *also* bypasses the cost that matters. Every budget number must come from a
+ * real-shaped artifact.
+ */
+export const CELL_CODE_BUDGET_REBASE_101 = {
+  target: "Forguncy 12.0.101.0",
+  /** The write points re-measured, keyed by character count, in milliseconds. */
+  writeMsByCharacters: {
+    101912: 470,
+    255487: 895,
+    511567: 1804,
+    1048203: 3983,
+    2096763: 11422,
+  },
+  /** The published series these were compared against, same keying. */
+  recordedWriteMsByCharacters: {
+    101919: 625,
+    255487: 959,
+    511567: 1691,
+    1048203: 4113,
+    2096763: 9440,
+  },
+  /** Whether the published slopes were replaced by these. They were not — see the note. */
+  replacedPublishedFigures: false,
+  /** Series the re-measurement could not cover, and why. */
+  notReMeasured: {
+    browserEntry: "Needs the generated page open in a browser. The login itself works on this build, but the runtime bundle then throws in `loginByRSA` because the RSA public key request is answered 405/411 and never yields a key, so the runtime scripts do not load.",
+  },
+  /** The one finding that may exceed sampling noise, stated as observed rather than decided. */
+  validationTimeoutObservation: {
+    rejectedAtCharacters: 4193986,
+    message: "代码验证失败：AI 校验 WebView 执行超时（20 秒）",
+    controlAtCharacters: 3500016,
+    controlOutcomes: ["rejected", "accepted in 20590 ms"],
+    reading: "A duration budget near the boundary, not a size limit; resolving it needs repeated runs, and no size threshold is derived here.",
+  },
   evidence: ["designer-api"],
 } as const;
 

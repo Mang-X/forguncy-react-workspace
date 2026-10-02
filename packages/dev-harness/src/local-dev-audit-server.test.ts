@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it, onTestFinished } from "vitest";
 import { createServer } from "vite";
 
+import { RUNTIME_CONTRACT_TARGET } from "@forguncy-react-workspace/core";
 import type { LockedDependencyDecision } from "@forguncy-react-workspace/core";
 import { createEmptyFgcLock } from "@forguncy-react-workspace/core";
 
@@ -84,8 +85,8 @@ function extensionDecision(packageName: string): LockedDependencyDecision {
     probe: { status: "passed", fingerprint: "probe=inline-bundle;entry=x", versionIndependent: false },
     target: {
       product: "Forguncy",
-      productVersion: "12.0.100.0",
-      productBuild: "12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623",
+      productVersion: RUNTIME_CONTRACT_TARGET.productVersion,
+      productBuild: RUNTIME_CONTRACT_TARGET.productBuild,
       hostReactVersion: "19.2.7",
     },
     probedWith: { vitePlus: "0.3.2" },

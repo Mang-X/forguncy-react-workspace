@@ -69,17 +69,46 @@ export const EXECUTED_AGAINST_REPROBE =
   "Forguncy 12.0.101.0 (designer assembly 12.0.101.0+92cefba44ce06dc75c2633bf5f6c6771e4ee41f0), a live MCP designer session against a disposable page, through the shipped adapter with no port corrections; re-run with packages/mcp-sync/scripts/validate-sync-against-designer.mjs and packages/mcp-sync/scripts/validate-unchanged-against-designer.mjs, evidence on #115.";
 
 /**
- * The product versions the repository has *any* executed flow evidence on.
+ * The product versions the repository has *any* executed flow evidence on, oldest first.
  *
- * Read this with {@link unexecutedRuntimeCoverage}. It is the set a coverage gap is reported
- * against, so it is deliberately the versions the repository actually claims support for rather
- * than a wish list: `12.0.100.0` is the version #5 pinned and #20 executed, and `12.0.101.0` is
- * the version #115 re-probed and executed. A third version is added here when someone runs the
- * flow on it, not when it is released.
+ * This is the **evidence vocabulary**, not the support claim: `12.0.100.0` is on it because
+ * #20's run happened there and its record is still in the table, and a version cannot be named
+ * by an execution row unless it appears here. Read {@link SYNC_SUPPORTED_VERSIONS} for the
+ * versions the flow is currently claimed to work on — since #120 that is `12.0.101.0` alone,
+ * and the two lists existing separately is what lets 100's evidence be *kept* without being
+ * *claimed*.
  */
-export const SYNC_EXPLORED_VERSIONS = ["12.0.100.0", "12.0.101.0"] as const;
+export const SYNC_MEASURED_VERSIONS = ["12.0.100.0", "12.0.101.0"] as const;
 
-export type SyncExploredVersion = (typeof SYNC_EXPLORED_VERSIONS)[number];
+export type SyncMeasuredVersion = (typeof SYNC_MEASURED_VERSIONS)[number];
+
+/**
+ * The product versions the flow is currently claimed to work on.
+ *
+ * One, since #120: `12.0.100.0` is out of use, so coverage is owed — and reported — on
+ * `12.0.101.0` only. {@link unexecutedRuntimeCoverage} iterates *this* list, which is why a
+ * gap on a version nobody claims support for is no longer reported as an open item.
+ *
+ * Why this is separate from {@link SYNC_MEASURED_VERSIONS} rather than a deletion there: #20's
+ * `12.0.100.0` execution row stays in {@link SYNC_EXECUTIONS} as history, and the version it
+ * names has to remain a member of the vocabulary or the table stops type-checking. Dropping the
+ * old version entirely would erase the record that the adapter's read-back tolerance exists
+ * *because* of — the pinned build's read-back spelling was never measured, which is why the
+ * adapter recognises both names. Keeping the evidence and narrowing the claim are two edits.
+ *
+ * Order is not what decides "which build is current" here, and the comment that used to say so
+ * was describing an invariant that does not exist. `preferredCallOf` in
+ * `capability-surface.ts` uses this list for **membership** — a call on a supported version wins
+ * over one on a version that is only measured — and takes "newest" from `SYNC_MEASURED_VERSIONS`'s
+ * own order. With one supported version the two agree, which is why the distinction only shows
+ * up when someone adds a second; the lists are stated separately so that day is boring.
+ *
+ * What this list *is* for: it is the answer to "which versions may this repository claim", and it
+ * only changes with a run. Adding a version is an edit against a run, never against a release note.
+ */
+export const SYNC_SUPPORTED_VERSIONS = ["12.0.101.0"] as const satisfies readonly SyncMeasuredVersion[];
+
+export type SyncSupportedVersion = (typeof SYNC_SUPPORTED_VERSIONS)[number];
 
 /**
  * One real-project execution of the flow, as a standalone record the promises point at.
@@ -95,7 +124,7 @@ export interface SyncExecution {
   readonly id: SyncExecutionId;
   /** The environment, quoted in full at every use so a reader sees the version and the session. */
   readonly environment: string;
-  readonly version: SyncExploredVersion;
+  readonly version: SyncMeasuredVersion;
   /** The routes through the flow's validation half that this run actually reached. */
   readonly routes: readonly SyncRuntimeRoute[];
   /** What produced it, so the claim is reproducible rather than trusted. */
@@ -434,7 +463,7 @@ export function unexecutedRealRuntimeSyncGuarantees(
 export interface UnexecutedCoverage {
   readonly guaranteeId: SyncGuaranteeId;
   readonly route: SyncRuntimeRoute;
-  readonly version: SyncExploredVersion;
+  readonly version: SyncMeasuredVersion;
   /** What a run on this route does, so the gap is readable without a second lookup. */
   readonly routeMeaning: string;
 }
@@ -487,7 +516,7 @@ export interface UnexecutedCoverage {
  */
 export function unexecutedRuntimeCoverage(
   guarantees: readonly SyncGuarantee[] = SYNC_GUARANTEES,
-  versions: readonly SyncExploredVersion[] = SYNC_EXPLORED_VERSIONS,
+  versions: readonly SyncMeasuredVersion[] = SYNC_SUPPORTED_VERSIONS,
 ): readonly UnexecutedCoverage[] {
   const gaps: UnexecutedCoverage[] = [];
   for (const guarantee of guarantees) {
@@ -528,7 +557,7 @@ export function unexecutedRuntimeCoverage(
  * is owed on.
  */
 export interface UnexecutedVersionCoverage {
-  readonly version: SyncExploredVersion;
+  readonly version: SyncMeasuredVersion;
   /** The cells still owed on this version, in declaration order. */
   readonly cells: readonly UnexecutedCoverage[];
   /** What running the flow on this version would establish, in the promises' own terms. */
@@ -536,26 +565,31 @@ export interface UnexecutedVersionCoverage {
 }
 
 /**
- * The per-version coverage gaps: every version the repository claims support for, together with
- * the cells no execution has covered on it.
+ * The per-version coverage gaps: every version asked about, together with the cells no
+ * execution has covered on it.
  *
- * Version `12.0.100.0` is a gap on purpose and cannot be closed from the machine #115 ran on —
- * one `12.0.101.0` install, no installer, no second designer session. Reporting it is the honest
- * state; inheriting #115's result would be the "a different version is a re-run rather than an
- * inheritance" rule broken in the one direction that matters. Adding `12.0.101.0` to
- * {@link SYNC_EXPLORED_VERSIONS} without executing on it would be the same error, which is why
- * that list is only extended with a run.
+ * **Defaults to the versions support is claimed for** ({@link SYNC_SUPPORTED_VERSIONS}), so the
+ * default report answers "is any version this repository claims still missing evidence?" — and
+ * with #120's re-base that is 12.0.101.0 alone, which is complete. Passing
+ * {@link SYNC_MEASURED_VERSIONS} instead asks the historical question, and *that* is where
+ * `12.0.100.0`'s three open `unchanged` cells appear.
+ *
+ * The distinction matters because the two answers are different claims and only one of them is a
+ * work item. 12.0.100.0 is out of use, so its uncovered cells are a fact about what was measured
+ * rather than something outstanding — reporting it as a gap by default would keep a retired build
+ * on the board indefinitely, and *not* reporting it would hide what the evidence does and does not
+ * cover. Hence: reported when asked for, never in the default answer.
  */
 export function unexecutedRuntimeVersionCoverage(
   guarantees: readonly SyncGuarantee[] = SYNC_GUARANTEES,
-  versions: readonly SyncExploredVersion[] = SYNC_EXPLORED_VERSIONS,
+  versions: readonly SyncMeasuredVersion[] = SYNC_SUPPORTED_VERSIONS,
 ): readonly UnexecutedVersionCoverage[] {
   const gaps = unexecutedRuntimeCoverage(guarantees, versions);
   // The runs on each version are taken from the *same* guarantees the gaps came from, rather than
   // from the global table. They have to be: the note says "N executions have run here", and a
   // report computed over supplied records must not describe them with facts from the shipped
   // table. Deriving one from the other is also what makes the two impossible to disagree.
-  const runsByVersion = new Map<SyncExploredVersion, SyncExecution[]>();
+  const runsByVersion = new Map<SyncMeasuredVersion, SyncExecution[]>();
   for (const guarantee of guarantees) {
     for (const execution of guarantee.executions ?? []) {
       const runs = runsByVersion.get(execution.version) ?? [];
@@ -584,7 +618,7 @@ export function unexecutedRuntimeVersionCoverage(
  * derivable from the executions table.
  *
  * A `Record` keyed by the version union rather than a chain of `if (version === …)` inside the
- * note, for two reasons: adding a version to {@link SYNC_EXPLORED_VERSIONS} then fails to compile
+ * note, for two reasons: adding a version to {@link SYNC_MEASURED_VERSIONS} then fails to compile
  * until someone says what is known about it, and the note function stays a composition of derived
  * facts and stated context instead of a place where a version-specific claim can hide.
  *
@@ -593,15 +627,15 @@ export function unexecutedRuntimeVersionCoverage(
  * the pinned one, which is false the moment a version has a partial gap — the exact state
  * (promise, route, version) coverage exists to express. #116's second review caught that.
  */
-export const SYNC_EXPLORED_VERSION_CONTEXT: Readonly<Record<SyncExploredVersion, string>> = {
+export const SYNC_MEASURED_VERSION_CONTEXT: Readonly<Record<SyncMeasuredVersion, string>> = {
   "12.0.100.0":
-    "This is the version the repository pins; #20's run on it predates the read-back recognition #115 corrected, and that build's read-back cell-type name is still unmeasured — which is why the adapter recognises both spellings.",
-  "12.0.101.0": "This is the build #115 probed and drove both routes through, with the shipped adapter.",
+    "A build this repository was measured against and no longer supports: it was the pinned target for #5 and #20, and was retired when the contract re-based on 12.0.101.0 (#120). #20's run predates the read-back recognition #115 corrected, and that build's read-back cell-type name was never measured — which is why the adapter recognises both spellings rather than narrowing to one.",
+  "12.0.101.0": "The build the repository targets, and the one #115 probed and drove both routes through.",
 };
 
 /** Why the given version's cells are open, and what would close them. */
 function unexecutedCoverageNote(
-  version: SyncExploredVersion,
+  version: SyncMeasuredVersion,
   cells: readonly UnexecutedCoverage[],
   executionsOnVersion: readonly SyncExecution[],
 ): string {
@@ -618,5 +652,5 @@ function unexecutedCoverageNote(
       ? `Nothing has run on ${version}, so every cell the flow owes there is open.`
       : `${executionsOnVersion.length} execution(s) have run on ${version}, covering the ${coveredRoutes.join("/")} route(s), so ${cells.length} cell(s) there are a *partial* gap rather than an unvalidated build.`;
 
-  return `${state} Open: ${openRoutes.join("/")} route(s) for ${scenarios.length} promise(s) (${scenarios.join(", ")}). Re-run both validation scripts against a ${version} designer to close them. ${SYNC_EXPLORED_VERSION_CONTEXT[version]}`;
+  return `${state} Open: ${openRoutes.join("/")} route(s) for ${scenarios.length} promise(s) (${scenarios.join(", ")}). Re-run both validation scripts against a ${version} designer to close them. ${SYNC_MEASURED_VERSION_CONTEXT[version]}`;
 }

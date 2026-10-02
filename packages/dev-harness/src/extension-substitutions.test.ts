@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it, onTestFinished } from "vitest";
 import { createServer } from "vite";
 
+import { RUNTIME_CONTRACT_TARGET } from "@forguncy-react-workspace/core";
 import type { ForguncyConfig } from "@forguncy-react-workspace/core";
 
 import { canonicalTempProject, removeTempProject } from "./temp-project.ts";
@@ -134,8 +135,8 @@ function projectWithShim(): { root: string; shimMarker: string; substitutePackag
           probe: { status: "passed", fingerprint: "probe=x", versionIndependent: false },
           target: {
             product: "Forguncy",
-            productVersion: "12.0.100.0",
-            productBuild: "12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623",
+            productVersion: RUNTIME_CONTRACT_TARGET.productVersion,
+            productBuild: RUNTIME_CONTRACT_TARGET.productBuild,
             hostReactVersion: "19.2.7",
           },
           probedWith: { vitePlus: "0.3.2" },
@@ -301,8 +302,8 @@ function writeLockWithCellScopedDecision(
     probe: { status: "passed", fingerprint: "probe=x", versionIndependent: false },
     target: {
       product: "Forguncy",
-      productVersion: "12.0.100.0",
-      productBuild: "12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623",
+      productVersion: RUNTIME_CONTRACT_TARGET.productVersion,
+      productBuild: RUNTIME_CONTRACT_TARGET.productBuild,
       hostReactVersion: "19.2.7",
     },
     probedWith: { vitePlus: "0.3.2" },
@@ -460,8 +461,8 @@ describe("a stale choice is reported but never applied", () => {
             probe: { status: "passed", fingerprint: "probe=x", versionIndependent: false },
             target: {
               product: "Forguncy",
-              productVersion: "12.0.100.0",
-              productBuild: "12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623",
+              productVersion: RUNTIME_CONTRACT_TARGET.productVersion,
+              productBuild: RUNTIME_CONTRACT_TARGET.productBuild,
               hostReactVersion: "19.2.7",
             },
             probedWith: { vitePlus: "0.3.2" },
@@ -643,8 +644,8 @@ describe("a declaration that cannot be honoured fails loudly rather than resolvi
             probe: { status: "passed", fingerprint: "probe=x", versionIndependent: false },
             target: {
               product: "Forguncy",
-              productVersion: "12.0.100.0",
-              productBuild: "12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623",
+              productVersion: RUNTIME_CONTRACT_TARGET.productVersion,
+              productBuild: RUNTIME_CONTRACT_TARGET.productBuild,
               hostReactVersion: "19.2.7",
             },
             probedWith: { vitePlus: "0.3.2" },
