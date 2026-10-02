@@ -136,7 +136,7 @@ describe("core/browser is a projection of core's surface, not a second one", () 
     // nothing, but it hashes with `node:crypto`, and the projection's second assertion is about
     // reachable builtins rather than about disk access. The second test's own wording says which
     // rule applies — this is about the *primitive*, not about the project.
-    const nodeSide = ["cell-compile-fingerprint", "cell-registry", "config-loader"] as const;
+    const nodeSide = ["cell-compile-fingerprint", "cell-registry", "config-loader", "resolve-config"] as const;
 
     const expected = barrelModules.filter(name => !(nodeSide as readonly string[]).includes(name));
     expect(expected.length).toBeGreaterThan(10);

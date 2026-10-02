@@ -18,6 +18,8 @@ import type { CellRegistry, ConfigDiagnosticCode, RegisteredCell } from "./cell-
 import { normalizeExtensionMappings } from "./extension-mappings-config.ts";
 import type { NormalizedExtensionMappings } from "./extension-mappings-config.ts";
 import { targetLocatorKey } from "./forguncy-config.ts";
+import { normalizeResolveConfig } from "./resolve-config.ts";
+import type { NormalizedResolveConfig } from "./resolve-config.ts";
 
 const fixturesRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "tests", "fixtures");
 const validMultiRoot = join(fixturesRoot, "valid-multi");
@@ -42,6 +44,12 @@ function normalizedMappingsOf(config: unknown): NormalizedExtensionMappings {
   const result = normalizeExtensionMappings(config);
   if (!result.ok) throw new Error("Expected this fixture config's extension mappings to normalize.");
   return result.mappings;
+}
+
+function normalizedResolveOf(config: unknown, root: string): NormalizedResolveConfig {
+  const result = normalizeResolveConfig(config, { root });
+  if (!result.ok) throw new Error("Expected this fixture config's resolve block to normalize.");
+  return result.resolve;
 }
 
 function registryOf(config: unknown, options: RegistryOptions = {}): CellRegistry {
@@ -604,6 +612,7 @@ describe("mutation-boundary target guard", () => {
       // requires this field, so a forged registry that omitted it would be re-normalized
       // from the raw config and the mutation-boundary path under test would never run.
       extensionMappings: normalizedMappingsOf({}),
+      resolve: normalizedResolveOf({}, validMultiRoot),
       cells,
       cellIds: cells.map(cell => cell.id),
       get: id => cells.find(cell => cell.id === id),

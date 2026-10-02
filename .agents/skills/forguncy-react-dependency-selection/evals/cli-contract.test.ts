@@ -118,7 +118,11 @@ async function removeScratch(root: string): Promise<void> {
   }
   const remaining = await readdir(parent).catch(() => null);
   if (remaining !== null && remaining.length === 0) {
-    await rm(parent, { recursive: true, force: true });
+    // Best-effort, for the same reason as the guard above: this file and `cap-e2e.test.ts` share
+    // `examples/probe-proving-cases/.fgc` and run in parallel, so the parent can be deleted out
+    // from under the other one between its `mkdir` and its `mkdtemp` — which failed it with
+    // `ENOENT` on Linux CI (measured). A leftover empty, git-ignored `.fgc/` costs nothing.
+    await rm(parent, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 

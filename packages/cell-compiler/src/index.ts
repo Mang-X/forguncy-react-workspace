@@ -303,3 +303,16 @@ export type { CreateRolldownCellBundlerOptions } from "./rolldown-bundler.ts";
 // The #26 registry seam: declared Cell id in, compilable input + target out
 export { planCellCompile, planCellCompiles } from "./registry-plan.ts";
 export type { CellCompilePlan, CellCompileTarget } from "./registry-plan.ts";
+
+// The public build entry (#97): one declared project in, one artifact per Cell out. Composes
+// the registry, the aliases both paths resolve through, the workspace audit and the compiler,
+// so a project does not have to assemble a bundler port and a decision list by hand.
+export { buildCellProject, requireCompiledCells } from "./build-cell-project.ts";
+export type {
+  BuildCellProjectOptions,
+  BuiltCell,
+  CellDependencies,
+  CellProjectBuild,
+  CellProjectSource,
+  CellProjectWorkspace,
+} from "./build-cell-project.ts";

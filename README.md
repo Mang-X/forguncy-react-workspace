@@ -144,6 +144,60 @@ lock 里的决策是**按挂载的那个 Cell 投影过**的。这很重要，�
 
 一个具体后果值得单独写下来：`react-dom/client` 在页面被收窄为 #5 实际观测到的成员，本地却是完整的已发布模块 —— 所以本地比页面**更宽松**，本地通过不能当作更强的结论。
 
+## 模块别名（`resolve.alias`）：本地与构建共用一份
+
+Cell 里想写 `import { Button } from "@/ui"` 这种短路径时，别名写在 **`forguncy.config.ts`** 里，不写在 `vite.config.ts` 里：
+
+```ts
+export default defineForguncyConfig({
+  cells: { /* ... */ },
+  resolve: {
+    alias: {
+      "@/ui": "./src/ui",
+      "@app/shared": "./packages/shared", // 指向 workspace 共享源码也可以
+    },
+  },
+});
+```
+
+**为什么必须写在项目配置里**：Cell 产物是**一个自包含的 IIFE**，不是普通 web bundle，所以生产构建直接驱动 Rolldown，而它读不到 `vite.config.ts` 里的任何东西。在 #97 之前，这个别名在 `vp dev` 下生效、在编译时直接失败 —— 也就是「本地一套、生产另一套」。现在 `core` 把这一块归一化一次、挂在 registry 上，dev server 与 Cell 构建**读的是同一个对象**，因此不可能各自解读成不同的文件。
+
+这一块刻意只支持**子集**，因为两个引擎只在一种键形态上规则一致（`importee === key || importee.startsWith(key + "/")`）：
+
+| 写法 | 结果 |
+| --- | --- |
+| `"@/ui": "./src/ui"` | ✅ 本地与构建解析同一文件 |
+| `"echarts/": "./vendor/echarts/"`（两侧都带斜杠） | ✅ 归一化后同上。**注意不能拿 `react` 之类被宿主桥接的 id 举例**：那种键会被下一节最后一行拒绝 |
+| 数组形式 `[{ find, replacement }]`（字符串 `find`） | ✅ 同上，方便从 `vite.config.ts` 拷过来 |
+| `RegExp`，或 `"/正则/"` / `"^x$"` 之类键 | ❌ 明确报错。Rolldown 的 `resolve.alias` 是字符串 map，没有 pattern 能力；对象键在 Vite 里也**按字面**匹配，所以这种写法在两条路径上都不会别名到任何东西 |
+| 目标是裸包名（`{ "old": "new" }`） | ❌ 明确报错。Vite 从项目根解析、Rolldown 从引用文件解析，同一个声明会解析到不同位置 |
+| 目标是绝对路径 / `~` / `file://` | ❌ 明确报错（提交进仓库的配置必须换台机器意思一样） |
+| 目标是项目根本身（`{ "@": "." }`） | ❌ 明确报错。否则整个项目都能用一个 id 导入。root 带不带尾斜杠、带不带 `.`/`..` 段都一样会被拒绝 |
+| 数组形式里两个键互相重叠、且声明顺序无法保持（如 `[{"1/deep"}, {"1"}]`） | ❌ 明确报错。对象会把「像数字的键」提前枚举，于是数组里的声明顺序被改写；Vite 按数组顺序取更具体的那个、Rolldown 按 map 顺序取更一般的那个，同一个 import 会在两条路径上解析到不同目标。把更具体的键写在更一般的之后即可 |
+| 键是 `__proto__` | ❌ 明确报错。普通对象存不下它（赋值走的是 `Object.prototype.__proto__` setter，不是新建自有属性），而 Vite 会把该 id 解析到自己的一个内部模块而不是任何别名目标 —— 所以两条路径都不可能一致地兑现它 |
+| 键是宿主桥接的 id（`react` / `react-dom` / `antd` 等） | ❌ 明确报错。两个引擎对「桥接 vs 别名」的**顺序相反**（Vite 先别名、产物先桥接），写在这里只会改本地解析。要指向自己打的 React，请写 `vite.config.ts`，那是**本地覆盖**，不是对产物的声明 |
+
+不支持的都是**报错**而不是静默忽略 —— 一个「本地能跑、产物里没生效」的别名比一个明确的错误更贵。
+
+### 同一个 id **不要**再写进 `vite.config.ts`
+
+`vite.config.ts` 里仍然可以写别名（本地打补丁、临时替身都是合理需求），但**不能与 `forguncy.config.ts` 的别名重叠**：Vite 会先应用自己的 `resolve.alias`，再到插件的 `resolveId`（项目别名在那里生效），所以重叠时本地会走 Vite 那份、而 Cell 构建只认 `forguncy.config.ts` 那份 —— 两条路径**都成功但结果不同**，这正是本票要消除的分歧。`vp dev` 启动时会**直接拒绝**（`local-dev-project-alias-shadowed`），并把重叠的键与两个目标一起打出来。
+
+重叠是**双向**判定的：`vite.config.ts` 写得更深（`@app/shared/thing`）同样会盖住项目里的 `@app/shared`，一样被拒绝。不重叠的 `vite.config.ts` 别名不受影响。
+
+**正则形式的 `find` 同样会被判定**，而不是压成字符串近似。`{ find: /^@app\/shared(?=\/|$)/ }` 这种写法会被真的求值：Vite 确实会用它改写 `@app/shared/thing`，所以必须拒绝 —— 早先版本把它降成 `source` 字符串比较，会**静默漏过**，等于恢复本票要消除的分叉。判定规则只有两条：
+
+1. 把该正则对着「项目 key 能匹配的 specifier 集合」**实际求值**，命中即拒绝；
+2. 未命中时，只有 `source` 完全不含元字符的正则才放行（它只能匹配自己字面拼出的串，探针未命中就是真未命中），其余**一律拒绝**（fail closed，因为这是 blocking gate，漏报的代价是不一致，误拒的代价只是让用户改写成普通字符串别名）。
+
+曾经还有一条「`^` 锚定正则的强制字面前缀不含该 key → 放行」的静态豁免，**已删除**：那个前提在三种普通写法下都不成立 —— `/i` 让匹配忽略大小写、`^` 只约束分支的第一个 alternative、`\x73` 是字符 `s` 而非两个字符 —— 三者都能让真实覆盖被静默跳过。静态判定要成立必须正确处理 flags、分支、量词、字符类、lookaround 与全部转义形式，这套分析没有实现，所以不提供任何豁免。
+
+误拒的确存在：一个与项目别名毫无关系的复杂正则（例如 `/^some-other-lib(\/|$)/`）也会被拒。改写成等价的普通字符串别名即可精确通过 —— 这也是「真的想要某个 id」时本来该写的形式。
+
+**由 Vite 插件注入的别名同样被拒绝。** harness 自身是 `enforce: "pre"`，而 Vite 的 `config` hook 是顺序执行的 —— 普通/`post` 用户插件会在 harness 读完之后继续 merge 进 `resolve.alias`。一个这样的插件若注入 `@app/shared/thing -> /local-copy`，Vite 会在 harness 的 `resolveId` 之前命中它，而 Cell 构建只认 `forguncy.config.ts`，于是 dev 与产物对同一个 import 给出不同文件。
+
+因此 harness 会在启动时对比**最终**的 alias 集合：项目自己声明的、harness 自己注入的（`hostModuleAliases()`）、以及 Vite 内置的 `@vite/` 条目三者之外，任何多出来的条目一律拒绝 —— 不要求它与项目别名重叠，因为「本 harness 无法解释的别名」本身就已经是本票要求报告的「未支持的 Vite plugin 行为」。需要某个别名就写在 `vite.config.ts` 里，那份声明会被正确记账。
+
 ## 依赖策略
 
 第三方依赖不会简单地分成“支持 / 不支持”，而是根据实际运行方式选择以下策略：

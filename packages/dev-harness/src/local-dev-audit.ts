@@ -218,6 +218,24 @@ export interface HarnessAuditInput {
    * to catch, and restating its rules here is how the two would come apart.
    */
   readonly extensionChoices: readonly LocalDevExtensionChoice[];
+  /**
+   * The keys of the project's own `vite.config.ts` aliases, and the project's declared aliases.
+   *
+   * Forwarded to `runtime`'s audit, which owns the question of whether an overlap is a problem and
+   * how bad it is (`local-dev-project-alias-shadowed`, `blocksLocalDevelopment: true`). The harness
+   * reads the *keys* — with Vite's own matching rule — because `runtime` may not depend on Vite; it
+   * does not decide what they mean.
+   */
+  readonly userAliasKeys?: readonly string[];
+  /**
+   * Project keys a `RegExp` alias shadows, with the pattern that does it.
+   *
+   * Forwarded for the same reason as {@link userAliasKeys} and not merged into it: a pattern cannot
+   * be compared as a string without losing its meaning, so the audit needs the harness's verdict and
+   * the pattern text, not a key.
+   */
+  readonly userAliasPatterns?: readonly { readonly key: string; readonly pattern: string }[];
+  readonly projectAlias?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -242,6 +260,9 @@ export function auditHarnessConfiguration(input: HarnessAuditInput): LocalDevAud
   return auditLocalDevConfiguration({
     decisions: input.decisions,
     extensionChoices: input.extensionChoices,
+    ...(input.userAliasKeys === undefined ? {} : { userAliasKeys: input.userAliasKeys }),
+    ...(input.userAliasPatterns === undefined ? {} : { userAliasPatterns: input.userAliasPatterns }),
+    ...(input.projectAlias === undefined ? {} : { projectAlias: input.projectAlias }),
   });
 }
 

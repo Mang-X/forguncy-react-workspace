@@ -1289,6 +1289,11 @@ describe("the diagnostic vocabulary", () => {
           resolution => resolution.specifier !== "antd",
         ),
       }),
+      // A `vite.config.ts` alias overlapping a project alias (#97 round 4).
+      auditLocalDevConfiguration({
+        projectAlias: { "@app/shared": "/abs/shared" },
+        userAliasKeys: ["@app/shared"],
+      }),
     ]) {
       for (const diagnostic of audit.diagnostics) produced.add(diagnostic.code);
     }

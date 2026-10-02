@@ -97,13 +97,26 @@ async function scratchRoot(example: string): Promise<string> {
   return mkdtemp(join(parent, "cap-e2e-"));
 }
 
-/** Removes a scratch root and the `.fgc/` parent this file created for it. */
+/**
+ * Removes a scratch root and, when it is empty, the `.fgc/` parent this file created for it.
+ *
+ * The parent removal is **best-effort**, and that is a race fix rather than tidiness: this file and
+ * `cli-contract.test.ts` share `examples/probe-proving-cases/.fgc` and run in parallel, so one file
+ * can observe the parent empty and delete it while the other is between its own `mkdir` and
+ * `mkdtemp`. That produced `ENOENT: mkdtemp '…/probe-proving-cases/.fgc/cap-e2e-XXXX'` on Linux CI
+ * (measured; Windows passed because its retry behaviour differs) — a failure in a suite this file
+ * does not own, caused by cleanup rather than by the assertion under test.
+ *
+ * A leftover empty `.fgc/` is harmless — it is git-ignored — while a spurious `ENOENT` fails a run.
+ * `force: true` already ignores a missing directory, so a parent another worker re-created is left
+ * alone and one it already removed is not an error.
+ */
 async function removeScratch(root: string): Promise<void> {
   await rm(root, { recursive: true, force: true });
   const parent = dirname(root);
   const remaining = await import("node:fs/promises").then(module => module.readdir(parent).catch(() => null));
   if (remaining !== null && remaining.length === 0) {
-    await rm(parent, { recursive: true, force: true });
+    await rm(parent, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 

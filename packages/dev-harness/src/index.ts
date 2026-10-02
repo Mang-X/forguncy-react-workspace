@@ -102,6 +102,7 @@ export {
   HARNESS_ENTRY_URL_PATH,
   HARNESS_MOUNT_ELEMENT_ID,
   harnessHostModulePlan,
+  projectAliasTarget,
   REACT_FAST_REFRESH_PLUGIN_NAME,
   reactFastRefresh,
 } from "./vite-plugin.ts";

@@ -58,6 +58,7 @@ import react from "@vitejs/plugin-react-swc";
 import { ForguncyConfigError, RUNTIME_CONTRACT_TARGET } from "@forguncy-react-workspace/core";
 import type { CellRegistry, ForguncyConfig, RegisteredCell } from "@forguncy-react-workspace/core";
 import type { LocalDevExtensionChoice } from "@forguncy-react-workspace/runtime";
+import { createLocalDevDiagnostic } from "@forguncy-react-workspace/runtime";
 import { resolveInstalledVersions } from "@forguncy-react-workspace/dependency-resolver/local";
 import { cellVirtualModuleId, forguncy } from "@forguncy-react-workspace/vite-plugin-fgc";
 
@@ -168,7 +169,18 @@ export interface DevHarnessVitePlugin {
     registry(): CellRegistry | undefined;
     mountedCell(): RegisteredCell | undefined;
   };
-  configResolved(config: { readonly root: string; readonly plugins: readonly { readonly name: string }[] }): void;
+  configResolved(config: {
+    readonly root: string;
+    readonly plugins: readonly { readonly name: string }[];
+    /**
+     * The user's own alias settings, read to detect a shadowing alias (#97).
+     *
+     * `unknown` rather than a typed alias shape, matching `config()`: the value has to be read with
+     * `readAliasPatterns` anyway (Vite accepts two forms and normalizes a trailing slash), and
+     * typing it here would invite a caller to trust the shape instead of that reader.
+     */
+    readonly resolve?: { readonly alias?: unknown };
+  }): void;
   /**
    * Audits the project's local-dev configuration once, and refuses the server on a blocking finding.
    *
@@ -205,7 +217,10 @@ export interface DevHarnessVitePlugin {
    * because that is the only mechanism of the four tried that reaches the browser — see the same
    * docstring for the three that do not, and why an alias would over-claim subpaths.
    */
-  resolveId(id: string): string | null;
+  resolveId(
+    this: { readonly resolve: ResolveIdContext["resolve"] },
+    id: string,
+  ): Promise<string | null> | string | null;
   /** Generates the mount module, or an explanation, or `null` for ids this plugin does not own. */
   load(id: string): string | null;
   /**
@@ -223,6 +238,23 @@ export interface DevHarnessVitePlugin {
       readonly injectTo: "body";
     }[];
   };
+}
+
+/**
+ * The slice of a Vite plugin context the project-alias claim needs.
+ *
+ * Structural rather than imported, like every other host type in this file: the plugin is typed
+ * against the Vite plugin *contract* so nothing here pins a toolchain version. `resolve` is
+ * declared because a project alias is finished by the host's own resolver — the target may be a
+ * directory, may need an extension, and may itself be claimed by another plugin — so the claim
+ * asks the host to resolve the rewritten id rather than returning a bare path.
+ */
+interface ResolveIdContext {
+  resolve(
+    id: string,
+    importer: string | undefined,
+    options: { readonly skipSelf: boolean },
+  ): Promise<{ readonly id: string } | null>;
 }
 
 export const DEV_HARNESS_PLUGIN_NAME = "forguncy-dev-harness";
@@ -441,6 +473,429 @@ function unclaimedHostAliases(userAlias: unknown): Record<string, string> {
  * Returning patterns of one type rather than a `{ find, replacement }` record keeps
  * `isClaimedBy`'s contract as simple as the string-or-RegExp question it actually asks.
  */
+/**
+ * The project keys a `RegExp` alias `find` shadows, paired with the pattern that does it.
+ *
+ * ## Why the pattern is evaluated rather than approximated
+ *
+ * An earlier version passed `pattern.source` and let the audit compare it as a string. That is
+ * unsound in the direction that matters: `^@app\/shared(?=\/|$)` becomes the string
+ * `@app/shared(?=/|$)`, which is neither equal to the project key nor a `/`-prefix of it, so a
+ * pattern Vite genuinely applies to `@app/shared/thing` passed the check and the dev/build split
+ * returned silently. Review found it; measured before fixing.
+ *
+ * Deciding "can this regex match a string that is `key` or a subpath of it" in general is an
+ * intersection problem, and this does **not** attempt to solve it. It does something both sound and
+ * simple: it runs the caller's own `RegExp` against the specifiers a project alias can actually
+ * match, using the caller's own regex engine. A hit is a fact rather than an inference, so there is
+ * no approximation left to be wrong about.
+ *
+ * ## Why that is not a heuristic
+ *
+ * The probe set is a **superset** of what the project alias can match, not a sample of it. A
+ * project key `k` covers `k` and every string beginning `k + "/"`; the set below is `k`, `k + "/"`,
+ * and a bounded set of `k + "/a…"` extensions. A pattern that matches any member of the set shadows
+ * at least that specifier, so refusing is sound. A pattern that matches none is not *proved*
+ * disjoint — a pattern needing five path segments could match `k + "/a/b/c/d/e"` without matching
+ * the ones probed — so the residue is decided by the one test that cannot be wrong: a source with
+ * no metacharacters can only match the literal it spells, and anything else is undecidable and
+ * refused.
+ *
+ * ## Why there is no static prefix exemption
+ *
+ * An earlier version added one: a `^`-anchored pattern's leading literal run was treated as
+ * mandatory on every match, so a key that could not start with it was skipped without being
+ * tested. Review found the premise false in three independent ways, each reproduced against a
+ * real Vite server before removing it — with a project alias `@app/shared -> ./shared`, all three of
+ * these **do** apply to `@app/shared/thing`, and all three sailed through the exemption:
+ *
+ * | pattern | why the extracted prefix was wrong |
+ * | --- | --- |
+ * | `/^@APP\/SHARED(?=\/|$)/i` | the `i` flag makes matching case-insensitive; `startsWith` is not |
+ * | `/^other\|@app\/shared(?=\/|$)/` | `^` binds only the first alternative, so `other` is not required of the second branch |
+ * | `/^@app\/\x73hared(?=\/|$)/` | `\x73` is the character `s`; the extractor treated it as a two-character escape |
+ *
+ * So the exemption was not merely imprecise — it was a **silent bypass** of a blocking gate, which
+ * is the one failure mode this whole check exists to prevent. Correct regex-prefix analysis would
+ * have to handle flags, alternation, quantifiers, classes, lookaround and every escape form before
+ * it could prove anything; that analysis is not implemented, so there is no exemption, and a
+ * `RegExp` is judged only by being run.
+ *
+ * The cost is that a complex regex which overlaps nothing may also be refused. That is the correct
+ * trade for a blocking gate — the remedy is a plain string alias, which is checked exactly and is
+ * what a project would write for an id it means literally.
+ *
+ * ## What it returns, and why the key is echoed back verbatim
+ *
+ * Each returned string is the **project key**, not the pattern. That is what lets a `RegExp` reach
+ * the audit through the same door as a string key — the audit compares strings and needs no regex
+ * knowledge. The cost is that the finding then quotes the project key as though `vite.config.ts`
+ * had declared it, which for a pattern that did *not* literally spell the key is a misattribution:
+ * measured, an undecidable pattern produced a message saying `vite.config.ts` "declares an alias
+ * \`@app/shared\`" when it declared no such thing.
+ *
+ * So the pattern is returned in the position the audit reads as `find`, by prefixing it with the
+ * key it shadows. The audit's message then names a string that *is* in the config file, and the
+ * comparison still matches exactly — one value, correct in both roles.
+ */
+/**
+ * One alias entry with its `replacement` kept, which `readAliasPatterns` throws away.
+ *
+ * The subtraction in {@link undeclaredAliasEntries} has to answer "is this final entry still the
+ * contribution we know?", and a key cannot answer it: Vite's merge keeps the last value for a
+ * repeated key, so a later plugin that rewrites `react -> /local-copy/react` produces a final entry
+ * whose `find` is one the harness owns and whose `replacement` is not the one the harness emitted
+ * (measured — dev resolved `react` to `/local-copy/react` while the harness's own alias was skipped
+ * on key alone). Keeping the pair is what makes the comparison an identity check on the whole
+ * contribution rather than a name check.
+ */
+/**
+ * Whether a value is a resolver Vite will actually honour, in either of the two forms it accepts.
+ *
+ * Vite 8.3.0 (the version this repository pins) types the field as
+ * `ResolverFunction | ResolverObject | null`, and its runtime `resolveCustomResolver` follows the
+ * same two shapes:
+ *
+ * ```js
+ * function resolveCustomResolver(customResolver) {
+ *   if (typeof customResolver === "function") return customResolver;
+ *   if (customResolver) return getHookFunction(customResolver.resolveId);
+ *   return null;
+ * }
+ * ```
+ *
+ * So the object form — `{ resolveId() { … } }` — is a resolver too. Recognising only functions left
+ * the round-13 bypass open by a different spelling (measured: a later plugin repeating the
+ * harness's own `react` find *and* replacement with only `customResolver: { resolveId }` added
+ * resolved `react` to `/local-copy/react` while the artifact kept the host bridge's page `React`).
+ *
+ * What is deliberately not distinguished is *which* resolver: the policy is fail-closed, so the
+ * only question is whether one is present, never what it would do.
+ */
+function isViteHonouredResolver(value: unknown): boolean {
+  if (typeof value === "function") {
+    return true;
+  }
+  if (typeof value === "object" && value !== null) {
+    return typeof (value as { resolveId?: unknown }).resolveId === "function";
+  }
+  // `null` and `undefined` are the two values Vite's own `resolveCustomResolver` turns into "no
+  // resolver", so they are the two this treats as absent.
+  return false;
+}
+
+interface AliasEntry {
+  readonly find: string | RegExp;
+  /** The value as authored, or `undefined` when the entry shape carried none. */
+  readonly replacement: string | undefined;
+  /**
+   * Whether the entry carried Vite's `customResolver` — a resolver *function*, which decides
+   * resolution instead of the `replacement` string.
+   *
+   * Recorded as a boolean rather than the function, deliberately. Two functions cannot be compared
+   * for behavioural equality, so an entry carrying one is **refused** rather than accepted as equal
+   * to a plain one (measured: a later plugin repeating the harness's own `react` find *and*
+   * replacement and adding only a `customResolver` made Vite resolve `react` to the resolver's
+   * `/local-copy/react`, while the artifact kept the host bridge's page `React`). Recording the fact
+   * and comparing it is what lets the check answer; keeping the function would only invite a
+   * comparison that cannot be sound.
+   */
+  readonly hasCustomResolver: boolean;
+}
+
+function readAliasEntries(
+  userAlias: unknown,
+  options: { readonly normalize: boolean } = { normalize: true },
+): readonly AliasEntry[] {
+  // Two inputs, and conflating them is what let round 11 through. The **declaration** is raw and must
+  // be carried to the form Vite merges it into; the **final list is already Vite's output** and
+  // normalizing it again applies the rule a second time. `normalize: false` for the latter.
+  const pair = (find: string, replacement: string): { find: string; replacement: string } =>
+    options.normalize ? normalizeAliasEntryPair(find, replacement) : { find, replacement };
+
+  // Both branches go through the same pair normalization, and the object form needs it as much as
+  // the array form: `normalizeAliasFind` strips a trailing `/` from the key only, so reading
+  // `{ "react/": "/patched-react/" }` as `find: "react"` with the *unstripped* value leaves a pair
+  // that no longer matches Vite's own merged entry `react -> /patched-react` (measured — the
+  // pre-existing trailing-slash test failed until this was applied to both halves).
+  if (Array.isArray(userAlias)) {
+    return userAlias
+      .filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
+      .map(entry => {
+        const { find, replacement } = entry;
+        if (typeof find !== "string" && !(find instanceof RegExp)) {
+          return undefined;
+        }
+        const hasCustomResolver = isViteHonouredResolver(entry.customResolver);
+        if (typeof find === "string" && typeof replacement === "string") {
+          // The pair rule produces the normalized halves; the raw spelling is deliberately not kept
+          // alongside, because comparing against a Vite-merged entry can only ever succeed on the
+          // normalized form.
+          return { ...pair(find, replacement), hasCustomResolver };
+        }
+        return { find, replacement: typeof replacement === "string" ? replacement : undefined, hasCustomResolver };
+      })
+      .filter((entry): entry is AliasEntry => entry !== undefined);
+  }
+
+  if (typeof userAlias === "object" && userAlias !== null) {
+    return Object.entries(userAlias as Record<string, unknown>)
+      .filter(([key]) => key.length > 0)
+      .map(([key, value]) => {
+        // Recorded for the object form too even though Vite 8.3.0 passes a non-string value through
+        // unchanged (measured: `{ nm: { replacement, customResolver } }` arrives as a literal object,
+        // with the resolver lost rather than honoured). Recording it means a *future* Vite that did
+        // honour it here cannot slip past the check, and it costs one field.
+        const hasCustomResolver =
+          typeof value === "object" && value !== null && isViteHonouredResolver((value as { customResolver?: unknown }).customResolver);
+        return typeof value === "string"
+          ? { ...pair(key, value), hasCustomResolver }
+          : { find: normalizeAliasFind(key, value), replacement: undefined, hasCustomResolver };
+      });
+  }
+
+  return [];
+}
+
+/**
+ * Final alias entries that neither the project nor this harness declared, as string keys.
+ *
+ * ## Why the `config()` snapshot is not enough on its own
+ *
+ * This plugin declares `enforce: "pre"` and Vite runs `config` hooks sequentially, so a normal or
+ * `post` user plugin still merges into the config **after** the snapshot was captured. Measured
+ * before this existed, with no RegExp involved: a plugin returning
+ * `{ resolve: { alias: { "@app/shared/thing": "/local-copy" } } }` made Vite resolve
+ * `@app/shared/thing` to `/local-copy/thing` while the Cell build used `./shared/thing` — and the
+ * snapshot-based audit had nothing to refuse.
+ *
+ * So the final set is compared against the contributions that are *known*, and the remainder is
+ * reported. "Known" is assembled from three sources rather than matched by looking for markers in
+ * the alias text, which is the mistake that produced the two previous bypasses:
+ *
+ * - what the project declared (the `config()` snapshot);
+ * - what this harness emits, which is {@link hostModuleAliases} — the very map `config()` returns,
+ *   so it is compared as a value rather than re-derived;
+ * - Vite's own injected entries, which are the `@vite/` scope.
+ *
+ * Only a **string** `find` is returned, and the reason is not convenience: a string is what the
+ * audit compares, and a `RegExp` arriving from a plugin this harness did not write has already
+ * been judged by {@link projectAliasShadowKeys} if the project declared it. An undeclared pattern is
+ * reported here by its source text so the message quotes something findable in the plugin rather
+ * than pretending to have run it.
+ */
+function undeclaredAliasPatterns(
+  finalAlias: unknown,
+  declared: readonly unknown[],
+): readonly string[] {
+  const harnessOwned = hostModuleAliases();
+  // The project's own contributions, as whole entries rather than keys: a later plugin that
+  // rewrites a key the project declared must not inherit its approval, and only the value can
+  // tell the two apart.
+  const declaredEntries = readAliasEntries(declared);
+
+  const undeclared: string[] = [];
+  for (const entry of readAliasEntries(finalAlias, { normalize: false })) {
+    const { find, replacement } = entry;
+
+    // A `customResolver` decides resolution instead of the `replacement` string, so an entry that
+    // carries one is **never** matched against a plain contribution. Two functions cannot be
+    // compared for behavioural equality, so the sound answer is to refuse rather than to guess
+    // (measured: a later plugin repeating this harness's own `react` find *and* replacement and
+    // adding only a resolver made Vite resolve `react` to `/local-copy/react`, while the artifact
+    // kept the host bridge's page `React`).
+    if (entry.hasCustomResolver) {
+      undeclared.push(typeof find === "string" ? find : String(find));
+      continue;
+    }
+
+    if (typeof find === "string") {
+      // This harness's own entries: both halves must match, so a later plugin rewriting
+      // `react -> /local-copy/react` is not accepted on the strength of the key alone (measured: dev
+      // resolved `react` to the plugin's copy while the harness's was skipped). Compared through the
+      // same normalization as the project's, because Vite strips the slashes off whichever entry it
+      // merged — so the harness's own emitted spelling is not what the final list carries.
+      // The key must **belong** to the harness before its value is worth comparing. A `?? ""` here
+      // would turn "this key is not one of ours" into "ours, with an empty replacement", and a
+      // later plugin's `{ "@app/shared": "" }` would then match it exactly and be accepted (measured:
+      // Vite rewrites `@app/shared/thing` to `/thing` for that entry, while the artifact keeps
+      // `./shared/thing`). An empty replacement is a real value a project can write — it is not a
+      // stand-in for "absent", and the two must not be conflated.
+      if (
+        Object.prototype.hasOwnProperty.call(harnessOwned, find) &&
+        replacement !== undefined &&
+        isSameStringAlias({ find, replacement: harnessOwned[find], hasCustomResolver: false }, find, replacement)
+      ) {
+        continue;
+      }
+      // Then the project's own, which is what a project claiming a host id actually ends up with:
+      // the harness defers to it (see `unclaimedHostAliases`), so the merged entry carries the
+      // project's value and the harness's never appears. Checked after the harness's own value so a
+      // later plugin overwriting a host alias is still caught — the two differ only in the value.
+      if (declaredEntries.some(known => isSameStringAlias(known, find, replacement))) {
+        continue;
+      }
+      undeclared.push(find);
+      continue;
+    }
+
+    // A `RegExp`. Identity is source **and flags**, and Vite's own client entries are recognised by
+    // the exact shape they arrive in — so a project pattern that merely mentions `@vite/` cannot
+    // claim to be one of them (measured: such a pattern, contributed by a later plugin, resolved
+    // `@app/shared/thing` to `/local-copy/thing` and was skipped on content alone).
+    if (isViteInjectedClientPattern(entry)) {
+      continue;
+    }
+    if (declaredEntries.some(known => isSamePatternAlias(known, find, replacement))) {
+      continue;
+    }
+    undeclared.push(String(find));
+  }
+
+  return undeclared;
+}
+
+/**
+ * Vite's own injected client entries, recognised by the exact form they arrive in.
+ *
+ * Deliberately not a `@vite/` substring test. That is the judgement that produced the two previous
+ * bypasses: a string test cannot distinguish *who wrote an alias*, and both times a project's own
+ * pattern or a later plugin's pattern was let through by containing the marker. Matching the whole
+ * entry — the source **and** the flag set **and** the replacement — means only Vite's own two
+ * entries match, and anything else must be accounted for by the project.
+ */
+/**
+ * The two alias patterns Vite injects into every resolved config for its dev client.
+ *
+ * Named as data rather than matched by a marker, because "contains `@vite/`" cannot say *who
+ * wrote an alias* — that mistake is what let two bypasses through in a row (a project pattern and,
+ * later, a plugin pattern, each naming the scope and each being accepted as Vite's own).
+ */
+const VITE_INJECTED_CLIENT_PATTERNS: readonly RegExp[] = [/^\/?@vite\/env/, /^\/?@vite\/client/];
+
+function isViteInjectedClientPattern(entry: AliasEntry): boolean {
+  const { find } = entry;
+  if (typeof find !== "object" || find === null) {
+    return false;
+  }
+  return VITE_INJECTED_CLIENT_PATTERNS.some(
+    known => find.source === known.source && find.flags === known.flags && isViteClientReplacement(entry),
+  );
+}
+
+/**
+ * The replacement Vite points its client entries at.
+ *
+ * A shape test rather than a literal: the path ends in Vite's own client module and is a version-
+ * and install-specific path, so pinning the exact string would break on every upgrade. Both a
+ * forward-slash and a backslash spelling are accepted, since a Windows path arrives escaped.
+ */
+function isViteClientReplacement(entry: { readonly replacement: string | undefined }): boolean {
+  return entry.replacement !== undefined && /(client[\\/])?client\.mjs$|env\.mjs$/.test(entry.replacement);
+}
+
+/**
+ * Two string aliases are the same contribution when both the key and the value agree.
+ *
+ * The **value** is compared through {@link normalizeAliasFind} as well, and that is Vite's own
+ * rule rather than a convenience: `{ find: "react/", replacement: "/patched-react/" }` is normalized
+ * by Vite to `find: "react"` with both slashes stripped, so the final entry carries the *stripped*
+ * spelling while the project's declaration carries the slashed one (measured — comparing them raw
+ * refused a project that had declared its alias correctly, in both the array and the object form).
+ */
+function isSameStringAlias(known: AliasEntry, find: string, replacement: string | undefined): boolean {
+  if (typeof known.find !== "string" || known.replacement === undefined || replacement === undefined) {
+    return false;
+  }
+  return known.find === find && known.replacement === replacement;
+}
+
+/**
+ * One alias entry through Vite's own `normalizeSingleAlias` rule, as a pair.
+ *
+ * The rule is **conditional on both sides**: Vite strips a trailing `/` only when `find` *and*
+ * `replacement` both end in one, and leaves both alone otherwise. That is not a detail — this file's
+ * own test `does not normalize a slash on find alone, since Vite does not either` exists to pin
+ * it, and `{ find: "foo/", replacement: "/a" }` is consequently a *different* pattern from
+ * `{ find: "foo", replacement: "/a" }`: the first matches nothing, the second matches `foo/x`.
+ *
+ * An earlier version of this comparison trimmed each side **unconditionally**, which is wider than
+ * Vite and therefore merges two genuinely different aliases. Measured: with the project declaring
+ * the inert `{ find: "some-unrelated/", replacement: "/local-copy" }` and a later plugin adding
+ * `{ "some-unrelated": "/local-copy" }`, the plugin's entry was accepted as the project's own, while
+ * Vite resolved `some-unrelated/thing` to `/local-copy/thing` — the plugin's copy — which the
+ * harness did not report.
+ *
+ * So the pair is normalized together, exactly as Vite normalizes it, and `foo/` stays distinct from
+ * `foo`. Comparing the two halves independently would be the same mistake one level down.
+ */
+function normalizeAliasEntryPair(find: string, replacement: string): { find: string; replacement: string } {
+  if (find.endsWith("/") && replacement.endsWith("/")) {
+    return { find: find.slice(0, -1), replacement: replacement.slice(0, -1) };
+  }
+  return { find, replacement };
+}
+
+function isSamePatternAlias(
+  known: AliasEntry,
+  find: RegExp,
+  replacement: string | undefined,
+): boolean {
+  return (
+    known.find instanceof RegExp &&
+    known.find.source === find.source &&
+    known.find.flags === find.flags &&
+    known.replacement === replacement
+  );
+}
+
+
+function projectAliasShadowKeys(
+  pattern: RegExp,
+  projectAlias: Readonly<Record<string, string>>,
+): readonly { readonly key: string; readonly pattern: string }[] {  // Extensions chosen to exceed what any realistic module path segment contains, so a pattern has to
+  // be *specific* to escape them rather than merely long.
+  const probeSegments = ["a", "ab", "abc", "abcd", "abcde", "a/b", "a/b/c", "a/b/c/d"];
+
+  // The audit quotes this verbatim as the offending `find`, so it must be something a developer
+  // can find in their own config — the pattern's own spelling, never the project key echoed back.
+  const rendered = String(pattern);
+  const shadowed: { key: string; pattern: string }[] = [];
+  for (const key of Object.keys(projectAlias)) {
+    const probes = [key, `${key}/`, ...probeSegments.map(segment => `${key}/${segment}`)];
+
+    // `test` on a `/g` or `/y` pattern is stateful (it advances `lastIndex`), so the caller's own
+    // object is restored before returning — the same obligation `isClaimedBy` documents.
+    const { lastIndex } = pattern;
+    let matched = false;
+    try {
+      matched = probes.some(probe => {
+        pattern.lastIndex = 0;
+        return pattern.test(probe);
+      });
+    } finally {
+      pattern.lastIndex = lastIndex;
+    }
+
+    if (matched) {
+      // The project key itself is the subject the audit reports, and the string comparison then
+      // matches it exactly — so a `RegExp` reaches the audit through the same door as a string key.
+      shadowed.push({ key, pattern: rendered });
+      continue;
+    }
+
+    // The probes missed it. A source with no metacharacters can only match the literal it
+    // spells, so a miss is a true miss. Anything else is undecidable from a bounded probe set, and
+    // the audit's default answer — "no overlap" — would restore the silent divergence, so it is
+    // refused instead.
+    if (/[.*+?()[\]{}|^$\\]/.test(pattern.source)) {
+      shadowed.push({ key, pattern: rendered });
+    }
+  }
+
+  return shadowed;
+}
+
 function readAliasPatterns(userAlias: unknown): readonly unknown[] {
   if (Array.isArray(userAlias)) {
     return userAlias
@@ -555,6 +1010,71 @@ export function normalizeAliasFind(find: string, replacement: unknown): string {
     return find.slice(0, -1);
   }
   return find;
+}
+
+/**
+ * The project alias entry that matches a module id, by Vite's own string rule.
+ *
+ * #97's requirement is that one declared alias set drives the dev server and the artifact. The
+ * set comes from `registry.resolve.alias` — the normalization of the project's
+ * `forguncy.config.ts` `resolve.alias` block — and this is the dev half of applying it.
+ *
+ * ## Why the rule is written here rather than by handing Vite an alias
+ *
+ * The natural mechanism is `resolve.alias` in a `config()` hook, which is how the host aliases are
+ * already emitted. That route does not work for a *project* alias, and three measurements say so:
+ *
+ * - `config()` runs before the registry exists, and it cannot see the project root when the
+ *   project does not set one — so there is nothing to normalize the block against. Guessing
+ *   `process.cwd()` there reproduced Vite's own root rule in the measured cases, but it would be a
+ *   *second* normalization of one config file, with a second answer if the two roots ever
+ *   differed.
+ * - Mutating `config.resolve.alias` in `configResolved` is inert: Vite has already built the
+ *   resolver by then, so neither `unshift` nor replacing the array changes what resolves.
+ * - Emitting an alias from `config()` puts it *before* the project's own `vite.config.ts` aliases
+ *   (`mergeConfig` lets the later value win), which is the silent override the host-alias filter
+ *   exists to avoid.
+ *
+ * Applying it in this plugin's `resolveId` has none of those problems and one property the others
+ * lack: it reads the *normalized* set off the registry, so there is exactly one normalization of
+ * one config file and the dev server cannot disagree with the build about it.
+ *
+ * ## The rule itself, including the precedence — measured, not assumed
+ *
+ * `===` or `startsWith(find + "/")`, which is Vite's — and, measured against Rolldown 1.2.9,
+ * exactly what that engine's `resolve.alias` does too. That identity is the whole reason the config
+ * block accepts only this key shape: a rule the two engines agree on is one the two paths cannot
+ * diverge about.
+ *
+ * **First declaration wins, not the longest match.** That is worth stating because the intuitive
+ * reading is the opposite, and the difference is observable. With `@/lib` and `@/lib/deep` both
+ * declared, `@/lib/deep/x` is matched by both, and measured against Vite 8.3.0 and Rolldown 1.2.9:
+ *
+ * | declaration order | Vite resolved `@/lib/deep/x` to |
+ * | --- | --- |
+ * | `@/lib` first | `@/lib`'s target |
+ * | `@/lib/deep` first | `@/lib/deep`'s target |
+ *
+ * Both engines answer by declaration order, so this does too — `Object.entries` order over the
+ * normalized map, which `normalizeResolveConfig` preserves from the config file. Picking the
+ * longest key instead would be a *third* rule: correct in isolation, and a genuine divergence from
+ * both engines the first time a project declared overlapping prefixes. That is precisely the class
+ * of defect this whole change removes, so the ordering here is the engines' rather than a better
+ * one.
+ */
+export function projectAliasTarget(
+  moduleId: string,
+  alias: Readonly<Record<string, string>>,
+): string | undefined {
+  for (const [find, target] of Object.entries(alias)) {
+    if (moduleId === find || moduleId.startsWith(`${find}/`)) {
+      // `slice` rather than `replace`: the remainder has to survive verbatim, and `replace` with a
+      // string pattern also rewrites an occurrence inside the matched text.
+      return `${target}${moduleId.slice(find.length)}`;
+    }
+  }
+
+  return undefined;
 }
 
 /**
@@ -676,6 +1196,38 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
   // honest state: there is no project to read a declaration from yet.
   let substitutions: readonly ExtensionSubstitution[] | undefined;
 
+  /**
+   * The keys of the project's own `vite.config.ts` aliases, read in `configResolved`.
+   *
+   * Held rather than recomputed so the audit and any later reader see one extraction. Populated
+   * with Vite's own matching rule (`readAliasPatterns`), because that rule is the whole reason the
+   * comparison is meaningful — see the hook for why this package does the reading rather than
+   * `runtime`.
+   */
+  let userAliasKeys: string[] | undefined;
+
+  /**
+   * Project keys a `RegExp` alias shadows, paired with the pattern that does it.
+   *
+   * A separate list from {@link userAliasKeys} because the audit treats the two differently: a
+   * string key is compared by reproducing Vite's prefix rule (which `runtime` may not own), while a
+   * pattern is judged by the result of running it — so the verdict travels as data rather than as
+   * something the audit re-derives.
+   */
+  let userAliasPatterns: { key: string; pattern: string }[] | undefined;
+
+  /**
+   * The patterns the *project itself* declared, captured in `config()` before anything is merged.
+   *
+   * A separate slot from {@link userAliasPatterns} because the two hold different things: this is
+   * the raw `readAliasPatterns` output as the project wrote it, and it is what proves an entry's
+   * origin. Reading origin from the merged list instead means reading it from the **text** — and a
+   * pattern that names `@vite/` is indistinguishable that way, so a project could write one alias
+   * mentioning `@vite/` that also matches its own id and opt itself out of the audit (review's
+   * round-7 counter-example, reproduced).
+   */
+  let declaredAliasEntries: readonly AliasEntry[] | undefined;
+
   return {
     name: DEV_HARNESS_PLUGIN_NAME,
     enforce: "pre",
@@ -704,6 +1256,97 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
       registry = cells.api.registry();
       if (registry === undefined) {
         return;
+      }
+
+      // The project's own `vite.config.ts` aliases, read once and held for the audit below.
+      //
+      // This is the earliest hook that can read them alongside a registry: the registry exists only
+      // after `configResolved`, and `config.resolve.alias` is final by the same point. The *keys*
+      // are extracted here with `readAliasPatterns` — Vite's own matching rule, including its
+      // trailing-slash normalization and its `RegExp` branch — because `runtime` may not depend on
+      // Vite and a second reproduction of that rule is exactly what took three review rounds to get
+      // right in this file.
+      //
+      // What the overlap *means* is decided in `runtime`'s audit, not here: whether it blocks is
+      // `LOCAL_DEV_DIAGNOSTIC_RULES[code].blocksLocalDevelopment`, so a rule the contract marks
+      // blocking cannot be downgraded by this package omitting it.
+      //
+      // A `RegExp` `find` is **not** reduced to an approximate string. An earlier version passed
+      // `pattern.source` and let the audit compare it literally, which was wrong in the dangerous
+      // direction: `^@app\/shared(?=\/|$)` becomes the string `@app/shared(?=/|$)`, which is neither
+      // equal to the project key nor a `/`-prefix of it, so a pattern that Vite really does apply to
+      // `@app/shared/thing` sailed through and the dev/build split returned — measured. This is a
+      // blocking gate, so a missed detection is a correctness failure, not a missed warning, and
+      // "fails safe" is not a direction that exists here.
+      //
+      // Instead the pattern is **evaluated** against the specifiers a project alias can match (see
+      // {@link projectAliasShadowKeys}), so a real overlap is detected and a pattern that provably
+      // cannot match one is left alone. `runtime` stays free of RegExp: it receives strings, exactly
+      // as before, and its comparison is unchanged.
+      // Captured in a local because the narrowing above (`registry === undefined` returns) does not
+      // survive into the callback, and a non-null assertion here would be the same lie the guard
+      // above exists to prevent.
+      const projectAlias = registry.resolve.alias;
+      const declaredEntriesForSubtraction = declaredAliasEntries ?? [];
+      // The shadow audit compares *keys and patterns*, which are the `find` half of these entries;
+      // the `replacement` half is what the subtraction below needs and is kept there.
+      const declared = declaredEntriesForSubtraction.map(entry => entry.find);
+      userAliasKeys = [];
+      userAliasPatterns = [];
+      for (const pattern of declared) {
+        if (typeof pattern !== "string" && !(pattern instanceof RegExp)) {
+          continue;
+        }
+        if (typeof pattern === "string") {
+          userAliasKeys.push(pattern);
+          continue;
+        }
+        userAliasPatterns.push(...projectAliasShadowKeys(pattern, projectAlias));
+      }
+
+      // Anything in the **final** alias set that this harness did not declare is a contribution
+      // from somewhere the snapshot cannot see, and Vite's resolver will use it before the
+      // harness's own `resolveId`.
+      //
+      // The snapshot in `config()` is necessary but not sufficient, and the reason is ordering:
+      // this plugin declares `enforce: "pre"`, Vite's `config` hooks run sequentially, and an
+      // ordinary or `post` user plugin still merges into the config *after* the snapshot was
+      // taken. Measured before this check, with no RegExp involved — a plugin whose `config()`
+      // returns `{ resolve: { alias: { "@app/shared/thing": "/local-copy" } } }` made Vite resolve
+      // `@app/shared/thing` to `/local-copy/thing` while production used `./shared/thing`, and the
+      // audit saw nothing to refuse.
+      //
+      // The subtraction is by **identity of contribution**, not by text: everything the project
+      // declared, everything this harness's own host aliases are (which is `hostModuleAliases()`
+      // — the same source `config()` emits, so it is known rather than guessed), and Vite's
+      // injected `@vite/` entries. What is left is a later plugin's, and it is refused rather than
+      // ignored because a plugin that silently changes local resolution is precisely the
+      // unsupported-Vite-plugin behaviour #97 asks to be reported.
+      const latePluginAliases = undeclaredAliasPatterns(config.resolve?.alias, declaredEntriesForSubtraction);
+      if (latePluginAliases.length > 0) {
+        // Refused whatever they overlap, not only a project alias. The overlap case is the
+        // correctness problem, but an alias this audit cannot account for is a plugin changing
+        // local resolution by a route the artifact never sees — and #97 asks for unsupported Vite
+        // plugin behaviour to be *reported* rather than silently accepted. Declaring the alias in
+        // `vite.config.ts` is the supported way to have one, and that declaration is in the snapshot.
+        const report = [
+          `The local dev harness refused to start: ${latePluginAliases.length} alias(es) reached \`resolve.alias\` from a Vite plugin, which this harness cannot account for.`,
+          ...latePluginAliases.map(
+            entry =>
+              `  ${entry}: a plugin added this after the harness read the project's own aliases, so it can change what a Cell resolves locally while the Cell build keeps using \`forguncy.config.ts\`. Declare it in \`vite.config.ts\` if the project means it, or remove the plugin.`,
+          ),
+        ].join("\n");
+
+        throw new BlockingLocalDevFindingError(
+          latePluginAliases.map(entry =>
+            createLocalDevDiagnostic(
+              "local-dev-project-alias-shadowed",
+              entry,
+              `A Vite plugin added the alias ${JSON.stringify(entry)} to \`resolve.alias\` after this harness read the project's own aliases, and neither Vite nor this harness contributed it.`,
+            ),
+          ),
+          report,
+        );
       }
 
       if (options.cellId !== undefined) {
@@ -801,6 +1444,9 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
       const audit = auditHarnessConfiguration({
         decisions: projection.decisions,
         extensionChoices: options.extensionChoices ?? [],
+        ...(userAliasKeys === undefined ? {} : { userAliasKeys }),
+        ...(userAliasPatterns === undefined ? {} : { userAliasPatterns }),
+        projectAlias: registry.resolve.alias,
       });
 
       // Built *here*, from the audit's own answer about which choices matched, and the ordering is
@@ -859,6 +1505,18 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
     },
 
     config(userConfig) {
+      // The project's own alias patterns, captured **here** — the one hook that sees them before
+      // anything is merged into them.
+      //
+      // By `configResolved` the list is a merge of three sources: what the project wrote, what Vite
+      // injects (`/^\/?@vite\/env/`), and what this plugin returns below. The shadow audit needs
+      // the first and must not judge the other two, and reading the origin from the *text* cannot
+      // do it: a pattern naming `@vite/` is indistinguishable by content, so a project could write
+      // one alias that mentions `@vite/` and also matches its own project id, and the check would
+      // skip it (review's round-7 counter-example, reproduced). Here the list contains only what
+      // the project declared, so no inference is needed at all.
+      declaredAliasEntries = readAliasEntries(userConfig.resolve?.alias);
+
       // No `plugins` here, and that is the whole point of `formatFastRefreshWarning`: Vite
       // ignores plugins returned from a `config()` hook, so a `react()` returned here would be a
       // line that reads as Fast Refresh and does nothing. See `reactFastRefresh` for the
@@ -910,7 +1568,7 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
       };
     },
 
-    resolveId(id) {
+    async resolveId(this: { readonly resolve: ResolveIdContext["resolve"] }, id) {
       // Returned as itself rather than `\0`-prefixed: this id is served to a browser, and a
       // resolved id beginning with NUL tells the rest of Vite "never look this up on disk".
       // The id is a URL path this plugin owns end to end, so claiming it here is enough —
@@ -930,6 +1588,25 @@ export function devHarness(options: DevHarnessOptions): DevHarnessVitePlugin {
       const substitution = substitutions === undefined ? undefined : substitutionForModuleId(id, substitutions);
       if (substitution !== undefined) {
         return extensionSubstitutionModuleId(substitution.moduleId);
+      }
+      // The project's own `resolve.alias` block (#97), applied here so the dev server and the
+      // artifact resolve a project alias to the same file. Last of the claims, and that position is
+      // load-bearing: the host bridge and the extension substitutions own their ids, and
+      // `resolve-config.ts` refuses a project alias naming a bridged id precisely so the two
+      // engines' opposite orderings — Vite's alias before a plugin's `resolveId`, Rolldown's
+      // interception hook before its `resolve.alias` — cannot make them diverge. See
+      // `projectAliasTarget` for why this is a `resolveId` claim rather than a Vite alias.
+      if (registry !== undefined) {
+        const rewritten = projectAliasTarget(id, registry.resolve.alias);
+        if (rewritten !== undefined) {
+          // Handed back to Vite to finish rather than returned as a bare path: the target may be a
+          // directory, may need an extension resolved, or may itself be claimed by another plugin,
+          // and all of that is what Vite's own resolution is for.
+          const resolved = await this.resolve(rewritten, undefined, { skipSelf: true });
+          // `.id` rather than the result object: this hook answers with an id, and Vite's own
+          // resolution carries the extension and folder-index work a bare concatenation does not.
+          return resolved === null ? rewritten : resolved.id;
+        }
       }
       // Everything else, including the Cell's own `virtual:forguncy/cell/<id>`, is the Cell
       // seam's business. Delegated rather than re-implemented: the seam owns the guards

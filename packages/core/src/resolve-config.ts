@@ -1,0 +1,675 @@
+/**
+ * The project's module-resolution configuration: the one alias set both the local dev
+ * server and the Cell build resolve through.
+ *
+ * Decision sources: GitHub Issues
+ * - #97 — "构建入口：统一 Cell registry、别名与生产构建配置的消费路径"
+ *   (https://github.com/Mang-X/forguncy-react-workspace/issues/97), which owns this block
+ *   and the requirement that one declared alias set drive both paths, and
+ * - #26 — "Spec: project configuration and React Cell target declarations"
+ *   (https://github.com/Mang-X/forguncy-react-workspace/issues/26), the config contract
+ *   this block extends,
+ *
+ * both downstream of #4 "application ownership boundaries and dependency strategy
+ * semantics" (https://github.com/Mang-X/forguncy-react-workspace/issues/4).
+ *
+ * ## Why this lives in the config file rather than in `vite.config.ts`
+ *
+ * #97's first acceptance criterion is that "one registry/alias configuration drives local
+ * and production actual resolution, with no implicit second set of defaults". A
+ * `vite.config.ts` alias can only ever satisfy half of that: Vite reads it, and the Cell
+ * build — which drives Rolldown directly, because a Cell artifact is one IIFE rather than
+ * a web bundle — never sees it. Measured on the build as it stood before this Issue:
+ * `createRolldownCellBundler` took `{ dir }` and nothing else, and the generated Rolldown
+ * options contained no `resolve` key at all, so `@/lib/x` resolved under `vp dev` and
+ * failed the compile. That is precisely the "local uses a Vite config while production
+ * ignores it" failure #97 names.
+ *
+ * So the alias set is *project* configuration — the same kind of declaration `cells` and
+ * `extensions.mappings` already are — and each engine is handed the normalized result
+ * rather than the project being asked to keep two files in step.
+ *
+ * ## The supported subset, and why it is a subset
+ *
+ * The two engines' alias rules agree for exactly one key shape, which is why this module
+ * accepts exactly that shape and reports the rest by name rather than passing them
+ * through. Measured against Vite 8.3.0 and Rolldown 1.2.9:
+ *
+ * | key shape | Vite | Rolldown `resolve.alias` | here |
+ * | --- | --- | --- | --- |
+ * | plain string (`"@/lib"`) | `===` or `startsWith(key + "/")` | same | accepted |
+ * | string with a trailing slash | slash stripped, then the rule above | slash kept, so it matches nothing | normalized to the plain form |
+ * | `RegExp`, or a `"/re/"` string | supported | not supported by this option | refused |
+ *
+ * The trailing-slash row is a **normalization** rather than a refusal because the two
+ * engines intend the same rule and differ only in spelling. The regex row is a **refusal**
+ * because no spelling makes them agree: Rolldown's `resolve.alias` is a plain
+ * string-keyed map, and its regex support is a separate plugin (`viteAliasPlugin`) whose
+ * ordering relative to this compiler's interception hooks is a different question. A
+ * project asking for a regex alias is asking for something that cannot be honoured on
+ * both paths, so it is told that instead of being handed an alias that works locally and
+ * not in the artifact.
+ *
+ * A target is accepted only as a **project-relative path**, which is the portability rule
+ * the rest of this config already follows. An absolute path is refused by the
+ * whole-document pass in `cell-registry`, and a bare specifier (`{"old": "new"}`) is a
+ * *module-id redirect* whose resolution differs between the engines — Rolldown resolves
+ * the replacement through `node_modules` from the importing file while Vite resolves it
+ * from the project root. Both are reported rather than silently reinterpreted.
+ *
+ * ## There is no built-in alias table
+ *
+ * Deliberately unlike `extensions.mappings`, whose absent state contributes the shipped
+ * table. `alias` has no shipped default to merge, so "the config declared nothing" and
+ * "the config declared an empty set" mean the same thing here — and saying so is worth a
+ * sentence, because the asymmetry with `extensions` is the kind a reader assumes away.
+ * What must not happen is a default *appearing*: an alias the project never wrote would
+ * make the dev server and the artifact resolve through a rule nobody declared, which is
+ * the "implicit second set of defaults" #97 forbids.
+ */
+
+import { resolve } from "node:path";
+
+import { hostBridgeInterceptedModuleIds } from "./host-bridge.ts";
+import { machineSpecificPathProblem } from "./portability.ts";
+
+/** The config field this block is declared under. */
+export const RESOLVE_CONFIG_FIELD = "resolve";
+
+/** Fields allowed inside a `resolve` block. */
+export const RESOLVE_ALLOWED_FIELDS = ["alias"] as const;
+
+/**
+ * The codes this module reports. A subset of the config vocabulary `cell-registry` carries.
+ *
+ * Declared here and folded into that union rather than being a second error type, for the
+ * reason `extension-mappings-config` records: a project with a bad alias *and* a bad Cell
+ * entry should cost one round trip, and a caller branching on `ForguncyConfigError.codes`
+ * should not have to know which sub-module found the problem.
+ */
+export type ResolveConfigDiagnosticCode =
+  | "unknown-resolve-field"
+  | "invalid-resolve-config"
+  | "invalid-resolve-alias"
+  | "unsupported-resolve-alias-pattern"
+  | "nonportable-resolve-alias-target"
+  | "host-module-alias-conflict"
+  | "duplicate-resolve-alias"
+  | "unpreservable-resolve-alias-order"
+  | "unpreservable-resolve-alias-key";
+
+/**
+ * One actionable problem, located at the config path that produced it.
+ *
+ * Structurally `cell-registry`'s `ConfigDiagnostic` — `code`/`path`/`message` — so the
+ * registry passes these through without translating them. Declared here rather than
+ * imported because that module calls this one, and a runtime import back would be a cycle.
+ */
+export interface ResolveConfigDiagnostic {
+  readonly code: ResolveConfigDiagnosticCode;
+  readonly path: string;
+  readonly message: string;
+}
+
+/** One alias as the project declared it, beside the absolute target both engines receive. */
+export interface ResolvedAliasEntry {
+  /** The module-id prefix, with any trailing slash already stripped. */
+  readonly find: string;
+  /** The target exactly as authored, for a report that has to quote the project back. */
+  readonly replacement: string;
+  /** The target as an absolute path, which is the form both engines are handed. */
+  readonly target: string;
+}
+
+/**
+ * The normalized alias set.
+ *
+ * Frozen, for the reason `NormalizedExtensionMappings` is: this object is shared by the
+ * dev server and by every compile in one build, so a caller that could mutate it would be
+ * editing the resolution table of every consumer at once — the "second source of truth"
+ * failure this whole line of work removes.
+ */
+export interface NormalizedResolveConfig {
+  /**
+   * The alias set as both engines take it: module-id prefix to **absolute** path.
+   *
+   * Absolute rather than project-relative because that is the only form both engines
+   * accept. Vite resolves a relative replacement against its own root, and Rolldown
+   * throws on a relative one (measured: `resolve.alias: { "@/lib": "./srclib" }` fails the
+   * build outright). Resolving here, against the registry's root, is what makes one
+   * declared string mean the same file on both paths.
+   */
+  readonly alias: Readonly<Record<string, string>>;
+  /** The entries as declared, in declaration order, for reporting. */
+  readonly entries: readonly ResolvedAliasEntry[];
+}
+
+export type NormalizeResolveConfigResult =
+  | { readonly ok: true; readonly resolve: NormalizedResolveConfig }
+  | { readonly ok: false; readonly diagnostics: readonly ResolveConfigDiagnostic[] };
+
+function diag(code: ResolveConfigDiagnosticCode, path: string, message: string): ResolveConfigDiagnostic {
+  return { code, path, message };
+}
+
+function isConfigRecordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Whether an **object** key is meant as a regular expression rather than as a literal prefix.
+ *
+ * Two spellings, because both appear in the wild: the `/…/` one Vite accepts for a `RegExp` in the
+ * array form, and the anchored `^…$` one people copy from a `paths` mapping. Neither works here,
+ * and the reason is slightly different for each — measured against Vite 8.3.0:
+ *
+ * - an object key is a **literal** in Vite, so `"/^my-lib$/"` and `"^my-lib$"` both match nothing;
+ * - the Cell build's Rolldown `resolve.alias` is a string-keyed map with no pattern support at all.
+ *
+ * So the two engines agree — on matching nothing. That is not a divergence to refuse, it is a
+ * declaration that silently does nothing, which is worse for the author: the alias looks declared
+ * and no import is affected. Reporting it is the helpful answer, and the alternative (`^`/`$` are
+ * not characters a module id starts or ends with) has no false positive worth worrying about.
+ */
+function looksLikePatternKey(key: string): boolean {
+  if (key.length > 2 && key.startsWith("/") && key.endsWith("/")) {
+    return true;
+  }
+  return key.startsWith("^") || key.endsWith("$");
+}
+
+/**
+ * The key as both engines will actually match it, or a refusal when they would agree on nothing.
+ *
+ * The rule is Vite's `normalizeSingleAlias` condition, reproduced rather than simplified, because
+ * a plain "strip the trailing slash" is wrong in a way that *creates* the divergence this module
+ * exists to prevent. Measured against Vite 8.3.0 and Rolldown 1.2.9 for a key `"my-lib/"`:
+ *
+ * | target | Vite | Rolldown | this module |
+ * | --- | --- | --- | --- |
+ * | ends in `/` | strips both, then prefix-matches | key keeps its slash, matches nothing | key stripped, so **both** prefix-match |
+ * | does not | keeps the slash, matches nothing | matches nothing | refused: neither engine honours it |
+ *
+ * The second row is the one a naive strip gets wrong. Stripping there would make the alias start
+ * resolving locally *and* in the artifact — which sounds like the fix and is actually a project's
+ * never-really-declared alias being silently activated. Refusing says what to do instead.
+ */
+function normalizeAliasKey(
+  key: string,
+  replacement: string,
+  path: string,
+  out: ResolveConfigDiagnostic[],
+): string | undefined {
+  if (!key.endsWith("/")) {
+    return key;
+  }
+
+  if (replacement.endsWith("/")) {
+    return key.replace(/\/+$/, "");
+  }
+
+  out.push(
+    diag(
+      "invalid-resolve-alias",
+      path,
+      `Alias "${key}" has a trailing slash on the key but not on the target, and neither engine strips a slash in that case — Vite only strips when both sides have one, and Rolldown keeps the key as written. The entry therefore matches nothing on either path. Either remove the trailing slash from "${key}", or add one to "${replacement}".`,
+    ),
+  );
+  return undefined;
+}
+
+/** The empty result: no aliases declared, which is a stated state rather than a default. */
+export const EMPTY_NORMALIZED_RESOLVE_CONFIG: NormalizedResolveConfig = Object.freeze({
+  alias: Object.freeze({}),
+  entries: Object.freeze([]),
+});
+
+/**
+ * Reads one `resolve.alias` entry, or reports every reason it cannot be honoured.
+ *
+ * Split out so the refusals read as different repairs rather than one "invalid alias": a key that
+ * is not a module id, a key that looks like a pattern, a target that is not a project-relative
+ * path, and a bridged id each send a reader somewhere different — the same argument
+ * `extension-mappings-config` makes for its per-row checks.
+ *
+ * **A machine-specific target is skipped rather than reported**, following the convention
+ * `cell-registry`'s `resolveDeclaredPath` states: the whole-document portability pass already
+ * reported that value under `machine-specific-path`, and reporting it again under a second code
+ * makes one mistake read as two. Every form `machineSpecificPathProblem` recognises is
+ * unambiguously not a project-relative path, so the entry cannot be honoured either way — what
+ * differs is only which diagnostic explains it, and the document walk's carries the project-wide
+ * rule.
+ */
+function readAliasEntry(
+  rawKey: string,
+  rawValue: unknown,
+  options: { readonly root: string; readonly bridgedModuleIds: ReadonlySet<string> },
+  path: string,
+  out: ResolveConfigDiagnostic[],
+): ResolvedAliasEntry | undefined {
+  const authoredKey = rawKey.trim();
+
+  if (authoredKey.length === 0) {
+    out.push(
+      diag("invalid-resolve-alias", path, `An alias key must be the module id prefix it matches, and an empty key matches nothing.`),
+    );
+    return undefined;
+  }
+
+  // Before the path check, because a `"/…/"` object key *also* starts with `/`, and "you wrote a
+  // path" is the wrong repair for somebody who wrote a pattern.
+  if (looksLikePatternKey(authoredKey)) {
+    out.push(
+      diag(
+        "unsupported-resolve-alias-pattern",
+        path,
+        `"${authoredKey}" looks like a regular expression, and as an *object key* Vite reads it literally — measured: it matches neither the bare id nor anything else — while the Cell build's Rolldown configuration has no pattern support at all. So it would silently alias nothing rather than working locally, which is why this is reported instead of accepted. Name the module ids explicitly, one entry each; for a Vite-only pattern, put it in \`vite.config.ts\`.`,
+      ),
+    );
+    return undefined;
+  }
+
+  if (authoredKey.startsWith("./") || authoredKey.startsWith("../") || authoredKey.startsWith("/")) {
+    out.push(
+      diag(
+        "invalid-resolve-alias",
+        path,
+        `An alias key must be a module id (what the source reads), not a path. Got "${authoredKey}". Put the path on the right-hand side.`,
+      ),
+    );
+    return undefined;
+  }
+
+  // `__proto__` is refused rather than carried, and the reason is measured rather than stylistic.
+  //
+  // It is the one key a plain object cannot hold: `alias["__proto__"] = target` runs the
+  // `Object.prototype.__proto__` *setter*, so the fold produced a map that `Object.keys` reported
+  // as empty while `entries` still listed the alias — the normalizer accepted a declaration that no
+  // consumer could see, which is the "looks declared, does not take effect" failure every other
+  // refusal in this module exists to prevent.
+  //
+  // Writing the fold as `Object.fromEntries` (or a null-prototype map) *would* preserve it, and both
+  // engines can be made to honour it — measured, Rolldown resolves it when the key is an own data
+  // property. But **Vite does not**: it resolves `__proto__` to an internal `undefined?v=undefined`
+  // module rather than to the alias target, both as a literal key and via `Object.fromEntries`. So
+  // accepting the alias would make the dev server and the artifact resolve one import to two
+  // different modules, which is precisely the divergence #97 removes. Refusing is the honest answer;
+  // the key is not a module id anyone means literally.
+  if (authoredKey === "__proto__") {
+    out.push(
+      diag(
+        "invalid-resolve-alias",
+        path,
+        `"__proto__" cannot be an alias key. A plain object cannot hold it as an own property, so it would be dropped before the dev server or the build ever saw it — and Vite resolves the id to one of its own internal modules rather than to any alias target (measured), so no target could be honoured consistently on both paths. Alias the real module id instead.`,
+      ),
+    );
+    return undefined;
+  }
+
+  if (typeof rawValue !== "string" || rawValue.trim().length === 0) {
+    out.push(diag("invalid-resolve-alias", path, `Alias "${authoredKey}" must have a non-empty target string.`));
+    return undefined;
+  }
+
+  const replacement = rawValue.trim();
+
+  // Skipped, not reported: see this function's docstring.
+  if (machineSpecificPathProblem(replacement) !== undefined) {
+    return undefined;
+  }
+
+  if (!isProjectRelativeTarget(replacement)) {
+    out.push(
+      diag(
+        "nonportable-resolve-alias-target",
+        path,
+        `Alias "${authoredKey}" targets "${replacement}", which is a bare specifier rather than a project-relative path. A module-id redirect resolves the target differently in Vite (from the project root) and in Rolldown (from the importing file), so it cannot be honoured on both paths. Write the target as "./…" or "../…".`,
+      ),
+    );
+    return undefined;
+  }
+
+  // Both separators are accepted on input and the authored spelling is kept for the report;
+  // `resolve` normalizes to the host's form, which is what the engines receive.
+  //
+  // `normalizedRoot` rather than `options.root` in the comparison below, and the difference is a
+  // real hole rather than tidiness: `resolve` normalizes its answer, while the root arrives as
+  // authored and `createCellRegistry` only requires it to be *absolute*. So `root: "/work/app/"`
+  // (or `"/work/app/./"`, or any equivalent spelling with a trailing separator or a `.`/`..`
+  // segment) made `resolve(root, ".")` — `"/work/app"` — compare unequal to the raw
+  // `"/work/app/"`, and the project-root refusal was bypassed: the whole root became importable
+  // under one alias. Measured on both separators.
+  const normalizedRoot = resolve(options.root);
+  const target = resolve(options.root, replacement);
+  if (target === normalizedRoot) {
+    out.push(
+      diag(
+        "invalid-resolve-alias",
+        path,
+        `Alias "${authoredKey}" targets the project root itself ${JSON.stringify(replacement)}. Alias a directory inside the project, so the alias cannot make the whole root importable under one id.`,
+      ),
+    );
+    return undefined;
+  }
+
+  const find = normalizeAliasKey(authoredKey, replacement, path, out);
+  if (find === undefined) {
+    return undefined;
+  }
+
+  // The host bridge owns its module ids, and the two engines order that binding *oppositely*:
+  // Vite applies the project's own `resolve.alias` before a plugin's `resolveId`, while the
+  // artifact's Rolldown configuration intercepts bridged ids in its `resolveId` hook before its
+  // `resolve.alias`. Both measured. So an alias here would win locally and lose in the artifact —
+  // one import, two modules, which is the divergence #97 exists to remove.
+  if (options.bridgedModuleIds.has(find)) {
+    out.push(
+      diag(
+        "host-module-alias-conflict",
+        path,
+        `"${find}" is bound by the host bridge (#9), and the two engines order that binding oppositely, so an alias here would change local resolution only. The artifact resolves it to the page's own object before any alias applies. Point it at a patched build from \`vite.config.ts\` instead — that is a local override, not a claim about the artifact.`,
+      ),
+    );
+    return undefined;
+  }
+
+  return { find, replacement, target };
+}
+
+/**
+ * Whether a target is spelled as a project-relative path.
+ *
+ * `.` and `..` are accepted alongside the `./`-prefixed forms because they are the same request in
+ * a shorter spelling and `resolve` treats them identically. Leaving them out would refuse
+ * `{ "@": "." }` as a "bare specifier", which names the wrong problem: the real answer for that
+ * entry is that it points at the project root, and `readAliasEntry` reports exactly that.
+ */
+function isProjectRelativeTarget(target: string): boolean {
+  return target === "." || target === ".." || target.startsWith("./") || target.startsWith("../");
+}
+
+/**
+ * Normalizes a project's `resolve` block, or reports every problem found.
+ *
+ * `root` is required rather than optional because every accepted target is made absolute
+ * against it, and a caller with no root could not answer the one question the normalization
+ * exists for. It is the registry's root, so the paths here are the same ones the Cells'
+ * entries were resolved against.
+ *
+ * The result is `ok: false` only when something was reported: an absent block, a block that
+ * declares no aliases, and a block whose every alias is refused all differ in the
+ * diagnostics they carry but not in the shape of the answer.
+ */
+export function normalizeResolveConfig(
+  config: unknown,
+  options: { readonly root: string },
+): NormalizeResolveConfigResult {
+  const diagnostics: ResolveConfigDiagnostic[] = [];
+
+  if (!isConfigRecordValue(config) || !(RESOLVE_CONFIG_FIELD in config)) {
+    // No block at all. `EMPTY` rather than `undefined` so a consumer never has to test for
+    // absence before reading `alias` — and so an absent block cannot be mistaken for an
+    // unvalidated one.
+    return { ok: true, resolve: EMPTY_NORMALIZED_RESOLVE_CONFIG };
+  }
+
+  const raw = config[RESOLVE_CONFIG_FIELD];
+  const path = RESOLVE_CONFIG_FIELD;
+
+  if (!isConfigRecordValue(raw)) {
+    diagnostics.push(
+      diag(
+        "invalid-resolve-config",
+        path,
+        `"${RESOLVE_CONFIG_FIELD}" must be an object with an "alias" map. Allowed fields: ${RESOLVE_ALLOWED_FIELDS.join(", ")}.`,
+      ),
+    );
+    return { ok: false, diagnostics };
+  }
+
+  for (const key of Object.keys(raw)) {
+    if (!(RESOLVE_ALLOWED_FIELDS as readonly string[]).includes(key)) {
+      diagnostics.push(
+        diag(
+          "unknown-resolve-field",
+          `${path}.${key}`,
+          `Unknown "${RESOLVE_CONFIG_FIELD}" field "${key}". Allowed fields: ${RESOLVE_ALLOWED_FIELDS.join(", ")}. ` +
+            `Vite options that have no Cell-build equivalent (conditions, dedupe, plugins, a tsconfig \`paths\` bridge) are not supported here: a Cell artifact is one IIFE, so an option the build cannot honour would change local resolution only.`,
+        ),
+      );
+    }
+  }
+
+  const rawAlias = raw.alias;
+  if (rawAlias === undefined) {
+    // A block with no `alias` is legal and means "no aliases" — but only once the unknown-field
+    // pass above came back clean. Returning `EMPTY` unconditionally was the first version and it
+    // silently dropped a reported problem: `{ resolve: { dedupe: [...] } }` produced a diagnostic
+    // and then a success, so the finding reached nobody. An absent key is not an absent error.
+    return diagnostics.length === 0
+      ? { ok: true, resolve: EMPTY_NORMALIZED_RESOLVE_CONFIG }
+      : { ok: false, diagnostics };
+  }
+
+  return normalizeAliasMap(rawAlias, options, diagnostics);
+}
+
+/**
+ * The `alias` map itself, in either shape Vite accepts.
+ *
+ * An array of `{ find, replacement }` is the other spelling Vite takes, so it is read too
+ * rather than refused as an unknown shape: a project that copied the array form from a
+ * `vite.config.ts` should get its aliases, not a message about the container. A `RegExp`
+ * in `find` is reported by the same pattern code a `"/re/"` object key gets, because it is
+ * the same request.
+ */
+function normalizeAliasMap(
+  rawAlias: unknown,
+  options: { readonly root: string },
+  diagnostics: ResolveConfigDiagnostic[],
+): NormalizeResolveConfigResult {
+  const path = `${RESOLVE_CONFIG_FIELD}.alias`;
+  const entries: ResolvedAliasEntry[] = [];
+  const bridgedModuleIds = new Set(hostBridgeInterceptedModuleIds());
+
+  if (Array.isArray(rawAlias)) {
+    for (const [index, member] of rawAlias.entries()) {
+      const memberPath = `${path}[${index}]`;
+      if (!isConfigRecordValue(member)) {
+        diagnostics.push(
+          diag("invalid-resolve-alias", memberPath, `An alias entry must be an object with "find" and "replacement".`),
+        );
+        continue;
+      }
+      if (member.find instanceof RegExp) {
+        // Measured: Vite *does* honour a `RegExp` here, and Rolldown's `resolve.alias` has no
+        // pattern support at all. So unlike the object-key spelling below — which silently matches
+        // nothing in either engine — this one really would resolve locally and fail in the
+        // artifact, which is the divergence #97 exists to remove.
+        diagnostics.push(
+          diag(
+            "unsupported-resolve-alias-pattern",
+            memberPath,
+            `A \`RegExp\` alias is supported by Vite but not by the Cell build's Rolldown configuration, whose \`resolve.alias\` is a string-keyed map, so it would resolve locally and not in the artifact. Name the module ids explicitly, one entry each; for a Vite-only pattern, put it in \`vite.config.ts\`.`,
+          ),
+        );
+        continue;
+      }
+      if (typeof member.find !== "string") {
+        diagnostics.push(
+          diag("invalid-resolve-alias", memberPath, `An alias entry's "find" must be a string module id.`),
+        );
+        continue;
+      }
+      const entry = readAliasEntry(member.find, member.replacement, { ...options, bridgedModuleIds }, memberPath, diagnostics);
+      if (entry !== undefined) entries.push(entry);
+    }
+  } else if (isConfigRecordValue(rawAlias)) {
+    for (const [key, value] of Object.entries(rawAlias)) {
+      const entry = readAliasEntry(key, value, { ...options, bridgedModuleIds }, `${path}.${key}`, diagnostics);
+      if (entry !== undefined) entries.push(entry);
+    }
+  } else {
+    diagnostics.push(
+      diag(
+        "invalid-resolve-alias",
+        path,
+        `"alias" must be an object of module id to target, or an array of { find, replacement }.`,
+      ),
+    );
+  }
+
+  if (diagnostics.length > 0) {
+    return { ok: false, diagnostics };
+  }
+
+  // Two entries that normalize to one `find` are refused rather than resolved, and this check has
+  // to be on the *normalized* key rather than on the declaration. Both forms can collide:
+  //
+  // - the array form can name one `find` twice, which Vite accepts and resolves to the first;
+  // - the object form cannot repeat a key, but two distinct keys can normalize to one —
+  //   `{ "@x": "./a", "@x/": "./b/" }`, since Vite's trailing-slash rule turns the second into
+  //   `find: "@x"` as well (measured; see `normalizeAliasKey`).
+  //
+  // Building the map last-wins (which is what a plain `alias[entry.find] = entry.target` does) would
+  // make the *resolved* set disagree with `entries` and with Vite, which resolves a duplicate to the
+  // first declaration. That is the dev/artifact divergence this module exists to remove, arriving
+  // through its own output.
+  //
+  // Refusing rather than keeping the first, and the reason is the choice rather than the rule:
+  // first-wins would be Vite-faithful, but it would also accept a declaration that *means nothing*,
+  // which is the "ambiguous form is never handled silently" principle every other refusal here
+  // follows. A duplicate `find` is always a mistake — there is no reading in which a project wants
+  // one id routed to two targets — so the diagnostic is the useful answer.
+  const byFind = new Map<string, ResolvedAliasEntry[]>();
+  for (const entry of entries) {
+    const group = byFind.get(entry.find);
+    if (group === undefined) {
+      byFind.set(entry.find, [entry]);
+    } else {
+      group.push(entry);
+    }
+  }
+
+  for (const [find, group] of byFind) {
+    if (group.length < 2) {
+      continue;
+    }
+    const targets = group.map(entry => JSON.stringify(entry.replacement)).join(" and ");
+    diagnostics.push(
+      diag(
+        "duplicate-resolve-alias",
+        path,
+        `Alias "${find}" is declared ${group.length} times, targeting ${targets}. One module id cannot route to two targets, and which one wins is not something this config can express, so it is reported rather than resolved. Keep the one you mean.`,
+      ),
+    );
+  }
+
+  if (diagnostics.length > 0) {
+    return { ok: false, diagnostics };
+  }
+
+  // `Object.fromEntries` rather than an assignment loop, so the fold cannot silently drop a key.
+  //
+  // A key that collides with an `Object.prototype` accessor — `__proto__` is the only one that can
+  // arrive here — is *defined* as an own data property rather than *assigned*, which runs the
+  // prototype setter and loses the entry. `__proto__` is refused earlier, so this is belt-and-braces
+  // rather than the guard: the point is that "the map the consumers read" is built in a way that
+  // cannot disagree with `entries` for a reason unrelated to the config being wrong. The assertion
+  // below makes that a checked property rather than a comment.
+  const alias: Record<string, string> = Object.fromEntries(
+    entries.map(entry => [entry.find, entry.target]),
+  );
+
+  // The invariant the fold must not break: every entry the normalizer accepted is a key the dev
+  // server and the build will actually consult. Reported as its own code rather than as a silent
+  // difference, because the failure mode is exactly "`entries` says one thing, the map says
+  // another" — the shape `__proto__` produced before it was refused.
+  const missing = entries.filter(entry => !Object.prototype.hasOwnProperty.call(alias, entry.find));
+  if (missing.length > 0) {
+    diagnostics.push(
+      diag(
+        "unpreservable-resolve-alias-key",
+        path,
+        `Alias ${missing.map(entry => JSON.stringify(entry.find)).join(", ")} would not survive normalization into the alias map, so the dev server and the build would not see ${missing.length === 1 ? "it" : "them"} although the config declares ${missing.length === 1 ? "it" : "them"}. Rename the module id.`,
+      ),
+    );
+    return { ok: false, diagnostics };
+  }
+
+  // The fold into a plain object can **change the order the consumers see**, and precedence is
+  // order-sensitive — so the invariant is checked rather than assumed.
+  //
+  // ECMAScript enumerates integer-index keys first, in ascending numeric order, whatever the
+  // insertion order was. Measured: folding the array form `[{find:"1/deep"}, {find:"1"}]` yields a
+  // map that `Object.keys` reports as `["1","1/deep"]`, so the *general* key is consulted first
+  // although it was declared second. Vite reads the array form in array order and Rolldown reads
+  // its map in enumeration order (both measured — the specific key wins when it is declared first,
+  // and the general one wins when it is), so the fold would make the two engines disagree, and make
+  // `entries` disagree with the `alias` map they actually consume.
+  //
+  // ## Why the check is narrow rather than "any reordering"
+  //
+  // Only two keys that can match the *same* specifier have a precedence relationship at all, which
+  // is one key being a prefix of the other. So a reordering that swaps an unrelated pair — `["2",
+  // "1"]` becoming `["1", "2"]` — changes nothing observable and is accepted. Refusing it would be a
+  // false positive on a config that works, which is the direction this module avoids: it reports
+  // what cannot be honoured, not what merely looks unusual.
+  //
+  // Note the **object** form is unaffected and needs no clause: it has no authored order to lose,
+  // because `Object.entries` — how both this module and Vite read it — already hoists integer-like
+  // keys. Only the array form carries an order the fold can destroy.
+  //
+  // The overlap test is **symmetric**, and getting that wrong is how the first version of this check
+  // was dead: `second.find.startsWith(first.find + "/")` only catches the case where the *later*
+  // declaration is the more specific one, while the reported defect is the opposite shape —
+  // `[{ "1/deep" }, { "1" }]`, where the earlier declaration is more specific. Either direction
+  // gives a pair that matches one specifier, so either direction can be reordered underneath the
+  // config's feet.
+  const enumeration = new Map(Object.keys(alias).map((key, index) => [key, index]));
+  for (const [declared, first] of entries.entries()) {
+    for (const [later, second] of entries.entries()) {
+      if (later <= declared) {
+        continue;
+      }
+      const overlaps =
+        first.find.startsWith(`${second.find}/`) || second.find.startsWith(`${first.find}/`);
+      if (!overlaps) {
+        continue;
+      }
+      // `first` is declared earlier, so Vite — which reads the array in order — takes it for any
+      // specifier both match. If the map enumerates `second` earlier, Rolldown takes `second`, and
+      // the two paths resolve the same import to different targets.
+      if ((enumeration.get(second.find) ?? 0) < (enumeration.get(first.find) ?? 0)) {
+        diagnostics.push(
+          diag(
+            "unpreservable-resolve-alias-order",
+            path,
+            `Aliases "${first.find}" and "${second.find}" overlap — a specifier matched by both exists — and the declaration order that decides which wins cannot be preserved: the engines read the alias map in a different order than the config declares, because a key that looks like a number is enumerated first. Rename one of the ids, or reorder them so the more specific one is declared after the more general one.`,
+          ),
+        );
+      }
+    }
+  }
+
+  if (diagnostics.length > 0) {
+    return { ok: false, diagnostics };
+  }
+
+  return {
+    ok: true,
+    resolve: Object.freeze({
+      alias: Object.freeze(alias),
+      entries: Object.freeze(entries.map(entry => Object.freeze({ ...entry }))),
+    }),
+  };
+}
+
+/** A report block for a CI log or a PR body. */
+export function formatResolveConfig(normalized: NormalizedResolveConfig): string {
+  const rows = normalized.entries.map(entry => `${entry.find} -> ${entry.replacement}`);
+  return [
+    `Module resolution aliases: ${normalized.entries.length}`,
+    `Aliases: ${rows.join(", ") || "(none declared)"}`,
+  ].join("\n");
+}
