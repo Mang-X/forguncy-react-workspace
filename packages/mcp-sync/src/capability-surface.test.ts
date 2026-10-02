@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { SYNC_CAPABILITY_IDS, preferredCallOf, SYNC_EVIDENCE_SOURCES } from "./capability-surface.ts";
+import { observedVersionsOf, SYNC_CAPABILITY_IDS, preferredCallOf, SYNC_EVIDENCE_SOURCES } from "./capability-surface.ts";
 import { SYNC_MEASURED_VERSIONS, SYNC_SUPPORTED_VERSIONS } from "./guarantees.ts";
 import {
   assertMcpSyncFlowIsCoherent,
@@ -197,28 +197,28 @@ describe("what the evidence establishes", () => {
         for (const call of capability.calls ?? []) {
           expect(call.evidenceSourceIds.length, `${capability.id} ${call.method}`).toBeGreaterThan(0);
           for (const sourceId of call.evidenceSourceIds) {
-            // Resolvable, and not tied to a *different* build: `observedVersions` absent means the
-            // source is version-neutral (#5's probe record, the product's documentation), which
-            // can stand alongside any version; present means it is tied to one.
-            const observed = findSyncEvidenceSource(sourceId).observedVersions;
-            if (observed === undefined) continue;
+            // Resolvable, and it ran this very call on this very build. An empty derived set
+            // means the source is documentation, which can stand alongside a call without ever
+            // establishing one — that is the one case this traversal does not assert.
+            const observed = observedVersionsOf(findSyncEvidenceSource(sourceId));
+            if (observed.length === 0) continue;
             expect(observed, `${capability.id} ${call.method} cites ${sourceId}`).toContain(call.version);
           }
         }
       }
     });
 
-    // And the other half: a version-neutral source is a stated property, not an omission, so the
-    // 12.0.100.0 calls #5 and the product guide establish are not refused by the rule above.
-    // Which sources are tied to a build is the whole basis of the rule, and #116's fourth review
-    // corrected my reading of two of them: #5 is a *probe record executed against 12.0.100.0*
-    // (its own citation says so), not a version-neutral fact, and only the product's
-    // documentation carries no build at all.
-    it("records which build each source observed", () => {
-      expect(findSyncEvidenceSource("issue-5-designer-probe").observedVersions).toEqual(["12.0.100.0"]);
-      expect(findSyncEvidenceSource("forguncy-library-guide").observedVersions).toBeUndefined();
-      expect(findSyncEvidenceSource("issue-20-designer-execution").observedVersions).toEqual(["12.0.100.0"]);
-      expect(findSyncEvidenceSource("issue-115-designer-probe").observedVersions).toEqual(["12.0.101.0"]);
+    // Which builds each source ran something on. Derived from the calls, so nothing states it
+    // twice — #116's fourth review corrected my reading of #5 (a probe record executed against
+    // 12.0.100.0, not a version-neutral fact), and the seventh removed the second hand-kept copy.
+    it("derives which build each source observed from the calls it recorded", () => {
+      const observed = (id: "issue-5-designer-probe" | "forguncy-library-guide" | "issue-20-designer-execution" | "issue-115-designer-probe") =>
+        observedVersionsOf(findSyncEvidenceSource(id));
+
+      expect(observed("issue-5-designer-probe")).toEqual(["12.0.100.0"]);
+      expect(observed("forguncy-library-guide")).toEqual([]);
+      expect(observed("issue-20-designer-execution")).toEqual(["12.0.100.0"]);
+      expect(observed("issue-115-designer-probe")).toEqual(["12.0.101.0"]);
     });
 
     // The counter-examples the review named, asserted so the wildcard cannot come back. Each is a
@@ -737,13 +737,18 @@ describe("the guards refuse an incoherent registry", () => {
     expect(methods).toContain("api.app.saveProject");
   });
 
-  // Every recorded pair names a build the source declares it observed, so the two cannot drift.
-  it("keeps every established call on a version the source declares", () => {
+  // A source cannot state two different things about the builds it observed, because it states
+  // one: `observedVersionsOf` reads the calls. The construction the review's finding rested on —
+  // `observedVersions: ["12.0.101.0"]` beside a call recorded on 12.0.100.0 — is now unrepresentable,
+  // so there is nothing here to keep in agreement and nothing for a test to catch.
+  it("cannot state a build it ran nothing on", () => {
     for (const [id, source] of Object.entries(SYNC_EVIDENCE_SOURCES)) {
-      const versions = source.observedVersions ?? [];
+      const derived = observedVersionsOf(source);
       for (const call of source.establishedCalls ?? []) {
-        expect(versions, `${id} ${call.method}@${call.version}`).toContain(call.version);
+        expect(derived, `${id} ${call.method}@${call.version}`).toContain(call.version);
       }
+      // And no build appears from anywhere else: the derived set is exactly the calls' versions.
+      expect(derived).toEqual([...new Set((source.establishedCalls ?? []).map(c => c.version))].sort());
     }
   });
 });

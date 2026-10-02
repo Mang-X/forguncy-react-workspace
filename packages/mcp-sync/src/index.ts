@@ -108,6 +108,7 @@ export {
   SYNC_CAPABILITY_IDS,
   syncCapabilityEvidenceChannels,
   SYNC_EVIDENCE_SOURCE_IDS,
+  observedVersionsOf,
   SYNC_EVIDENCE_SOURCES,
   syncMutationStep,
   unestablishedSyncCapabilities,

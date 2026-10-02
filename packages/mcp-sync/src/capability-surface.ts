@@ -88,20 +88,15 @@ export interface SyncEvidenceSource {
   readonly citation: string;
   /** What this source can and cannot establish. */
   readonly scope: string;
-  /**
-   * The builds this source observed something on — **derived** from {@link establishedCalls}.
-   *
-   * A getter rather than a stored list because the two were the same fact twice, and that is what
-   * #116's sixth review pointed at: a source that records calls on two builds and names one in
-   * `observedVersions` is a registry contradicting itself, with nothing to say which is true.
-   * The builds are exactly the builds its recorded calls ran on, so they cannot disagree.
-   *
-   * Absent means the source is **documentation**, not an execution — only
-   * `forguncy-library-guide` — and it may be cited beside a versioned call without ever
-   * establishing one. "This source says nothing about any build" and "this source can back a call
-   * on any build" are opposites, and only the second was ever wrong.
-   */
-  readonly observedVersions?: readonly SyncMeasuredVersion[];
+  // There is deliberately no stored list of observed builds. It was the same fact as
+  // `establishedCalls` a second time, and a source could say one thing in each: `observedVersions:
+  // ["12.0.101.0"]` beside `establishedCalls: [{ version: "12.0.100.0", … }]` passed every guard
+  // while being self-contradictory, and a list could also name a build it established nothing on.
+  // #116's seventh review found both by constructing them. The builds are
+  // {@link observedVersionsOf} — derived, so they cannot disagree — and nothing stores them.
+  //
+  // Absent `establishedCalls` means the source is **documentation**, not an execution: only
+  // `forguncy-library-guide`. It may be cited beside a versioned call without ever establishing one.
   /**
    * The calls this source **establishes** — the ones that could back a capability record — each
    * paired with the build it was executed on.
@@ -142,7 +137,6 @@ export const SYNC_EVIDENCE_SOURCES: Readonly<Record<SyncEvidenceSourceId, SyncEv
     // and its `[DT]` rows are calls executed against that build. #116's fourth review caught it being
     // read as a wildcard that could establish a call on any build; a probe record is authoritative
     // about the build it probed.
-    observedVersions: ["12.0.100.0"],
     // The two calls #116's earlier review recorded this source as establishing — `api.page.getCells`
     // to read and `api.app.saveProject` to persist — plus the others its flow exercised end to end
     // through the port.
@@ -173,7 +167,6 @@ export const SYNC_EVIDENCE_SOURCES: Readonly<Record<SyncEvidenceSourceId, SyncEv
       "#20's own executed evidence against a real designer session — recorded on the Issue (https://github.com/Mang-X/forguncy-react-workspace/issues/20). Environment: MCP `http://localhost:11234/mcp`, `serverInfo = Forguncy 12.0.100.0`, designer assembly `12.0.100.0+3d6e56feb0e449ed1cc71cc44d9f34060a06f623`; project `前端拓展包集成示例.fgcc`; the product's own API reference, which the designer serves over MCP VFS at `/apis/**`.",
     scope:
       "The two operations #5 left unnamed, *performed* (this source is an execution, not a reading of one) and the product reference that documents them: `api.page.getCells` and `api.page.getCellCodeContext` (both read a Cell's persisted state) and `api.app.saveProject` (persists it). It also records what `api.page.readCellCode` does — the segmented reader — and the measurement that decides which of the two readers the divergence check uses: `readCellCode` returned exactly 12,000 characters with `hasMore: true` for a 17,125-character cell, while `getCells` returned all 17,125 characters of the same `cellTypeProps.code`. It records the designer's own `baseHash` equals `sha256` of the stored code string byte-for-byte (LF line endings, trailing newline preserved). What it does **not** record: any claim that these calls are stable across Forguncy versions other than 12.0.100.0, or that `getCells` has no size budget — only that none was observed at 17,125 characters.",
-    observedVersions: ["12.0.100.0"],
     // The two calls #116's earlier review recorded this source as establishing — `api.page.getCells`
     // to read and `api.app.saveProject` to persist — plus the rest of the flow it drove through the
     // port on the same build. `api.page.getCells` is here and is **not** in #5's list, which is the
@@ -195,7 +188,6 @@ export const SYNC_EVIDENCE_SOURCES: Readonly<Record<SyncEvidenceSourceId, SyncEv
       "#115's own executed evidence against a live designer session (https://github.com/Mang-X/forguncy-react-workspace/issues/115). Environment: MCP `http://localhost:11234/mcp`, `serverInfo = Forguncy 12.0.101.0`, designer assembly `12.0.101.0+92cefba44ce06dc75c2633bf5f6c6771e4ee41f0`; project `前端拓展包集成示例.fgcc`; the product's own API reference served over MCP VFS at `/apis/**`.",
     scope:
       "The two shapes #115 found to be version-sensitive between the pinned 12.0.100.0 and this 12.0.101.0 build. (1) **The read-back cell-type name.** `api.page.setCells` accepted `ReactCellTypeCellType`, `ReactCellType` and the display name `React AI 单元格` for the same cell type — which the `setCells` reference states as 内置别名、类型名或显示名 — and all three read back through `api.page.getCells` as `cellType: \"ReactCellType\"`, with the same `cellTypeProps.code` byte for byte. The product's own reference (`/apis/cellTypes/ReactCellType.md`, `/apis/cellTypes/index.md`) also calls the type `ReactCellType`; `ReactCellTypeCellType` appears in neither. `UserControlPageCellType` wrote and read back as itself with `cellTypeProps: { overflowMode }` and no `code`. (2) **The generation call.** `api.app.generatePageAsync` is not an own property of `api.app` on this build and calling it throws; `api.app.generateProject` exists, is documented at `/apis/app/generateProject.md` (permission `read/safe`, request `{ skipCheckProjectError? }`, response `{ url, message, checkResult, success? }`), and was executed: with `{}` and with `{ skipCheckProjectError: true }` it resolved `success: true` with `url = \"http://localhost:63982/Forguncy\"` and `checkResult.errorCount: 0` — the same runtime *base* #20 measured, so the page-route mapping is unchanged. What it does **not** record: any re-measurement of `12.0.100.0`. That build is not installed on this machine, so neither shape is claimed for it, and nothing here narrows or widens #20's own findings. **(3) The adapter-level end-to-end run, which is the execution evidence for every `12.0.101.0` call in `SYNC_CAPABILITIES`.** After fixing those two shapes, #115 re-ran the flow through the shipped adapter with the two port corrections #92's script used to carry removed: `validate-sync-against-designer.mjs` 20/20 (write route) and `validate-unchanged-against-designer.mjs` 13/13 (unchanged route), on this build, against a disposable page. That run drove `api.app.listFrontendLibraries`, `api.page.getCells`, `api.page.setCells`, `api.app.getProjectSaveStatus`, `api.app.saveProject`, `api.app.checkProjectErrors` and the generation call — all seven port methods — so it is what establishes each of those calls on `12.0.101.0`, not only the two drift findings. What it does **not** record: any browser-side observation, and any `12.0.100.0` re-measurement.",
-    observedVersions: ["12.0.101.0"],
     // The seven port methods the adapter-level run drove on this build (write route 20/20,
     // unchanged route 13/13): every call in the flow, plus the generation call, which on this
     // build is `api.app.generateProject`.
@@ -210,6 +202,20 @@ export const SYNC_EVIDENCE_SOURCES: Readonly<Record<SyncEvidenceSourceId, SyncEv
     ],
   },
 };
+
+/**
+ * The builds a source ran something on — **derived**, because nothing stores it.
+ *
+ * The builds an evidence source observed are exactly the builds its recorded calls ran on, so the
+ * two can never be a second, hand-kept copy of one fact. Empty for a source that executed
+ * nothing — the product's documentation — which is what distinguishes "says nothing about any
+ * build" from "can back a call on any build".
+ */
+export function observedVersionsOf(
+  source: Pick<SyncEvidenceSource, "establishedCalls">,
+): readonly SyncMeasuredVersion[] {
+  return [...new Set((source.establishedCalls ?? []).map(call => call.version))].sort();
+}
 
 // ---------------------------------------------------------------------------
 // Capabilities
